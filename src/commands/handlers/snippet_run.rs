@@ -2,7 +2,7 @@ use crate::actions::Action;
 
 use super::super::{
     CommandError, CommandInvocation, CommandOutcome, HeadlessCommandHost, HistoryPolicy,
-    StorageCommand, ToastPolicy,
+    StorageCommand,
 };
 
 pub(crate) fn handle_snippet_run<H: HeadlessCommandHost + ?Sized>(
@@ -73,9 +73,6 @@ fn handle_snippet_entry<H: HeadlessCommandHost + ?Sized>(
         .map_err(|_| snippet_error("prompted snippet could not be queued"))?;
 
     Ok(CommandOutcome {
-        toasts: vec![ToastPolicy::Info(
-            "Snippet needs input before it can be copied".into(),
-        )],
         history: HistoryPolicy::Skip,
         ..CommandOutcome::default()
     })
@@ -244,12 +241,7 @@ mod tests {
         assert!(host.copied.is_empty());
         assert_eq!(outcome.history, HistoryPolicy::Skip);
         assert_eq!(outcome.visibility, crate::commands::VisibilityPolicy::Keep);
-        assert_eq!(
-            outcome.toasts,
-            vec![ToastPolicy::Info(
-                "Snippet needs input before it can be copied".into()
-            )]
-        );
+        assert!(outcome.toasts.is_empty());
         let pending = host.pending.unwrap();
         assert_eq!(pending.alias, "ticket");
         assert_eq!(pending.entry_snapshot, entry);

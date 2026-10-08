@@ -51,6 +51,7 @@ mod screenshot_editor;
 mod search;
 mod shell_cmd_dialog;
 mod snippet_dialog;
+mod snippet_prompt_dialog;
 mod state;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
@@ -553,6 +554,7 @@ pub enum Panel {
     CompletionDialog,
     ShellCmdDialog,
     SnippetDialog,
+    SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
     MouseGesturesDialog,
@@ -604,6 +606,7 @@ struct PanelStates {
     completion_dialog: bool,
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
+    snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
     mouse_gestures_dialog: bool,
@@ -760,7 +763,6 @@ pub struct LauncherApp {
     egui_ctx: egui::Context,
     virtual_desktop_interaction_token: u64,
     command_root_policy: crate::universal_actions::RootLauncherPolicy,
-    pub(crate) pending_snippet_prompt: Option<crate::commands::SnippetPromptIntent>,
     folder_aliases: HashMap<String, Option<String>>,
     folder_aliases_lc: HashMap<String, Option<String>>,
     bookmark_aliases: HashMap<String, Option<String>>,
@@ -806,6 +808,7 @@ pub struct LauncherApp {
     completion_dialog: TimerCompletionDialog,
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
+    snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
     pub(crate) macro_prompt: MacroPromptUi,
@@ -2132,7 +2135,6 @@ impl LauncherApp {
             egui_ctx: ctx.clone(),
             virtual_desktop_interaction_token: 0,
             command_root_policy: crate::universal_actions::RootLauncherPolicy::Legacy,
-            pending_snippet_prompt: None,
             folder_aliases,
             folder_aliases_lc,
             bookmark_aliases,
@@ -2181,6 +2183,7 @@ impl LauncherApp {
             completion_dialog: TimerCompletionDialog::default(),
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
+            snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
             macro_prompt: MacroPromptUi::default(),
@@ -2846,7 +2849,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 47] = [
+    const TRACKED_PANELS: [Panel; 48] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -2858,6 +2861,7 @@ impl LauncherApp {
         Panel::CompletionDialog,
         Panel::ShellCmdDialog,
         Panel::SnippetDialog,
+        Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
         Panel::MouseGesturesDialog,
@@ -2909,6 +2913,7 @@ impl LauncherApp {
             Panel::CompletionDialog => self.completion_dialog.open,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open,
             Panel::SnippetDialog => self.snippet_dialog.open,
+            Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open,
@@ -3052,6 +3057,9 @@ impl LauncherApp {
             Panel::SnippetDialog => {
                 self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
+            }
+            Panel::SnippetPromptDialog => {
+                let _ = self.cancel_snippet_prompt();
             }
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
@@ -3267,6 +3275,9 @@ impl LauncherApp {
                 self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
             }
+            Panel::SnippetPromptDialog => {
+                let _ = self.cancel_snippet_prompt();
+            }
             Panel::MacroDialog => {
                 self.macro_dialog.open = false;
                 self.panel_states.macro_dialog = false;
@@ -3441,6 +3452,7 @@ impl LauncherApp {
             Panel::CompletionDialog => self.completion_dialog.open = true,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
             Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
+            Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.open = true,
             Panel::MkMacroDialog => self.mkmacro_dialog.open(),
             Panel::MouseGesturesDialog => self.mouse_gestures_dialog.open = true,
@@ -3583,6 +3595,7 @@ impl LauncherApp {
         check!(completion_dialog, Panel::CompletionDialog);
         check!(shell_cmd_dialog, Panel::ShellCmdDialog);
         check!(snippet_dialog, Panel::SnippetDialog);
+        check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);
         check!(mouse_gestures_dialog, Panel::MouseGesturesDialog);

@@ -2300,6 +2300,7 @@ impl eframe::App for LauncherApp {
         self.root_window_bridge.clear();
         self.close_screen_draw_for_exit();
         self.macro_parameter_prompt.shutdown();
+        self.snippet_prompt_dialog.shutdown();
         self.data_recovery_dialog.shutdown();
         self.clipboard_modify_dialog.cleanup_after_close();
         self.clipboard_modify_immediate.cancel_pending();
