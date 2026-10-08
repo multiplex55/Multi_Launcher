@@ -6,6 +6,44 @@
 //! rebuilding a desktop-sized bitmap.
 
 use super::controller::{CoordinateRuntimeFactory, CoordinateSampler, CoordinateSurfaceBackend};
+
+/// Per-monitor-aware click-time sampler shared by the capture hook callback.
+/// Its DPI context is installed on construction and restored when dropped.
+pub(crate) struct NativeCoordinatePointSampler {
+    #[cfg(windows)]
+    sampler: windows_runtime::WindowsSampler,
+}
+
+impl NativeCoordinatePointSampler {
+    pub(crate) fn new() -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            return Ok(Self {
+                sampler: windows_runtime::WindowsSampler::new()?,
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Coordinate point sampling is available only on Windows".into())
+        }
+    }
+
+    pub(crate) fn sample_at(
+        &mut self,
+        point: super::model::PhysicalPoint,
+    ) -> Result<super::model::CoordinateSample, String> {
+        #[cfg(windows)]
+        {
+            self.sampler.sample_at(point)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = point;
+            Err("Coordinate point sampling is available only on Windows".into())
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct NativeCoordinateRuntimeFactory;
 
@@ -113,6 +151,22 @@ mod windows_runtime {
                 _dpi_context: ThreadDpiContext::per_monitor_v2()?,
             })
         }
+
+        pub(super) fn sample_at(
+            &mut self,
+            desktop_point: super::super::model::PhysicalPoint,
+        ) -> Result<CoordinateSample, String> {
+            let point = POINT {
+                x: desktop_point.x,
+                y: desktop_point.y,
+            };
+            Ok(CoordinateSample::new(
+                desktop_point,
+                virtual_desktop_bounds(),
+                monitor_geometry(point),
+                foreground_client_geometry(),
+            ))
+        }
     }
 
     impl CoordinateSampler for WindowsSampler {
@@ -120,13 +174,7 @@ mod windows_runtime {
             let mut point = POINT::default();
             unsafe { GetCursorPos(&mut point) }
                 .map_err(|error| format!("Could not sample the physical cursor: {error}"))?;
-            let desktop_point = PhysicalPoint::new(point.x, point.y);
-            Ok(CoordinateSample::new(
-                desktop_point,
-                virtual_desktop_bounds(),
-                monitor_geometry(point),
-                foreground_client_geometry(),
-            ))
+            self.sample_at(PhysicalPoint::new(point.x, point.y))
         }
     }
 

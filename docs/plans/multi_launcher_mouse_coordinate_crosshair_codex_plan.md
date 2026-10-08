@@ -59,7 +59,7 @@ Do not claim completion solely from checked milestone boxes. Prove accepted beha
 - Repository instructions and agent definitions read; bounded read-only architecture inventory complete.
 - Implementation milestones and acceptance matrix: source-grounded planning below; ordinary unspecified defaults are implementation decisions, not additional approved requirements.
 
-## M1-A: Typed coordinate model and preferences (`implemented; verification pending`)
+## M1-A: Typed coordinate model and preferences (`complete`)
 
 Objective: feature-owned pure coordinate types, settings and conversion/formatting; no workers or GUI behavior changes yet.
 
@@ -95,7 +95,7 @@ All commands are exact and case-insensitive. The passive HUD remains click-throu
 
 Client space means foreground-window client coordinates in physical pixels, including negative points outside its client area. Missing geometry is an explicit error. Pick captures a live click-time sample even if the HUD is frozen; it uses the selected space, copies once after paired release/native teardown, and restores prior independent HUD/crosshair state. Escape/cancel or invalid samples preserve clipboard contents. The word "pixel" identifies the cursor's selected location; the clipboard payload is coordinate text, not color or an image.
 
-## M1-B: Passive native runtime (`implemented; verification pending`)
+## M1-B: Passive native runtime (`automated verification passed; native smoke pending`)
 
 Objective/owner: feature-owned `coordinate_tool::{controller,native}` supplies live HUD and independent crosshair; GUI remains an adapter. Depends on M1-A.
 
@@ -116,7 +116,7 @@ Invariants: passive input/focus untouched; signed coordinates; no duplicate work
 
 Verification at integration gate: targeted `coordinate_tool` Nextest plus `cargo check --lib`; directly affected helper consumers only if shared mechanics are extracted. Done: runtime integrated, lifecycle/resource/idle tests meaningful and passing at verification gate, scoped diff reviewed.
 
-## M1-C: Launcher controls and persistence (`implemented; integration verification pending`)
+## M1-C: Launcher controls and persistence (`automated verification passed; native smoke pending`)
 
 Objective/ownership: typed commands dispatch, plugin discovers, feature controller executes, GUI adapter coordinates feedback. Depends on M1-B.
 
@@ -135,7 +135,7 @@ Tests: exact parsing/invalid values, plugin inventory, metadata, bus once, headl
 
 Verification at integration gate: focused feature/plugin/parser/handler/GUI filters; `cargo nextest run --test domain command_bus_architecture`; `cargo check --lib`. Invariants: existing commands/plugins preserved. Non-goals: capture/global passive shortcuts/settings UI redesign. Done: all passive controls reachable, saved correctly, copy/help and lifecycle integrated, scoped diff reviewed.
 
-## M2-A: Capture owner and paired-input state machine (`pending`)
+## M2-A: Capture owner and paired-input state machine (`implemented; integration verification pending`)
 
 Objective/ownership: one feature-owned transient capture session with capture-scoped native interception. Depends on M1-C. Scope: new capture model and native/controller extensions.
 
@@ -211,3 +211,5 @@ M1-B committed `3d8c21ff`. M1-C implemented: canonical typed parser/bus/host, ex
 M1-C committed `2d6e6236`. Passive automated integration gate passed: `cargo check --lib` after correcting the signed GDI font weight; `cargo nextest run --lib --test domain -E 'test(coordinate) | test(control_tokens_are_case_insensitive_and_typed) | test(command_bus_architecture)'` ran 78 tests, all passed, 4,946 skipped (Nextest run `e7ed2d48-0c1a-46af-84fd-646bf0887fca`). The broad coordinate substring also matched existing coordinate tests outside the new feature; future selection will use feature module paths and explicit relevant names. Test compilation took 10m40s; there were three warnings in untouched GUI tests. No concurrent builds or full suite runs.
 
 Native compiler remediation also explicitly discards best-effort GDI cleanup return values, removing two new warnings. Rustfmt and diff checks passed. Real native input/focus and mixed-DPI acceptance remain pending M3. M2-A next. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.
+
+M2-A source implemented: session-scoped native hooks and message pump, event-point sample, paired left/Escape ownership, pre-held and modifier-qualified Escape tracking, nonblocking cancellation/draining, retained terminal results after worker join and partial setup cleanup. Fresh injected clicks follow physical click semantics. Gesture suppression adds a background synchronous release acknowledgment. Parent source review resolved unowned Escape carryover and completion/restart races before this checkpoint. Formatting/diff checks passed; compilation/tests and native acceptance pending. M2-B next.

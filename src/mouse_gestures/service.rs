@@ -449,6 +449,24 @@ impl GestureSuppressionGuard {
         };
         release_guard_token(Arc::clone(&self.service), token);
     }
+
+    /// Release the lease synchronously from a background teardown owner.
+    /// Unlike `release`, this waits for the service mutex so a capture session
+    /// can acknowledge completion only after gesture suppression is restored.
+    pub fn release_synchronously(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        match self.service.lock() {
+            Ok(mut service) => {
+                service.release_runtime_suppression(token);
+            }
+            Err(error) => {
+                tracing::error!("mouse gesture service lock was poisoned while restoring");
+                error.into_inner().release_runtime_suppression(token);
+            }
+        }
+    }
 }
 
 impl Drop for GestureSuppressionGuard {
@@ -1505,6 +1523,25 @@ mod tests {
         drop(guard);
         assert!(!service.lock().unwrap().is_running());
         assert_eq!(handle.install_count(), 1);
+        service.lock().unwrap().stop();
+    }
+
+    #[test]
+    fn synchronous_suppression_release_restores_gestures_before_returning() {
+        let (backend, handle) = MockHookBackend::new();
+        let service = Arc::new(Mutex::new(MouseGestureService::new_with_backend(Box::new(
+            backend,
+        ))));
+        service.lock().unwrap().start();
+        let mut guard = GestureSuppressionGuard::acquire(Arc::clone(&service));
+        assert!(!service.lock().unwrap().is_running());
+
+        // Capture teardown runs on its worker, so this acknowledgment can wait
+        // for the service lock without blocking the GUI or a hook callback.
+        guard.release_synchronously();
+
+        assert!(service.lock().unwrap().is_running());
+        assert!(handle.emit(HookEvent::SelectBinding(0)));
         service.lock().unwrap().stop();
     }
 
