@@ -189,9 +189,11 @@ fn is_hide_exempt(command: &Command) -> bool {
 fn success_toasts(invocation: &CommandInvocation) -> Vec<ToastPolicy> {
     let mut toasts = match &invocation.command {
         Command::Storage(StorageCommand::RecycleClean) => Vec::new(),
-        Command::Clipboard(_) => vec![ToastPolicy::Copied(
-            invocation.original_action.label.clone(),
-        )],
+        Command::Clipboard(_) | Command::Storage(StorageCommand::SnippetRun(_)) => {
+            vec![ToastPolicy::Copied(
+                invocation.original_action.label.clone(),
+            )]
+        }
         _ => vec![ToastPolicy::Launched(
             invocation.original_action.label.clone(),
         )],

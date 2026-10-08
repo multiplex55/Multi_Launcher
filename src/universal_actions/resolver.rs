@@ -101,6 +101,10 @@ impl ActionTargetResolver {
             return ActionTarget::Timer { id };
         }
 
+        if let Some(alias) = crate::plugins::snippets::decode_snippet_run_action(&selected.action) {
+            return ActionTarget::Snippet { alias };
+        }
+
         if let Ok(command) = parse_action(selected) {
             match command {
                 Command::Timer(TimerCommand::StopwatchShow(id)) if selected.desc == "Stopwatch" => {
@@ -140,13 +144,15 @@ impl ActionTargetResolver {
             }
         }
 
-        // These current result rows carry identity in presentation/legacy
-        // fields rather than in a dedicated typed command.
-        if selected.desc == "Snippet" {
+        // The live catalog still emits legacy literal-copy snippet rows until
+        // M5-A migrates that entrypoint. Keep their secondary snippet identity
+        // while leaving the selected primary clipboard action untouched.
+        if selected.desc == "Snippet" && !selected.action.starts_with("snippet:run:") {
             return ActionTarget::Snippet {
                 alias: selected.label.clone(),
             };
         }
+
         if selected.desc == "Tempfile" && !selected.action.starts_with("tempfile:") {
             return ActionTarget::Tempfile {
                 path: selected.action.clone(),
@@ -240,7 +246,11 @@ mod tests {
                 ActionTarget::Stopwatch { id: 42 },
             ),
             (
-                action("sig", "Snippet", "clipboard:Regards"),
+                action(
+                    "Different display label",
+                    "Different description",
+                    &crate::plugins::snippets::snippet_run_action("sig"),
+                ),
                 ActionTarget::Snippet {
                     alias: "sig".into(),
                 },
@@ -286,6 +296,28 @@ mod tests {
             resolve(&generic, &empty, &empty, &[]).target,
             ActionTarget::Generic {
                 action: generic.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn legacy_snippet_rows_keep_secondary_identity_and_primary_literal_action() {
+        let empty = HashMap::new();
+        let selected = action("Old Snippet", "Snippet", "clipboard:literal body");
+        let resolved = resolve(&selected, &empty, &empty, &[]);
+        assert_eq!(
+            resolved.target,
+            ActionTarget::Snippet {
+                alias: "Old Snippet".into()
+            }
+        );
+        assert_eq!(resolved.selected_action.action, "clipboard:literal body");
+
+        let generic_clipboard = action("Clipboard", "Clipboard", "clipboard:literal body");
+        assert_eq!(
+            resolve(&generic_clipboard, &empty, &empty, &[]).target,
+            ActionTarget::Generic {
+                action: generic_clipboard
             }
         );
     }

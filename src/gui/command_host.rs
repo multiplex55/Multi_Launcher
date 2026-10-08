@@ -808,6 +808,22 @@ impl HeadlessCommandHost for LauncherApp {
     fn launcher_should_refocus(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst) && !self.any_panel_open()
     }
+
+    fn copy_snippet_text(&mut self, text: &str) -> anyhow::Result<()> {
+        crate::actions::clipboard::set_text(text)
+    }
+
+    fn request_snippet_prompt(
+        &mut self,
+        intent: crate::commands::SnippetPromptIntent,
+    ) -> Result<(), String> {
+        self.pending_snippet_prompt = Some(intent);
+        Ok(())
+    }
+
+    fn snippet_root_policy(&self) -> crate::universal_actions::RootLauncherPolicy {
+        self.command_root_policy
+    }
 }
 
 fn command_accepts_query_override(command: &Command) -> bool {

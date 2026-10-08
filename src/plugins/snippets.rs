@@ -18,6 +18,8 @@ use std::sync::{
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
 
+const SNIPPET_RUN_PREFIX: &str = "snippet:run:";
+
 static SNIPPETS_VERSION: AtomicU64 = AtomicU64::new(0);
 static SNIPPETS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static VERSIONED_SNIPPETS: Lazy<Mutex<Option<(PathBuf, Vec<SnippetEntry>)>>> =
@@ -105,6 +107,12 @@ pub(crate) struct PreparedSnippetTemplate {
     pub(crate) fields: Vec<SnippetFieldDefinition>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnippetRunMode {
+    Plain,
+    Prompted(PreparedSnippetTemplate),
+}
+
 impl fmt::Display for SnippetPreparationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -144,6 +152,18 @@ pub(crate) fn prepare_prompted_template(
     Ok(PreparedSnippetTemplate { parsed, fields })
 }
 
+/// Make the single domain-level decision about how a resolved snippet runs.
+/// Plain text bypasses template parsing; prompted text is fully prepared before
+/// either the GUI or headless adapter chooses its execution behavior.
+pub(crate) fn prepare_snippet_run(
+    entry: &SnippetEntry,
+) -> Result<SnippetRunMode, SnippetPreparationError> {
+    if !entry.prompt_for_fields {
+        return Ok(SnippetRunMode::Plain);
+    }
+    prepare_prompted_template(&entry.text, &entry.fields).map(SnippetRunMode::Prompted)
+}
+
 /// Build a text-edit candidate, parsing and reconciling only opted-in snippets.
 /// The returned entry is detached from the persisted snapshot until the caller commits it.
 pub(crate) fn prepare_snippet_text(
@@ -181,6 +201,110 @@ fn readable_field_label(name: &str) -> String {
 
 fn required_by_default() -> bool {
     true
+}
+
+/// Construct the stable, payload-free command used by snippet search results.
+///
+/// Percent-encoding every byte outside the URI unreserved set keeps action
+/// strings safe for the launcher's delimiter-based protocols while preserving
+/// aliases exactly when decoded.
+pub fn snippet_run_action(alias: &str) -> String {
+    let mut action = String::with_capacity(SNIPPET_RUN_PREFIX.len() + alias.len());
+    action.push_str(SNIPPET_RUN_PREFIX);
+    for byte in alias.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            action.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(action, "%{byte:02X}");
+        }
+    }
+    action
+}
+
+/// Decode a canonical snippet-run action, rejecting malformed or empty aliases.
+pub fn decode_snippet_run_action(action: &str) -> Option<String> {
+    decode_snippet_run_alias(action.strip_prefix(SNIPPET_RUN_PREFIX)?)
+}
+
+fn decode_snippet_run_alias(encoded: &str) -> Option<String> {
+    if encoded.is_empty() {
+        return None;
+    }
+
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                let high = *bytes.get(index + 1)?;
+                let low = *bytes.get(index + 2)?;
+                decoded.push((hex_value(high)? << 4) | hex_value(low)?);
+                index += 3;
+            }
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') => {
+                decoded.push(byte);
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
+
+    String::from_utf8(decoded)
+        .ok()
+        .filter(|alias| !alias.is_empty())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnippetResolutionError {
+    Unavailable,
+    MissingOrAmbiguous,
+}
+
+impl fmt::Display for SnippetResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => formatter.write_str("saved snippets could not be read"),
+            Self::MissingOrAmbiguous => {
+                formatter.write_str("snippet is missing or has an ambiguous alias")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SnippetResolutionError {}
+
+/// Resolve the current persisted entry by exact, case-sensitive alias.
+/// The file is read under the mutation transaction so stale search results
+/// cannot execute an old body or prompt configuration.
+pub fn resolve_snippet(alias: &str) -> Result<SnippetEntry, SnippetResolutionError> {
+    resolve_snippet_from(SNIPPETS_FILE, alias)
+}
+
+pub(crate) fn resolve_snippet_from(
+    path: &str,
+    alias: &str,
+) -> Result<SnippetEntry, SnippetResolutionError> {
+    let _transaction = snippets_transaction_guard();
+    let snippets = load_snippets(path).map_err(|_| SnippetResolutionError::Unavailable)?;
+    let mut matching = snippets.iter().filter(|entry| entry.alias == alias);
+    let Some(entry) = matching.next() else {
+        return Err(SnippetResolutionError::MissingOrAmbiguous);
+    };
+    if matching.next().is_some() {
+        return Err(SnippetResolutionError::MissingOrAmbiguous);
+    }
+    Ok(entry.clone())
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -530,7 +654,7 @@ impl Plugin for SnippetsPlugin {
                 .map(|s| Action {
                     label: s.alias.clone(),
                     desc: "Snippet".into(),
-                    action: format!("clipboard:{}", s.text.clone()),
+                    action: snippet_run_action(&s.alias),
                     args: None,
                 })
                 .collect();
@@ -551,7 +675,7 @@ impl Plugin for SnippetsPlugin {
                 .map(|s| Action {
                     label: s.alias.clone(),
                     desc: "Snippet".into(),
-                    action: format!("clipboard:{}", s.text.clone()),
+                    action: snippet_run_action(&s.alias),
                     args: None,
                 })
                 .collect();
@@ -652,6 +776,58 @@ mod persistence_tests {
 
         assert_eq!(snippet_preview_text(&entry), "******");
         assert_eq!(entry.text, "private body\n秘密 🧪");
+    }
+
+    #[test]
+    fn snippet_run_action_round_trips_alias_bytes_and_rejects_invalid_encoding() {
+        for alias in [
+            "simple",
+            " leading and trailing ",
+            "a:b|c%d",
+            "line\nnext\r\t\0秘密🧪",
+        ] {
+            let action = snippet_run_action(alias);
+            assert!(action.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'-' | b'_' | b'.' | b'~' | b':' | b'%')
+            }));
+            assert_eq!(decode_snippet_run_action(&action).as_deref(), Some(alias));
+        }
+        for malformed in [
+            "snippet:run:",
+            "snippet:run:%",
+            "snippet:run:%0",
+            "snippet:run:%GG",
+            "snippet:run:%C3%28",
+            "snippet:run:literal:colon",
+            "snippet:run:raw space",
+        ] {
+            assert_eq!(decode_snippet_run_action(malformed), None, "{malformed}");
+        }
+    }
+
+    #[test]
+    fn run_resolution_uses_exact_alias_and_current_file_snapshot() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+
+        save_snippets(path, &[snippet("Case", "old body")]).unwrap();
+        assert_eq!(
+            resolve_snippet_from(path, "case"),
+            Err(SnippetResolutionError::MissingOrAmbiguous)
+        );
+        assert_eq!(resolve_snippet_from(path, "Case").unwrap().text, "old body");
+
+        save_snippets(path, &[snippet("Case", "new body")]).unwrap();
+        assert_eq!(resolve_snippet_from(path, "Case").unwrap().text, "new body");
+
+        save_snippets(path, &[snippet("Case", "one"), snippet("Case", "two")]).unwrap();
+        assert_eq!(
+            resolve_snippet_from(path, "Case"),
+            Err(SnippetResolutionError::MissingOrAmbiguous)
+        );
     }
 
     #[test]
@@ -1218,7 +1394,7 @@ mod persistence_tests {
 
         for plugin in [&first, &second] {
             assert!(plugin.search("cs immediate").iter().any(|action| {
-                action.label == "immediate" && action.action == "clipboard:published text"
+                action.label == "immediate" && action.action == snippet_run_action("immediate")
             }));
         }
     }

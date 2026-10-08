@@ -8,6 +8,20 @@ use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload}
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use chrono::NaiveDate;
 
+/// Immutable command-time snapshot queued for the next prompted-snippet step.
+/// The original entry is retained separately because its persisted definitions
+/// may differ from the reconciled effective fields used for the current text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SnippetPromptIntent {
+    pub(crate) alias: String,
+    pub(crate) entry_snapshot: crate::plugins::snippets::SnippetEntry,
+    pub(crate) prepared: crate::plugins::snippets::PreparedSnippetTemplate,
+    pub(crate) safe_action: Action,
+    pub(crate) source: super::ActivationSource,
+    pub(crate) history_query: String,
+    pub(crate) root_policy: crate::universal_actions::RootLauncherPolicy,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScreenshotCommandResult {
     Completed,
@@ -194,6 +208,18 @@ pub trait HeadlessCommandHost {
     fn preserve_command(&self) -> bool;
     fn current_query(&self) -> &str;
     fn launcher_should_refocus(&self) -> bool;
+
+    fn copy_snippet_text(&mut self, text: &str) -> anyhow::Result<()> {
+        crate::actions::clipboard::set_text(text)
+    }
+
+    fn request_snippet_prompt(&mut self, _intent: SnippetPromptIntent) -> Result<(), String> {
+        Err("prompted snippets require the launcher interface".into())
+    }
+
+    fn snippet_root_policy(&self) -> crate::universal_actions::RootLauncherPolicy {
+        crate::universal_actions::RootLauncherPolicy::Legacy
+    }
 }
 
 pub trait CommandHost:

@@ -988,6 +988,14 @@ fn parse_storage(s: &str) -> Option<StorageCommand> {
     map!("bookmark:remove:", StorageCommand::BookmarkRemove);
     map!("folder:add:", StorageCommand::FolderAdd);
     map!("folder:remove:", StorageCommand::FolderRemove);
+    if s.starts_with("snippet:run:") {
+        return Some(
+            match crate::plugins::snippets::decode_snippet_run_action(s) {
+                Some(alias) => StorageCommand::SnippetRun(alias),
+                None => StorageCommand::InvalidSnippetRun,
+            },
+        );
+    }
     map!("snippet:remove:", StorageCommand::SnippetRemove);
     map!("snippet:edit:", StorageCommand::SnippetEdit);
     map!("fav:remove:", StorageCommand::FavoriteRemove);
@@ -1821,6 +1829,23 @@ mod tests {
                 text: "b|c".into()
             })
         );
+        let alias = " edge : a|b%\n秘密";
+        let action = crate::plugins::snippets::snippet_run_action(alias);
+        assert_eq!(
+            parse(&action).command,
+            Command::Storage(StorageCommand::SnippetRun(alias.into()))
+        );
+        for malformed in [
+            "snippet:run:",
+            "snippet:run:%",
+            "snippet:run:%GG",
+            "snippet:run:%C3%28",
+        ] {
+            assert_eq!(
+                parse(malformed).command,
+                Command::Storage(StorageCommand::InvalidSnippetRun)
+            );
+        }
         assert_eq!(
             parse("tempfile:alias:C:/x|alias").command,
             Command::Storage(StorageCommand::TempfileAlias {

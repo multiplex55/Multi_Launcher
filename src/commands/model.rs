@@ -579,6 +579,8 @@ pub enum StorageCommand {
         alias: String,
         text: String,
     },
+    SnippetRun(String),
+    InvalidSnippetRun,
     SnippetEdit(String),
     SnippetRemove(String),
     SnippetDialog,
@@ -602,7 +604,7 @@ pub enum StorageCommand {
     InvalidTempfileAlias,
     RecycleClean,
 }
-kinds!(StorageCommand, Self::BookmarkDialog => "bookmark_dialog", Self::BookmarkAdd(_) => "bookmark_add", Self::BookmarkRemove(_) => "bookmark_remove", Self::FolderAdd(_) => "folder_add", Self::FolderRemove(_) => "folder_remove", Self::HistoryClear => "history_clear", Self::HistoryLaunch(_) => "history_launch", Self::SnippetAdd { .. } => "snippet_add", Self::SnippetEdit(_) => "snippet_edit", Self::SnippetRemove(_) => "snippet_remove", Self::SnippetDialog => "snippet_dialog", Self::FavoriteAdd { .. } => "favorite_add", Self::FavoriteRemove(_) => "favorite_remove", Self::FavoriteDialog(_) => "favorite_dialog", Self::TempfileNew(_) => "tempfile_new", Self::TempfileDialog => "tempfile_dialog", Self::TempfileOpen => "tempfile_open", Self::TempfileOpenFile(_) => "tempfile_open_file", Self::TempfileClear => "tempfile_clear", Self::TempfileRemove(_) => "tempfile_remove", Self::TempfileAlias { .. } => "tempfile_alias", Self::InvalidTempfileAlias => "invalid_tempfile_alias", Self::RecycleClean => "recycle_clean");
+kinds!(StorageCommand, Self::BookmarkDialog => "bookmark_dialog", Self::BookmarkAdd(_) => "bookmark_add", Self::BookmarkRemove(_) => "bookmark_remove", Self::FolderAdd(_) => "folder_add", Self::FolderRemove(_) => "folder_remove", Self::HistoryClear => "history_clear", Self::HistoryLaunch(_) => "history_launch", Self::SnippetAdd { .. } => "snippet_add", Self::SnippetRun(_) => "snippet_run", Self::InvalidSnippetRun => "invalid_snippet_run", Self::SnippetEdit(_) => "snippet_edit", Self::SnippetRemove(_) => "snippet_remove", Self::SnippetDialog => "snippet_dialog", Self::FavoriteAdd { .. } => "favorite_add", Self::FavoriteRemove(_) => "favorite_remove", Self::FavoriteDialog(_) => "favorite_dialog", Self::TempfileNew(_) => "tempfile_new", Self::TempfileDialog => "tempfile_dialog", Self::TempfileOpen => "tempfile_open", Self::TempfileOpenFile(_) => "tempfile_open_file", Self::TempfileClear => "tempfile_clear", Self::TempfileRemove(_) => "tempfile_remove", Self::TempfileAlias { .. } => "tempfile_alias", Self::InvalidTempfileAlias => "invalid_tempfile_alias", Self::RecycleClean => "recycle_clean");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimerCommand {
     TimerDialog,

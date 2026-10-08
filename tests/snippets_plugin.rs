@@ -1,8 +1,9 @@
+use multi_launcher::commands::{Command, StorageCommand, parse_action};
 use multi_launcher::launcher::launch_action;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::snippets::{
     SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition, SnippetInputKind, SnippetsPlugin,
-    load_snippets, save_snippets,
+    load_snippets, save_snippets, snippet_run_action,
 };
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
@@ -31,7 +32,7 @@ fn load_save_roundtrip() {
 }
 
 #[test]
-fn search_returns_clipboard_action() {
+fn search_returns_typed_snippet_run_action_without_body_payload() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
@@ -49,8 +50,12 @@ fn search_returns_clipboard_action() {
     let results = plugin.search("cs hi");
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].label, "hi");
-    assert_eq!(results[0].action, "clipboard:hello world");
+    assert_eq!(results[0].action, snippet_run_action("hi"));
     assert_eq!(results[0].desc, "Snippet");
+    assert_eq!(
+        parse_action(&results[0]).unwrap(),
+        Command::Storage(StorageCommand::SnippetRun("hi".into()))
+    );
 }
 
 #[test]
@@ -104,7 +109,7 @@ fn rm_command_returns_remove_actions() {
 }
 
 #[test]
-fn search_preserves_newlines() {
+fn search_run_action_keeps_newline_body_out_of_wire_payload() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
@@ -121,7 +126,8 @@ fn search_preserves_newlines() {
     let plugin = SnippetsPlugin::default();
     let results = plugin.search("cs multi");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].action, "clipboard:a\nb");
+    assert_eq!(results[0].action, snippet_run_action("multi"));
+    assert_eq!(load_snippets(SNIPPETS_FILE).unwrap()[0].text, "a\nb");
 }
 
 #[test]
@@ -209,7 +215,7 @@ fn command_add_and_inline_edit_preserve_prompt_metadata_and_hidden_flag() {
 }
 
 #[test]
-fn hidden_body_search_and_list_keep_alias_label_and_original_clipboard_payload() {
+fn hidden_body_search_and_list_keep_alias_identity_without_leaking_body() {
     let _lock = TEST_MUTEX.lock().unwrap();
     let dir = tempdir().unwrap();
     std::env::set_current_dir(dir.path()).unwrap();
@@ -232,9 +238,10 @@ fn hidden_body_search_and_list_keep_alias_label_and_original_clipboard_payload()
         let results = plugin.search(query);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].label, "private-alias");
-        assert_eq!(results[0].action, format!("clipboard:{body}"));
-        assert_ne!(results[0].action, "clipboard:******");
+        assert_eq!(results[0].action, snippet_run_action("private-alias"));
+        assert!(!results[0].action.contains(body));
     }
+    assert_eq!(load_snippets(SNIPPETS_FILE).unwrap()[0].text, body);
 }
 
 #[test]
