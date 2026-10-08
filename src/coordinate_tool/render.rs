@@ -5,7 +5,9 @@ use super::model::{
     CoordinateSample, CoordinateSpace, CoordinateUnavailable, PhysicalPoint, PhysicalRect,
     PhysicalSize,
 };
-use super::settings::{CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail};
+use super::settings::{
+    CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PixelRect {
@@ -71,6 +73,352 @@ pub(crate) struct HaloGeometry {
     pub origin: PhysicalPoint,
     pub source: PhysicalRect,
     pub diameter: i32,
+}
+
+/// How a source rectangle is known to intersect readable physical content.
+/// The virtual desktop rectangle is deliberately not used as evidence here:
+/// it can span gaps between monitors and does not prove those pixels exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZoomSourceCoverage {
+    Unknown,
+    SampledMonitor {
+        bounds: PhysicalRect,
+        visible: Option<PhysicalRect>,
+        missing: PhysicalInsets,
+    },
+}
+
+/// Which sampled bounds were available for destination placement/clipping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZoomDestinationBounds {
+    SampledMonitor,
+    VirtualDesktopFallback,
+}
+
+/// Physical pixel margins omitted by an intersection, measured from the
+/// corresponding edge of the requested rectangle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PhysicalInsets {
+    pub left: i64,
+    pub top: i64,
+    pub right: i64,
+    pub bottom: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RasterPoint {
+    pub x: u32,
+    pub y: u32,
+}
+
+/// Fractional destination-pixel translation required after applying the exact
+/// zoom factor to `source_hotspot` to land on `destination_hotspot`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RasterTranslation {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Per-axis outcome for offset placement. Centered mode remains cursor-anchored
+/// and reports `Centered` even when the resulting destination clips.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZoomAxisPlacement {
+    Centered,
+    RequestedOffset,
+    MirroredOffset,
+    Clamped,
+    LeadingEdgeAnchored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ZoomRasterAlignment {
+    /// Zero-based source pixel index corresponding to the cursor hotspot.
+    pub source_hotspot: RasterPoint,
+    /// Zero-based destination pixel index where that source hotspot is shown.
+    pub destination_hotspot: RasterPoint,
+    /// The configured scale is preserved exactly; rounded source dimensions
+    /// never replace or modify it.
+    pub zoom_factor: f32,
+    /// Residual translation after scaling the source hotspot by `zoom_factor`.
+    /// This captures fractional alignment caused by rounded source coverage.
+    pub hotspot_translation: RasterTranslation,
+}
+
+/// Cursor-anchored source and monitor-aware destination for a circular lens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ZoomLensGeometry {
+    /// Source remains centered on `hotspot`, irrespective of destination
+    /// mirroring or clamping.
+    pub source: PhysicalRect,
+    pub hotspot: PhysicalPoint,
+    pub source_coverage: ZoomSourceCoverage,
+    /// Full requested square destination; clipping is described separately.
+    pub destination: PhysicalRect,
+    /// Actual hotspot anchor after an offset flip/clamp. For odd raster sizes,
+    /// this is the center pixel selected by the leading-edge convention.
+    pub destination_hotspot: PhysicalPoint,
+    pub destination_bounds: Option<ZoomDestinationBounds>,
+    pub visible_destination: Option<PhysicalRect>,
+    pub destination_missing: PhysicalInsets,
+    pub placement: [ZoomAxisPlacement; 2],
+    pub alignment: ZoomRasterAlignment,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZoomGeometryError {
+    PlacementBoundsUnavailable,
+    ArithmeticOverflow,
+}
+
+/// Calculate source and destination geometry using only this live sample's
+/// physical cursor point. Source dimensions use `ceil(diameter / factor)` so
+/// every destination pixel has input coverage. The native transform remains
+/// the exact normalized preference, not a ratio reconstructed from the rounded
+/// source size.
+///
+/// Rectangles use exclusive right/bottom edges. Their leading edge is placed
+/// `floor(extent / 2)` pixels before the hotspot; the hotspot therefore maps
+/// to raster index `floor(extent / 2)`. Odd extents select their single middle
+/// pixel and even extents select the lower/right of their two middle pixels.
+/// Source clipping is reported only against the sampled monitor. A virtual
+/// desktop rectangle is not proof of coverage across monitor gaps.
+pub(crate) fn zoom_lens_geometry(
+    sample: &CoordinateSample,
+    preferences: ZoomPreferences,
+) -> Result<ZoomLensGeometry, ZoomGeometryError> {
+    let preferences = preferences.normalized();
+    let hotspot = sample.desktop_point;
+    let diameter = i64::from(preferences.diameter);
+    // Keep the division explicit in f64 so non-integral preferences round
+    // upward deterministically while the native scale remains an f32 value.
+    let rounded_source_extent = (diameter as f64 / f64::from(preferences.zoom_factor)).ceil();
+    if !rounded_source_extent.is_finite()
+        || rounded_source_extent <= 0.0
+        || rounded_source_extent > i64::MAX as f64
+    {
+        return Err(ZoomGeometryError::ArithmeticOverflow);
+    }
+    let source_extent = rounded_source_extent as i64;
+    let source = rect_from_center(
+        i64::from(hotspot.x),
+        i64::from(hotspot.y),
+        source_extent,
+        source_extent,
+    )
+    .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+
+    let source_coverage = if let Some(monitor) = sample.monitor.as_ref() {
+        ZoomSourceCoverage::SampledMonitor {
+            bounds: monitor.bounds,
+            visible: intersect_rect(source, monitor.bounds),
+            missing: rectangle_missing(source, monitor.bounds),
+        }
+    } else {
+        ZoomSourceCoverage::Unknown
+    };
+
+    let (bounds, bounds_kind) = if let Some(monitor) = sample.monitor.as_ref() {
+        (
+            Some(monitor.bounds),
+            Some(ZoomDestinationBounds::SampledMonitor),
+        )
+    } else if let Some(virtual_bounds) = sample.virtual_desktop_bounds {
+        (
+            Some(virtual_bounds),
+            Some(ZoomDestinationBounds::VirtualDesktopFallback),
+        )
+    } else {
+        (None, None)
+    };
+
+    let (destination, destination_hotspot, placement) = match preferences.mode {
+        ZoomMode::Centered => {
+            let rect = rect_from_center(
+                i64::from(hotspot.x),
+                i64::from(hotspot.y),
+                diameter,
+                diameter,
+            )
+            .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+            (
+                rect,
+                hotspot,
+                [ZoomAxisPlacement::Centered, ZoomAxisPlacement::Centered],
+            )
+        }
+        ZoomMode::Offset => {
+            let bounds = bounds.ok_or(ZoomGeometryError::PlacementBoundsUnavailable)?;
+            let (left, x_anchor, x_placement) = place_offset_axis(
+                i64::from(hotspot.x),
+                i64::from(preferences.destination_offset.x),
+                i64::from(bounds.left()),
+                i64::from(bounds.right()),
+                diameter,
+            )?;
+            let (top, y_anchor, y_placement) = place_offset_axis(
+                i64::from(hotspot.y),
+                i64::from(preferences.destination_offset.y),
+                i64::from(bounds.top()),
+                i64::from(bounds.bottom()),
+                diameter,
+            )?;
+            let rect = rect_from_leading(left, top, diameter, diameter)
+                .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+            let anchor = PhysicalPoint::new(
+                i32::try_from(x_anchor).map_err(|_| ZoomGeometryError::ArithmeticOverflow)?,
+                i32::try_from(y_anchor).map_err(|_| ZoomGeometryError::ArithmeticOverflow)?,
+            );
+            (rect, anchor, [x_placement, y_placement])
+        }
+    };
+
+    let source_anchor =
+        u32::try_from(source_extent / 2).map_err(|_| ZoomGeometryError::ArithmeticOverflow)?;
+    let destination_anchor =
+        u32::try_from(diameter / 2).map_err(|_| ZoomGeometryError::ArithmeticOverflow)?;
+    let zoom_factor = preferences.zoom_factor;
+    Ok(ZoomLensGeometry {
+        source,
+        hotspot,
+        source_coverage,
+        destination,
+        destination_hotspot,
+        destination_bounds: bounds_kind,
+        visible_destination: bounds.and_then(|bounds| intersect_rect(destination, bounds)),
+        destination_missing: bounds
+            .map(|bounds| rectangle_missing(destination, bounds))
+            .unwrap_or_default(),
+        placement,
+        alignment: ZoomRasterAlignment {
+            source_hotspot: RasterPoint {
+                x: source_anchor,
+                y: source_anchor,
+            },
+            destination_hotspot: RasterPoint {
+                x: destination_anchor,
+                y: destination_anchor,
+            },
+            zoom_factor,
+            hotspot_translation: RasterTranslation {
+                x: destination_anchor as f32 - source_anchor as f32 * zoom_factor,
+                y: destination_anchor as f32 - source_anchor as f32 * zoom_factor,
+            },
+        },
+    })
+}
+
+fn rect_from_center(center_x: i64, center_y: i64, width: i64, height: i64) -> Option<PhysicalRect> {
+    let left = center_x.checked_sub(width / 2)?;
+    let top = center_y.checked_sub(height / 2)?;
+    rect_from_leading(left, top, width, height)
+}
+
+fn rect_from_leading(left: i64, top: i64, width: i64, height: i64) -> Option<PhysicalRect> {
+    let right = left.checked_add(width)?;
+    let bottom = top.checked_add(height)?;
+    PhysicalRect::new(
+        i32::try_from(left).ok()?,
+        i32::try_from(top).ok()?,
+        i32::try_from(right).ok()?,
+        i32::try_from(bottom).ok()?,
+    )
+}
+
+fn intersect_rect(first: PhysicalRect, second: PhysicalRect) -> Option<PhysicalRect> {
+    PhysicalRect::new(
+        first.left().max(second.left()),
+        first.top().max(second.top()),
+        first.right().min(second.right()),
+        first.bottom().min(second.bottom()),
+    )
+}
+
+fn rectangle_missing(rect: PhysicalRect, bounds: PhysicalRect) -> PhysicalInsets {
+    let (left, right) = interval_missing(
+        i64::from(rect.left()),
+        i64::from(rect.right()),
+        i64::from(bounds.left()),
+        i64::from(bounds.right()),
+    );
+    let (top, bottom) = interval_missing(
+        i64::from(rect.top()),
+        i64::from(rect.bottom()),
+        i64::from(bounds.top()),
+        i64::from(bounds.bottom()),
+    );
+    PhysicalInsets {
+        left,
+        top,
+        right,
+        bottom,
+    }
+}
+
+fn interval_missing(start: i64, end: i64, bound_start: i64, bound_end: i64) -> (i64, i64) {
+    let extent = end - start;
+    if end <= bound_start {
+        (extent, 0)
+    } else if start >= bound_end {
+        (0, extent)
+    } else {
+        ((bound_start - start).max(0), (end - bound_end).max(0))
+    }
+}
+
+fn place_offset_axis(
+    cursor: i64,
+    offset: i64,
+    bound_start: i64,
+    bound_end: i64,
+    extent: i64,
+) -> Result<(i64, i64, ZoomAxisPlacement), ZoomGeometryError> {
+    let requested_center = cursor
+        .checked_add(offset)
+        .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+    if let Some(leading) = axis_leading_if_fits(requested_center, bound_start, bound_end, extent) {
+        return Ok((
+            leading,
+            requested_center,
+            ZoomAxisPlacement::RequestedOffset,
+        ));
+    }
+
+    let mirrored_center = cursor
+        .checked_sub(offset)
+        .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+    if offset != 0 {
+        if let Some(leading) = axis_leading_if_fits(mirrored_center, bound_start, bound_end, extent)
+        {
+            return Ok((leading, mirrored_center, ZoomAxisPlacement::MirroredOffset));
+        }
+    }
+
+    let requested_leading = requested_center
+        .checked_sub(extent / 2)
+        .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+    let available_extent = bound_end
+        .checked_sub(bound_start)
+        .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+    let max_leading = bound_end
+        .checked_sub(extent)
+        .ok_or(ZoomGeometryError::ArithmeticOverflow)?
+        .max(bound_start);
+    let leading = requested_leading.clamp(bound_start, max_leading);
+    let placement = if available_extent < extent {
+        ZoomAxisPlacement::LeadingEdgeAnchored
+    } else {
+        ZoomAxisPlacement::Clamped
+    };
+    let anchor = leading
+        .checked_add(extent / 2)
+        .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
+    Ok((leading, anchor, placement))
+}
+
+fn axis_leading_if_fits(center: i64, bound_start: i64, bound_end: i64, extent: i64) -> Option<i64> {
+    let leading = center.checked_sub(extent / 2)?;
+    let trailing = leading.checked_add(extent)?;
+    (leading >= bound_start && trailing <= bound_end).then_some(leading)
 }
 
 /// Five-by-five Magnification color matrix and equivalent RGB pixel blend.
@@ -638,9 +986,10 @@ fn concise_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CrosshairGeometry, GuideOrientation, HaloColorTransform, crosshair_bitmap,
+        CrosshairGeometry, GuideOrientation, HaloColorTransform, PhysicalInsets, ZoomAxisPlacement,
+        ZoomDestinationBounds, ZoomGeometryError, ZoomSourceCoverage, crosshair_bitmap,
         crosshair_geometry, guide_geometry, halo_fallback_bitmap, halo_geometry,
-        halo_outline_bitmap,
+        halo_outline_bitmap, zoom_lens_geometry,
     };
     use crate::coordinate_tool::controller::CoordinateRenderFrame;
     use crate::coordinate_tool::model::{
@@ -648,7 +997,10 @@ mod tests {
         MonitorGeometry, MonitorId,
     };
     use crate::coordinate_tool::model::{PhysicalPoint, PhysicalRect, PhysicalSize};
-    use crate::coordinate_tool::settings::{CrosshairColor, CrosshairPreferences, HaloPreferences};
+    use crate::coordinate_tool::settings::{
+        CoordinateOffset, CrosshairColor, CrosshairPreferences, HaloPreferences, ZoomMode,
+        ZoomPreferences,
+    };
 
     #[test]
     fn halo_blend_preserves_input_full_inversion_and_expected_partial_rgb_values() {
@@ -710,6 +1062,453 @@ mod tests {
                 .diameter,
             512
         );
+    }
+
+    #[test]
+    fn zoom_default_source_is_cursor_centered_and_destination_mode_does_not_change_it() {
+        let sample = zoom_sample(
+            PhysicalPoint::new(500, 400),
+            Some(PhysicalRect::new(0, 0, 1920, 1080).unwrap()),
+            Some(PhysicalRect::new(0, 0, 1920, 1080).unwrap()),
+        );
+        let offset = zoom_lens_geometry(&sample, ZoomPreferences::default()).unwrap();
+        assert_eq!(
+            offset.source,
+            PhysicalRect::new(460, 360, 540, 440).unwrap()
+        );
+        assert_eq!(offset.hotspot, sample.desktop_point);
+        assert_eq!(
+            offset.destination,
+            PhysicalRect::new(540, 400, 700, 560).unwrap()
+        );
+        assert_eq!(offset.destination_hotspot, PhysicalPoint::new(620, 480));
+        assert_eq!(offset.alignment.source_hotspot.x, 40);
+        assert_eq!(offset.alignment.destination_hotspot.x, 80);
+        assert_eq!(offset.alignment.zoom_factor, 2.0);
+
+        let centered = zoom_lens_geometry(
+            &sample,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(centered.source, offset.source);
+        assert_eq!(
+            centered.destination,
+            PhysicalRect::new(420, 320, 580, 480).unwrap()
+        );
+        assert_eq!(centered.destination_hotspot, sample.desktop_point);
+        assert_eq!(centered.placement, [ZoomAxisPlacement::Centered; 2]);
+    }
+
+    #[test]
+    fn zoom_source_coverage_uses_ceil_and_keeps_exact_scale_for_odd_and_even_rasters() {
+        let sample = zoom_sample(
+            PhysicalPoint::new(1000, 900),
+            Some(PhysicalRect::new(0, 0, 2000, 1800).unwrap()),
+            None,
+        );
+        for (diameter, factor, expected_source_extent, expected_translation) in [
+            (160, 1.25, 128_i64, 0.0_f32),
+            (160, 2.0, 80, 0.0),
+            (160, 4.0, 40, 0.0),
+            (161, 1.25, 129, 0.0),
+            (161, 2.0, 81, 0.0),
+            (161, 4.0, 41, 0.0),
+            (163, 1.7, 96, -0.6),
+            (163, 4.0, 41, 1.0),
+            (166, 4.0, 42, -1.0),
+        ] {
+            let geometry = zoom_lens_geometry(
+                &sample,
+                ZoomPreferences {
+                    diameter,
+                    zoom_factor: factor,
+                    mode: ZoomMode::Centered,
+                    ..ZoomPreferences::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(geometry.alignment.zoom_factor, factor);
+            assert_eq!(geometry.source.width(), expected_source_extent);
+            assert_eq!(geometry.source.height(), expected_source_extent);
+            let source_leading_extent =
+                i64::from(sample.desktop_point.x) - expected_source_extent / 2;
+            assert_eq!(i64::from(geometry.source.left()), source_leading_extent);
+            assert_eq!(
+                i64::from(geometry.source.right()),
+                source_leading_extent + expected_source_extent
+            );
+            assert_eq!(
+                geometry.alignment.source_hotspot.x,
+                (expected_source_extent / 2) as u32
+            );
+            assert_eq!(
+                geometry.alignment.destination_hotspot.x,
+                (diameter / 2) as u32
+            );
+            assert!(
+                (geometry.alignment.hotspot_translation.x - expected_translation).abs() < 0.0001,
+                "diameter={diameter}, factor={factor}"
+            );
+            assert_eq!(
+                geometry.alignment.hotspot_translation.y,
+                geometry.alignment.hotspot_translation.x
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_destination_mirrors_then_clamps_without_moving_the_source() {
+        let sample = zoom_sample(
+            PhysicalPoint::new(930, 400),
+            Some(PhysicalRect::new(0, 0, 1000, 800).unwrap()),
+            None,
+        );
+        let preferences = ZoomPreferences {
+            destination_offset: CoordinateOffset::new(100, 0),
+            ..ZoomPreferences::default()
+        };
+        let mirrored = zoom_lens_geometry(&sample, preferences).unwrap();
+        assert_eq!(mirrored.placement[0], ZoomAxisPlacement::MirroredOffset);
+        assert_eq!(mirrored.destination_hotspot.x, 830);
+        assert_eq!(
+            mirrored.destination,
+            PhysicalRect::new(750, 320, 910, 480).unwrap()
+        );
+
+        let clamp_sample = zoom_sample(
+            PhysicalPoint::new(50, 200),
+            Some(PhysicalRect::new(0, 0, 600, 400).unwrap()),
+            None,
+        );
+        let clamped = zoom_lens_geometry(
+            &clamp_sample,
+            ZoomPreferences {
+                destination_offset: CoordinateOffset::new(500, 0),
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        let centered = zoom_lens_geometry(
+            &clamp_sample,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(clamped.placement[0], ZoomAxisPlacement::Clamped);
+        assert_eq!(clamped.destination_hotspot.x, 520);
+        assert_eq!(
+            clamped.destination,
+            PhysicalRect::new(440, 120, 600, 280).unwrap()
+        );
+        assert_eq!(clamped.source, centered.source);
+    }
+
+    #[test]
+    fn zoom_uses_signed_physical_monitor_bounds_not_work_area_or_dpi() {
+        let sample = CoordinateSample::new(
+            PhysicalPoint::new(-600, -400),
+            Some(PhysicalRect::new(-1920, -1080, 1920, 1080).unwrap()),
+            Some(MonitorGeometry {
+                id: MonitorId::new("DISPLAY_UPPER_LEFT"),
+                bounds: PhysicalRect::new(-1920, -1080, 0, 0).unwrap(),
+                work_area: PhysicalRect::new(-1900, -1000, -20, -350).unwrap(),
+                effective_dpi: Some((288, 192)),
+            }),
+            None,
+        );
+        let geometry = zoom_lens_geometry(
+            &sample,
+            ZoomPreferences {
+                destination_offset: CoordinateOffset::new(120, 80),
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(geometry.destination_hotspot, PhysicalPoint::new(-480, -320));
+        assert_eq!(
+            geometry.destination,
+            PhysicalRect::new(-560, -400, -400, -240).unwrap()
+        );
+        assert_eq!(
+            geometry.destination_bounds,
+            Some(ZoomDestinationBounds::SampledMonitor)
+        );
+        assert_eq!(geometry.placement[1], ZoomAxisPlacement::RequestedOffset);
+    }
+
+    #[test]
+    fn zoom_reports_edge_clipping_and_preserves_lens_diameter_when_oversized() {
+        let edge_sample = zoom_sample(
+            PhysicalPoint::new(10, 20),
+            Some(PhysicalRect::new(0, 0, 1000, 1000).unwrap()),
+            None,
+        );
+        let centered = zoom_lens_geometry(
+            &edge_sample,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            centered.destination,
+            PhysicalRect::new(-70, -60, 90, 100).unwrap()
+        );
+        assert_eq!(
+            centered.visible_destination,
+            Some(PhysicalRect::new(0, 0, 90, 100).unwrap())
+        );
+        assert_eq!(
+            centered.destination_missing,
+            PhysicalInsets {
+                left: 70,
+                top: 60,
+                right: 0,
+                bottom: 0,
+            }
+        );
+
+        let small_monitor = zoom_sample(
+            PhysicalPoint::new(110, 120),
+            Some(PhysicalRect::new(10, 20, 210, 220).unwrap()),
+            None,
+        );
+        let oversized = zoom_lens_geometry(
+            &small_monitor,
+            ZoomPreferences {
+                diameter: 480,
+                destination_offset: CoordinateOffset::new(0, 0),
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(oversized.destination.width(), 480);
+        assert_eq!(oversized.destination.height(), 480);
+        assert_eq!(
+            oversized.destination,
+            PhysicalRect::new(10, 20, 490, 500).unwrap()
+        );
+        assert_eq!(
+            oversized.placement,
+            [ZoomAxisPlacement::LeadingEdgeAnchored; 2]
+        );
+        assert_eq!(
+            oversized.destination_missing,
+            PhysicalInsets {
+                left: 0,
+                top: 0,
+                right: 280,
+                bottom: 280,
+            }
+        );
+    }
+
+    #[test]
+    fn zoom_source_edge_margins_use_only_the_sampled_monitor_not_virtual_desktop_gaps() {
+        let monitor = PhysicalRect::new(-100, -100, 0, 0).unwrap();
+        let sample = zoom_sample(
+            PhysicalPoint::new(-5, -5),
+            Some(monitor),
+            Some(PhysicalRect::new(-100, -100, 100, 100).unwrap()),
+        );
+        let geometry = zoom_lens_geometry(
+            &sample,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            geometry.source,
+            PhysicalRect::new(-45, -45, 35, 35).unwrap()
+        );
+        assert_eq!(
+            geometry.source_coverage,
+            ZoomSourceCoverage::SampledMonitor {
+                bounds: monitor,
+                visible: Some(PhysicalRect::new(-45, -45, 0, 0).unwrap()),
+                missing: PhysicalInsets {
+                    left: 0,
+                    top: 0,
+                    right: 35,
+                    bottom: 35,
+                },
+            }
+        );
+
+        let no_monitor = zoom_sample(
+            PhysicalPoint::new(-5, -5),
+            None,
+            Some(PhysicalRect::new(-100, -100, 100, 100).unwrap()),
+        );
+        let unknown = zoom_lens_geometry(
+            &no_monitor,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(unknown.source_coverage, ZoomSourceCoverage::Unknown);
+    }
+
+    #[test]
+    fn zoom_reports_fully_uncovered_source_and_destination_on_the_correct_side() {
+        let monitor = PhysicalRect::new(0, 0, 100, 100).unwrap();
+        let before = zoom_lens_geometry(
+            &zoom_sample(PhysicalPoint::new(-500, -500), Some(monitor), None),
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            before.source_coverage,
+            ZoomSourceCoverage::SampledMonitor {
+                bounds: monitor,
+                visible: None,
+                missing: PhysicalInsets {
+                    left: 80,
+                    top: 80,
+                    right: 0,
+                    bottom: 0,
+                },
+            }
+        );
+        assert_eq!(
+            before.destination_missing,
+            PhysicalInsets {
+                left: 160,
+                top: 160,
+                right: 0,
+                bottom: 0,
+            }
+        );
+
+        let after = zoom_lens_geometry(
+            &zoom_sample(PhysicalPoint::new(500, 500), Some(monitor), None),
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            after.source_coverage,
+            ZoomSourceCoverage::SampledMonitor {
+                bounds: monitor,
+                visible: None,
+                missing: PhysicalInsets {
+                    left: 0,
+                    top: 0,
+                    right: 80,
+                    bottom: 80,
+                },
+            }
+        );
+        assert_eq!(
+            after.destination_missing,
+            PhysicalInsets {
+                left: 0,
+                top: 0,
+                right: 160,
+                bottom: 160,
+            }
+        );
+    }
+
+    #[test]
+    fn zoom_requires_bounds_for_unanchored_offset_but_labels_virtual_fallback() {
+        let no_bounds = zoom_sample(PhysicalPoint::new(500, 500), None, None);
+        assert_eq!(
+            zoom_lens_geometry(&no_bounds, ZoomPreferences::default()),
+            Err(ZoomGeometryError::PlacementBoundsUnavailable)
+        );
+        let centered = zoom_lens_geometry(
+            &no_bounds,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(centered.destination_bounds, None);
+        assert_eq!(centered.visible_destination, None);
+        assert_eq!(centered.source_coverage, ZoomSourceCoverage::Unknown);
+
+        let virtual_fallback = zoom_sample(
+            PhysicalPoint::new(0, 0),
+            None,
+            Some(PhysicalRect::new(-100, -100, 100, 100).unwrap()),
+        );
+        let geometry = zoom_lens_geometry(
+            &virtual_fallback,
+            ZoomPreferences {
+                diameter: 64,
+                destination_offset: CoordinateOffset::new(80, 0),
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            geometry.destination_bounds,
+            Some(ZoomDestinationBounds::VirtualDesktopFallback)
+        );
+        assert_eq!(geometry.placement[0], ZoomAxisPlacement::Clamped);
+        assert_eq!(
+            geometry.destination,
+            PhysicalRect::new(36, -32, 100, 32).unwrap()
+        );
+        assert_eq!(geometry.source_coverage, ZoomSourceCoverage::Unknown);
+    }
+
+    #[test]
+    fn zoom_returns_arithmetic_overflow_instead_of_wrapping_extreme_source_rectangles() {
+        for point in [
+            PhysicalPoint::new(i32::MIN, 0),
+            PhysicalPoint::new(i32::MAX, 0),
+            PhysicalPoint::new(0, i32::MIN),
+            PhysicalPoint::new(0, i32::MAX),
+        ] {
+            let sample = zoom_sample(point, None, None);
+            assert_eq!(
+                zoom_lens_geometry(
+                    &sample,
+                    ZoomPreferences {
+                        mode: ZoomMode::Centered,
+                        ..ZoomPreferences::default()
+                    }
+                ),
+                Err(ZoomGeometryError::ArithmeticOverflow)
+            );
+        }
+    }
+
+    fn zoom_sample(
+        point: PhysicalPoint,
+        monitor_bounds: Option<PhysicalRect>,
+        virtual_desktop_bounds: Option<PhysicalRect>,
+    ) -> CoordinateSample {
+        CoordinateSample::new(
+            point,
+            virtual_desktop_bounds,
+            monitor_bounds.map(|bounds| MonitorGeometry {
+                id: MonitorId::new("DISPLAY_TEST"),
+                bounds,
+                work_area: bounds,
+                effective_dpi: None,
+            }),
+            None,
+        )
     }
 
     #[test]
