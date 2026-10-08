@@ -101,6 +101,21 @@ pub struct MonitorGeometry {
     pub id: MonitorId,
     pub bounds: PhysicalRect,
     pub work_area: PhysicalRect,
+    pub effective_dpi: Option<(u32, u32)>,
+}
+
+/// Client-area origin in physical virtual-desktop coordinates, with the
+/// transformed client bounds when Windows can provide a non-empty rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ForegroundClientGeometry {
+    pub origin: PhysicalPoint,
+    pub bounds: Option<PhysicalRect>,
+}
+
+impl ForegroundClientGeometry {
+    pub const fn new(origin: PhysicalPoint, bounds: Option<PhysicalRect>) -> Self {
+        Self { origin, bounds }
+    }
 }
 
 /// A coordinate space selected for display or copying.
@@ -129,20 +144,23 @@ pub enum CoordinateUnavailable {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoordinateSample {
     pub desktop_point: PhysicalPoint,
+    pub virtual_desktop_bounds: Option<PhysicalRect>,
     pub monitor: Option<MonitorGeometry>,
-    pub foreground_client_origin: Option<PhysicalPoint>,
+    pub foreground_client: Option<ForegroundClientGeometry>,
 }
 
 impl CoordinateSample {
     pub fn new(
         desktop_point: PhysicalPoint,
+        virtual_desktop_bounds: Option<PhysicalRect>,
         monitor: Option<MonitorGeometry>,
-        foreground_client_origin: Option<PhysicalPoint>,
+        foreground_client: Option<ForegroundClientGeometry>,
     ) -> Self {
         Self {
             desktop_point,
+            virtual_desktop_bounds,
             monitor,
-            foreground_client_origin,
+            foreground_client,
         }
     }
 
@@ -159,9 +177,9 @@ impl CoordinateSample {
             }
             CoordinateSpace::ForegroundClient => {
                 let origin = self
-                    .foreground_client_origin
+                    .foreground_client
                     .ok_or(CoordinateUnavailable::ForegroundClientUnavailable)?;
-                checked_relative_to(self.desktop_point, origin.x, origin.y)
+                checked_relative_to(self.desktop_point, origin.origin.x, origin.origin.y)
             }
         }
     }
@@ -295,6 +313,10 @@ impl CoordinateToolRuntimeState {
         self.frozen_sample.is_some()
     }
 
+    pub fn frozen_sample(&self) -> Option<&CoordinateSample> {
+        self.frozen_sample.as_ref()
+    }
+
     pub fn freeze(&mut self, sample: &CoordinateSample) {
         if self.frozen_sample.is_none() {
             self.frozen_sample = Some(sample.clone());
@@ -337,8 +359,8 @@ impl CoordinateToolRuntimeState {
 mod tests {
     use super::{
         CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState, CoordinateUnavailable,
-        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, clamp_hud_origin,
-        format_coordinate,
+        ForegroundClientGeometry, MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect,
+        PhysicalSize, clamp_hud_origin, format_coordinate,
     };
 
     fn monitor(bounds: PhysicalRect, work_area: PhysicalRect) -> MonitorGeometry {
@@ -346,17 +368,22 @@ mod tests {
             id: MonitorId::new("DISPLAY1"),
             bounds,
             work_area,
+            effective_dpi: Some((96, 96)),
         }
     }
 
     fn sample(point: PhysicalPoint) -> CoordinateSample {
         CoordinateSample::new(
             point,
+            Some(PhysicalRect::new(-1920, 0, 1920, 1080).unwrap()),
             Some(monitor(
                 PhysicalRect::new(-1920, 0, 0, 1080).unwrap(),
                 PhysicalRect::new(-1920, 0, 0, 1040).unwrap(),
             )),
-            Some(PhysicalPoint::new(-1800, 40)),
+            Some(ForegroundClientGeometry::new(
+                PhysicalPoint::new(-1800, 40),
+                Some(PhysicalRect::new(-1800, 40, -100, 800).unwrap()),
+            )),
         )
     }
 
@@ -385,7 +412,7 @@ mod tests {
 
     #[test]
     fn missing_monitor_and_client_origin_are_explicitly_unavailable() {
-        let sample = CoordinateSample::new(PhysicalPoint::new(4, 5), None, None);
+        let sample = CoordinateSample::new(PhysicalPoint::new(4, 5), None, None, None);
         assert_eq!(
             sample.point_in(CoordinateSpace::Monitor),
             Err(CoordinateUnavailable::MonitorUnavailable)
@@ -404,11 +431,15 @@ mod tests {
     fn relative_coordinate_overflow_is_reported_instead_of_wrapping() {
         let sample = CoordinateSample::new(
             PhysicalPoint::new(i32::MAX, i32::MIN),
+            None,
             Some(monitor(
                 PhysicalRect::new(i32::MIN, i32::MIN, 0, 1).unwrap(),
                 PhysicalRect::new(i32::MIN, i32::MIN, 0, 1).unwrap(),
             )),
-            Some(PhysicalPoint::new(i32::MIN, i32::MIN)),
+            Some(ForegroundClientGeometry::new(
+                PhysicalPoint::new(i32::MIN, i32::MIN),
+                None,
+            )),
         );
         assert_eq!(
             sample.point_in(CoordinateSpace::Monitor),
@@ -465,7 +496,7 @@ mod tests {
         assert_eq!(state.last_successful_copy(), Some(&copied));
         assert_eq!(
             state.copy_value(
-                &CoordinateSample::new(PhysicalPoint::new(1, 2), None, None),
+                &CoordinateSample::new(PhysicalPoint::new(1, 2), None, None, None),
                 CoordinateSpace::ForegroundClient,
             ),
             Err(CoordinateUnavailable::ForegroundClientUnavailable)

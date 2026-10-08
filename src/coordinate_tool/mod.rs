@@ -1,17 +1,25 @@
-//! Pure coordinate data and transient state for the coordinate inspector.
+//! Coordinate inspector domain state, passive runtime, and native surfaces.
 //!
-//! Native sampling, clipboard access, commands, and presentation are owned by
-//! later integration layers. This module keeps coordinate conversion and
-//! inspector state deterministic and independently testable.
+//! Capture, clipboard access, commands, and GUI integration are owned by later
+//! integration layers. Coordinate conversion and rendering remain testable
+//! without native windows.
 
+pub mod controller;
 pub mod model;
+pub mod native;
+pub mod render;
 pub mod settings;
 
+pub use controller::{
+    CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSampler, CoordinateSurfaceBackend,
+    CoordinateToolController,
+};
 pub use model::{
     CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState, CoordinateUnavailable,
-    FormattedCoordinate, MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize,
-    clamp_hud_origin, format_coordinate,
+    ForegroundClientGeometry, FormattedCoordinate, MonitorGeometry, MonitorId, PhysicalPoint,
+    PhysicalRect, PhysicalSize, clamp_hud_origin, format_coordinate,
 };
+pub use native::NativeCoordinateRuntimeFactory;
 pub use settings::{
     CoordinateOffset, CoordinateToolPreferences, CrosshairColor, CrosshairPreferences, HudDetail,
 };

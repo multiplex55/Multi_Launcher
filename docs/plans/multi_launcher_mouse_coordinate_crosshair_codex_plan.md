@@ -95,7 +95,7 @@ All commands are exact and case-insensitive. The passive HUD remains click-throu
 
 Client space means foreground-window client coordinates in physical pixels, including negative points outside its client area. Missing geometry is an explicit error. Pick captures a live click-time sample even if the HUD is frozen; it uses the selected space, copies once after paired release/native teardown, and restores prior independent HUD/crosshair state. Escape/cancel or invalid samples preserve clipboard contents. The word "pixel" identifies the cursor's selected location; the clipboard payload is coordinate text, not color or an image.
 
-## M1-B: Passive native runtime (`pending`)
+## M1-B: Passive native runtime (`implemented; verification pending`)
 
 Objective/owner: feature-owned `coordinate_tool::{controller,native}` supplies live HUD and independent crosshair; GUI remains an adapter. Depends on M1-A.
 
@@ -202,4 +202,8 @@ Each row must have actual evidence or be explicitly recorded as unresolved envir
 
 Use `feat(coord): [M1-A] establish coordinate model and preferences`, `[M1-B] add passive HUD and crosshair runtime`, `[M1-C] integrate launcher controls and persistence`, `[M2-A] add scoped coordinate capture lifecycle`, `[M2-B] integrate capture and coexistence guards`, and `test(coord): [M3-A] verify Windows capture and document controls` when those coherent changes are ready. Exact subjects may adapt to real changes.
 
-M1-A source checkpoint implemented: signed/checked conversion, samples, independent transient state, frozen copy formatting, placement and normalized persisted preferences. Settings editor preserves preferences. Rustfmt and diff checks passed; new tests have not yet run. M1-B next. Subsequent checkpoints: pending. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.
+M1-A source checkpoint committed `c15d546f`: signed/checked conversion, samples, independent transient state, frozen copy formatting, placement and normalized persisted preferences. Settings editor preserves preferences.
+
+M1-B source checkpoint implemented: lazy single worker, injectable sampling/backend, per-monitor-aware native sampling, cached four-surface renderer, narrow guides, display refresh and teardown. Sampling errors clear the live sample; last-good geometry is placement-only. Native client context uses the last external window while launcher owns foreground; help must state this explicitly.
+
+Rustfmt and diff checks passed for M1-A/M1-B; Cargo verification and native acceptance have not yet run. M1-C next. Subsequent checkpoints: pending. Commit completion and acceptance verification are tracked separately: source checkpoints may precede expensive tests, but milestones are complete only after their scoped acceptance checks pass.
