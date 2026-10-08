@@ -203,6 +203,14 @@ pub trait HeadlessCommandHost {
     ) {
         self.spawn_virtual_desktop_command(invocation);
     }
+
+    /// Snapshot one history record for GUI replay routing. The default keeps
+    /// existing hosts on the shared history store; tests and specialized hosts
+    /// can provide an isolated snapshot without changing generic replay.
+    fn history_entry(&self, index: usize) -> Option<crate::history::HistoryEntry> {
+        crate::history::get_history().get(index).cloned()
+    }
+
     fn clear_query_after_run(&self) -> bool;
     fn hide_after_run(&self) -> bool;
     fn preserve_command(&self) -> bool;

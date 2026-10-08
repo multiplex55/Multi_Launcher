@@ -18,7 +18,7 @@ pub(crate) fn handle_snippet_run<H: HeadlessCommandHost + ?Sized>(
     )
 }
 
-fn handle_snippet_run_from_path<H: HeadlessCommandHost + ?Sized>(
+pub(super) fn handle_snippet_run_from_path<H: HeadlessCommandHost + ?Sized>(
     host: &mut H,
     invocation: &CommandInvocation,
     captured_history_query: Option<&str>,

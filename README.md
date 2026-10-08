@@ -464,6 +464,12 @@ Hidden bodies remain searchable, and text typed into the filter remains visible.
 The Dashboard also masks hidden snippet previews; its clipboard-history section
 is unchanged.
 
+Favorites and history pins saved before snippet aliases were introduced still
+run their stored literal action. To make one promptable, select the current
+snippet result and save it as a new favorite or pin. Replace a radial cell's
+literal clipboard action with the current snippet action, or use the dynamic
+**Snippets** source. Opaque older actions are not rewritten automatically.
+
 ## JSON and screen color utilities
 
 `json` opens a compact, local JSON editor. `json format` and `json pretty` prefer

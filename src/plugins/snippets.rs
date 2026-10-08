@@ -297,6 +297,13 @@ pub(crate) fn resolve_snippet_from(
 ) -> Result<SnippetEntry, SnippetResolutionError> {
     let _transaction = snippets_transaction_guard();
     let snippets = load_snippets(path).map_err(|_| SnippetResolutionError::Unavailable)?;
+    resolve_snippet_from_entries(&snippets, alias).cloned()
+}
+
+pub(crate) fn resolve_snippet_from_entries<'a>(
+    snippets: &'a [SnippetEntry],
+    alias: &str,
+) -> Result<&'a SnippetEntry, SnippetResolutionError> {
     let mut matching = snippets.iter().filter(|entry| entry.alias == alias);
     let Some(entry) = matching.next() else {
         return Err(SnippetResolutionError::MissingOrAmbiguous);
@@ -304,7 +311,7 @@ pub(crate) fn resolve_snippet_from(
     if matching.next().is_some() {
         return Err(SnippetResolutionError::MissingOrAmbiguous);
     }
-    Ok(entry.clone())
+    Ok(entry)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -317,6 +324,27 @@ pub struct SnippetEntry {
     pub prompt_for_fields: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<SnippetFieldDefinition>,
+}
+
+/// Rebuild a canonical snippet action from its encoded alias when that alias
+/// identifies exactly one entry in the current snapshot. Literal clipboard
+/// actions intentionally do not participate in this lookup.
+pub fn resolve_snippet_run_action_from_entries(
+    action_id: &str,
+    args: Option<&str>,
+    entries: &[SnippetEntry],
+) -> Option<Action> {
+    if args.is_some() {
+        return None;
+    }
+    let alias = decode_snippet_run_action(action_id)?;
+    let entry = resolve_snippet_from_entries(entries, &alias).ok()?;
+    Some(Action {
+        label: entry.alias.clone(),
+        desc: "Snippet".into(),
+        action: snippet_run_action(&entry.alias),
+        args: None,
+    })
 }
 
 /// Produce a safe, single-line body preview without changing the saved text.
@@ -804,6 +832,56 @@ mod persistence_tests {
         ] {
             assert_eq!(decode_snippet_run_action(malformed), None, "{malformed}");
         }
+    }
+
+    #[test]
+    fn saved_run_identity_resolves_only_a_unique_current_alias() {
+        let shared_text = "identical body {{literal}}";
+        let entries = vec![
+            snippet("first", shared_text),
+            snippet("second", shared_text),
+        ];
+
+        let resolved =
+            resolve_snippet_run_action_from_entries(&snippet_run_action("second"), None, &entries)
+                .unwrap();
+        assert_eq!(resolved.label, "second");
+        assert_eq!(resolved.desc, "Snippet");
+        assert_eq!(resolved.action, snippet_run_action("second"));
+        assert_eq!(resolved.args, None);
+
+        assert!(resolve_snippet_run_action_from_entries(
+            &snippet_run_action("missing"),
+            None,
+            &entries,
+        )
+        .is_none());
+        assert!(
+            resolve_snippet_run_action_from_entries(
+                &snippet_run_action("second"),
+                Some("unexpected"),
+                &entries,
+            )
+            .is_none()
+        );
+
+        let ambiguous = vec![snippet("second", "one"), snippet("second", "two")];
+        assert!(
+            resolve_snippet_run_action_from_entries(
+                &snippet_run_action("second"),
+                None,
+                &ambiguous,
+            )
+            .is_none()
+        );
+        assert!(
+            resolve_snippet_run_action_from_entries(
+                "clipboard:identical body {{literal}}",
+                None,
+                &entries,
+            )
+            .is_none()
+        );
     }
 
     #[test]

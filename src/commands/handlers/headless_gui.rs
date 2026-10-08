@@ -16,6 +16,18 @@ pub(crate) fn handle_headless_gui_with_history_query<H: HeadlessCommandHost + ?S
     invocation: &CommandInvocation,
     captured_history_query: Option<&str>,
 ) -> Result<CommandOutcome, CommandError> {
+    if let Command::Storage(StorageCommand::HistoryLaunch(index)) = &invocation.command
+        && let Some(outcome) = handle_history_snippet_replay(
+            host,
+            invocation,
+            *index,
+            captured_history_query,
+            crate::plugins::snippets::SNIPPETS_FILE,
+        )?
+    {
+        return Ok(outcome);
+    }
+
     if let Command::VirtualDesktop(command) = &invocation.command {
         let _ = command;
         let history_query = captured_history_query
@@ -55,6 +67,62 @@ pub(crate) fn handle_headless_gui_with_history_query<H: HeadlessCommandHost + ?S
     }
 
     Ok(success_outcome(host, invocation))
+}
+
+fn handle_history_snippet_replay<H: HeadlessCommandHost + ?Sized>(
+    host: &mut H,
+    history_invocation: &CommandInvocation,
+    index: usize,
+    captured_history_query: Option<&str>,
+    snippets_path: &str,
+) -> Result<Option<CommandOutcome>, CommandError> {
+    let Some(entry) = host.history_entry(index) else {
+        return Ok(None);
+    };
+    if entry.action.args.is_some() {
+        return Ok(None);
+    }
+    let Ok(command) = crate::commands::parse_action(&entry.action) else {
+        return Ok(None);
+    };
+
+    let (command, original_action) = match command {
+        Command::Storage(StorageCommand::SnippetRun(alias)) => (
+            Command::Storage(StorageCommand::SnippetRun(alias.clone())),
+            crate::actions::Action {
+                label: alias.clone(),
+                desc: "Snippet".into(),
+                action: crate::plugins::snippets::snippet_run_action(&alias),
+                args: None,
+            },
+        ),
+        Command::Storage(StorageCommand::InvalidSnippetRun) => (
+            Command::Storage(StorageCommand::InvalidSnippetRun),
+            crate::actions::Action {
+                label: "Snippet".into(),
+                desc: "Snippet".into(),
+                action: "snippet:run:".into(),
+                args: None,
+            },
+        ),
+        _ => return Ok(None),
+    };
+    let invocation = CommandInvocation {
+        command,
+        original_action,
+        query_override: None,
+        source: history_invocation.source,
+    };
+    let history_query = captured_history_query
+        .map(str::to_owned)
+        .unwrap_or_else(|| host.current_query().to_owned());
+    super::snippet_run::handle_snippet_run_from_path(
+        host,
+        &invocation,
+        Some(&history_query),
+        snippets_path,
+    )
+    .map(Some)
 }
 
 pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
@@ -246,6 +314,9 @@ mod tests {
         executed: usize,
         spawned: usize,
         fail: bool,
+        history: Option<crate::history::HistoryEntry>,
+        copied: Vec<String>,
+        prompt: Option<crate::commands::SnippetPromptIntent>,
     }
 
     impl HeadlessCommandHost for FakeHost {
@@ -274,6 +345,24 @@ mod tests {
         fn launcher_should_refocus(&self) -> bool {
             true
         }
+        fn history_entry(&self, index: usize) -> Option<crate::history::HistoryEntry> {
+            if index == 0 {
+                self.history.clone()
+            } else {
+                None
+            }
+        }
+        fn copy_snippet_text(&mut self, text: &str) -> anyhow::Result<()> {
+            self.copied.push(text.to_owned());
+            Ok(())
+        }
+        fn request_snippet_prompt(
+            &mut self,
+            intent: crate::commands::SnippetPromptIntent,
+        ) -> Result<(), String> {
+            self.prompt = Some(intent);
+            Ok(())
+        }
     }
 
     fn invocation(command: Command, raw: &str) -> CommandInvocation {
@@ -299,7 +388,161 @@ mod tests {
             executed: 0,
             spawned: 0,
             fail: false,
+            history: None,
+            copied: Vec::new(),
+            prompt: None,
         }
+    }
+
+    fn history_entry(action: &str, label: &str) -> crate::history::HistoryEntry {
+        crate::history::HistoryEntry {
+            query: "old query".into(),
+            query_lc: "old query".into(),
+            action: Action {
+                label: label.into(),
+                desc: "Snippet".into(),
+                action: action.into(),
+                args: None,
+            },
+            source: None,
+            timestamp: 1,
+        }
+    }
+
+    fn history_launch(source: ActivationSource) -> CommandInvocation {
+        let mut invocation = invocation(
+            Command::Storage(StorageCommand::HistoryLaunch(0)),
+            "history:0",
+        );
+        invocation.source = source;
+        invocation
+    }
+
+    fn write_test_snippets(
+        directory: &tempfile::TempDir,
+        entries: &[crate::plugins::snippets::SnippetEntry],
+    ) -> String {
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap().to_owned();
+        crate::plugins::snippets::save_snippets(&path, entries).unwrap();
+        path
+    }
+
+    #[test]
+    fn history_snippet_replay_uses_current_run_mode_and_captured_activation_context() {
+        use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition, snippet_run_action};
+
+        let directory = tempfile::tempdir().unwrap();
+        let plain_text = "literal {{ braces }}\r\nremain exact";
+        let plain = SnippetEntry {
+            alias: "plain".into(),
+            text: plain_text.into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        };
+        let prompted = SnippetEntry {
+            alias: "ticket:current".into(),
+            text: "Hello {{name}}".into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![SnippetFieldDefinition::new("name")],
+        };
+        let path = write_test_snippets(&directory, &[plain, prompted]);
+        let invocation = history_launch(ActivationSource::Dashboard);
+
+        let mut plain_host = host();
+        plain_host.history = Some(history_entry(&snippet_run_action("plain"), "old plain"));
+        let plain_outcome = handle_history_snippet_replay(
+            &mut plain_host,
+            &invocation,
+            0,
+            Some("captured plain query"),
+            &path,
+        )
+        .unwrap()
+        .expect("canonical snippet history must use the typed handler");
+        assert_eq!(plain_host.copied, [plain_text]);
+        assert_eq!(plain_outcome.history, HistoryPolicy::Record);
+        assert_eq!(plain_outcome.toasts, [ToastPolicy::Copied("plain".into())]);
+        assert_eq!(plain_host.executed, 0);
+
+        let mut prompted_host = host();
+        prompted_host.query = "ambient query must not replace captured history".into();
+        prompted_host.history = Some(history_entry(
+            &snippet_run_action("ticket:current"),
+            "stale display label",
+        ));
+        let prompted_outcome = handle_history_snippet_replay(
+            &mut prompted_host,
+            &invocation,
+            0,
+            Some("captured prompted query"),
+            &path,
+        )
+        .unwrap()
+        .expect("prompted history must hand off to the existing form owner");
+        assert!(prompted_host.copied.is_empty());
+        assert_eq!(prompted_outcome.history, HistoryPolicy::Skip);
+        assert!(prompted_outcome.toasts.is_empty());
+        assert_eq!(prompted_host.executed, 0);
+        let pending = prompted_host.prompt.expect("prompt intent");
+        assert_eq!(pending.alias, "ticket:current");
+        assert_eq!(pending.source, ActivationSource::Dashboard);
+        assert_eq!(pending.history_query, "captured prompted query");
+        assert_eq!(pending.safe_action.label, "ticket:current");
+        assert!(!pending.safe_action.action.contains("Hello"));
+    }
+
+    #[test]
+    fn invalid_or_opaque_history_actions_never_infer_snippet_from_description() {
+        use crate::plugins::snippets::{SnippetEntry, snippet_run_action};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_test_snippets(
+            &directory,
+            &[SnippetEntry {
+                alias: "available".into(),
+                text: "literal".into(),
+                hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
+            }],
+        );
+        let invocation = history_launch(ActivationSource::Enter);
+        let mut missing_host = host();
+        missing_host.history = Some(history_entry(&snippet_run_action("gone"), "gone"));
+        let error = handle_history_snippet_replay(&mut missing_host, &invocation, 0, None, &path)
+            .unwrap_err();
+        assert!(error.message.contains("missing or has an ambiguous alias"));
+        assert!(missing_host.copied.is_empty());
+        assert!(missing_host.prompt.is_none());
+
+        let mut malformed_host = host();
+        malformed_host.history = Some(history_entry("snippet:run:%GG", "malformed"));
+        let malformed =
+            handle_history_snippet_replay(&mut malformed_host, &invocation, 0, None, &path)
+                .unwrap_err();
+        assert!(malformed.message.contains("invalid snippet run action"));
+        assert!(malformed_host.copied.is_empty());
+        assert!(malformed_host.prompt.is_none());
+
+        let mut opaque_host = host();
+        opaque_host.history = Some(history_entry(
+            "clipboard:literal {{ equal-looking text }}",
+            "old opaque snippet",
+        ));
+        assert!(
+            handle_history_snippet_replay(&mut opaque_host, &invocation, 0, None, &path,)
+                .unwrap()
+                .is_none(),
+            "opaque clipboard history must remain on generic replay"
+        );
+        let outer = handle_headless_gui(&mut opaque_host, &invocation).unwrap();
+        assert_eq!(opaque_host.executed, 1);
+        assert!(opaque_host.copied.is_empty());
+        assert_eq!(outer.history, HistoryPolicy::Record);
+        assert!(opaque_host.prompt.is_none());
     }
 
     #[test]

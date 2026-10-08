@@ -144,15 +144,6 @@ impl ActionTargetResolver {
             }
         }
 
-        // The live catalog still emits legacy literal-copy snippet rows until
-        // M5-A migrates that entrypoint. Keep their secondary snippet identity
-        // while leaving the selected primary clipboard action untouched.
-        if selected.desc == "Snippet" && !selected.action.starts_with("snippet:run:") {
-            return ActionTarget::Snippet {
-                alias: selected.label.clone(),
-            };
-        }
-
         if selected.desc == "Tempfile" && !selected.action.starts_with("tempfile:") {
             return ActionTarget::Tempfile {
                 path: selected.action.clone(),
@@ -301,14 +292,14 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snippet_rows_keep_secondary_identity_and_primary_literal_action() {
+    fn opaque_literal_actions_do_not_gain_snippet_identity_from_description() {
         let empty = HashMap::new();
         let selected = action("Old Snippet", "Snippet", "clipboard:literal body");
         let resolved = resolve(&selected, &empty, &empty, &[]);
         assert_eq!(
             resolved.target,
-            ActionTarget::Snippet {
-                alias: "Old Snippet".into()
+            ActionTarget::Generic {
+                action: selected.clone()
             }
         );
         assert_eq!(resolved.selected_action.action, "clipboard:literal body");
@@ -318,6 +309,14 @@ mod tests {
             resolve(&generic_clipboard, &empty, &empty, &[]).target,
             ActionTarget::Generic {
                 action: generic_clipboard
+            }
+        );
+
+        let malformed_snippet = action("Old Snippet", "Snippet", "snippet:run:%GG");
+        assert_eq!(
+            resolve(&malformed_snippet, &empty, &empty, &[]).target,
+            ActionTarget::Generic {
+                action: malformed_snippet
             }
         );
     }
