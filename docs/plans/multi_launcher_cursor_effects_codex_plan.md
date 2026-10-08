@@ -639,10 +639,12 @@ The orchestrator must provide:
 - M1-C: complete core feasibility gate. Retained isolated harness implemented and reviewed; standalone build, 1 matrix test, formatter/diff checks pass. Native startup/keyboard/independent lens disable and resource teardown observed. Bounded F12 composed desktop readback proved actual 0/40/100% inversion and exact 2x offset zoom, with captured sibling/self exclusion. User confirmed physical click-through and stationary live updates on October 8. Select Windows Magnification API for production integration. See `cursor_effects_feasibility.md` for evidence and remaining final acceptance limits.
 - M1-B checkpoint: `60689d88`.
 - Grouped A/B Nextest: first run 19 passed, 1 test-helper failure, 5 not run due to fail-fast. Negative rays now stop at the bitmap edge. Rerun with `--no-fail-fast`: **25 passed**, 4,940 unrelated tests skipped; compile produced 3 existing warnings in untouched `src/gui/render.rs`. Filter covered settings, crosshair/guide rendering, transactional adapter and worker update, dialog, exact parser, handler and mouse plugin.
-- M2-A, M2-B, M3-A, M3-B, M4-A, M4-B, M5-A, M5-B, M5-C: pending.
+- M2-B, M3-A, M3-B, M4-A, M4-B, M5-A, M5-B, M5-C: pending.
 - Desktop access: ordinary Computer Use pixel capture times out, but the native fixture's bounded desktop readback includes composed output. Physical click automation fails because coordinate geometry is unavailable; user-performed click-through and stationary-update checks were explicitly confirmed.
 - Gap independent review: no substantive findings. Native harness review's child-redraw finding resolved; parent reentrancy and scene-creation fixes applied before native evaluation.
 - Test-helper remediation checkpoint: `9998849a`.
+- M1-C retained proof checkpoints: `f7fb9d4b`, composed readback `c6ad754a`, confirmed gate decision `ffb63bae`. Post-confirmation fixture shutdown exited 0 with 9 hosts created/9 destroyed and four reference overlays destroyed.
+- M2-A: implemented and parent-reviewed; canonical normalized halo/zoom appearance preferences and independent runtime/controller flags share the existing frame, sampler and worker. Effects-off preserves HUD/freeze/copy state. Formatter/diff checks pass. Focused serde, normalization, runtime independence, worker lifecycle/startup rollback and live-versus-frozen tests authored; execution deferred to the M2-B grouped native-binding gate per the scoped budget.
 
 ---
 

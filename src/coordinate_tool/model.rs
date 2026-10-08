@@ -278,6 +278,8 @@ pub fn format_coordinate(
 pub struct CoordinateToolRuntimeState {
     hud_enabled: bool,
     crosshair_enabled: bool,
+    halo_enabled: bool,
+    zoom_enabled: bool,
     frozen_sample: Option<CoordinateSample>,
     last_successful_copy: Option<FormattedCoordinate>,
 }
@@ -289,6 +291,20 @@ impl CoordinateToolRuntimeState {
 
     pub const fn crosshair_enabled(&self) -> bool {
         self.crosshair_enabled
+    }
+
+    pub const fn halo_enabled(&self) -> bool {
+        self.halo_enabled
+    }
+
+    pub const fn zoom_enabled(&self) -> bool {
+        self.zoom_enabled
+    }
+
+    /// Whether the shared coordinate worker is needed by any of the four
+    /// independent session modes.
+    pub const fn has_active_mode(&self) -> bool {
+        self.hud_enabled || self.crosshair_enabled || self.halo_enabled || self.zoom_enabled
     }
 
     pub fn set_hud_enabled(&mut self, enabled: bool) {
@@ -307,6 +323,32 @@ impl CoordinateToolRuntimeState {
     pub fn toggle_crosshair(&mut self) -> bool {
         self.crosshair_enabled = !self.crosshair_enabled;
         self.crosshair_enabled
+    }
+
+    pub fn set_halo_enabled(&mut self, enabled: bool) {
+        self.halo_enabled = enabled;
+    }
+
+    pub fn toggle_halo(&mut self) -> bool {
+        self.halo_enabled = !self.halo_enabled;
+        self.halo_enabled
+    }
+
+    pub fn set_zoom_enabled(&mut self, enabled: bool) {
+        self.zoom_enabled = enabled;
+    }
+
+    pub fn toggle_zoom(&mut self) -> bool {
+        self.zoom_enabled = !self.zoom_enabled;
+        self.zoom_enabled
+    }
+
+    /// Turn off crosshair, halo, and zoom while preserving the coordinate HUD
+    /// and all inspector state (freeze and last successful copy).
+    pub fn disable_effects(&mut self) {
+        self.crosshair_enabled = false;
+        self.halo_enabled = false;
+        self.zoom_enabled = false;
     }
 
     pub fn is_frozen(&self) -> bool {
@@ -502,6 +544,41 @@ mod tests {
             Err(CoordinateUnavailable::ForegroundClientUnavailable)
         );
         assert_eq!(state.last_successful_copy(), Some(&copied));
+    }
+
+    #[test]
+    fn four_runtime_modes_are_independent_and_effects_off_preserves_hud_state() {
+        let live = sample(PhysicalPoint::new(-1700, 210));
+        let frozen = sample(PhysicalPoint::new(-1800, 200));
+        let copied = format_coordinate(&frozen, CoordinateSpace::Desktop).unwrap();
+        let mut state = CoordinateToolRuntimeState::default();
+
+        assert!(!state.has_active_mode());
+        assert!(state.toggle_hud());
+        assert!(state.has_active_mode());
+        assert!(state.toggle_crosshair());
+        assert!(state.toggle_halo());
+        assert!(state.toggle_zoom());
+        assert!(state.hud_enabled());
+        assert!(state.crosshair_enabled());
+        assert!(state.halo_enabled());
+        assert!(state.zoom_enabled());
+
+        state.freeze(&frozen);
+        state.record_successful_copy(copied.clone());
+        state.disable_effects();
+
+        assert!(state.hud_enabled());
+        assert!(!state.crosshair_enabled());
+        assert!(!state.halo_enabled());
+        assert!(!state.zoom_enabled());
+        assert!(state.has_active_mode());
+        assert_eq!(state.frozen_sample(), Some(&frozen));
+        assert_eq!(state.last_successful_copy(), Some(&copied));
+        assert_eq!(state.displayed_sample(&live), &frozen);
+
+        state.set_hud_enabled(false);
+        assert!(!state.has_active_mode());
     }
 
     #[test]

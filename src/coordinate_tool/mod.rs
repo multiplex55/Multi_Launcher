@@ -27,5 +27,6 @@ pub use model::{
 pub(crate) use native::NativeCoordinatePointSampler;
 pub use native::NativeCoordinateRuntimeFactory;
 pub use settings::{
-    CoordinateOffset, CoordinateToolPreferences, CrosshairColor, CrosshairPreferences, HudDetail,
+    CoordinateOffset, CoordinateToolPreferences, CrosshairColor, CrosshairPreferences,
+    HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
 };

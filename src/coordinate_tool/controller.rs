@@ -33,7 +33,8 @@ pub struct CoordinateRenderFrame {
     pub preferences: CoordinateToolPreferences,
     pub runtime_state: CoordinateToolRuntimeState,
     /// A sample returned successfully in this update. `None` means the sampler
-    /// failed; renderers must not reuse old coordinate text as current data.
+    /// failed; crosshair, halo, and zoom effects must consume only this live
+    /// sample, never the frozen HUD display or last-known placement sample.
     pub current_sample: Option<CoordinateSample>,
     /// The frozen sample, or the current sample when not frozen.
     pub displayed_sample: Option<CoordinateSample>,
@@ -75,10 +76,10 @@ struct WorkerHandle {
     join: JoinHandle<Result<(), String>>,
 }
 
-/// Coordinates the passive HUD and crosshair and owns their single worker.
+/// Coordinates the HUD, crosshair, halo, and zoom and owns their single worker.
 ///
-/// There is no thread while both modes are disabled. Turning off the final mode
-/// synchronously joins the worker, after its backend has released native
+/// There is no thread while all four modes are disabled. Turning off the final
+/// mode synchronously joins the worker, after its backend has released native
 /// windows and drawing resources.
 pub struct CoordinateToolController {
     factory: Arc<dyn CoordinateRuntimeFactory>,
@@ -109,39 +110,61 @@ impl CoordinateToolController {
     }
 
     pub fn set_hud_enabled(&mut self, enabled: bool) -> Result<(), String> {
-        let previous = {
-            let mut shared = lock(&self.shared);
-            let previous = shared.runtime.hud_enabled();
-            shared.runtime.set_hud_enabled(enabled);
-            previous
-        };
-        if let Err(error) = self.reconcile_worker() {
-            let still_requested_active = {
-                let shared = lock(&self.shared);
-                shared.runtime.hud_enabled() || shared.runtime.crosshair_enabled()
-            };
-            if still_requested_active {
-                lock(&self.shared).runtime.set_hud_enabled(previous);
-            }
-            return Err(error);
-        }
-        Ok(())
+        self.set_mode(
+            enabled,
+            CoordinateToolRuntimeState::hud_enabled,
+            CoordinateToolRuntimeState::set_hud_enabled,
+        )
     }
 
     pub fn set_crosshair_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        self.set_mode(
+            enabled,
+            CoordinateToolRuntimeState::crosshair_enabled,
+            CoordinateToolRuntimeState::set_crosshair_enabled,
+        )
+    }
+
+    pub fn set_halo_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        self.set_mode(
+            enabled,
+            CoordinateToolRuntimeState::halo_enabled,
+            CoordinateToolRuntimeState::set_halo_enabled,
+        )
+    }
+
+    pub fn set_zoom_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        self.set_mode(
+            enabled,
+            CoordinateToolRuntimeState::zoom_enabled,
+            CoordinateToolRuntimeState::set_zoom_enabled,
+        )
+    }
+
+    /// Disable the crosshair, halo, and zoom without changing HUD or inspector
+    /// state. The shared worker remains active if the HUD is still enabled.
+    pub fn disable_effects(&mut self) -> Result<(), String> {
+        lock(&self.shared).runtime.disable_effects();
+        self.reconcile_worker()
+    }
+
+    fn set_mode(
+        &mut self,
+        enabled: bool,
+        is_enabled: fn(&CoordinateToolRuntimeState) -> bool,
+        set_enabled: fn(&mut CoordinateToolRuntimeState, bool),
+    ) -> Result<(), String> {
         let previous = {
             let mut shared = lock(&self.shared);
-            let previous = shared.runtime.crosshair_enabled();
-            shared.runtime.set_crosshair_enabled(enabled);
+            let previous = is_enabled(&shared.runtime);
+            set_enabled(&mut shared.runtime, enabled);
             previous
         };
         if let Err(error) = self.reconcile_worker() {
-            let still_requested_active = {
-                let shared = lock(&self.shared);
-                shared.runtime.hud_enabled() || shared.runtime.crosshair_enabled()
-            };
+            let mut shared = lock(&self.shared);
+            let still_requested_active = shared.runtime.has_active_mode();
             if still_requested_active {
-                lock(&self.shared).runtime.set_crosshair_enabled(previous);
+                set_enabled(&mut shared.runtime, previous);
             }
             return Err(error);
         }
@@ -190,7 +213,9 @@ impl CoordinateToolController {
             return Ok(sample.clone());
         }
         if self.worker.is_none() {
-            return Err("No live coordinate sample. Enable the HUD or crosshair first.".into());
+            return Err(
+                "No live coordinate sample. Enable the HUD or a cursor effect first.".into(),
+            );
         }
         shared.latest_sample.clone().ok_or_else(|| {
             shared
@@ -222,17 +247,14 @@ impl CoordinateToolController {
         {
             let mut shared = lock(&self.shared);
             shared.runtime.set_hud_enabled(false);
-            shared.runtime.set_crosshair_enabled(false);
+            shared.runtime.disable_effects();
             shared.pending_freeze = false;
         }
         self.stop_worker()
     }
 
     fn reconcile_worker(&mut self) -> Result<(), String> {
-        let active = {
-            let shared = lock(&self.shared);
-            shared.runtime.hud_enabled() || shared.runtime.crosshair_enabled()
-        };
+        let active = lock(&self.shared).runtime.has_active_mode();
         match (active, self.worker.is_some()) {
             (true, false) => self.start_worker(),
             (false, true) => self.stop_worker(),
@@ -397,7 +419,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::{
         CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSampler,
@@ -416,6 +438,7 @@ mod tests {
         shutdowns: Arc<AtomicUsize>,
         samples: Arc<Mutex<VecDeque<Result<CoordinateSample, String>>>>,
         fallback: Result<CoordinateSample, String>,
+        backend_failure: Option<String>,
         sample_gate: Option<mpsc::Sender<mpsc::SyncSender<()>>>,
         rendered: mpsc::Sender<CoordinateRenderFrame>,
     }
@@ -434,6 +457,7 @@ mod tests {
                     shutdowns: Arc::new(AtomicUsize::new(0)),
                     samples: Arc::new(Mutex::new(samples.into_iter().collect())),
                     fallback,
+                    backend_failure: None,
                     sample_gate: None,
                     rendered,
                 },
@@ -517,6 +541,9 @@ mod tests {
 
         fn create_backend(&self) -> Result<Box<dyn CoordinateSurfaceBackend>, String> {
             self.backend_creations.fetch_add(1, Ordering::AcqRel);
+            if let Some(error) = &self.backend_failure {
+                return Err(error.clone());
+            }
             Ok(Box::new(FakeSurfaceBackend {
                 rendered: self.rendered.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
@@ -548,6 +575,22 @@ mod tests {
             .expect("worker should publish a frame")
     }
 
+    fn receive_matching(
+        receiver: &mpsc::Receiver<CoordinateRenderFrame>,
+        mut predicate: impl FnMut(&CoordinateRenderFrame) -> bool,
+    ) -> CoordinateRenderFrame {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let frame = receiver
+                .recv_timeout(remaining)
+                .expect("worker should publish the requested runtime frame");
+            if predicate(&frame) {
+                return frame;
+            }
+        }
+    }
+
     #[test]
     fn one_worker_serves_independent_repeated_modes_and_stops_before_returning() {
         let sample = sample(-1800, 200, "DISPLAY1");
@@ -562,17 +605,92 @@ mod tests {
         assert!(!hud.runtime_state.crosshair_enabled());
         controller.set_hud_enabled(true).unwrap();
         controller.set_crosshair_enabled(true).unwrap();
-        let both = receive(&rendered);
-        assert!(both.runtime_state.hud_enabled());
-        assert!(both.runtime_state.crosshair_enabled());
+        controller.set_halo_enabled(true).unwrap();
+        controller.set_zoom_enabled(true).unwrap();
+        let all_modes = receive_matching(&rendered, |frame| {
+            frame.runtime_state.hud_enabled()
+                && frame.runtime_state.crosshair_enabled()
+                && frame.runtime_state.halo_enabled()
+                && frame.runtime_state.zoom_enabled()
+        });
+        assert!(all_modes.runtime_state.hud_enabled());
+        assert!(all_modes.runtime_state.crosshair_enabled());
+        assert!(all_modes.runtime_state.halo_enabled());
+        assert!(all_modes.runtime_state.zoom_enabled());
+        assert_eq!(
+            all_modes.current_sample.as_ref().unwrap().desktop_point,
+            PhysicalPoint::new(-1800, 200)
+        );
+        controller.set_zoom_enabled(false).unwrap();
+        let without_zoom = receive_matching(&rendered, |frame| {
+            frame.runtime_state.hud_enabled()
+                && frame.runtime_state.crosshair_enabled()
+                && frame.runtime_state.halo_enabled()
+                && !frame.runtime_state.zoom_enabled()
+        });
+        assert!(without_zoom.runtime_state.halo_enabled());
+        assert!(!without_zoom.runtime_state.zoom_enabled());
+
+        controller.set_halo_enabled(false).unwrap();
+        let without_halo = receive_matching(&rendered, |frame| {
+            frame.runtime_state.hud_enabled()
+                && frame.runtime_state.crosshair_enabled()
+                && !frame.runtime_state.halo_enabled()
+                && !frame.runtime_state.zoom_enabled()
+        });
+        assert!(without_halo.runtime_state.crosshair_enabled());
+
+        controller.set_hud_enabled(false).unwrap();
+        let crosshair_only = receive_matching(&rendered, |frame| {
+            !frame.runtime_state.hud_enabled()
+                && frame.runtime_state.crosshair_enabled()
+                && !frame.runtime_state.halo_enabled()
+                && !frame.runtime_state.zoom_enabled()
+        });
+        assert!(!crosshair_only.runtime_state.hud_enabled());
+        assert_eq!(
+            crosshair_only
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            PhysicalPoint::new(-1800, 200)
+        );
+
+        controller.set_hud_enabled(true).unwrap();
+        controller.set_halo_enabled(true).unwrap();
+        controller.set_zoom_enabled(true).unwrap();
+        let _ = receive_matching(&rendered, |frame| {
+            frame.runtime_state.hud_enabled()
+                && frame.runtime_state.crosshair_enabled()
+                && frame.runtime_state.halo_enabled()
+                && frame.runtime_state.zoom_enabled()
+        });
+
+        let all_modes = controller.runtime_state();
+        assert!(all_modes.hud_enabled());
+        assert!(all_modes.crosshair_enabled());
+        assert!(all_modes.halo_enabled());
+        assert!(all_modes.zoom_enabled());
+        assert!(all_modes.has_active_mode());
         assert_eq!(factory.count(&factory.sampler_creations), 1);
         assert_eq!(factory.count(&factory.backend_creations), 1);
 
+        controller.disable_effects().unwrap();
+        let hud_only = receive_matching(&rendered, |frame| {
+            frame.runtime_state.hud_enabled()
+                && !frame.runtime_state.crosshair_enabled()
+                && !frame.runtime_state.halo_enabled()
+                && !frame.runtime_state.zoom_enabled()
+        });
+        assert!(hud_only.runtime_state.hud_enabled());
+        assert!(!hud_only.runtime_state.crosshair_enabled());
+        assert!(!hud_only.runtime_state.halo_enabled());
+        assert!(!hud_only.runtime_state.zoom_enabled());
+        assert!(controller.is_running());
+        assert_eq!(factory.count(&factory.shutdowns), 0);
+
         controller.set_hud_enabled(false).unwrap();
-        let crosshair = receive(&rendered);
-        assert!(!crosshair.runtime_state.hud_enabled());
-        assert!(crosshair.runtime_state.crosshair_enabled());
-        controller.set_crosshair_enabled(false).unwrap();
         assert!(!controller.is_running());
         assert_eq!(factory.count(&factory.shutdowns), 1);
         let calls_at_stop = factory.count(&factory.sample_calls);
@@ -591,6 +709,9 @@ mod tests {
         );
         let mut controller = CoordinateToolController::new(Arc::new(factory));
         controller.set_hud_enabled(true).unwrap();
+        controller.set_crosshair_enabled(true).unwrap();
+        controller.set_halo_enabled(true).unwrap();
+        controller.set_zoom_enabled(true).unwrap();
         let first = receive(&rendered);
         assert_eq!(
             first.current_sample.as_ref().unwrap().desktop_point,
@@ -608,10 +729,18 @@ mod tests {
             PhysicalPoint::new(-1800, 200)
         );
         assert_eq!(
+            next.current_sample.as_ref().unwrap().desktop_point,
+            PhysicalPoint::new(-1600, 300)
+        );
+        assert_eq!(
             next.placement_sample.as_ref().unwrap().desktop_point,
             PhysicalPoint::new(-1600, 300)
         );
+        assert!(next.runtime_state.crosshair_enabled());
+        assert!(next.runtime_state.halo_enabled());
+        assert!(next.runtime_state.zoom_enabled());
         controller.shutdown().unwrap();
+        assert!(!controller.runtime_state().has_active_mode());
     }
 
     #[test]
@@ -644,12 +773,16 @@ mod tests {
         let release_failure = sample_gate
             .recv_timeout(Duration::from_secs(2))
             .expect("second sample should reach the explicit gate");
+        controller.set_halo_enabled(true).unwrap();
+        controller.set_zoom_enabled(true).unwrap();
         release_failure.send(()).unwrap();
 
         let unavailable = receive(&rendered);
         assert!(unavailable.current_sample.is_none());
         assert!(unavailable.displayed_sample.is_none());
         assert_eq!(unavailable.placement_sample, Some(first_sample));
+        assert!(unavailable.runtime_state.halo_enabled());
+        assert!(unavailable.runtime_state.zoom_enabled());
         controller.freeze();
         assert!(!controller.runtime_state().is_frozen());
         controller.shutdown().unwrap();
@@ -732,5 +865,69 @@ mod tests {
         assert_eq!(factory.count(&factory.sampler_creations), 0);
         assert_eq!(factory.count(&factory.backend_creations), 0);
         controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn halo_and_zoom_setters_roll_back_when_worker_startup_fails() {
+        let (mut factory, _rendered) = FakeFactory::new([], Ok(sample(0, 0, "DISPLAY1")));
+        factory.backend_failure = Some("native backend initialization failed".into());
+        let factory = Arc::new(factory);
+        let mut controller = CoordinateToolController::new(factory.clone());
+
+        assert_eq!(
+            controller.set_halo_enabled(true).unwrap_err(),
+            "native backend initialization failed"
+        );
+        assert!(!controller.runtime_state().halo_enabled());
+        assert!(!controller.runtime_state().has_active_mode());
+        assert!(!controller.is_running());
+
+        assert_eq!(
+            controller.set_zoom_enabled(true).unwrap_err(),
+            "native backend initialization failed"
+        );
+        assert!(!controller.runtime_state().zoom_enabled());
+        assert!(!controller.runtime_state().has_active_mode());
+        assert_eq!(factory.count(&factory.sampler_creations), 2);
+        assert_eq!(factory.count(&factory.backend_creations), 2);
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn halo_only_and_zoom_only_modes_each_own_the_worker_lifecycle() {
+        for (enable_effect, halo_enabled) in [
+            (
+                CoordinateToolController::set_halo_enabled
+                    as fn(&mut CoordinateToolController, bool) -> Result<(), String>,
+                true,
+            ),
+            (
+                CoordinateToolController::set_zoom_enabled
+                    as fn(&mut CoordinateToolController, bool) -> Result<(), String>,
+                false,
+            ),
+        ] {
+            let sample = sample(-1800, 200, "DISPLAY1");
+            let (factory, rendered) = FakeFactory::new([], Ok(sample.clone()));
+            let mut controller = CoordinateToolController::new(Arc::new(factory.clone()));
+
+            enable_effect(&mut controller, true).unwrap();
+            let effect_frame = receive_matching(&rendered, |frame| {
+                frame.runtime_state.halo_enabled() == halo_enabled
+                    && frame.runtime_state.zoom_enabled() != halo_enabled
+            });
+            assert!(!effect_frame.runtime_state.hud_enabled());
+            assert!(!effect_frame.runtime_state.crosshair_enabled());
+            assert_eq!(effect_frame.current_sample, Some(sample));
+            assert!(controller.is_running());
+            assert_eq!(factory.count(&factory.sampler_creations), 1);
+            assert_eq!(factory.count(&factory.backend_creations), 1);
+
+            enable_effect(&mut controller, false).unwrap();
+            assert!(!controller.is_running());
+            assert!(!controller.runtime_state().has_active_mode());
+            assert_eq!(factory.count(&factory.shutdowns), 1);
+            controller.shutdown().unwrap();
+        }
     }
 }

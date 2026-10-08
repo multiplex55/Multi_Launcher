@@ -136,6 +136,13 @@ disable/recreation, focus preservation and resource teardown, they pass M1-C's
 core feasibility gate. Proceed with the Windows Magnification API for M2–M5;
 no alternate capture backend is needed based on these results.
 
+After the user's checks, Escape closed the same interactive fixture with exit
+code 0. Its recorded button operations preserved foreground identity through
+independent toggles, recreation and placement changes. Final cleanup reported
+9 effect hosts created and 9 destroyed, and successful destruction of all four
+reference overlays. This is actual fixture lifecycle evidence; final production
+integration still needs its own scoped lifecycle and interaction verification.
+
 Still not established: full controlled black/white/RGB swatch acceptance;
 sustained non-recursion/flicker acceptance; actual production overlay exclusion;
 multi-monitor/negative-coordinate/mixed-DPI visual acceptance and performance.
