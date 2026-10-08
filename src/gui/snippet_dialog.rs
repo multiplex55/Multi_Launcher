@@ -1,7 +1,8 @@
 use super::{LauncherApp, push_toast};
+use crate::plugins::snippet_template::{TemplateError, parse_template};
 use crate::plugins::snippets::{
-    SNIPPETS_FILE, SnippetEntry, SnippetPreparationError, load_snippets, prepare_snippet_text,
-    snippet_preview_text, update_snippets,
+    SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition, SnippetInputKind, SnippetPreparationError,
+    load_snippets, prepare_snippet_text, snippet_preview_text, update_snippets,
 };
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -49,6 +50,10 @@ pub struct SnippetDialog {
     text: String,
     hide_contents: bool,
     body_revealed: bool,
+    prompt_for_fields: bool,
+    fields: Vec<SnippetFieldDefinition>,
+    discovered_field_keys: Vec<String>,
+    template_error: Option<TemplateError>,
     filter: String,
     load_error: Option<String>,
     inline_error: Option<String>,
@@ -76,6 +81,57 @@ fn matching_snippet_indices(entries: &[SnippetEntry], filter: &str) -> Vec<usize
 
 fn body_editor_id_source(session: u64) -> (&'static str, u64) {
     ("snippet_body_editor", session)
+}
+
+fn show_field_definition_row(
+    ui: &mut egui::Ui,
+    session: u64,
+    key: &str,
+    field: &mut SnippetFieldDefinition,
+) -> bool {
+    ui.label(key);
+    let mut changed = ui
+        .add_sized(
+            [130.0, ui.spacing().interact_size.y],
+            egui::TextEdit::singleline(&mut field.label)
+                .id_source(("snippet_prompt_field_label", session, key))
+                .hint_text(key),
+        )
+        .changed();
+    changed |= ui
+        .add_sized(
+            [170.0, 46.0],
+            egui::TextEdit::multiline(&mut field.default_value)
+                .id_source(("snippet_prompt_field_default", session, key))
+                .desired_rows(2)
+                .hint_text("Default value"),
+        )
+        .changed();
+    changed |= ui.checkbox(&mut field.required, "Required").changed();
+    let input_kind = match field.input_kind {
+        SnippetInputKind::SingleLine => "Single line",
+        SnippetInputKind::Multiline => "Multiline",
+    };
+    egui::ComboBox::from_id_source(("snippet_prompt_field_kind", session, key))
+        .selected_text(input_kind)
+        .show_ui(ui, |ui| {
+            changed |= ui
+                .selectable_value(
+                    &mut field.input_kind,
+                    SnippetInputKind::SingleLine,
+                    "Single line",
+                )
+                .changed();
+            changed |= ui
+                .selectable_value(
+                    &mut field.input_kind,
+                    SnippetInputKind::Multiline,
+                    "Multiline",
+                )
+                .changed();
+        });
+    ui.end_row();
+    changed
 }
 
 fn single_line_alias(alias: &str) -> String {
@@ -219,6 +275,9 @@ impl SnippetDialog {
         self.text = entry.text;
         self.hide_contents = entry.hide_contents;
         self.body_revealed = !entry.hide_contents;
+        self.prompt_for_fields = entry.prompt_for_fields;
+        self.fields = entry.fields;
+        self.refresh_prompted_fields();
         self.open = true;
         true
     }
@@ -232,6 +291,10 @@ impl SnippetDialog {
         self.text.clear();
         self.hide_contents = false;
         self.body_revealed = true;
+        self.prompt_for_fields = false;
+        self.fields.clear();
+        self.discovered_field_keys.clear();
+        self.template_error = None;
         self.open = true;
     }
 
@@ -241,6 +304,112 @@ impl SnippetDialog {
         self.text.clear();
         self.hide_contents = false;
         self.body_revealed = false;
+        self.prompt_for_fields = false;
+        self.fields.clear();
+        self.discovered_field_keys.clear();
+        self.template_error = None;
+    }
+
+    fn set_prompt_for_fields(&mut self, enabled: bool) {
+        if self.prompt_for_fields == enabled {
+            return;
+        }
+        self.prompt_for_fields = enabled;
+        self.inline_error = None;
+        if enabled {
+            self.refresh_prompted_fields();
+        } else {
+            self.discovered_field_keys.clear();
+            self.template_error = None;
+        }
+    }
+
+    /// Refresh the active discovery view without dropping detached settings for
+    /// keys that temporarily disappeared from the text.
+    fn refresh_prompted_fields(&mut self) {
+        self.discovered_field_keys.clear();
+        self.template_error = None;
+        if !self.prompt_for_fields {
+            return;
+        }
+
+        match parse_template(&self.text) {
+            Ok(parsed) => {
+                self.discovered_field_keys = parsed.field_keys;
+                for key in &self.discovered_field_keys {
+                    if !self.fields.iter().any(|field| field.name == *key) {
+                        self.fields.push(SnippetFieldDefinition::new(key.clone()));
+                    }
+                }
+            }
+            Err(error) => self.template_error = Some(error),
+        }
+    }
+
+    fn field_mut(&mut self, key: &str) -> Option<&mut SnippetFieldDefinition> {
+        self.fields.iter_mut().find(|field| field.name == key)
+    }
+
+    fn show_prompt_field_settings(&mut self, ui: &mut egui::Ui) {
+        if !self.prompt_for_fields {
+            if !self.fields.is_empty() {
+                ui.small("Field settings are retained while prompting is off.");
+            }
+            return;
+        }
+
+        ui.separator();
+        ui.label("Prompt fields");
+        if !self.body_revealed {
+            ui.small("Field settings are hidden until contents are revealed.");
+            return;
+        }
+        if let Some(error) = &self.template_error {
+            ui.colored_label(egui::Color32::RED, format!("Template error: {error}"));
+            ui.small("Existing field settings remain in this draft until the template is valid.");
+            return;
+        }
+        if self.discovered_field_keys.is_empty() {
+            ui.small("Add at least one placeholder, for example {{name}}, to enable prompting.");
+            if !self.fields.is_empty() {
+                ui.small("Previously configured field settings are retained until Save.");
+            }
+            return;
+        }
+
+        ui.small("Fields follow their first appearance in the text.");
+        let body_edit_session = self.body_edit_session;
+        egui::Grid::new(("snippet_prompt_field_grid", body_edit_session))
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("Key");
+                ui.strong("Label");
+                ui.strong("Default");
+                ui.strong("Required");
+                ui.strong("Input");
+                ui.end_row();
+
+                let mut changed = false;
+                for key in self.discovered_field_keys.clone() {
+                    let Some(field) = self.field_mut(&key) else {
+                        ui.label(&key);
+                        ui.label("Field settings unavailable");
+                        ui.end_row();
+                        continue;
+                    };
+                    changed |= show_field_definition_row(ui, body_edit_session, &key, field);
+                }
+                if changed {
+                    self.inline_error = None;
+                }
+            });
+        if self
+            .fields
+            .iter()
+            .any(|field| !self.discovered_field_keys.contains(&field.name))
+        {
+            ui.small("Settings for removed keys stay in this draft if you re-add them; Save prunes absent keys.");
+        }
     }
 
     fn apply_window_open(&mut self, open: bool) {
@@ -286,23 +455,38 @@ impl SnippetDialog {
         };
         let expected = self.entries.clone();
         let mut candidate = expected.clone();
-        let alias_validation = if index == candidate.len() {
-            candidate.push(SnippetEntry {
+        let draft = if index == candidate.len() {
+            SnippetEntry {
                 alias: self.alias.clone(),
                 text: self.text.clone(),
                 hide_contents: self.hide_contents,
-                prompt_for_fields: false,
-                fields: Vec::new(),
-            });
+                prompt_for_fields: self.prompt_for_fields,
+                fields: self.fields.clone(),
+            }
+        } else if let Some(entry) = candidate.get(index) {
+            let mut draft = entry.clone();
+            draft.alias = self.alias.clone();
+            draft.text = self.text.clone();
+            draft.hide_contents = self.hide_contents;
+            draft.prompt_for_fields = self.prompt_for_fields;
+            draft.fields = self.fields.clone();
+            draft
+        } else {
+            return Err(EditorCandidateError::InvalidState(
+                "The edited snippet no longer exists.",
+            ));
+        };
+        let mut prepared = prepare_snippet_text(&draft, &self.text)
+            .map_err(EditorCandidateError::PromptedTemplate)?;
+        prepared.alias = self.alias.clone();
+        prepared.hide_contents = self.hide_contents;
+        let alias_validation = if index == candidate.len() {
+            candidate.push(prepared);
             AliasValidation {
                 edited_index: None,
                 alias: self.alias.clone(),
             }
-        } else if let Some(entry) = candidate.get(index) {
-            let mut prepared = prepare_snippet_text(entry, &self.text)
-                .map_err(EditorCandidateError::PromptedTemplate)?;
-            prepared.alias = self.alias.clone();
-            prepared.hide_contents = self.hide_contents;
+        } else if index < candidate.len() {
             candidate[index] = prepared;
             AliasValidation {
                 edited_index: Some(index),
@@ -542,6 +726,18 @@ impl SnippetDialog {
                     {
                         self.set_hide_contents(hide_contents);
                     }
+                    let mut prompt_for_fields = self.prompt_for_fields;
+                    if ui
+                        .checkbox(&mut prompt_for_fields, "Prompt for fields")
+                        .on_hover_text(
+                            "When enabled, {{field}} placeholders request values before copying.",
+                        )
+                        .changed()
+                    {
+                        self.set_prompt_for_fields(prompt_for_fields);
+                    }
+                    ui.small(r"Use {{field}} for an input; prefix with \{{...}} to keep braces literal.");
+                    ui.small(r"Example: Hello {{name}}. {{date}} is an ordinary input, not a computed date.");
                     ui.label("Text");
                     let action_height = ui.spacing().interact_size.y
                         + ui.spacing().button_padding.y * 2.0
@@ -551,20 +747,21 @@ impl SnippetDialog {
                     let line_height = ui.fonts(|fonts| fonts.row_height(&font_id));
                     let desired_rows =
                         (editor_height / line_height).floor().clamp(4.0, 48.0) as usize;
+                    let mut body_changed = false;
                     if self.body_revealed {
                         egui::ScrollArea::both()
                             .id_source("snippet_dialog_body")
                             .auto_shrink([false, false])
                             .max_height(editor_height)
                             .show(ui, |ui| {
-                                ui.add(
+                                body_changed = ui.add(
                                     egui::TextEdit::multiline(&mut self.text)
                                         .id_source(body_editor_id_source(
                                             self.body_edit_session,
                                         ))
                                         .desired_width(f32::INFINITY)
                                         .desired_rows(desired_rows),
-                                );
+                                ).changed();
                             });
                     } else {
                         ui.label("Contents hidden");
@@ -572,9 +769,16 @@ impl SnippetDialog {
                             self.reveal_contents();
                         }
                     }
+                    if body_changed {
+                        self.inline_error = None;
+                        self.refresh_prompted_fields();
+                    }
+                    self.show_prompt_field_settings(ui);
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
-                            if self.alias.trim().is_empty() || self.text.trim().is_empty() {
+                            if self.alias.trim().is_empty()
+                                || (!self.prompt_for_fields && self.text.trim().is_empty())
+                            {
                                 report_required_fields();
                             } else {
                                 save_request = true;
@@ -1051,8 +1255,7 @@ mod tests {
 
     #[test]
     fn editor_initializes_saved_privacy_and_new_drafts_safely() {
-        let mut hidden = snippet("masked", "private\nline");
-        hidden.hide_contents = true;
+        let hidden = prompted_snippet("masked", "private {{name}}\nline");
         let dialog_entries = vec![hidden.clone(), snippet("visible", "public")];
         let mut dialog = SnippetDialog {
             entries: dialog_entries,
@@ -1062,6 +1265,7 @@ mod tests {
         assert!(dialog.begin_existing(0));
         assert!(dialog.hide_contents);
         assert!(!dialog.body_revealed);
+        assert!(dialog.prompt_for_fields);
         assert_eq!(dialog.text, hidden.text);
 
         assert!(dialog.begin_existing(1));
@@ -1071,6 +1275,8 @@ mod tests {
         dialog.begin_new("new");
         assert!(!dialog.hide_contents);
         assert!(dialog.body_revealed);
+        assert!(!dialog.prompt_for_fields);
+        assert!(dialog.fields.is_empty());
         assert!(dialog.text.is_empty());
 
         dialog.set_hide_contents(true);
@@ -1078,6 +1284,100 @@ mod tests {
         assert!(
             dialog.body_revealed,
             "new drafts remain editable while masked"
+        );
+    }
+
+    #[test]
+    fn prompted_field_controls_follow_opt_in_and_masking_state() {
+        fn painted_text(output: &egui::FullOutput) -> String {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => Some(text.galley.job.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        fn field_settings_frame(
+            ctx: &egui::Context,
+            dialog: &mut SnippetDialog,
+        ) -> egui::FullOutput {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 900.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        dialog.show_prompt_field_settings(ui);
+                    });
+                },
+            )
+        }
+
+        let mut hidden = prompted_snippet("masked", "Private {{secret_key}}");
+        hidden.fields[0].name = "secret_key".into();
+        hidden.fields[0].label = "PRIVATE LABEL".into();
+        hidden.fields[0].default_value = "PRIVATE DEFAULT".into();
+        let mut removed = SnippetFieldDefinition::new("removed_key");
+        removed.label = "REMOVED LABEL".into();
+        removed.default_value = "REMOVED DEFAULT".into();
+        hidden.fields.push(removed);
+        let mut dialog = SnippetDialog {
+            open: true,
+            entries: vec![hidden],
+            ..Default::default()
+        };
+        assert!(dialog.begin_existing(0));
+        assert!(!dialog.body_revealed);
+        assert!(dialog.open);
+        assert!(dialog.prompt_for_fields);
+
+        let ctx = egui::Context::default();
+        let mut output = dialog_frame(&ctx, &mut dialog, Vec::new());
+        for _ in 0..3 {
+            output = dialog_frame(&ctx, &mut dialog, Vec::new());
+        }
+        let painted = painted_text(&output);
+        assert!(painted.contains("Prompt for fields"), "{painted}");
+        assert!(painted.contains("Field settings are hidden until contents are revealed."));
+        assert!(!painted.contains("secret_key"));
+        assert!(!painted.contains("PRIVATE LABEL"));
+        assert!(!painted.contains("PRIVATE DEFAULT"));
+
+        dialog.reveal_contents();
+        for _ in 0..4 {
+            output = dialog_frame(&ctx, &mut dialog, Vec::new());
+        }
+        let editor_painted = painted_text(&output);
+        assert!(editor_painted.contains("Use {{field}}"));
+        assert!(editor_painted.contains("\\{{...}}"));
+        assert!(editor_painted.contains("{{date}} is an ordinary input, not a computed date."));
+
+        let field_context = egui::Context::default();
+        assert!(dialog.body_revealed);
+        assert_eq!(dialog.discovered_field_keys, vec!["secret_key"]);
+        assert!(dialog.template_error.is_none());
+        let _ = field_settings_frame(&field_context, &mut dialog);
+        let output = field_settings_frame(&field_context, &mut dialog);
+        let fields_painted = painted_text(&output);
+        assert!(fields_painted.contains("secret_key"), "{fields_painted:?}");
+        assert!(fields_painted.contains("PRIVATE LABEL"));
+        assert!(fields_painted.contains("PRIVATE DEFAULT"));
+        assert!(!fields_painted.contains("removed_key"));
+        assert!(!fields_painted.contains("REMOVED LABEL"));
+        assert!(!fields_painted.contains("REMOVED DEFAULT"));
+        assert!(
+            dialog
+                .fields
+                .iter()
+                .any(|field| field.name == "removed_key")
         );
     }
 
@@ -1327,12 +1627,135 @@ mod tests {
     }
 
     #[test]
+    fn prompted_authoring_is_explicit_and_metadata_only_save_is_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = snippet("ordinary", "Hello {{name}} / {{ticket_id}}");
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+        assert!(!dialog.prompt_for_fields);
+        assert!(dialog.fields.is_empty());
+
+        dialog.set_prompt_for_fields(true);
+        assert_eq!(
+            dialog.discovered_field_keys,
+            vec!["name".to_owned(), "ticket_id".to_owned()]
+        );
+        assert_eq!(dialog.fields[0], SnippetFieldDefinition::new("name"));
+        assert_eq!(dialog.fields[1], SnippetFieldDefinition::new("ticket_id"));
+        dialog.fields[0].label = "Recipient".into();
+        dialog.fields[0].default_value = "Ada".into();
+        dialog.fields[0].required = false;
+        dialog.fields[0].input_kind = SnippetInputKind::Multiline;
+        dialog.fields[1].label = "Ticket".into();
+        dialog.fields[1].default_value = "T-42".into();
+
+        let original_bytes = std::fs::read(&path).unwrap();
+        let version = snippets_version();
+        let (_, candidate, _) = dialog.editor_candidate().unwrap();
+        assert_eq!(candidate[0].text, original.text);
+        assert!(candidate[0].prompt_for_fields);
+        assert_eq!(candidate[0].fields[0].label, "Recipient");
+        assert_eq!(candidate[0].fields[0].default_value, "Ada");
+        assert!(!candidate[0].fields[0].required);
+        assert_eq!(
+            candidate[0].fields[0].input_kind,
+            SnippetInputKind::Multiline
+        );
+        assert_eq!(candidate[0].fields[1].label, "Ticket");
+        assert_eq!(candidate[0].fields[1].default_value, "T-42");
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
+
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved, candidate);
+        assert_eq!(snippets_version(), version + 1);
+        let saved_bytes = std::fs::read(&path).unwrap();
+
+        assert!(dialog.begin_existing(0));
+        let no_op_version = snippets_version();
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), saved_bytes);
+        assert_eq!(snippets_version(), no_op_version);
+    }
+
+    #[test]
+    fn new_snippets_start_plain_and_can_be_saved_with_authored_field_defaults() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        save_snippets(path.to_str().unwrap(), &[]).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        dialog.begin_new("greeting");
+
+        assert!(!dialog.prompt_for_fields);
+        assert!(dialog.fields.is_empty());
+        dialog.text = "Hello {{name}}".into();
+        dialog.set_prompt_for_fields(true);
+        assert_eq!(dialog.fields, vec![SnippetFieldDefinition::new("name")]);
+        dialog.fields[0].label = "Name".into();
+        dialog.fields[0].default_value = "Ada".into();
+        dialog.fields[0].required = true;
+        dialog.fields[0].input_kind = SnippetInputKind::SingleLine;
+
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].prompt_for_fields);
+        assert_eq!(saved[0].fields[0].name, "name");
+        assert_eq!(saved[0].fields[0].label, "Name");
+        assert_eq!(saved[0].fields[0].default_value, "Ada");
+        assert!(saved[0].fields[0].required);
+        assert_eq!(saved[0].fields[0].input_kind, SnippetInputKind::SingleLine);
+    }
+
+    #[test]
+    fn prompt_off_saves_malformed_braces_literally_and_retains_field_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let mut original = prompted_snippet("saved", "Hello {{name}}");
+        original.fields[0].label = "Preferred name".into();
+        original.fields[0].default_value = "Ada".into();
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+
+        dialog.set_prompt_for_fields(false);
+        dialog.text = r"Literal {{unfinished and \{{still literal}}".into();
+        dialog.refresh_prompted_fields();
+        assert!(dialog.template_error.is_none());
+        let (_, candidate, _) = dialog.editor_candidate().unwrap();
+        assert!(!candidate[0].prompt_for_fields);
+        assert_eq!(candidate[0].text, dialog.text);
+        assert_eq!(candidate[0].fields, original.fields);
+
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert!(!saved[0].prompt_for_fields);
+        assert_eq!(
+            saved[0].text,
+            r"Literal {{unfinished and \{{still literal}}"
+        );
+        assert_eq!(saved[0].fields, original.fields);
+    }
+
+    #[test]
     fn prompted_editor_reconciles_fields_in_candidate_and_commits_them_only_on_save() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("snippets.json");
         let mut original = prompted_snippet("saved", "Hello {{name}} and {{removed}}");
-        let configured_name = original.fields[0].clone();
-        original.fields.push(SnippetFieldDefinition::new("removed"));
+        original.fields[0].label = "Recipient".into();
+        original.fields[0].default_value = "Ada".into();
+        original.fields[0].required = false;
+        let mut configured_removed = SnippetFieldDefinition::new("removed");
+        configured_removed.label = "Old ticket".into();
+        configured_removed.default_value = "T-42".into();
+        configured_removed.input_kind = SnippetInputKind::Multiline;
+        original.fields.push(configured_removed.clone());
         save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
         let original_bytes = std::fs::read(&path).unwrap();
         let version = snippets_version();
@@ -1340,13 +1763,41 @@ mod tests {
         dialog.load_from(path.to_str().unwrap()).unwrap();
         assert!(dialog.begin_existing(0));
         dialog.text = "{{new_key}} then {{name}}".into();
+        dialog.refresh_prompted_fields();
+
+        assert_eq!(
+            dialog.discovered_field_keys,
+            vec!["new_key".to_owned(), "name".to_owned()]
+        );
+        assert_eq!(dialog.fields[0], original.fields[0]);
+        assert_eq!(dialog.fields[1], configured_removed);
+        assert_eq!(dialog.fields[2], SnippetFieldDefinition::new("new_key"));
+
+        dialog.text = "{{removed}} then {{new_key}} then {{name}}".into();
+        dialog.refresh_prompted_fields();
+        assert_eq!(
+            dialog.discovered_field_keys,
+            vec![
+                "removed".to_owned(),
+                "new_key".to_owned(),
+                "name".to_owned()
+            ]
+        );
+        assert_eq!(dialog.field_mut("removed").unwrap().default_value, "T-42");
+
+        dialog.text = "{{new_key}} then {{name}}".into();
+        dialog.refresh_prompted_fields();
 
         let (_, candidate, _) = dialog.editor_candidate().unwrap();
 
         assert_eq!(
             candidate[0].fields,
-            vec![SnippetFieldDefinition::new("new_key"), configured_name]
+            vec![
+                SnippetFieldDefinition::new("new_key"),
+                original.fields[0].clone()
+            ]
         );
+        assert!(dialog.fields.iter().any(|field| field.name == "removed"));
         assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
         assert_eq!(dialog.entries, vec![original.clone()]);
         assert_eq!(snippets_version(), version);
@@ -1356,6 +1807,7 @@ mod tests {
         let saved = load_snippets(path.to_str().unwrap()).unwrap();
         assert_eq!(saved[0].text, "{{new_key}} then {{name}}");
         assert_eq!(saved[0].fields, candidate[0].fields);
+        assert!(!saved[0].fields.iter().any(|field| field.name == "removed"));
         assert_eq!(snippets_version(), version + 1);
     }
 
@@ -1376,6 +1828,13 @@ mod tests {
             assert!(dialog.begin_existing(0));
             dialog.alias = "draft alias".into();
             dialog.text = invalid_text.into();
+            dialog.refresh_prompted_fields();
+            assert!(dialog.discovered_field_keys.is_empty());
+            if invalid_text.contains("unfinished") {
+                assert!(dialog.template_error.is_some());
+            } else {
+                assert!(dialog.template_error.is_none());
+            }
 
             assert!(matches!(
                 dialog.save_editor(path.to_str().unwrap()),
@@ -1384,6 +1843,7 @@ mod tests {
 
             assert_eq!(dialog.alias, "draft alias");
             assert_eq!(dialog.text, invalid_text);
+            assert!(dialog.fields.iter().any(|field| field.name == "name"));
             assert_eq!(dialog.entries, vec![original.clone()]);
             assert_eq!(dialog.edit_idx, Some(0));
             let inline_error = dialog.inline_error.as_deref().unwrap();
@@ -1404,21 +1864,29 @@ mod tests {
         let original = prompted_snippet("saved", "Hello {{name}}");
         save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
         let original_bytes = std::fs::read(&path).unwrap();
+        let version = snippets_version();
         let mut dialog = SnippetDialog::default();
         dialog.load_from(path.to_str().unwrap()).unwrap();
         assert!(dialog.begin_existing(0));
 
         dialog.alias = "unsaved alias".into();
         dialog.text = "Unsaved {{name}}".into();
+        dialog.fields[0].label = "Draft label".into();
+        dialog.fields[0].default_value = "Draft default".into();
+        dialog.set_prompt_for_fields(false);
         dialog.cancel_editor();
 
         assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
         assert_eq!(
             load_snippets(path.to_str().unwrap()).unwrap(),
             vec![original.clone()]
         );
         assert_eq!(dialog.entries, vec![original]);
         assert!(dialog.edit_idx.is_none());
+        assert!(!dialog.prompt_for_fields);
+        assert!(dialog.fields.is_empty());
+        assert!(dialog.discovered_field_keys.is_empty());
     }
 
     #[test]
@@ -1502,14 +1970,16 @@ mod tests {
     fn failed_editor_save_preserves_revealed_session_draft() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("snippets.json");
-        let mut original = snippet("masked", "original body");
-        original.hide_contents = true;
+        let original = prompted_snippet("masked", "Original {{name}}");
         save_snippets(path.to_str().unwrap(), &[original]).unwrap();
         let mut dialog = SnippetDialog::default();
         dialog.open_edit_from(path.to_str().unwrap(), "masked");
         dialog.reveal_contents();
         dialog.alias = "changed alias".to_owned();
-        dialog.text = "unsaved revised λ\nbody".to_owned();
+        dialog.text = "unsaved revised {{name}} λ\nbody".to_owned();
+        dialog.refresh_prompted_fields();
+        dialog.fields[0].label = "Draft label".into();
+        dialog.fields[0].default_value = "Draft default".into();
         dialog.set_hide_contents(false);
         let draft = dialog.text.clone();
         let invalid = b"external malformed update";
@@ -1524,6 +1994,9 @@ mod tests {
         assert_eq!(dialog.text, draft);
         assert!(dialog.body_revealed);
         assert!(!dialog.hide_contents);
+        assert!(dialog.prompt_for_fields);
+        assert_eq!(dialog.fields[0].label, "Draft label");
+        assert_eq!(dialog.fields[0].default_value, "Draft default");
         assert!(dialog.load_error.is_some());
         assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
