@@ -1,8 +1,8 @@
 # Cursor effects native feasibility
 
-Status: native inversion, circular composition and offset zoom observed in composed
-desktop readbacks. Click-through and stationary live-update confirmation remain
-pending; M1-C is not yet complete.
+Status: M1-C core feasibility gate passed. Native inversion, circular composition
+and offset zoom were observed in composed desktop readbacks; the user confirmed
+physical click-through and live updates with the pointer stationary.
 
 ## Candidate and ownership
 
@@ -127,16 +127,17 @@ changes. The fixture is left at default 40% halo with an offset lens.
 
 ### Current gate outcome
 
-M1-C has meaningful native appearance evidence. **Click-through and stationary
-live-update confirmation are still awaiting user observation**, because Computer
-Use clicking fails with `coordinate input geometry is unavailable`. Production
-M2–M5 remains pending at the approved hard feasibility gate. This input-observation
-limitation is not evidence of a Magnification API failure and does not justify
-switching capture backends.
+On October 8, 2026, the user explicitly confirmed that clicks reach controls
+beneath the halo/lens and content updates inside the effects while the pointer
+is still. These are user-performed native observations, not automated click
+results: Computer Use clicking fails with `coordinate input geometry is
+unavailable`. Together with the composed pixel evidence, observed independent
+disable/recreation, focus preservation and resource teardown, they pass M1-C's
+core feasibility gate. Proceed with the Windows Magnification API for M2–M5;
+no alternate capture backend is needed based on these results.
 
 Still not established: full controlled black/white/RGB swatch acceptance;
-stationary live content; physical click-through; sustained non-recursion/flicker
-acceptance; actual production overlay exclusion;
+sustained non-recursion/flicker acceptance; actual production overlay exclusion;
 multi-monitor/negative-coordinate/mixed-DPI visual acceptance and performance.
 
 Actual standalone checks (all successful):
