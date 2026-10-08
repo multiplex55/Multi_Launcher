@@ -377,7 +377,7 @@ mod windows_runtime {
                 bottom: i32::try_from(height).map_err(|_| "HUD height is too large")?,
             };
             let filled = unsafe { FillRect(self.dc, &bounds, brush) };
-            unsafe { DeleteObject(brush) };
+            let _ = unsafe { DeleteObject(brush) };
             if filled == 0 {
                 return Err("Could not paint coordinate HUD background".into());
             }
@@ -388,7 +388,7 @@ mod windows_runtime {
                     0,
                     0,
                     0,
-                    FW_NORMAL.0,
+                    FW_NORMAL.0 as i32,
                     0,
                     0,
                     0,
@@ -405,7 +405,7 @@ mod windows_runtime {
             }
             let original_font = unsafe { SelectObject(self.dc, font) };
             if original_font.0.is_null() || original_font.0 as isize == -1 {
-                unsafe { DeleteObject(font) };
+                let _ = unsafe { DeleteObject(font) };
                 return Err("Could not select coordinate HUD font".into());
             }
             let result = (|| {
