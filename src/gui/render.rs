@@ -750,6 +750,115 @@ impl LauncherApp {
         None
     }
 
+    fn route_snippet_prompt_keyboard(&mut self, ctx: &egui::Context) -> bool {
+        self.route_snippet_prompt_keyboard_with(ctx, |app| {
+            let _ = app.submit_snippet_prompt();
+        })
+    }
+
+    fn route_snippet_prompt_keyboard_with(
+        &mut self,
+        ctx: &egui::Context,
+        mut submit: impl FnMut(&mut Self),
+    ) -> bool {
+        if !self.snippet_prompt_dialog.is_open() {
+            return false;
+        }
+
+        #[derive(Clone, Copy)]
+        enum PromptKey {
+            Escape(egui::Modifiers),
+            CtrlEnter(egui::Modifiers),
+            Tab {
+                modifiers: egui::Modifiers,
+                backwards: bool,
+            },
+        }
+
+        let key = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Key {
+                    key: egui::Key::Escape,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(PromptKey::Escape(*modifiers)),
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.ctrl && !modifiers.shift && !modifiers.alt && !modifiers.mac_cmd => {
+                    Some(PromptKey::CtrlEnter(*modifiers))
+                }
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => Some(PromptKey::Tab {
+                    modifiers: *modifiers,
+                    backwards: modifiers.shift,
+                }),
+                _ => None,
+            })
+        });
+
+        match key {
+            Some(PromptKey::Escape(modifiers)) => {
+                ctx.input_mut(|input| {
+                    input.consume_key(modifiers, egui::Key::Escape);
+                });
+                let _ = self.cancel_snippet_prompt();
+            }
+            Some(PromptKey::CtrlEnter(modifiers)) => {
+                ctx.input_mut(|input| {
+                    input.consume_key(modifiers, egui::Key::Enter);
+                });
+                if !self.snippet_prompt_dialog.is_preview_only() {
+                    submit(self);
+                }
+            }
+            Some(PromptKey::Tab {
+                modifiers,
+                backwards,
+            }) => {
+                ctx.input_mut(|input| {
+                    input.consume_key(modifiers, egui::Key::Tab);
+                });
+                self.snippet_prompt_dialog.queue_tab_focus(ctx, backwards);
+            }
+            None => {}
+        }
+
+        // The open prompt owns this complete frame, even if Escape or a
+        // successful submit closed it above.
+        true
+    }
+
+    fn consume_prompt_opening_frame_keys(ctx: &egui::Context) {
+        ctx.input_mut(|input| {
+            let owned_keys = input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if matches!(key, egui::Key::Enter | egui::Key::Tab | egui::Key::Escape) => {
+                        Some((*modifiers, *key))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for (modifiers, key) in owned_keys {
+                input.consume_key(modifiers, key);
+            }
+        });
+    }
+
     pub(crate) fn handle_action_sheet_key(
         &mut self,
         key: Option<action_sheet::ActionSheetKey>,
@@ -1081,6 +1190,14 @@ impl LauncherApp {
             }
         }
 
+        // Prompt keyboard actions must win before Escape cleanup, action-sheet
+        // routing, or launcher-query handling can observe the same event.
+        let mut snippet_prompt_owns_input =
+            self.snippet_prompt_dialog.is_open() && !self.ocr_surface_visible();
+        if snippet_prompt_owns_input {
+            self.route_snippet_prompt_keyboard(ctx);
+        }
+
         let plugin_search_generation = self.plugins.search_generation();
         if plugin_search_generation != self.last_plugin_search_generation
             && !self.ocr_defers_launcher_query_refresh()
@@ -1117,7 +1234,9 @@ impl LauncherApp {
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
         self.poll_macro_prompt(ctx);
-        self.macro_parameter_prompt.show(ctx);
+        if !snippet_prompt_owns_input {
+            self.macro_parameter_prompt.show(ctx);
+        }
 
         // tracing::debug!("LauncherApp::update called");
         if let Some(hwnd) = frame.and_then(crate::window_manager::get_hwnd) {
@@ -1502,14 +1621,24 @@ impl LauncherApp {
         // Latch ownership for this entire frame, including a dismissal frame,
         // so input cannot fall through to the underlying query after Close.
         let ocr_blocks_launcher_input = self.ocr_surface_visible();
+        if !ocr_blocks_launcher_input
+            && !snippet_prompt_owns_input
+            && self.snippet_prompt_dialog.is_open()
+        {
+            // A prompt opened by an earlier asynchronous or macro action owns
+            // the rest of this frame, but the key that opened it must not also
+            // be treated as a submit.
+            snippet_prompt_owns_input = true;
+            Self::consume_prompt_opening_frame_keys(ctx);
+        }
         self.route_ocr_surface_dismissal(ctx);
-        let mut selected_sheet_action = if ocr_blocks_launcher_input {
+        let mut selected_sheet_action = if ocr_blocks_launcher_input || snippet_prompt_owns_input {
             None
         } else {
             self.route_action_sheet_keyboard(ctx, query_input_id)
         };
 
-        if self.action_sheet.is_open() && !ocr_blocks_launcher_input {
+        if self.action_sheet.is_open() && !ocr_blocks_launcher_input && !snippet_prompt_owns_input {
             if let Some(action) = action_sheet::render(ctx, &mut self.action_sheet, &self.matcher) {
                 self.close_action_sheet();
                 selected_sheet_action = Some(action);
@@ -1526,7 +1655,15 @@ impl LauncherApp {
                 source,
             );
         }
-        let action_sheet_blocks_launcher_input = self.action_sheet.is_open();
+        if !ocr_blocks_launcher_input
+            && !snippet_prompt_owns_input
+            && self.snippet_prompt_dialog.is_open()
+        {
+            snippet_prompt_owns_input = true;
+            Self::consume_prompt_opening_frame_keys(ctx);
+        }
+        let action_sheet_blocks_launcher_input =
+            self.action_sheet.is_open() || snippet_prompt_owns_input;
 
         let mut deferred_universal_action = None;
         let mut deferred_radial_authoring_add = None;
@@ -1919,6 +2056,12 @@ impl LauncherApp {
             }
         });
         self.execute_deferred_result_action(deferred_universal_action);
+        if !ocr_blocks_launcher_input
+            && !snippet_prompt_owns_input
+            && self.snippet_prompt_dialog.is_open()
+        {
+            Self::consume_prompt_opening_frame_keys(ctx);
+        }
         if let Some(add) = deferred_radial_authoring_add {
             if let Ok(mut editor) = self.radial_editor.lock() {
                 editor.add_action_to_radial(
@@ -2240,6 +2383,15 @@ impl LauncherApp {
                 }
             }
             ConfirmationResult::None => {}
+        }
+        match self.snippet_prompt_dialog.show(ctx) {
+            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
+                let _ = self.submit_snippet_prompt();
+            }
+            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Cancel) => {
+                let _ = self.cancel_snippet_prompt();
+            }
+            None => {}
         }
         self.enforce_pinned();
         self.update_panel_stack();
@@ -3171,6 +3323,29 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn new_prompt_app(ctx: &egui::Context) -> (LauncherApp, tempfile::TempDir) {
+        let directory = tempfile::tempdir().unwrap();
+        let actions_path = directory.path().join("actions.json");
+        let settings_path = directory.path().join("settings.json");
+        let app = LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new(),
+            actions_path.display().to_string(),
+            settings_path.display().to_string(),
+            Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        (app, directory)
     }
 
     struct StartupCaptureBackend {
@@ -6725,6 +6900,202 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    fn prompted_test_entry() -> crate::plugins::snippets::SnippetEntry {
+        let mut message = crate::plugins::snippets::SnippetFieldDefinition::new("message");
+        message.required = false;
+        message.input_kind = crate::plugins::snippets::SnippetInputKind::Multiline;
+        crate::plugins::snippets::SnippetEntry {
+            alias: "reply".into(),
+            text: "Hello {{name}}\n{{message}}".into(),
+            hide_contents: false,
+            prompt_for_fields: true,
+            fields: vec![
+                crate::plugins::snippets::SnippetFieldDefinition::new("name"),
+                message,
+            ],
+        }
+    }
+
+    fn request_test_prompt(app: &mut LauncherApp, entry: crate::plugins::snippets::SnippetEntry) {
+        let prepared = match crate::plugins::snippets::prepare_snippet_run(&entry).unwrap() {
+            crate::plugins::snippets::SnippetRunMode::Prompted(prepared) => prepared,
+            crate::plugins::snippets::SnippetRunMode::Plain => unreachable!(),
+        };
+        crate::commands::HeadlessCommandHost::request_snippet_prompt(
+            app,
+            crate::commands::SnippetPromptIntent {
+                alias: entry.alias.clone(),
+                entry_snapshot: entry,
+                prepared,
+                safe_action: Action {
+                    label: "reply".into(),
+                    desc: "Snippet".into(),
+                    action: crate::plugins::snippets::snippet_run_action("reply"),
+                    args: None,
+                },
+                source: ActivationSource::Dashboard,
+                history_query: "cs reply".into(),
+                root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+            },
+        )
+        .unwrap();
+    }
+
+    fn prompt_raw_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(720.0, 520.0),
+            )),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn render_prompt_test_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) {
+        let _ = ctx.run(prompt_raw_input(events), |ctx| {
+            app.render_root_frame(ctx, None);
+        });
+    }
+
+    #[test]
+    fn snippet_prompt_focus_tab_multiline_and_escape_are_owned_by_the_dialog() {
+        let ctx = egui::Context::default();
+        let (mut app, _test_directory) = new_prompt_app(&ctx);
+        app.test_skip_history_persistence = true;
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.query = "keep this query".into();
+        app.results = vec![Action {
+            label: "Help".into(),
+            desc: "Command".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        assert!(app.open_action_sheet_for_index(0));
+        request_test_prompt(&mut app, prompted_test_entry());
+        let generation = app.snippet_prompt_dialog.session().unwrap().generation;
+        let name_id = egui::Id::new(("snippet_prompt_field", generation, "name"));
+
+        render_prompt_test_frame(&ctx, &mut app, Vec::new());
+        assert!(ctx.memory(|memory| memory.has_focus(name_id)));
+
+        // Ctrl+Enter reaches the central validator before the form has a value.
+        // That failure must leave the dialog, value and focus in place.
+        render_prompt_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)],
+        );
+        assert!(app.snippet_prompt_dialog.is_open());
+        assert_eq!(
+            app.snippet_prompt_dialog.feedback(),
+            Some(super::super::snippet_prompt_dialog::SnippetPromptError::RequiredValueEmpty)
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(name_id)));
+        app.snippet_prompt_dialog.set_value("name", "Ada".into());
+
+        let mut tab_fell_through = true;
+        let _ = ctx.run(
+            prompt_raw_input(vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)]),
+            |ctx| {
+                app.render_root_frame(ctx, None);
+                tab_fell_through = ctx.input(|input| input.key_pressed(egui::Key::Tab));
+            },
+        );
+        let message_id = egui::Id::new(("snippet_prompt_field", generation, "message"));
+        assert!(!tab_fell_through);
+        assert!(ctx.memory(|memory| memory.has_focus(message_id)));
+
+        // Plain Enter remains text input in the multiline field.
+        render_prompt_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+        );
+        assert!(
+            app.snippet_prompt_dialog
+                .session()
+                .and_then(|session| session.values.get("message"))
+                .is_some_and(|value| value.contains('\n'))
+        );
+
+        render_prompt_test_frame(
+            &ctx,
+            &mut app,
+            vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(app.snippet_prompt_dialog.session().is_none());
+        assert!(app.action_sheet.is_open());
+        assert_eq!(app.query, "keep this query");
+        assert!(app.test_activation_trace.is_empty());
+    }
+
+    #[test]
+    fn snippet_prompt_ctrl_enter_submits_once_and_preview_consumes_without_copy() {
+        let ctx = egui::Context::default();
+        let (mut app, _test_directory) = new_prompt_app(&ctx);
+        app.test_skip_history_persistence = true;
+        let entry = prompted_test_entry();
+        request_test_prompt(&mut app, entry.clone());
+        app.snippet_prompt_dialog.set_value("name", "Ada".into());
+        app.results = vec![Action {
+            label: "Help".into(),
+            desc: "Command".into(),
+            action: "help:show".into(),
+            args: None,
+        }];
+        assert!(app.open_action_sheet_for_index(0));
+
+        let mut copied = Vec::new();
+        let mut submit_result = None;
+        let _ = ctx.run(
+            prompt_raw_input(vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)]),
+            |ctx| {
+                assert!(app.route_snippet_prompt_keyboard_with(ctx, |app| {
+                    submit_result = Some(app.submit_snippet_prompt_with_test_backends(
+                        |alias| (alias == entry.alias).then(|| entry.clone()).ok_or(()),
+                        |text| {
+                            copied.push(text.to_owned());
+                            Ok(())
+                        },
+                    ));
+                }));
+                assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+            },
+        );
+        assert_eq!(copied, ["Hello Ada\n"]);
+        assert!(submit_result.unwrap().is_ok());
+        assert!(app.snippet_prompt_dialog.session().is_none());
+        assert!(app.action_sheet.is_open());
+
+        let (mut preview_app, _preview_directory) = new_prompt_app(&ctx);
+        preview_app.test_skip_history_persistence = true;
+        preview_app
+            .snippet_prompt_dialog
+            .begin_preview(entry)
+            .unwrap();
+        preview_app.focus_panel(super::super::Panel::SnippetPromptDialog);
+        let mut submissions = 0;
+        let _ = ctx.run(
+            prompt_raw_input(vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)]),
+            |ctx| {
+                assert!(preview_app.route_snippet_prompt_keyboard_with(ctx, |_| {
+                    submissions += 1;
+                }));
+                assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
+            },
+        );
+        assert_eq!(submissions, 0);
+        assert!(preview_app.snippet_prompt_dialog.is_open());
+        assert!(preview_app.snippet_prompt_dialog.is_preview_only());
     }
 
     fn focus_launcher_query(ctx: &egui::Context, app: &mut LauncherApp) {

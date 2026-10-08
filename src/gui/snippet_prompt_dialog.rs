@@ -3,10 +3,26 @@ use std::collections::HashMap;
 use crate::actions::Action;
 use crate::commands::{ActivationSource, SnippetPromptIntent};
 use crate::plugins::snippet_template::{
-    RenderErrorKind, RenderedPreview, TemplateRenderError, render_for_copy, render_preview,
+    RenderErrorKind, RenderIssueKind, RenderedPreview, TemplateRenderError, render_for_copy,
+    render_preview,
 };
-use crate::plugins::snippets::{PreparedSnippetTemplate, SnippetEntry, SnippetRunMode};
+use crate::plugins::snippets::{
+    PreparedSnippetTemplate, SnippetEntry, SnippetInputKind, SnippetRunMode,
+};
 use crate::universal_actions::RootLauncherPolicy;
+use eframe::egui;
+
+#[derive(Clone, PartialEq, Eq)]
+enum PromptFocusTarget {
+    Field(String),
+    Copy,
+    Cancel,
+}
+
+pub(crate) enum SnippetPromptUiAction {
+    Submit,
+    Cancel,
+}
 
 /// Transient, in-memory state for one prompted snippet invocation or editor preview.
 /// It intentionally has no `Debug` implementation because it owns user-entered values.
@@ -16,6 +32,10 @@ pub(crate) struct SnippetPromptDialog {
     generation: u64,
     open: bool,
     feedback: Option<SnippetPromptError>,
+    focused_generation: Option<u64>,
+    pending_focus: Option<PromptFocusTarget>,
+    copy_widget_id: Option<egui::Id>,
+    cancel_widget_id: Option<egui::Id>,
 }
 
 pub(crate) struct SnippetPromptSession {
@@ -137,7 +157,246 @@ impl SnippetPromptDialog {
         self.session = Some(session);
         self.open = true;
         self.feedback = None;
+        self.focused_generation = None;
+        self.pending_focus = None;
+        self.copy_widget_id = None;
+        self.cancel_widget_id = None;
         self.generation
+    }
+
+    pub(crate) fn queue_tab_focus(&mut self, ctx: &egui::Context, backwards: bool) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+
+        let mut targets = session
+            .prepared
+            .fields
+            .iter()
+            .map(|field| PromptFocusTarget::Field(field.name.clone()))
+            .collect::<Vec<_>>();
+        if !self.is_preview_only() {
+            targets.push(PromptFocusTarget::Copy);
+        }
+        targets.push(PromptFocusTarget::Cancel);
+
+        let current = targets.iter().position(|target| match target {
+            PromptFocusTarget::Field(key) => {
+                ctx.memory(|memory| memory.has_focus(field_widget_id(session.generation, key)))
+            }
+            PromptFocusTarget::Copy => self
+                .copy_widget_id
+                .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id))),
+            PromptFocusTarget::Cancel => self
+                .cancel_widget_id
+                .is_some_and(|id| ctx.memory(|memory| memory.has_focus(id))),
+        });
+        let current = current.or_else(|| {
+            let first = session.initial_focus.as_ref()?;
+            targets
+                .iter()
+                .position(|target| matches!(target, PromptFocusTarget::Field(key) if key == first))
+        });
+        let target_index = match (current, backwards) {
+            (Some(index), true) => index.checked_sub(1).unwrap_or(targets.len() - 1),
+            (Some(index), false) => (index + 1) % targets.len(),
+            (None, true) => targets.len() - 1,
+            (None, false) => 0,
+        };
+        self.pending_focus = targets.get(target_index).cloned();
+    }
+
+    pub(crate) fn show(&mut self, ctx: &egui::Context) -> Option<SnippetPromptUiAction> {
+        if !self.open {
+            return None;
+        }
+        let Some(session) = self.session.as_ref() else {
+            self.open = false;
+            return Some(SnippetPromptUiAction::Cancel);
+        };
+
+        let generation = session.generation;
+        let initial_focus = session.initial_focus.clone();
+        let preview_only = matches!(&session.mode, SnippetPromptMode::PreviewOnly { .. });
+        let mut focus_target = self.pending_focus.take();
+        if self.focused_generation != Some(generation) {
+            self.focused_generation = Some(generation);
+            if focus_target.is_none() {
+                focus_target = initial_focus.map(PromptFocusTarget::Field);
+            }
+        }
+
+        let available = ctx.available_rect().size();
+        let max_size = egui::vec2(available.x.max(1.0), available.y.max(1.0));
+        let default_size = egui::vec2(max_size.x.min(620.0), max_size.y.min(700.0));
+        let min_size = egui::vec2(max_size.x.min(280.0), max_size.y.min(180.0));
+        let title = format!(
+            "{} — {}",
+            if preview_only {
+                "Preview Snippet"
+            } else {
+                "Fill Snippet"
+            },
+            session.alias
+        );
+        let mut opened = self.open;
+        let feedback = self.feedback;
+        let mut action = None;
+        let mut value_changed = false;
+
+        egui::Window::new(title)
+            .id(egui::Id::new(("snippet_prompt_window", generation)))
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(default_size)
+            .min_size(min_size)
+            .max_size(max_size)
+            .open(&mut opened)
+            .show(ctx, |ui| {
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                if preview_only {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "Preview mode — copying is disabled.",
+                    );
+                }
+
+                let footer_height = ui.spacing().interact_size.y + 12.0;
+                let feedback_height = if feedback.is_some() { 22.0 } else { 0.0 };
+                let body_height =
+                    (ui.available_height() - footer_height - feedback_height).max(24.0);
+                egui::ScrollArea::vertical()
+                    .id_source(("snippet_prompt_body", generation))
+                    .auto_shrink([false, false])
+                    .max_height(body_height)
+                    .show(ui, |ui| {
+                        for field in &session.prepared.fields {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.strong(field.display_label().as_ref());
+                                if field.required {
+                                    ui.colored_label(egui::Color32::LIGHT_RED, "* required");
+                                }
+                            });
+
+                            let value = session.values.entry(field.name.clone()).or_default();
+                            let id = field_widget_id(generation, &field.name);
+                            let response = match field.input_kind {
+                                SnippetInputKind::SingleLine => ui.add(
+                                    egui::TextEdit::singleline(value)
+                                        .id(id)
+                                        .desired_width(f32::INFINITY),
+                                ),
+                                SnippetInputKind::Multiline => ui.add_sized(
+                                    [ui.available_width(), 82.0],
+                                    egui::TextEdit::multiline(value)
+                                        .id(id)
+                                        .desired_rows(3)
+                                        .desired_width(f32::INFINITY),
+                                ),
+                            };
+                            value_changed |= response.changed();
+                            if matches!(&focus_target, Some(PromptFocusTarget::Field(key)) if key == &field.name)
+                            {
+                                response.request_focus();
+                                response.scroll_to_me(Some(egui::Align::Center));
+                            }
+
+                            ui.add_space(4.0);
+                        }
+
+                        ui.separator();
+                        ui.strong("Preview");
+                        match render_preview(
+                            &session.prepared.parsed,
+                            &session.prepared.fields,
+                            &session.values,
+                        ) {
+                            Ok(preview) => {
+                                for issue in &preview.validation_errors {
+                                    if issue.kind == RenderIssueKind::RequiredValueEmpty
+                                        && let Some(field) = session
+                                            .prepared
+                                            .fields
+                                            .iter()
+                                            .find(|field| field.name == issue.key)
+                                    {
+                                        ui.colored_label(
+                                            egui::Color32::LIGHT_RED,
+                                            format!(
+                                                "{}: enter a value for this required field.",
+                                                field.display_label()
+                                            ),
+                                        );
+                                    }
+                                }
+                                egui::ScrollArea::vertical()
+                                    .id_source(("snippet_prompt_preview", generation))
+                                    .auto_shrink([false, false])
+                                    .max_height(ui.available_height().min(150.0).max(44.0))
+                                    .show(ui, |ui| {
+                                        let mut text = preview.text;
+                                        ui.add(
+                                            egui::TextEdit::multiline(&mut text)
+                                                .id(egui::Id::new((
+                                                    "snippet_prompt_preview_text",
+                                                    generation,
+                                                )))
+                                                .desired_rows(3)
+                                                .desired_width(f32::INFINITY)
+                                                .interactive(false),
+                                        );
+                                    });
+                            }
+                            Err(error) => {
+                                ui.colored_label(egui::Color32::LIGHT_RED, error.to_string());
+                            }
+                        }
+                    });
+
+                if let Some(error) = feedback {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error.message());
+                }
+                ui.horizontal(|ui| {
+                    if !preview_only {
+                        let response = ui
+                            .push_id(button_widget_id(generation, "copy"), |ui| ui.button("Copy"))
+                            .inner;
+                        self.copy_widget_id = Some(response.id);
+                        if matches!(&focus_target, Some(PromptFocusTarget::Copy)) {
+                            response.request_focus();
+                        }
+                        if response.clicked() && action.is_none() {
+                            action = Some(SnippetPromptUiAction::Submit);
+                        }
+                    }
+
+                    let response = ui
+                        .push_id(button_widget_id(generation, "cancel"), |ui| {
+                            ui.button("Cancel")
+                        })
+                        .inner;
+                    self.cancel_widget_id = Some(response.id);
+                    if matches!(&focus_target, Some(PromptFocusTarget::Cancel)) {
+                        response.request_focus();
+                    }
+                    if response.clicked() {
+                        action = Some(SnippetPromptUiAction::Cancel);
+                    }
+                });
+            });
+
+        self.open = opened;
+        if value_changed {
+            self.feedback = None;
+        }
+        if !opened {
+            Some(SnippetPromptUiAction::Cancel)
+        } else {
+            action
+        }
     }
 
     /// Set only a configured field. The entered text remains in this session and is
@@ -224,6 +483,7 @@ impl SnippetPromptDialog {
                 self.session = None;
                 self.open = false;
                 self.feedback = None;
+                self.pending_focus = None;
                 Ok(completion)
             }
             Err(error) => {
@@ -238,6 +498,7 @@ impl SnippetPromptDialog {
     pub(crate) fn cancel(&mut self) -> Option<SnippetEntry> {
         self.open = false;
         self.feedback = None;
+        self.pending_focus = None;
         match self.session.take().map(|session| session.mode) {
             Some(SnippetPromptMode::PreviewOnly { draft }) => Some(draft),
             Some(SnippetPromptMode::Execute { .. }) | None => None,
@@ -247,6 +508,14 @@ impl SnippetPromptDialog {
     pub(crate) fn shutdown(&mut self) {
         let _ = self.cancel();
     }
+}
+
+fn field_widget_id(generation: u64, key: &str) -> egui::Id {
+    egui::Id::new(("snippet_prompt_field", generation, key))
+}
+
+fn button_widget_id(generation: u64, name: &str) -> egui::Id {
+    egui::Id::new(("snippet_prompt_button", generation, name))
 }
 
 impl SnippetPromptSession {
@@ -575,5 +844,67 @@ mod tests {
         assert_eq!(completion.safe_action.args, None);
         assert_eq!(completion.safe_action.action, "snippet:run:ticketreply");
         assert_eq!(completion.history_query, "cs ticketreply");
+    }
+
+    #[test]
+    fn presentation_focuses_required_field_and_scopes_widgets_to_each_session() {
+        let ctx = egui::Context::default();
+        let mut dialog = SnippetPromptDialog::default();
+        let first_generation = dialog.begin_execution(intent(entry()));
+        let first_field_id = field_widget_id(first_generation, "name");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 220.0));
+
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                assert!(dialog.show(ctx).is_none());
+            },
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(first_field_id)));
+
+        dialog.set_value("name", "old transient value".into());
+        let second_generation = dialog.begin_execution(intent(entry()));
+        let second_field_id = field_widget_id(second_generation, "name");
+        assert_ne!(first_field_id, second_field_id);
+        assert_ne!(
+            egui::Id::new(("snippet_prompt_window", first_generation)),
+            egui::Id::new(("snippet_prompt_window", second_generation))
+        );
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                assert!(dialog.show(ctx).is_none());
+            },
+        );
+        assert!(ctx.memory(|memory| memory.has_focus(second_field_id)));
+        assert!(!ctx.memory(|memory| memory.has_focus(first_field_id)));
+        assert_eq!(
+            dialog
+                .session()
+                .and_then(|session| session.values.get("name"))
+                .map(String::as_str),
+            Some("Ada")
+        );
+
+        let mut draft = entry();
+        draft.alias = "draft".into();
+        dialog.begin_preview(draft).unwrap();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ctx| {
+                assert!(dialog.show(ctx).is_none());
+            },
+        );
+        assert!(dialog.copy_widget_id.is_none());
+        assert!(dialog.cancel_widget_id.is_some());
     }
 }
