@@ -636,11 +636,11 @@ The orchestrator must provide:
 - M1-A: complete; parent inspected geometry and corrected raw-arm bound and zero-gap subtraction with implementer. Formatter/diff checks and grouped targeted tests passed.
 - M1-A checkpoint: `b021b87f`.
 - M1-B: complete; parent diff inspected, formatter/diff checks and grouped targeted tests passed. Typed gap command and field-only transactional merge integrated.
-- M1-C: retained isolated harness implemented and reviewed; standalone build, 1 matrix test, formatter/diff checks pass. Native startup/keyboard/independent lens disable and resource teardown observed. Pixel capture times out even for project Explorer; mandatory visual acceptance awaits user observation. See `cursor_effects_feasibility.md`. Production effects remain gated; no native acceptance claimed.
+- M1-C: retained isolated harness implemented and reviewed; standalone build, 1 matrix test, formatter/diff checks pass. Native startup/keyboard/independent lens disable and resource teardown observed. Added bounded F12 composed desktop readback: actual 0/40/100% inversion and exact 2x offset zoom proved from native pixels, with captured sibling/self exclusion. Click-through and stationary live-update confirmation remain pending; production effects remain gated. See `cursor_effects_feasibility.md` for evidence and limits.
 - M1-B checkpoint: `60689d88`.
 - Grouped A/B Nextest: first run 19 passed, 1 test-helper failure, 5 not run due to fail-fast. Negative rays now stop at the bitmap edge. Rerun with `--no-fail-fast`: **25 passed**, 4,940 unrelated tests skipped; compile produced 3 existing warnings in untouched `src/gui/render.rs`. Filter covered settings, crosshair/guide rendering, transactional adapter and worker update, dialog, exact parser, handler and mouse plugin.
 - M2-A, M2-B, M3-A, M3-B, M4-A, M4-B, M5-A, M5-B, M5-C: pending.
-- Desktop access: computer-use initialization and application inventory succeeded; native effect acceptance has not yet been performed.
+- Desktop access: ordinary Computer Use pixel capture times out, but the native fixture's bounded desktop readback includes composed output. Physical click automation fails because coordinate geometry is unavailable; requested user confirmation of click-through and stationary updates is pending.
 - Gap independent review: no substantive findings. Native harness review's child-redraw finding resolved; parent reentrancy and scene-creation fixes applied before native evaluation.
 - Test-helper remediation checkpoint: `9998849a`.
 

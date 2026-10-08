@@ -18,18 +18,20 @@ fn main() {
 mod win32 {
     use std::cell::RefCell;
     use std::ffi::c_void;
-    use std::fs::{File, OpenOptions};
+    use std::fs::{File, OpenOptions, create_dir_all};
     use std::io::Write;
-    use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use windows::Win32::Foundation::{
-        BOOL, COLORREF, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        BOOL, COLORREF, GetLastError, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreateEllipticRgn, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC,
-        GetPixel, InvalidateRect, PAINTSTRUCT, ReleaseDC, ScreenToClient, SetBkMode, SetTextColor,
-        TRANSPARENT, TextOutW, UpdateWindow,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CAPTUREBLT, CreateCompatibleDC,
+        CreateDIBSection, CreateEllipticRgn, CreateSolidBrush, DIB_RGB_COLORS, DeleteDC,
+        DeleteObject, EndPaint, FillRect, GdiFlush, GetDC, GetPixel, HBITMAP, HDC, HGDIOBJ,
+        InvalidateRect, PAINTSTRUCT, ROP_CODE, ReleaseDC, SRCCOPY, ScreenToClient, SelectObject,
+        SetBkMode, SetTextColor, TRANSPARENT, TextOutW, UpdateWindow,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::HiDpi::{
@@ -66,6 +68,8 @@ mod win32 {
     const LENS_SOURCE_HALF: i32 = LENS_DIAMETER / 4;
     const LENS_OFFSET_X: i32 = 120;
     const LENS_OFFSET_Y: i32 = 80;
+    const READBACK_MAX_WIDTH: i32 = 320;
+    const READBACK_MAX_HEIGHT: i32 = 280;
     const ID_HALO: i32 = 1001;
     const ID_LENS: i32 = 1002;
     const ID_STRENGTH_0: i32 = 1003;
@@ -771,6 +775,7 @@ mod win32 {
                 0x77 => self.set_strength_index((self.strength_index + 1) % 3), // F8
                 0x78 => self.toggle_lens_mode(),                                // F9
                 0x79 => self.toggle_overlays(),                                 // F10
+                0x7b => self.save_composed_readback(),                          // F12
                 0x1b => self.request_close(),
                 _ => return false,
             }
@@ -953,6 +958,160 @@ mod win32 {
             let foreground_after = unsafe { GetForegroundWindow() };
             self.log(format!(
                 "inspect foreground_after={} preserved={}",
+                hwnd_value(foreground_after),
+                foreground_before == foreground_after
+            ));
+        }
+
+        fn save_composed_readback(&mut self) {
+            let foreground_before = unsafe { GetForegroundWindow() };
+            let mut cursor = POINT::default();
+            if let Err(error) = unsafe { GetCursorPos(&mut cursor) } {
+                self.log(format!("F12 readback: GetCursorPos failed: {error}"));
+                return;
+            }
+
+            let observation_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("target")
+                .join("cursor-effects-smoke")
+                .join("observations");
+            if let Err(error) = create_dir_all(&observation_dir) {
+                self.log(format!(
+                    "F12 readback: could not create {}: {error}",
+                    observation_dir.display()
+                ));
+                return;
+            }
+            let observation_dir = match std::fs::canonicalize(&observation_dir) {
+                Ok(path) => path,
+                Err(error) => {
+                    self.log(format!(
+                        "F12 readback: could not resolve output directory: {error}"
+                    ));
+                    return;
+                }
+            };
+            let capture_id = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+
+            let halo_rect = centered_rect(cursor, HALO_RADIUS, HALO_RADIUS);
+            let source_rect = centered_rect(cursor, LENS_SOURCE_HALF, LENS_SOURCE_HALF);
+            let lens_host_destination =
+                self.lens.as_ref().map(|lens| (lens.host, lens.destination));
+            let lens_rect = if let Some((lens_host, last_destination)) = lens_host_destination {
+                let mut rect = RECT::default();
+                match unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::GetWindowRect(lens_host, &mut rect)
+                } {
+                    Ok(()) => Some(rect),
+                    Err(error) => {
+                        self.log(format!(
+                            "F12 readback: GetWindowRect(lens host) failed ({error}); using last destination {}",
+                            rect_text(last_destination)
+                        ));
+                        Some(last_destination)
+                    }
+                }
+            } else {
+                None
+            };
+            // The default offset lens occupies cursor+[40..200] x cursor+[0..160], while the
+            // halo occupies cursor+[-60..60] in both axes. This fixed bounded rectangle contains
+            // both circles with surrounding scene pixels and remains useful in centered mode.
+            let context_rect = RECT {
+                left: cursor.x.saturating_sub(80),
+                top: cursor.y.saturating_sub(80),
+                right: cursor.x.saturating_add(240),
+                bottom: cursor.y.saturating_add(200),
+            };
+
+            self.log(format!(
+                "F12 readback: BitBlt(SRCCOPY|CAPTUREBLT) is one-shot; the Windows compositor may omit layered WC_MAGNIFIER output. API success alone is not proof, but saved pixels can support inspection if composed output is included. cursor_physical=({}, {}) halo_active={} halo_rect={} lens_active={} lens_source={} lens_destination={} context_rect={}",
+                cursor.x,
+                cursor.y,
+                self.halo.is_some(),
+                rect_text(halo_rect),
+                self.lens.is_some(),
+                rect_text(source_rect),
+                lens_rect.map(rect_text).unwrap_or_else(|| "OFF".into()),
+                rect_text(context_rect)
+            ));
+
+            let mut captures = vec![
+                (
+                    "halo-120x120",
+                    halo_rect,
+                    vec![
+                        ("hotspot", HALO_RADIUS, HALO_RADIUS),
+                        ("inside_top", HALO_RADIUS, 10),
+                        ("outside_corner", 0, 0),
+                    ],
+                ),
+                (
+                    "lens-source-80x80",
+                    source_rect,
+                    vec![("cursor_source_center", LENS_SOURCE_HALF, LENS_SOURCE_HALF)],
+                ),
+                (
+                    "context-320x280",
+                    context_rect,
+                    vec![
+                        ("halo_hotspot", 80, 80),
+                        ("halo_inside_top", 80, 30),
+                        ("halo_outside_top", 80, 10),
+                        (
+                            if self.lens_offset {
+                                "offset_lens_center"
+                            } else {
+                                "centered_lens_center"
+                            },
+                            if self.lens_offset { 200 } else { 80 },
+                            if self.lens_offset { 160 } else { 80 },
+                        ),
+                        ("context_background", 310, 20),
+                    ],
+                ),
+            ];
+            if let Some(rect) = lens_rect {
+                captures.insert(
+                    1,
+                    (
+                        "lens-destination-160x160",
+                        rect,
+                        vec![
+                            ("lens_center", 80, 80),
+                            ("lens_inside_left", 20, 80),
+                            ("lens_top", 80, 10),
+                            ("lens_corner", 0, 0),
+                        ],
+                    ),
+                );
+            }
+
+            for (name, rect, samples) in captures {
+                let path = observation_dir.join(format!("readback-{capture_id}-{name}.bmp"));
+                match save_desktop_rect_bmp(&path, rect, &samples) {
+                    Ok(sample_text) => self.log(format!(
+                        "F12 readback saved; inspect whether WC_MAGNIFIER output is present: name={name} rect={} path={} rgb_samples=[{}]",
+                        rect_text(rect),
+                        path.display(),
+                        sample_text
+                    )),
+                    Err(error) => self.log(format!(
+                        "F12 readback failed: name={name} rect={} path={} error={error}",
+                        rect_text(rect),
+                        path.display()
+                    )),
+                }
+            }
+            let foreground_after = unsafe { GetForegroundWindow() };
+            self.log(format!(
+                "F12 readback complete foreground_before={} foreground_after={} preserved={}",
+                hwnd_value(foreground_before),
                 hwnd_value(foreground_after),
                 foreground_before == foreground_after
             ));
@@ -1147,14 +1306,14 @@ mod win32 {
                 hdc,
                 60,
                 555,
-                "Log: %TEMP%\\MultiLauncherCursorEffectsSmoke.log | stdout has the same event records.",
+                "Log: %TEMP%\\MultiLauncherCursorEffectsSmoke.log | F12 saves bounded desktop BMP readbacks.",
                 [190, 205, 220],
             );
             let _ = draw_text(
                 hdc,
                 60,
                 585,
-                "Observe: native cursor unchanged; circular host mask; live content; exclusion; focus and click-through; then repeat recreate/toggle.",
+                "Observe: cursor unchanged; circle mask; live content; exclusion; focus/click-through. F12 saves bounded readbacks.",
                 [190, 205, 220],
             );
             let _ = unsafe { EndPaint(hwnd, &paint) };
@@ -1191,6 +1350,247 @@ mod win32 {
         fn drop(&mut self) {
             self.cleanup();
         }
+    }
+
+    fn centered_rect(center: POINT, half_width: i32, half_height: i32) -> RECT {
+        RECT {
+            left: center.x.saturating_sub(half_width),
+            top: center.y.saturating_sub(half_height),
+            right: center.x.saturating_add(half_width),
+            bottom: center.y.saturating_add(half_height),
+        }
+    }
+
+    struct ScreenReadback {
+        desktop_dc: HDC,
+        memory_dc: HDC,
+        bitmap: HBITMAP,
+        previous_bitmap: HGDIOBJ,
+        bitmap_selected: bool,
+        pixel_bits: *mut c_void,
+        byte_count: usize,
+    }
+
+    impl ScreenReadback {
+        fn new(width: i32, height: i32) -> Result<Self, String> {
+            let byte_count = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|pixel_count| pixel_count.checked_mul(4))
+                .ok_or_else(|| "readback byte size overflow".to_string())?;
+            let mut capture = Self {
+                desktop_dc: HDC::default(),
+                memory_dc: HDC::default(),
+                bitmap: HBITMAP::default(),
+                previous_bitmap: HGDIOBJ::default(),
+                bitmap_selected: false,
+                pixel_bits: std::ptr::null_mut(),
+                byte_count,
+            };
+            capture.desktop_dc = unsafe { GetDC(HWND::default()) };
+            if capture.desktop_dc.is_invalid() {
+                return Err(format!(
+                    "GetDC(desktop) returned an invalid handle (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            capture.memory_dc = unsafe { CreateCompatibleDC(capture.desktop_dc) };
+            if capture.memory_dc.is_invalid() {
+                return Err(format!(
+                    "CreateCompatibleDC returned an invalid handle (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            let bitmap_info = readback_bitmap_info(width, height, byte_count);
+            capture.bitmap = unsafe {
+                CreateDIBSection(
+                    capture.desktop_dc,
+                    &bitmap_info,
+                    DIB_RGB_COLORS,
+                    &mut capture.pixel_bits,
+                    HANDLE::default(),
+                    0,
+                )
+            }
+            .map_err(|error| format!("CreateDIBSection({width}x{height}) failed: {error}"))?;
+            if capture.pixel_bits.is_null() {
+                return Err("CreateDIBSection returned a null pixel buffer".into());
+            }
+            capture.previous_bitmap = unsafe { SelectObject(capture.memory_dc, capture.bitmap) };
+            if capture.previous_bitmap.is_invalid() {
+                return Err(format!(
+                    "SelectObject(memory_dc, bitmap) failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            capture.bitmap_selected = true;
+            Ok(capture)
+        }
+
+        fn copy_rect(&mut self, rect: RECT, width: i32, height: i32) -> Result<&[u8], String> {
+            let rop = ROP_CODE(SRCCOPY.0 | CAPTUREBLT.0);
+            unsafe {
+                BitBlt(
+                    self.memory_dc,
+                    0,
+                    0,
+                    width,
+                    height,
+                    self.desktop_dc,
+                    rect.left,
+                    rect.top,
+                    rop,
+                )
+            }
+            .map_err(|error| format!("BitBlt(SRCCOPY|CAPTUREBLT) failed: {error}"))?;
+            if !unsafe { GdiFlush() }.as_bool() {
+                return Err(format!(
+                    "GdiFlush failed before reading DIB pixels (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            // SAFETY: CreateDIBSection allocated this buffer for byte_count bytes; it remains
+            // valid until bitmap deletion, and GdiFlush completed queued GDI writes before reading.
+            Ok(unsafe { std::slice::from_raw_parts(self.pixel_bits.cast(), self.byte_count) })
+        }
+    }
+
+    impl Drop for ScreenReadback {
+        fn drop(&mut self) {
+            if self.bitmap_selected {
+                let restored = unsafe { SelectObject(self.memory_dc, self.previous_bitmap) };
+                if restored.is_invalid() {
+                    eprintln!(
+                        "cursor-effects-smoke: readback SelectObject restore failed (GetLastError={})",
+                        unsafe { GetLastError().0 }
+                    );
+                    if !self.memory_dc.is_invalid() && unsafe { DeleteDC(self.memory_dc) }.as_bool()
+                    {
+                        self.memory_dc = HDC::default();
+                        self.bitmap_selected = false;
+                    } else {
+                        eprintln!("cursor-effects-smoke: readback DeleteDC fallback failed");
+                    }
+                } else {
+                    self.bitmap_selected = false;
+                }
+            }
+            if !self.bitmap.is_invalid() && !unsafe { DeleteObject(self.bitmap) }.as_bool() {
+                eprintln!(
+                    "cursor-effects-smoke: readback DeleteObject(bitmap) failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                );
+            }
+            if !self.memory_dc.is_invalid() && !unsafe { DeleteDC(self.memory_dc) }.as_bool() {
+                eprintln!(
+                    "cursor-effects-smoke: readback DeleteDC failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                );
+            }
+            if !self.desktop_dc.is_invalid()
+                && unsafe { ReleaseDC(HWND::default(), self.desktop_dc) } == 0
+            {
+                eprintln!(
+                    "cursor-effects-smoke: readback ReleaseDC(desktop) failed (GetLastError={})",
+                    unsafe { GetLastError().0 }
+                );
+            }
+        }
+    }
+
+    fn save_desktop_rect_bmp(
+        path: &Path,
+        rect: RECT,
+        samples: &[(&str, i32, i32)],
+    ) -> Result<String, String> {
+        let width = rect
+            .right
+            .checked_sub(rect.left)
+            .ok_or_else(|| "rectangle width overflow".to_string())?;
+        let height = rect
+            .bottom
+            .checked_sub(rect.top)
+            .ok_or_else(|| "rectangle height overflow".to_string())?;
+        if width <= 0 || height <= 0 || width > READBACK_MAX_WIDTH || height > READBACK_MAX_HEIGHT {
+            return Err(format!(
+                "bounded readback rectangle rejected ({}x{}, maximum {}x{})",
+                width, height, READBACK_MAX_WIDTH, READBACK_MAX_HEIGHT
+            ));
+        }
+
+        let mut capture = ScreenReadback::new(width, height)?;
+        let pixels = capture.copy_rect(rect, width, height)?;
+        write_bmp(path, width, height, pixels)?;
+        Ok(format_samples(pixels, width, height, samples))
+    }
+
+    fn write_bmp(path: &Path, width: i32, height: i32, pixels: &[u8]) -> Result<(), String> {
+        let image_size = (width as u32)
+            .checked_mul(height as u32)
+            .and_then(|pixel_count| pixel_count.checked_mul(4))
+            .ok_or_else(|| "BMP image size overflow".to_string())?;
+        if pixels.len() != image_size as usize {
+            return Err(format!(
+                "BMP pixel buffer length {} did not match expected {image_size}",
+                pixels.len()
+            ));
+        }
+        let file_size = 14_u32
+            .checked_add(40)
+            .and_then(|header_size| header_size.checked_add(image_size))
+            .ok_or_else(|| "BMP file size overflow".to_string())?;
+        let mut bmp = Vec::with_capacity(file_size as usize);
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&file_size.to_le_bytes());
+        bmp.extend_from_slice(&0_u32.to_le_bytes());
+        bmp.extend_from_slice(&54_u32.to_le_bytes());
+        bmp.extend_from_slice(&40_u32.to_le_bytes());
+        bmp.extend_from_slice(&width.to_le_bytes());
+        bmp.extend_from_slice(&(-height).to_le_bytes());
+        bmp.extend_from_slice(&1_u16.to_le_bytes());
+        bmp.extend_from_slice(&32_u16.to_le_bytes());
+        bmp.extend_from_slice(&BI_RGB.0.to_le_bytes());
+        bmp.extend_from_slice(&image_size.to_le_bytes());
+        bmp.extend_from_slice(&0_i32.to_le_bytes());
+        bmp.extend_from_slice(&0_i32.to_le_bytes());
+        bmp.extend_from_slice(&0_u32.to_le_bytes());
+        bmp.extend_from_slice(&0_u32.to_le_bytes());
+        bmp.extend_from_slice(pixels);
+        std::fs::write(path, bmp).map_err(|error| format!("write {}: {error}", path.display()))
+    }
+
+    fn readback_bitmap_info(width: i32, height: i32, byte_count: usize) -> BITMAPINFO {
+        BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                biSizeImage: byte_count as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn format_samples(
+        pixels: &[u8],
+        width: i32,
+        height: i32,
+        samples: &[(&str, i32, i32)],
+    ) -> String {
+        samples
+            .iter()
+            .map(|(name, x, y)| {
+                let x = (*x).clamp(0, width - 1) as usize;
+                let y = (*y).clamp(0, height - 1) as usize;
+                let index = ((y * width as usize) + x) * 4;
+                let rgb = [pixels[index + 2], pixels[index + 1], pixels[index]];
+                format!("{name}={rgb:?}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     fn update_surface(
@@ -1789,7 +2189,7 @@ mod win32 {
                     log_path, hwnd_value(scene)
                 ));
                 state.log("API candidate: actual scene pixels through WC_MAGNIFIER; API success is not visual acceptance. No hooks, injected input, or worker threads are used.");
-                state.log("controls: buttons or F5 inspect / F6 halo / F7 lens / F8 strength / F9 centered-offset / F10 reference overlays / Escape exit");
+                state.log("controls: buttons or F5 inspect / F6 halo / F7 lens / F8 strength / F9 centered-offset / F10 reference overlays / F12 save bounded desktop readbacks / Escape exit");
                 state.log("filters exclude named fake HUD, crosshair, both guides, and both active magnifier hosts; exact production class discovery is not enabled in this standalone harness");
                 state
                     .log("native host titles: Cursor Effects Halo 1x; Cursor Effects Zoom Lens 2x");

@@ -1,6 +1,8 @@
 # Cursor effects native feasibility
 
-Status: native visual proof pending fixture inspection. This note does not establish acceptance.
+Status: native inversion, circular composition and offset zoom observed in composed
+desktop readbacks. Click-through and stationary live-update confirmation remain
+pending; M1-C is not yet complete.
 
 ## Candidate and ownership
 
@@ -82,18 +84,59 @@ recreated the lens and refreshed both exclusion lists. Each keyboard operation
 reported unchanged foreground identity. Both effects are left enabled in the
 interactive fixture for the requested manual observation; Escape exits it.
 
+### Composed desktop readback
+
+The retained fixture now provides opt-in F12 bounded desktop readback using
+`BitBlt(SRCCOPY | CAPTUREBLT)` into a top-down DIB, checked `GdiFlush`, and BMP
+output. This desktop's resulting pixels include the native magnifier output;
+ordinary Computer Use window capture still times out. Readback is proof tooling,
+not a production capture backend. Independent review found no substantive issue
+in its bounded allocation, GDI ownership, flushing or BMP output.
+
+Actual artifacts are under `target/cursor-effects-smoke/observations` (ignored
+generated output). The capture stamps were `1791495842532627900` (40%),
+`1791495911449164900` (100%) and `1791495927601388800` (0%). Each has the
+`readback-<stamp>-context-320x280.bmp`, `-halo-120x120.bmp`,
+`-lens-destination-160x160.bmp` and `-lens-source-80x80.bmp` files.
+
+At cursor `(668,434)`, halo bounds were `[608,374..728,494]`, lens source
+`[628,394..708,474]`, and offset destination `[708,434..868,594]`.
+Direct inspection showed circular inversion with scene text inside it, an offset
+circular lens with enlarged text, and white fake guide lines absent inside both
+effects while present outside. In overlapping regions the lens retained ordinary
+source colors rather than the transformed halo colors.
+
+Python standard-library BMP comparisons of the three context captures found:
+
+- 10,965 pixels changed between 0% and 100%, with none outside the halo rectangle.
+- All changed pixels matched `100% = 255 - input` per channel exactly.
+- All corresponding 40% pixels matched `round(0.2 * input + 102)` exactly.
+- The scene background `(31,34,42)` became `(108,109,110)` at 40% and
+  `(224,221,213)` at 100%; an outside green corner stayed `(0,255,0)`.
+- All 17,692 interior lens samples (radius 75 within the 160-pixel destination)
+  matched the 80-pixel source at `(floor(x/2), floor(y/2))` exactly at 0%.
+  Lens content stayed unchanged across halo strengths.
+
+These are real composed-pixel observations, not just matrix unit tests or API
+return values. They establish actual partial inversion and actual 2x zoom of the
+cursor-centered source in offset mode. A further centered-mode capture
+`1791496314182263100` showed circular enlarged scene text at the cursor; its
+overlapping source readback is not used for the exact source comparison above.
+Native logs reported preserved foreground identity after capture and placement
+changes. The fixture is left at default 40% halo with an offset lens.
+
 ### Current gate outcome
 
-M1-C retained harness/source checks are coherent, but **native visual acceptance
-is awaiting user observation**. The parent requested confirmation of a visible
-partly inverted circle, true cursor-centered zoom, circular clipping and absence
-of overlay feedback. Production M2–M5 remains pending. This is an observation
-access limitation, not evidence that Magnification API failed its appearance
-contract; switching capture backends without such evidence is not justified.
+M1-C has meaningful native appearance evidence. **Click-through and stationary
+live-update confirmation are still awaiting user observation**, because Computer
+Use clicking fails with `coordinate input geometry is unavailable`. Production
+M2–M5 remains pending at the approved hard feasibility gate. This input-observation
+limitation is not evidence of a Magnification API failure and does not justify
+switching capture backends.
 
-Not executed/established: controlled 0/40/100% native swatches; circular pixels
-outside/inside bounds; actual doubled screen content; stationary live content;
-click-through; recursive feedback; actual production overlay exclusion;
+Still not established: full controlled black/white/RGB swatch acceptance;
+stationary live content; physical click-through; sustained non-recursion/flicker
+acceptance; actual production overlay exclusion;
 multi-monitor/negative-coordinate/mixed-DPI visual acceptance and performance.
 
 Actual standalone checks (all successful):
@@ -109,10 +152,11 @@ One standalone matrix test passed; build emitted no warnings. Native source
 review found no remaining substantive safety/resource issue after checked child
 invalidation. The fixture is a proof tool, not the integrated production backend.
 
-G08, Z01 and Z08 remain **unexecuted**. API success and the pure matrix test
-do not satisfy circular rendering, actual pixel inversion, real zoom or
-non-recursion acceptance. No alternate compositor has been justified by these
-results: desktop access failed before either backend could be evaluated.
+G08 now has native pixel evidence for real inversion; Z01 has native exact 2x
+source evidence; Z08 has native sibling/self-filter evidence from the captured
+combination. Their broader final integration acceptance remains pending,
+including live updates and sustained non-recursion. No alternate compositor has
+been justified by these results.
 
 ## Crosshair checkpoints verified before this gate
 

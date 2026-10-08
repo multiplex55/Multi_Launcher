@@ -16,13 +16,18 @@ the fake HUD/crosshair/guide overlays, and inspect the current state. F5 logs a 
 sample at the cursor while the pointer remains over the scene; F6 toggles the halo, F7 toggles the
 lens, F8 cycles strength, F9 switches lens placement, F10 toggles reference overlays, and Escape
 closes the harness. Focus the scene first, then move the pointer over a color patch and press F5 to
-record an observation without moving the pointer to an Inspect button.
+record an observation without moving the pointer to an Inspect button. F12 performs a one-shot
+desktop `BitBlt(SRCCOPY | CAPTUREBLT)` readback around the cursor, lens destination, cursor source,
+and a bounded context rectangle that contains the halo and offset lens.
 
 The program writes concise diagnostics to stdout and `%TEMP%\MultiLauncherCursorEffectsSmoke.log`.
 It logs the signed physical cursor/source/destination rectangles, selected matrix, filter HWNDs,
 foreground before/after explicit operations, and create/destroy counts. A desktop `GetPixel` sample
 is explicitly advisory: whether that DC includes composed magnifier output depends on the desktop
-composition path. Compare it with actual on-screen output.
+composition path. F12 saves unmodified desktop readback BMPs and RGB samples under
+`target/cursor-effects-smoke/observations`; GDI may still omit layered `WC_MAGNIFIER` output, so
+API success alone is not proof. Inspect whether the saved pixels contain the composed effect; if
+they do, the image can support the native review. Compare with actual on-screen output as well.
 
 The color matrix follows the row-vector layout shown in Microsoft's [MagSetColorEffect documentation](https://learn.microsoft.com/en-us/windows/win32/api/magnification/nf-magnification-magsetcoloreffect): RGB slopes occupy the diagonal and the affine strength term is in the last row. At 40%, the intended operation is `out = 0.2 * input + 0.4 * 255` per RGB channel; the harness logs expected swatch values so visual orientation can be checked against the actual desktop.
 
