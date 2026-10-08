@@ -1,6 +1,6 @@
 # Multi Launcher — Plan B: Prompted Snippet Fields
 
-**Status:** M1-A and M1-B complete; M2-A verified (checkpoint commit pending parent); remaining stages pending.\
+**Status:** M1-A, M1-B and M2-A complete; M2-B verified (checkpoint commit pending parent); remaining stages pending.\
 **Deliverable:** Extend the existing Clipboard Snippets (`cs`) plugin to support opt-in, user-filled template fields, without creating a new plugin.  
 **Execution baseline:** `prompt-fields` at `888a55fb793cdcf2c44202ed56f2752abe8c9da1`; the user approved the current branch HEAD in place of the ZIP requirement on 2026-10-07.\
 **Original reference snapshot:** `multi_launcher(20261007-185532).zip` (SHA-256 `0d1deb806acd61857693a0559d2cd5cc5bf7f4336e3259969e9749ce9504e7ec`); retained as historical context, not an execution prerequisite.\
@@ -13,10 +13,13 @@
 - M1-A verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippets::persistence_tests)'` passed 13/13; `cargo nextest run --test snippets_plugin --test plugin_exact_match -E 'test(load_save_roundtrip) or test(snippet_edit_command_unfiltered)'` passed 2/2 before the final label-fallback-only correction.
 - M1-B — complete; commit `f08b95faf76d3f0400eeaf651662ba25e7fd051f`.
 - M1-B verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippets::persistence_tests) or test(gui::snippet_dialog::tests::prompted_editor_save_preserves_configuration_on_alias_and_text_changes) or test(gui::snippet_dialog::tests::prompted_editor_cancel_discards_alias_and_text_draft_without_writing) or test(gui::snippet_dialog::tests::prompted_editor_no_op_save_preserves_bytes_and_version)'` passed 19/19; `cargo nextest run --test snippets_plugin -E 'test(launch_action_add_saves_snippet) or test(command_add_and_inline_edit_preserve_prompt_metadata_and_hidden_flag)'` passed 2/2.
-- M2-A — verified; checkpoint commit pending parent.
+- M2-A — complete; commit `7c630598b49093b7da9ae989097ff4a086f5cd88`.
 - M2-A verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippet_template::tests) or test(plugins::snippets::persistence_tests) or test(gui::snippet_dialog::tests::prompted_editor_reconciles_fields_in_candidate_and_commits_them_only_on_save) or test(gui::snippet_dialog::tests::prompted_editor_invalid_text_keeps_inline_error_draft_and_snapshot)'` passed 28/28.
-- M2-A adaptation: Activated the M1-B-deferred validation only for changed prompted text in append and editor Save; load/open/watcher remain tolerant. Duplicate configured keys are detected before key reconciliation so malformed metadata is not silently discarded; broader field-configuration validation remains for M2-B.
-- Pending: M2-B, M3-A, M3-B, M3-C, M4-A, M4-B, M5-A, M5-B, M6-A and the M6-B review gate.
+- M2-A adaptation: Activated the M1-B-deferred validation only for changed prompted text in append and editor Save; load/open/watcher remain tolerant. Duplicate configured keys are rejected before key reconciliation so malformed metadata is not silently discarded.
+- M2-B — verified; checkpoint commit pending parent.
+- M2-B verification: `cargo fmt --all` and `git diff --check` passed; `cargo nextest run --lib -E 'test(plugins::snippet_template::tests) or test(plugins::snippets::persistence_tests::runtime_preparation_normalizes_discovered_fields_without_mutating_config) or test(plugins::snippets::persistence_tests::runtime_preparation_rejects_duplicate_config_before_reconciliation)'` passed 14/14.
+- M2-B scope note: Renderer-side validation covers definitions, completeness and required values; runtime preparation supplies effective discovered fields without persisting those transient changes.
+- Pending: M3-A, M3-B, M3-C, M4-A, M4-B, M5-A, M5-B, M6-A and the M6-B review gate.
 
 > **Required directive:** Use the project's active checkpoint commit cadence and define the task-specific commit boundaries in the plan.
 

@@ -1,4 +1,4 @@
-use super::snippet_template::{TemplateError, parse_template};
+use super::snippet_template::{ParsedTemplate, TemplateError, parse_template};
 use crate::actions::Action;
 use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
@@ -99,6 +99,12 @@ pub(crate) enum SnippetPreparationError {
     DuplicateFieldDefinitions,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedSnippetTemplate {
+    pub(crate) parsed: ParsedTemplate,
+    pub(crate) fields: Vec<SnippetFieldDefinition>,
+}
+
 impl fmt::Display for SnippetPreparationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -115,6 +121,29 @@ impl fmt::Display for SnippetPreparationError {
 
 impl std::error::Error for SnippetPreparationError {}
 
+/// Parse and build an effective field list without changing persisted metadata.
+/// Missing definitions use authored-field defaults and orphan definitions are omitted.
+pub(crate) fn prepare_prompted_template(
+    text: &str,
+    configured_fields: &[SnippetFieldDefinition],
+) -> Result<PreparedSnippetTemplate, SnippetPreparationError> {
+    let parsed = parse_template(text).map_err(SnippetPreparationError::InvalidTemplate)?;
+    if parsed.field_keys.is_empty() {
+        return Err(SnippetPreparationError::NoFields);
+    }
+
+    let mut known_keys = HashSet::new();
+    if configured_fields
+        .iter()
+        .any(|field| !known_keys.insert(field.name.as_str()))
+    {
+        return Err(SnippetPreparationError::DuplicateFieldDefinitions);
+    }
+
+    let fields = reconcile_snippet_fields(configured_fields, &parsed.field_keys);
+    Ok(PreparedSnippetTemplate { parsed, fields })
+}
+
 /// Build a text-edit candidate, parsing and reconciling only opted-in snippets.
 /// The returned entry is detached from the persisted snapshot until the caller commits it.
 pub(crate) fn prepare_snippet_text(
@@ -127,21 +156,7 @@ pub(crate) fn prepare_snippet_text(
         return Ok(candidate);
     }
 
-    let parsed = parse_template(text).map_err(SnippetPreparationError::InvalidTemplate)?;
-    if parsed.field_keys.is_empty() {
-        return Err(SnippetPreparationError::NoFields);
-    }
-
-    let mut known_keys = HashSet::new();
-    if entry
-        .fields
-        .iter()
-        .any(|field| !known_keys.insert(field.name.as_str()))
-    {
-        return Err(SnippetPreparationError::DuplicateFieldDefinitions);
-    }
-
-    candidate.fields = reconcile_snippet_fields(&entry.fields, &parsed.field_keys);
+    candidate.fields = prepare_prompted_template(text, &entry.fields)?.fields;
     Ok(candidate)
 }
 
@@ -834,6 +849,52 @@ mod persistence_tests {
         assert_eq!(reconciled[1], configured);
         assert!(!reconciled.iter().any(|field| field.name == "removed"));
         assert_eq!(existing, vec![reconciled[1].clone(), orphan]);
+    }
+
+    #[test]
+    fn runtime_preparation_normalizes_discovered_fields_without_mutating_config() {
+        let configured_name = SnippetFieldDefinition {
+            name: "name".into(),
+            label: "Preferred name".into(),
+            default_value: "Ada".into(),
+            required: false,
+            input_kind: SnippetInputKind::Multiline,
+        };
+        let configured = vec![
+            configured_name.clone(),
+            SnippetFieldDefinition::new("orphan"),
+        ];
+
+        let prepared = prepare_prompted_template("{{new_key}}/{{name}}", &configured).unwrap();
+
+        assert_eq!(prepared.parsed.field_keys, vec!["new_key", "name"]);
+        assert_eq!(
+            prepared.fields,
+            vec![SnippetFieldDefinition::new("new_key"), configured_name]
+        );
+        assert_eq!(configured[0].label, "Preferred name");
+        assert_eq!(configured[0].default_value, "Ada");
+        assert_eq!(configured[0].input_kind, SnippetInputKind::Multiline);
+        assert_eq!(configured[1].name, "orphan");
+    }
+
+    #[test]
+    fn runtime_preparation_rejects_duplicate_config_before_reconciliation() {
+        let duplicate = vec![
+            SnippetFieldDefinition::new("name"),
+            SnippetFieldDefinition {
+                name: "name".into(),
+                label: "Second name".into(),
+                default_value: String::new(),
+                required: false,
+                input_kind: SnippetInputKind::Multiline,
+            },
+        ];
+
+        assert!(matches!(
+            prepare_prompted_template("{{new_key}}", &duplicate),
+            Err(SnippetPreparationError::DuplicateFieldDefinitions)
+        ));
     }
 
     #[test]
