@@ -348,7 +348,7 @@ pub(crate) fn hud_dimensions(lines: &[String], font_size: u32) -> (u32, u32) {
     let width = (longest
         .saturating_mul(approximate_char_width)
         .saturating_add(24))
-    .clamp(220, 640);
+    .max(220);
     let line_height = font_size.saturating_add(5);
     let height = (lines.len() as u32)
         .saturating_mul(line_height)
@@ -564,6 +564,10 @@ mod tests {
             "font should shrink to fit the work-area height"
         );
         assert!(width <= 1920);
+        assert!(
+            width > 640,
+            "long signed coordinates and sampling details must not be clipped by a fixed width cap"
+        );
         assert!(height <= 520);
         let last_row_bottom =
             9 + u32::try_from(lines.len() - 1).unwrap() * (font_size + 5) + font_size;
