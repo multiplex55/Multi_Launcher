@@ -626,6 +626,18 @@ The orchestrator must provide:
 
 **The project is not complete merely because settings sliders or translucent circles exist.** Actual desktop pixel inversion and magnification, non-recursion, click-through behavior and resource cleanup are core acceptance conditions.
 
+## Execution ledger — October 8, 2026
+
+- Baseline: clean `mouse-improvements`, HEAD `af09178e39d4c7a50fb7fefe5be2e266f8ea4e52`; current code matches the scoped plan baseline.
+- Ownership: planner read-only handoffs; one implementer writes one checkpoint at a time; parent inspects/stages/commits and maintains this ledger; reviewer performs bounded independent review.
+- Commit boundaries: retain the M1-A through M5-C boundaries and subjects in §7. No branch change or push.
+- Native decision: evaluate windowed Windows Magnification API first in an isolated proof. Production effect resources will only be introduced after observed circular inversion, real zoom and exclusion pass M1-C.
+- Verification budget: lightweight formatter/diff checks for M1-A/B, focused behavioral tests authored there and run together at the compilation gate; isolated native proof at M1-C; subsequent scoped checks per §9.
+- M1-A: implemented; parent inspected geometry and corrected raw-arm bound and zero-gap subtraction with implementer. Formatter/diff checks passed; focused test execution deferred to grouped A/B compilation gate before acceptance is marked complete.
+- M1-B: in_progress.
+- M1-C, M2-A, M2-B, M3-A, M3-B, M4-A, M4-B, M5-A, M5-B, M5-C: pending.
+- Desktop access: computer-use initialization and application inventory succeeded; native effect acceptance has not yet been performed.
+
 ---
 
 # 12. Quick orchestrator handoff summary

@@ -17,11 +17,26 @@ struct PixelRect {
 
 impl PixelRect {
     fn expanded(self, amount: u32) -> Self {
+        let expansion = amount
+            .checked_mul(2)
+            .expect("bounded pixel rectangle expansion fits u32");
         Self {
-            x: self.x.saturating_sub(amount),
-            y: self.y.saturating_sub(amount),
-            width: self.width.saturating_add(amount.saturating_mul(2)),
-            height: self.height.saturating_add(amount.saturating_mul(2)),
+            x: self
+                .x
+                .checked_sub(amount)
+                .expect("crosshair outline remains inside its bitmap"),
+            y: self
+                .y
+                .checked_sub(amount)
+                .expect("crosshair outline remains inside its bitmap"),
+            width: self
+                .width
+                .checked_add(expansion)
+                .expect("bounded pixel rectangle width fits u32"),
+            height: self
+                .height
+                .checked_add(expansion)
+                .expect("bounded pixel rectangle height fits u32"),
         }
     }
 }
@@ -50,39 +65,83 @@ pub(crate) struct GuideGeometry {
 }
 
 fn crosshair_geometry(preferences: &CrosshairPreferences) -> CrosshairGeometry {
-    let arm = preferences.arm_length.max(2) as u32;
+    // Bound raw/deserialized and directly constructed preferences before any
+    // sizing arithmetic so malformed values cannot request a huge bitmap.
+    let arm = preferences.arm_length.clamp(2, 256) as u32;
     let thickness = preferences.thickness.clamp(1, 16) as u32;
+    let gap = preferences.center_gap.clamp(0, 128) as u32;
     let outline = u32::from(preferences.high_contrast_outline);
-    let gap = thickness.max(3);
-    let extent = arm * 2 + gap;
-    let width = extent + outline * 2;
-    let height = width;
-    let center_x = outline + arm + gap / 2;
-    let center_y = center_x;
-    let horizontal_y = center_y.saturating_sub(thickness / 2);
-    let vertical_x = center_x.saturating_sub(thickness / 2);
+    let outline_expansion = outline
+        .checked_mul(2)
+        .expect("bounded crosshair outline expansion fits u32");
+    let arm_radius = gap
+        .checked_add(arm)
+        .and_then(|extent| extent.checked_sub(1))
+        .and_then(|extent| extent.checked_add(outline_expansion))
+        .expect("bounded crosshair arm extent fits u32");
+    let thickness_radius = (thickness / 2)
+        .checked_add(outline)
+        .expect("bounded crosshair thickness extent fits u32");
+    let radius = arm_radius.max(thickness_radius);
+    let extent = radius
+        .checked_mul(2)
+        .and_then(|diameter| diameter.checked_add(1))
+        .expect("bounded crosshair bitmap dimensions fit u32");
+    let width = extent;
+    let height = extent;
+    // Odd dimensions keep this exact center pixel aligned with the hotspot
+    // when native.rs places the image at hotspot - (width / 2, height / 2).
+    let center_x = width / 2;
+    let center_y = height / 2;
+    let inset = gap
+        .checked_add(outline)
+        .expect("bounded crosshair center inset fits u32");
+    let negative_end_x = center_x
+        .checked_sub(inset)
+        .expect("crosshair negative arm remains inside its bitmap");
+    let negative_start_x = negative_end_x
+        .checked_sub(arm - 1)
+        .expect("crosshair negative arm start remains inside its bitmap");
+    let positive_start_x = center_x
+        .checked_add(inset)
+        .expect("crosshair positive arm remains inside its bitmap");
+    let negative_end_y = center_y
+        .checked_sub(inset)
+        .expect("crosshair negative arm remains inside its bitmap");
+    let negative_start_y = negative_end_y
+        .checked_sub(arm - 1)
+        .expect("crosshair negative arm start remains inside its bitmap");
+    let positive_start_y = center_y
+        .checked_add(inset)
+        .expect("crosshair positive arm remains inside its bitmap");
+    let horizontal_y = center_y
+        .checked_sub(thickness / 2)
+        .expect("crosshair horizontal stroke remains inside its bitmap");
+    let vertical_x = center_x
+        .checked_sub(thickness / 2)
+        .expect("crosshair vertical stroke remains inside its bitmap");
     let colored_strokes = [
         PixelRect {
-            x: outline,
+            x: negative_start_x,
             y: horizontal_y,
             width: arm,
             height: thickness,
         },
         PixelRect {
-            x: outline + arm + gap,
+            x: positive_start_x,
             y: horizontal_y,
             width: arm,
             height: thickness,
         },
         PixelRect {
             x: vertical_x,
-            y: outline,
+            y: negative_start_y,
             width: thickness,
             height: arm,
         },
         PixelRect {
             x: vertical_x,
-            y: outline + arm + gap,
+            y: positive_start_y,
             width: thickness,
             height: arm,
         },
@@ -408,7 +467,9 @@ fn concise_error(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CrosshairGeometry, GuideOrientation, crosshair_geometry, guide_geometry};
+    use super::{
+        CrosshairGeometry, GuideOrientation, crosshair_bitmap, crosshair_geometry, guide_geometry,
+    };
     use crate::coordinate_tool::controller::CoordinateRenderFrame;
     use crate::coordinate_tool::model::{
         CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState, ForegroundClientGeometry,
@@ -427,7 +488,7 @@ mod tests {
             outline_strokes,
         } = crosshair_geometry(&preferences);
 
-        assert_eq!((width, height), (29, 29));
+        assert_eq!((width, height), (59, 59));
         assert!(
             colored_strokes
                 .iter()
@@ -457,6 +518,187 @@ mod tests {
             guide_geometry(GuideOrientation::Vertical, desktop, cursor, &preferences).unwrap();
         assert_eq!(vertical.origin, PhysicalPoint::new(-642, -200));
         assert_eq!((vertical.width, vertical.height), (4, 1440));
+
+        let changed_gap = CrosshairPreferences {
+            center_gap: 128,
+            ..preferences
+        };
+        assert_eq!(
+            horizontal,
+            guide_geometry(GuideOrientation::Horizontal, desktop, cursor, &changed_gap).unwrap()
+        );
+        assert_eq!(
+            vertical,
+            guide_geometry(GuideOrientation::Vertical, desktop, cursor, &changed_gap).unwrap()
+        );
+    }
+
+    #[test]
+    fn crosshair_pixel_clearance_is_symmetric_for_gaps_thicknesses_and_outlines() {
+        let color = CrosshairColor::new(200, 30, 40);
+        const ARM_LENGTH: u32 = 9;
+        for gap in [0, 1, 16, 128] {
+            for thickness in [3, 4] {
+                for high_contrast_outline in [false, true] {
+                    let preferences = CrosshairPreferences {
+                        color,
+                        thickness,
+                        arm_length: ARM_LENGTH as i32,
+                        center_gap: gap,
+                        opacity: 1.0,
+                        high_contrast_outline,
+                        ..Default::default()
+                    };
+                    let geometry = crosshair_geometry(&preferences);
+                    let image = crosshair_bitmap(&preferences);
+                    let center = (image.width() / 2, image.height() / 2);
+                    assert_eq!(image.width() % 2, 1);
+                    assert_eq!(image.height() % 2, 1);
+
+                    for (horizontal, positive) in
+                        [(true, false), (true, true), (false, false), (false, true)]
+                    {
+                        let visible_distance =
+                            first_visible_axis_pixel(&image, center, horizontal, positive);
+                        assert_eq!(
+                            visible_distance, gap as u32,
+                            "gap={gap}, thickness={thickness}, outline={high_contrast_outline}, horizontal={horizontal}, positive={positive}"
+                        );
+
+                        let colored_length =
+                            colored_axis_pixels(&image, center, horizontal, positive, color);
+                        assert_eq!(
+                            colored_length, ARM_LENGTH,
+                            "colored arm length changed for gap={gap}, thickness={thickness}, outline={high_contrast_outline}, horizontal={horizontal}, positive={positive}"
+                        );
+                    }
+
+                    let expected_rgba = [color.red, color.green, color.blue, 255];
+                    for stroke in &geometry.colored_strokes[..2] {
+                        let endpoint_x = if stroke.x < center.0 {
+                            stroke.x
+                        } else {
+                            stroke.x + stroke.width - 1
+                        };
+                        let colored_pixels = (0..image.height())
+                            .filter(|y| image.get_pixel(endpoint_x, *y).0 == expected_rgba)
+                            .count();
+                        assert_eq!(colored_pixels, thickness as usize);
+                    }
+                    for stroke in &geometry.colored_strokes[2..] {
+                        let endpoint_y = if stroke.y < center.1 {
+                            stroke.y
+                        } else {
+                            stroke.y + stroke.height - 1
+                        };
+                        let colored_pixels = (0..image.width())
+                            .filter(|x| image.get_pixel(*x, endpoint_y).0 == expected_rgba)
+                            .count();
+                        assert_eq!(colored_pixels, thickness as usize);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn crosshair_geometry_bounds_raw_dimensions_before_sizing() {
+        let minimum = CrosshairPreferences {
+            arm_length: i32::MIN,
+            thickness: i32::MIN,
+            center_gap: i32::MIN,
+            high_contrast_outline: false,
+            ..Default::default()
+        };
+        let minimum_geometry = crosshair_geometry(&minimum);
+        assert_eq!((minimum_geometry.width, minimum_geometry.height), (3, 3));
+        assert_eq!(minimum_geometry.colored_strokes[0].width, 2);
+        assert_eq!(minimum_geometry.colored_strokes[0].height, 1);
+
+        let maximum = CrosshairPreferences {
+            arm_length: i32::MAX,
+            thickness: i32::MAX,
+            center_gap: i32::MAX,
+            high_contrast_outline: true,
+            ..Default::default()
+        };
+        let maximum_geometry = crosshair_geometry(&maximum);
+        assert_eq!(
+            (maximum_geometry.width, maximum_geometry.height),
+            (771, 771)
+        );
+        assert_eq!(maximum_geometry.colored_strokes[0].width, 256);
+        assert_eq!(maximum_geometry.colored_strokes[0].height, 16);
+    }
+
+    fn first_visible_axis_pixel(
+        image: &image::RgbaImage,
+        center: (u32, u32),
+        horizontal: bool,
+        positive: bool,
+    ) -> u32 {
+        let axis_length = if horizontal {
+            image.width()
+        } else {
+            image.height()
+        };
+        (0..axis_length)
+            .find(|distance| {
+                let x = if horizontal {
+                    if positive {
+                        center.0 + *distance
+                    } else {
+                        center.0.saturating_sub(*distance)
+                    }
+                } else {
+                    center.0
+                };
+                let y = if horizontal {
+                    center.1
+                } else if positive {
+                    center.1 + *distance
+                } else {
+                    center.1.saturating_sub(*distance)
+                };
+                x < image.width() && y < image.height() && image.get_pixel(x, y).0[3] > 0
+            })
+            .expect("crosshair has visible pixels on all four axes")
+    }
+
+    fn colored_axis_pixels(
+        image: &image::RgbaImage,
+        center: (u32, u32),
+        horizontal: bool,
+        positive: bool,
+        color: CrosshairColor,
+    ) -> u32 {
+        let axis_length = if horizontal {
+            image.width()
+        } else {
+            image.height()
+        };
+        let expected = [color.red, color.green, color.blue, 255];
+        (0..axis_length)
+            .filter(|distance| {
+                let x = if horizontal {
+                    if positive {
+                        center.0 + *distance
+                    } else {
+                        center.0.saturating_sub(*distance)
+                    }
+                } else {
+                    center.0
+                };
+                let y = if horizontal {
+                    center.1
+                } else if positive {
+                    center.1 + *distance
+                } else {
+                    center.1.saturating_sub(*distance)
+                };
+                x < image.width() && y < image.height() && image.get_pixel(x, y).0 == expected
+            })
+            .count() as u32
     }
 
     #[test]

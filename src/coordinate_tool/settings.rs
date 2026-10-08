@@ -60,8 +60,15 @@ pub struct CrosshairPreferences {
     pub color: CrosshairColor,
     /// Physical-pixel line thickness before display scaling.
     pub thickness: i32,
-    /// Physical-pixel arm length from the center.
+    /// Physical-pixel length of the colored part of each arm.
     pub arm_length: i32,
+    /// Axial physical-pixel distance from the hotspot pixel center to the
+    /// nearest visible pixel center, including the contrasting outline. A
+    /// positive value N places the innermost visible pixels N pixel indices
+    /// from the hotspot; zero lets each arm reach the hotspot pixel. Odd stroke
+    /// thickness centers on the hotspot row/column, while even thickness keeps
+    /// the renderer's existing upper/left rasterization bias.
+    pub center_gap: i32,
     pub opacity: f32,
     pub virtual_desktop_guides: bool,
     pub high_contrast_outline: bool,
@@ -73,6 +80,7 @@ impl Default for CrosshairPreferences {
             color: CrosshairColor::default(),
             thickness: 2,
             arm_length: 12,
+            center_gap: 16,
             opacity: 1.0,
             virtual_desktop_guides: false,
             high_contrast_outline: true,
@@ -109,6 +117,7 @@ impl CoordinateToolPreferences {
         self.cursor_offset.y = self.cursor_offset.y.clamp(-512, 512);
         self.crosshair.thickness = self.crosshair.thickness.clamp(1, 16);
         self.crosshair.arm_length = self.crosshair.arm_length.clamp(2, 256);
+        self.crosshair.center_gap = self.crosshair.center_gap.clamp(0, 128);
         self.crosshair.opacity = if self.crosshair.opacity.is_finite() {
             self.crosshair.opacity.clamp(0.1, 1.0)
         } else {
@@ -182,6 +191,7 @@ mod tests {
         assert_eq!(preferences.crosshair.color, CrosshairColor::new(255, 0, 0));
         assert_eq!(preferences.crosshair.thickness, 2);
         assert_eq!(preferences.crosshair.arm_length, 12);
+        assert_eq!(preferences.crosshair.center_gap, 16);
         assert_eq!(preferences.crosshair.opacity, 1.0);
         assert!(!preferences.crosshair.virtual_desktop_guides);
         assert!(preferences.crosshair.high_contrast_outline);
@@ -192,12 +202,18 @@ mod tests {
         let legacy: CoordinateToolPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy, CoordinateToolPreferences::default());
 
+        let legacy_crosshair: CoordinateToolPreferences =
+            serde_json::from_str(r#"{"crosshair":{"thickness":6,"arm_length":18}}"#).unwrap();
+        assert_eq!(legacy_crosshair.crosshair.thickness, 6);
+        assert_eq!(legacy_crosshair.crosshair.arm_length, 18);
+        assert_eq!(legacy_crosshair.crosshair.center_gap, 16);
+
         let partial: CoordinateToolPreferences = serde_json::from_str(
             r#"{
                 "space":"foreground_client",
                 "hud_detail":"detailed",
                 "cursor_offset":{"x":-900},
-                "crosshair":{"thickness":99,"arm_length":1,"opacity":0.0}
+                "crosshair":{"thickness":99,"arm_length":1,"center_gap":400,"opacity":0.0}
             }"#,
         )
         .unwrap();
@@ -207,6 +223,7 @@ mod tests {
         assert_eq!(partial.crosshair.color, CrosshairColor::default());
         assert_eq!(partial.crosshair.thickness, 16);
         assert_eq!(partial.crosshair.arm_length, 2);
+        assert_eq!(partial.crosshair.center_gap, 128);
         assert_eq!(partial.crosshair.opacity, 0.1);
         assert!(!partial.crosshair.virtual_desktop_guides);
         assert!(partial.crosshair.high_contrast_outline);
@@ -219,6 +236,7 @@ mod tests {
             crosshair: CrosshairPreferences {
                 thickness: i32::MIN,
                 arm_length: i32::MAX,
+                center_gap: i32::MIN,
                 opacity: f32::NAN,
                 ..Default::default()
             },
@@ -228,7 +246,18 @@ mod tests {
         assert_eq!(normalized.cursor_offset, CoordinateOffset::new(512, -512));
         assert_eq!(normalized.crosshair.thickness, 1);
         assert_eq!(normalized.crosshair.arm_length, 256);
+        assert_eq!(normalized.crosshair.center_gap, 0);
         assert_eq!(normalized.crosshair.opacity, 1.0);
+
+        let maximum_gap = CoordinateToolPreferences {
+            crosshair: CrosshairPreferences {
+                center_gap: i32::MAX,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(maximum_gap.crosshair.center_gap, 128);
     }
 
     #[test]
@@ -236,6 +265,7 @@ mod tests {
         let preferences = CoordinateToolPreferences {
             hud_detail: HudDetail::Detailed,
             crosshair: CrosshairPreferences {
+                center_gap: 37,
                 virtual_desktop_guides: true,
                 ..Default::default()
             },
