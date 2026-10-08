@@ -206,6 +206,7 @@ pub enum CoordinateToolCommand {
     SetCrosshairColor(crate::coordinate_tool::CrosshairColor),
     SetCrosshairThickness(i32),
     SetCrosshairLength(i32),
+    SetCrosshairGap(i32),
     SetCrosshairOpacity(f32),
     SetGuides(bool),
     SetContrast(bool),
@@ -222,7 +223,7 @@ kinds!(CoordinateToolCommand,
     Self::HudHelp => "hud_help", Self::ToggleCrosshair => "toggle_crosshair",
     Self::SetCrosshairEnabled(_) => "set_crosshair_enabled", Self::SetCrosshairColor(_) => "set_crosshair_color",
     Self::SetCrosshairThickness(_) => "set_crosshair_thickness", Self::SetCrosshairLength(_) => "set_crosshair_length",
-    Self::SetCrosshairOpacity(_) => "set_crosshair_opacity", Self::SetGuides(_) => "set_guides",
+    Self::SetCrosshairGap(_) => "set_crosshair_gap", Self::SetCrosshairOpacity(_) => "set_crosshair_opacity", Self::SetGuides(_) => "set_guides",
     Self::SetContrast(_) => "set_contrast", Self::CrosshairHelp => "crosshair_help",
     Self::Invalid { .. } => "invalid"
 );

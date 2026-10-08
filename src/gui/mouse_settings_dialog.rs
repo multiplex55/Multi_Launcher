@@ -80,7 +80,7 @@ impl MouseSettingsDialog {
                     .show(ui, |ui| {
                 ui.label("Configure the coordinate display and crosshair.");
                 ui.small("Enabled states are temporary. Apply saves display options and updates active overlays.");
-                ui.small("Commands: mouse coords …, mouse crosshair …, and mouse help.");
+                ui.small("Commands: mouse coords …, mouse crosshair gap N, and mouse help.");
                 ui.separator();
 
                 if let Some(error) = &self.last_error {
@@ -121,6 +121,16 @@ impl MouseSettingsDialog {
                     ui.add(
                         egui::DragValue::new(&mut self.draft.crosshair.arm_length)
                             .clamp_range(2..=256),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Center gap (physical pixels)");
+                    ui.add(
+                        egui::DragValue::new(&mut self.draft.crosshair.center_gap)
+                            .clamp_range(0..=128),
+                    )
+                    .on_hover_text(
+                        "Per-arm distance from the cursor hotspot to the first visible pixel, including the outline, in physical pixels. Set to 0 to meet at the hotspot.",
                     );
                 });
                 ui.horizontal(|ui| {
@@ -256,6 +266,7 @@ mod tests {
         let mut dialog = MouseSettingsDialog::default();
         dialog.open(adapter.preferences());
         dialog.draft.space = CoordinateSpace::ForegroundClient;
+        dialog.draft.crosshair.center_gap = 0;
         let draft = dialog.draft.clone();
 
         assert!(dialog.apply_to(&mut adapter).is_err());
@@ -264,6 +275,41 @@ mod tests {
         assert!(dialog.last_error.is_some());
         assert_eq!(adapter.preferences(), &CoordinateToolPreferences::default());
         assert!(!adapter.is_running());
+    }
+
+    #[test]
+    fn successful_center_gap_apply_saves_and_reopens_cleanly() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let mut adapter =
+            CoordinateToolGui::new(path.clone(), CoordinateToolPreferences::default());
+        let mut dialog = MouseSettingsDialog::default();
+        dialog.open(adapter.preferences());
+        dialog.draft.crosshair.center_gap = 128;
+        assert!(dialog.is_dirty());
+
+        dialog.apply_to(&mut adapter).unwrap();
+        assert_eq!(adapter.preferences().crosshair.center_gap, 128);
+        assert_eq!(dialog.baseline.crosshair.center_gap, 128);
+        assert_eq!(dialog.draft.crosshair.center_gap, 128);
+        assert!(!dialog.is_dirty());
+        assert_eq!(
+            crate::settings::Settings::load(&path)
+                .unwrap()
+                .coordinate_tool
+                .crosshair
+                .center_gap,
+            128
+        );
+
+        dialog.open = false;
+        dialog.open(adapter.preferences());
+        assert_eq!(dialog.draft.crosshair.center_gap, 128);
+        assert!(!dialog.is_dirty());
     }
 
     #[test]

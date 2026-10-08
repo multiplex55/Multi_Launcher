@@ -121,6 +121,7 @@ mod tests {
                 "mouse crosshair color #Aa00FF",
                 "mouse:crosshair:color:#aa00ff",
             ),
+            ("MOUSE CROSSHAIR GAP 128", "mouse:crosshair:gap:128"),
             ("MOUSE CROSSHAIR GUIDES OFF", "mouse:crosshair:guides:off"),
         ] {
             let results = plugin.search(query);
@@ -138,6 +139,11 @@ mod tests {
             "mouse coords cancel extra",
             "mouse crosshair thickness 0",
             "mouse crosshair length 257",
+            "mouse crosshair gap",
+            "mouse crosshair gap 1 extra",
+            "mouse crosshair gap -1",
+            "mouse crosshair gap 129",
+            "mouse crosshair gap Infinity",
             "mouse crosshair opacity NaN",
             "mouse crosshair color red",
             "mouse crosshair guides maybe",
@@ -184,6 +190,7 @@ mod tests {
         );
         assert!(plugin.search("mouse coords offset 16 24").len() == 1);
         assert!(plugin.search("mouse crosshair color #ff0000").len() == 1);
+        assert!(plugin.search("mouse crosshair gap 0").len() == 1);
         let coords = plugin.search("mouse coords");
         assert_eq!(coords.len(), 8);
         assert!(

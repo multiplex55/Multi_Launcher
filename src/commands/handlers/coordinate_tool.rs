@@ -60,11 +60,11 @@ fn help_outcome(text: &str) -> CommandOutcome {
     }
 }
 
-const MOUSE_HELP: &str = "Mouse controls: `mouse settings` opens the preferred appearance UI. Quick coordinate actions: `mouse coords toggle`, `mouse coords copy`, `mouse coords pick`, and `mouse coords cancel`; crosshair toggles are `mouse crosshair toggle|on|off`. Advanced commands: `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, `mouse coords offset <signed-x> <signed-y>` (-512..512), `mouse coords freeze|unfreeze`, `mouse crosshair color #rrggbb`, `mouse crosshair thickness` (1..16), `mouse crosshair length` (2..256), `mouse crosshair opacity` (0.1..1.0), `mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`. Coordinates are signed physical pixels. A pick consumes a fresh left press and release; Escape cancels without changing the clipboard. Picking uses its click-time sample even while the HUD is frozen. Client coordinates use the foreground client origin, or the last external active window while Multi Launcher is foreground. See `mouse coords help` and `mouse crosshair help` for details.";
+const MOUSE_HELP: &str = "Mouse controls: `mouse settings` opens the preferred appearance UI. Quick coordinate actions: `mouse coords toggle`, `mouse coords copy`, `mouse coords pick`, and `mouse coords cancel`; crosshair toggles are `mouse crosshair toggle|on|off`. Advanced commands: `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, `mouse coords offset <signed-x> <signed-y>` (-512..512), `mouse coords freeze|unfreeze`, `mouse crosshair color #rrggbb`, `mouse crosshair thickness` (1..16), `mouse crosshair length` (2..256), `mouse crosshair gap <0..128>` (per-arm physical pixels), `mouse crosshair opacity` (0.1..1.0), `mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`. Coordinates are signed physical pixels. A pick consumes a fresh left press and release; Escape cancels without changing the clipboard. Picking uses its click-time sample even while the HUD is frozen. Client coordinates use the foreground client origin, or the last external active window while Multi Launcher is foreground. See `mouse coords help` and `mouse crosshair help` for details.";
 
 const COORDINATE_HELP: &str = "Coordinate HUD: `mouse coords toggle` toggles the HUD; use `mouse coords on|off`, `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, or `mouse coords offset <signed-x> <signed-y>` (-512..512). Use `mouse coords freeze|unfreeze`; `mouse coords copy` writes the displayed signed physical-pixel position as x,y. `mouse coords pick` copies the next click's physical x,y in the selected space after consuming its press and release; Escape cancels without changing the clipboard. Pick uses its click-time sample even while the HUD is frozen. `mouse coords cancel` requests safe cancellation and drains any consumed click release. Desktop uses signed virtual-desktop coordinates, monitor is relative to the cursor monitor origin, and client is relative to the foreground client origin. While Multi Launcher is foreground, client coordinates use the last external active window. For display preferences, use `mouse settings`. The crosshair is independent; see `mouse crosshair help`.";
 
-const CROSSHAIR_HELP: &str = "Crosshair controls: `mouse crosshair toggle|on|off`; `mouse crosshair color #rrggbb`; `mouse crosshair thickness <1..16>`; `mouse crosshair length <2..256>`; `mouse crosshair opacity <0.1..1.0>`; `mouse crosshair guides on|off`; `mouse crosshair contrast on|off`. The crosshair is independent from the coordinate HUD.";
+const CROSSHAIR_HELP: &str = "Crosshair controls: `mouse crosshair toggle|on|off`; `mouse crosshair color #rrggbb`; `mouse crosshair thickness <1..16>`; `mouse crosshair length <2..256>`; `mouse crosshair gap <0..128>` sets the per-arm physical-pixel clearance from the cursor hotspot, including the outline; `mouse crosshair opacity <0.1..1.0>`; `mouse crosshair guides on|off`; `mouse crosshair contrast on|off`. The crosshair is independent from the coordinate HUD.";
 
 #[cfg(test)]
 mod tests {
@@ -102,7 +102,11 @@ mod tests {
     fn passive_controls_dispatch_once_without_query_visibility_or_focus_effects() {
         let mut host = Host::default();
         let outcome = handle_coordinate_tool(&mut host, &CoordinateToolCommand::ToggleHud).unwrap();
-        assert_eq!(host.calls, [CoordinateToolCommand::ToggleHud]);
+        assert_eq!(outcome, CommandOutcome::default());
+
+        let gap = CoordinateToolCommand::SetCrosshairGap(16);
+        let outcome = handle_coordinate_tool(&mut host, &gap).unwrap();
+        assert_eq!(host.calls, [CoordinateToolCommand::ToggleHud, gap]);
         assert_eq!(outcome, CommandOutcome::default());
     }
 
@@ -150,7 +154,13 @@ mod tests {
         let general = handle_coordinate_tool(&mut host, &CoordinateToolCommand::Help).unwrap();
         assert!(matches!(
             general.toasts.as_slice(),
-            [ToastPolicy::Info(text)] if text.contains("mouse settings") && text.contains("mouse coords pick")
+            [ToastPolicy::Info(text)] if text.contains("mouse settings") && text.contains("mouse coords pick") && text.contains("mouse crosshair gap <0..128>")
+        ));
+        let crosshair_help =
+            handle_coordinate_tool(&mut host, &CoordinateToolCommand::CrosshairHelp).unwrap();
+        assert!(matches!(
+            crosshair_help.toasts.as_slice(),
+            [ToastPolicy::Info(text)] if text.contains("mouse crosshair gap <0..128>") && text.contains("per-arm physical-pixel clearance")
         ));
         let help = handle_coordinate_tool(&mut host, &CoordinateToolCommand::HudHelp).unwrap();
         assert!(

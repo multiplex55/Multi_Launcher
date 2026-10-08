@@ -505,6 +505,9 @@ fn parse_crosshair_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, S
         ["length", value] => Ok(CoordinateToolCommand::SetCrosshairLength(
             parse_bounded_integer(value, 2, 256, "mouse crosshair length")?,
         )),
+        ["gap", value] => Ok(CoordinateToolCommand::SetCrosshairGap(
+            parse_bounded_integer(value, 0, 128, "mouse crosshair gap")?,
+        )),
         ["opacity", value] => {
             let opacity = value
                 .parse::<f32>()
@@ -530,6 +533,9 @@ fn parse_crosshair_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, S
         }
         [operation, ..] if operation.eq_ignore_ascii_case("length") => {
             Err("mouse crosshair length must be in the range 2..256".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("gap") => {
+            Err("mouse crosshair gap requires one integer in the range 0..128".into())
         }
         [operation, ..] if operation.eq_ignore_ascii_case("opacity") => {
             Err("mouse crosshair opacity must be in the range 0.1..1.0".into())
@@ -2314,6 +2320,22 @@ mod mouse_command_parser_tests {
             CoordinateToolCommand::SetCrosshairOpacity(0.5)
         );
         assert_eq!(
+            parse("MOUSE:CROSSHAIR:GAP:0"),
+            CoordinateToolCommand::SetCrosshairGap(0)
+        );
+        assert_eq!(
+            parse("mouse:crosshair:gap:16"),
+            CoordinateToolCommand::SetCrosshairGap(16)
+        );
+        assert_eq!(
+            parse("mouse:crosshair:gap:128"),
+            CoordinateToolCommand::SetCrosshairGap(128)
+        );
+        assert_eq!(
+            CoordinateToolCommand::SetCrosshairGap(16).kind_name(),
+            "set_crosshair_gap"
+        );
+        assert_eq!(
             parse("mouse:crosshair:guides:OFF"),
             CoordinateToolCommand::SetGuides(false)
         );
@@ -2331,6 +2353,14 @@ mod mouse_command_parser_tests {
             "mouse:coords:space:virtual",
             "mouse:crosshair:thickness:0",
             "mouse:crosshair:length:257",
+            "mouse:crosshair:gap",
+            "mouse:crosshair:gap:1:2",
+            "mouse:crosshair:gap:-1",
+            "mouse:crosshair:gap:129",
+            "mouse:crosshair:gap:1.5",
+            "mouse:crosshair:gap:NaN",
+            "mouse:crosshair:gap:Infinity",
+            "mouse:crosshair:gap:2147483648",
             "mouse:crosshair:opacity:NaN",
             "mouse:crosshair:color:red",
             "mouse:crosshair:guides:maybe",
@@ -2355,6 +2385,26 @@ mod mouse_command_parser_tests {
                 matches!(parse_action(&lookalike).unwrap(), Command::External(_)),
                 "{raw}"
             );
+        }
+    }
+
+    #[test]
+    fn malformed_crosshair_gaps_explain_the_required_value_and_range() {
+        for raw in [
+            "mouse:crosshair:gap",
+            "mouse:crosshair:gap:1:2",
+            "mouse:crosshair:gap:-1",
+            "mouse:crosshair:gap:129",
+            "mouse:crosshair:gap:1.5",
+            "mouse:crosshair:gap:NaN",
+            "mouse:crosshair:gap:Infinity",
+            "mouse:crosshair:gap:2147483648",
+        ] {
+            let CoordinateToolCommand::Invalid { error, .. } = parse(raw) else {
+                panic!("{raw} should be rejected");
+            };
+            assert!(error.contains("mouse crosshair gap"), "{error}");
+            assert!(error.contains("0..128"), "{error}");
         }
     }
 }

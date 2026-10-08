@@ -634,8 +634,10 @@ The orchestrator must provide:
 - Native decision: evaluate windowed Windows Magnification API first in an isolated proof. Production effect resources will only be introduced after observed circular inversion, real zoom and exclusion pass M1-C.
 - Verification budget: lightweight formatter/diff checks for M1-A/B, focused behavioral tests authored there and run together at the compilation gate; isolated native proof at M1-C; subsequent scoped checks per §9.
 - M1-A: implemented; parent inspected geometry and corrected raw-arm bound and zero-gap subtraction with implementer. Formatter/diff checks passed; focused test execution deferred to grouped A/B compilation gate before acceptance is marked complete.
-- M1-B: in_progress.
-- M1-C, M2-A, M2-B, M3-A, M3-B, M4-A, M4-B, M5-A, M5-B, M5-C: pending.
+- M1-A checkpoint: `b021b87f`.
+- M1-B: implemented and parent diff inspected; formatter/diff checks passed. Typed gap command and field-only transactional merge integrated; grouped behavioral test execution pending.
+- M1-C: in_progress (isolated proof harness, production effects remain gated).
+- M2-A, M2-B, M3-A, M3-B, M4-A, M4-B, M5-A, M5-B, M5-C: pending.
 - Desktop access: computer-use initialization and application inventory succeeded; native effect acceptance has not yet been performed.
 
 ---

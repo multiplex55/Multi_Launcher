@@ -176,6 +176,10 @@ impl CoordinateToolGui {
                 let length = *length;
                 self.update_preferences(|preferences| preferences.crosshair.arm_length = length)?;
             }
+            Command::SetCrosshairGap(gap) => {
+                let gap = *gap;
+                self.update_preferences(|preferences| preferences.crosshair.center_gap = gap)?;
+            }
             Command::SetCrosshairOpacity(opacity) => {
                 let opacity = *opacity;
                 self.update_preferences(|preferences| preferences.crosshair.opacity = opacity)?;
@@ -662,6 +666,9 @@ impl CoordinateToolGui {
             if draft.crosshair.arm_length != baseline.crosshair.arm_length {
                 current.crosshair.arm_length = draft.crosshair.arm_length;
             }
+            if draft.crosshair.center_gap != baseline.crosshair.center_gap {
+                current.crosshair.center_gap = draft.crosshair.center_gap;
+            }
             if draft.crosshair.opacity != baseline.crosshair.opacity {
                 current.crosshair.opacity = draft.crosshair.opacity;
             }
@@ -719,7 +726,7 @@ fn coordinate_unavailable_message(reason: CoordinateUnavailable) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -737,6 +744,7 @@ mod tests {
     struct FakeFactory {
         sample: Arc<Mutex<CoordinateSample>>,
         rendered: mpsc::Sender<CoordinateRenderFrame>,
+        backend_creations: Option<Arc<AtomicUsize>>,
     }
 
     struct FakeSampler(Arc<Mutex<CoordinateSample>>);
@@ -767,6 +775,9 @@ mod tests {
         }
 
         fn create_backend(&self) -> Result<Box<dyn CoordinateSurfaceBackend>, String> {
+            if let Some(creations) = &self.backend_creations {
+                creations.fetch_add(1, Ordering::AcqRel);
+            }
             Ok(Box::new(FakeBackend(self.rendered.clone())))
         }
     }
@@ -841,6 +852,7 @@ mod tests {
         let factory = FakeFactory {
             sample: Arc::clone(&current_sample),
             rendered,
+            backend_creations: None,
         };
         let clipboard = FakeClipboard {
             fail: Arc::new(AtomicBool::new(false)),
@@ -870,6 +882,7 @@ mod tests {
         let factory = FakeFactory {
             sample: current_sample,
             rendered,
+            backend_creations: None,
         };
         let (started_tx, started_rx) = mpsc::channel();
         let (outcome_tx, outcome_rx) = mpsc::channel();
@@ -924,6 +937,11 @@ mod tests {
             crate::coordinate_tool::CoordinateSpace::ForegroundClient
         );
         assert_eq!(gui.preferences().space, committed.coordinate_tool.space);
+        gui.execute(&CoordinateToolCommand::SetCrosshairGap(37))
+            .unwrap();
+        let committed = Settings::load(&path).unwrap();
+        assert_eq!(committed.coordinate_tool.crosshair.center_gap, 37);
+        assert_eq!(gui.preferences().crosshair.center_gap, 37);
 
         let invalid_path = directory.path().to_string_lossy().to_string();
         let (mut failed_gui, _, _, _) = adapter(invalid_path);
@@ -935,7 +953,78 @@ mod tests {
                 )))
                 .is_err()
         );
+        assert!(
+            failed_gui
+                .execute(&CoordinateToolCommand::SetCrosshairGap(128))
+                .is_err()
+        );
         assert_eq!(failed_gui.preferences(), &before);
+    }
+
+    #[test]
+    fn crosshair_gap_command_updates_the_live_frame_without_restarting_the_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .to_string();
+        let (rendered, frames) = mpsc::channel();
+        let current_sample = Arc::new(Mutex::new(sample(-1800, 200)));
+        let backend_creations = Arc::new(AtomicUsize::new(0));
+        let factory = FakeFactory {
+            sample: current_sample,
+            rendered,
+            backend_creations: Some(Arc::clone(&backend_creations)),
+        };
+        let clipboard = FakeClipboard {
+            fail: Arc::new(AtomicBool::new(false)),
+            writes: Arc::new(Mutex::new(Vec::new())),
+            current: Arc::new(Mutex::new(None)),
+        };
+        let mut gui = CoordinateToolGui::with_backends(
+            path.clone(),
+            CoordinateToolPreferences::default(),
+            Arc::new(factory),
+            Box::new(clipboard),
+        );
+
+        gui.execute(&CoordinateToolCommand::SetCrosshairEnabled(true))
+            .unwrap();
+        assert_eq!(receive_frame(&frames).preferences.crosshair.center_gap, 16);
+        assert_eq!(backend_creations.load(Ordering::Acquire), 1);
+
+        gui.execute(&CoordinateToolCommand::SetCrosshairGap(0))
+            .unwrap();
+        assert_eq!(gui.preferences().crosshair.center_gap, 0);
+        assert_eq!(
+            Settings::load(&path)
+                .unwrap()
+                .coordinate_tool
+                .crosshair
+                .center_gap,
+            0
+        );
+        assert_eq!(backend_creations.load(Ordering::Acquire), 1);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut updated_frame = false;
+        while Instant::now() < deadline {
+            match frames.recv_timeout(Duration::from_millis(100)) {
+                Ok(frame) if frame.preferences.crosshair.center_gap == 0 => {
+                    updated_frame = true;
+                    break;
+                }
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(
+            updated_frame,
+            "the enabled worker should render the new gap"
+        );
+        assert_eq!(backend_creations.load(Ordering::Acquire), 1);
+        gui.shutdown().unwrap();
     }
 
     #[test]
@@ -951,11 +1040,13 @@ mod tests {
         let mut draft = baseline.clone();
         draft.space = crate::coordinate_tool::CoordinateSpace::ForegroundClient;
         draft.crosshair.opacity = 0.45;
+        draft.crosshair.center_gap = 37;
 
         Settings::update(&path, |settings| {
             settings.coordinate_tool.space = crate::coordinate_tool::CoordinateSpace::Monitor;
             settings.coordinate_tool.cursor_offset.x = 99;
             settings.coordinate_tool.crosshair.thickness = 7;
+            settings.coordinate_tool.crosshair.center_gap = 80;
             Ok(())
         })
         .unwrap();
@@ -969,6 +1060,21 @@ mod tests {
         assert_eq!(committed.cursor_offset.x, 99);
         assert_eq!(committed.crosshair.thickness, 7);
         assert_eq!(committed.crosshair.opacity, 0.45);
+        assert_eq!(committed.crosshair.center_gap, 37);
+        assert_eq!(gui.preferences(), &committed);
+
+        let baseline = committed;
+        let mut draft = baseline.clone();
+        draft.crosshair.opacity = 0.6;
+        Settings::update(&path, |settings| {
+            settings.coordinate_tool.crosshair.center_gap = 96;
+            Ok(())
+        })
+        .unwrap();
+        gui.apply_draft_preferences(&baseline, &draft).unwrap();
+        let committed = Settings::load(&path).unwrap().coordinate_tool;
+        assert_eq!(committed.crosshair.opacity, 0.6);
+        assert_eq!(committed.crosshair.center_gap, 96);
         assert_eq!(gui.preferences(), &committed);
     }
 
