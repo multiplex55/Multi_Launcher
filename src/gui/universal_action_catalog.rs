@@ -939,7 +939,7 @@ impl LauncherApp {
                     selected_action: Action {
                         label: snippet.alias.clone(),
                         desc: "Snippet".into(),
-                        action: format!("clipboard:{}", snippet.text),
+                        action: crate::plugins::snippets::snippet_run_action(&snippet.alias),
                         args: None,
                     },
                     custom_action_index: None,
@@ -1405,6 +1405,165 @@ mod tests {
             recent_entries: Vec::new(),
             dashboard: std::sync::Arc::new(DashboardDataSnapshot::default()),
         }
+    }
+
+    #[test]
+    fn dashboard_snippet_catalog_uses_alias_route_and_keeps_clipboard_history_literal() {
+        let ctx = eframe::egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = crate::gui::LauncherApp::new(
+            &ctx,
+            std::sync::Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new(),
+            directory.path().join("actions.json").display().to_string(),
+            directory.path().join("settings.json").display().to_string(),
+            crate::settings::Settings::default(),
+            None,
+            None,
+            None,
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.test_skip_history_persistence = true;
+
+        let alias = "Sales: λ|%";
+        let template = "Private template {{name}}";
+        let snippet = crate::plugins::snippets::SnippetEntry {
+            alias: alias.into(),
+            text: template.into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+                "name",
+            )],
+        };
+        let history_text = "Clipboard history {{name}}";
+        let plain_alias = "literal row";
+        let plain_snippet = crate::plugins::snippets::SnippetEntry {
+            alias: plain_alias.into(),
+            text: history_text.into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        };
+        let mut dashboard = DashboardDataSnapshot::default();
+        dashboard.clipboard_history = std::sync::Arc::new(vec![history_text.into()]);
+        dashboard.snippets = std::sync::Arc::new(vec![snippet, plain_snippet]);
+        app.dashboard_data_cache.set_snapshot_for_test(dashboard);
+
+        let usage_before = app.usage.clone();
+        let history_before = app.test_recorded_history_queries.clone();
+        let activations_before = app.test_activation_trace.clone();
+        let version_before = crate::plugins::snippets::snippets_version();
+        let catalog_snapshot = app.universal_action_catalog_snapshot();
+        let canonical = crate::plugins::snippets::snippet_run_action(alias);
+        let live_snippet = catalog_snapshot
+            .entries
+            .iter()
+            .find(|entry| matches!(&entry.target, ActionTarget::Snippet { alias: found } if found == alias))
+            .expect("dashboard prompted snippet appears in the catalog");
+        assert_eq!(live_snippet.selected_action.label, alias);
+        assert_eq!(live_snippet.selected_action.desc, "Snippet");
+        assert_eq!(live_snippet.selected_action.action, canonical);
+        assert_eq!(live_snippet.selected_action.args, None);
+        assert!(!live_snippet.selected_action.action.contains(template));
+        assert_eq!(
+            crate::plugins::snippets::decode_snippet_run_action(
+                &live_snippet.selected_action.action
+            )
+            .as_deref(),
+            Some(alias)
+        );
+        let empty_aliases = std::collections::HashMap::new();
+        let resolver_context =
+            ActionTargetResolverContext::new(&empty_aliases, &empty_aliases, &[]);
+        assert_eq!(
+            ActionTargetResolver
+                .resolve(&live_snippet.selected_action, &resolver_context)
+                .target,
+            ActionTarget::Snippet {
+                alias: alias.into()
+            }
+        );
+
+        let plain_row = catalog_snapshot
+            .entries
+            .iter()
+            .find(|entry| {
+                matches!(&entry.target, ActionTarget::Snippet { alias: found } if found == plain_alias)
+            })
+            .expect("plain dashboard snippet is still a snippet target");
+        assert_eq!(
+            plain_row.selected_action.action,
+            crate::plugins::snippets::snippet_run_action(plain_alias)
+        );
+        assert_eq!(plain_row.selected_action.label, plain_alias);
+        assert_eq!(plain_row.selected_action.desc, "Snippet");
+        assert_eq!(plain_row.selected_action.args, None);
+
+        let history_entry = catalog_snapshot
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.target, ActionTarget::ClipboardEntry { index: 0 }))
+            .expect("dashboard clipboard history stays a live clipboard entry");
+        assert_eq!(history_entry.selected_action.label, history_text);
+        assert_eq!(history_entry.selected_action.desc, "Clipboard");
+        assert_eq!(history_entry.selected_action.action, "clipboard:copy:0");
+
+        let picker = UniversalActionAuthoringCatalog::build(
+            &catalog_snapshot,
+            &InvocationContext::empty(81),
+            "",
+        );
+        for action_id in [
+            action_ids::RESULT_EXECUTE,
+            action_ids::SNIPPET_EDIT,
+            action_ids::SNIPPET_REMOVE,
+        ] {
+            let row = picker
+                .rows()
+                .iter()
+                .find(|row| {
+                    row.target_type == "Snippet"
+                        && row.target_title == alias
+                        && row.action_id == action_id
+                })
+                .unwrap_or_else(|| panic!("snippet row {action_id} is available"));
+            assert_eq!(row.target_command, canonical);
+        }
+        let history_row = picker
+            .rows()
+            .iter()
+            .find(|row| {
+                row.target_type == "Clipboard entry"
+                    && row.target_title == history_text
+                    && row.action_id == action_ids::RESULT_EXECUTE
+            })
+            .expect("clipboard history primary action remains available");
+        assert_eq!(history_row.target_command, "clipboard:copy:0");
+
+        let plain_execute = picker
+            .rows()
+            .iter()
+            .find(|row| {
+                row.target_type == "Snippet"
+                    && row.target_title == plain_alias
+                    && row.action_id == action_ids::RESULT_EXECUTE
+            })
+            .expect("plain snippet has the same alias-based primary route");
+        assert_eq!(
+            plain_execute.target_command,
+            crate::plugins::snippets::snippet_run_action(plain_alias)
+        );
+
+        assert!(!app.snippet_prompt_dialog.is_open());
+        assert_eq!(app.usage, usage_before);
+        assert_eq!(app.test_recorded_history_queries, history_before);
+        assert_eq!(app.test_activation_trace, activations_before);
+        assert_eq!(crate::plugins::snippets::snippets_version(), version_before);
     }
 
     struct TimerCleanup(u64);
