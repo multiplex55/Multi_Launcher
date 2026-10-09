@@ -732,8 +732,8 @@ mod tests {
         assert!(
             applied_zoom_summary(&committed).contains("Saved magnifier appearance: 2.00× · 160 px")
         );
-        assert!(!applied_halo_summary(&committed).contains("90%"));
-        assert!(!applied_zoom_summary(&committed).contains("4.00×"));
+        assert!(applied_halo_summary(&draft).contains("90% inversion · 200 px"));
+        assert!(applied_zoom_summary(&draft).contains("4.00× · 400 px"));
     }
 
     #[test]

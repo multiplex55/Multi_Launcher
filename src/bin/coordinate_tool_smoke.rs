@@ -26,8 +26,8 @@ mod smoke {
 
     use multi_launcher::coordinate_tool::{
         CaptureOutcome, CapturePhase, CaptureSessionId, CaptureStatus, CoordinateCaptureController,
-        CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSample, CoordinateSampler,
-        CoordinateSpace, CoordinateSurfaceBackend, CoordinateToolController,
+        CoordinateEffectsStatus, CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSample,
+        CoordinateSampler, CoordinateSpace, CoordinateSurfaceBackend, CoordinateToolController,
         ForegroundClientGeometry, MonitorGeometry, MonitorId, NativeCoordinateCaptureRuntime,
         NativeCoordinateRuntimeFactory, PhysicalPoint, PhysicalRect, format_coordinate,
     };
@@ -113,6 +113,9 @@ mod smoke {
         fn render(&mut self, frame: &CoordinateRenderFrame) -> Result<(), String> {
             self.1.renders.fetch_add(1, Ordering::AcqRel);
             self.0.render(frame)
+        }
+        fn effects_status(&self) -> CoordinateEffectsStatus {
+            self.0.effects_status()
         }
         fn shutdown(&mut self) -> Result<(), String> {
             self.1.shutdowns.fetch_add(1, Ordering::AcqRel);
@@ -391,8 +394,15 @@ mod smoke {
     }
 
     pub(super) fn run() -> Result<(), String> {
+        let args = std::env::args().collect::<Vec<_>>();
+        if args.iter().any(|arg| arg == "--cursor-effects-auto") {
+            return cursor_effects::run(true);
+        }
+        if args.iter().any(|arg| arg == "--cursor-effects") {
+            return cursor_effects::run(false);
+        }
         let _dpi = DpiScope::enter()?;
-        if std::env::args().any(|arg| arg == "--receiver") {
+        if args.iter().any(|arg| arg == "--receiver") {
             return run_receiver();
         }
         run_smoke()
@@ -1226,4 +1236,7 @@ mod smoke {
             .parse()
             .map_err(|e| format!("parse {key}: {e}"))
     }
+
+    #[path = "../smoke/cursor_effects.rs"]
+    mod cursor_effects;
 }

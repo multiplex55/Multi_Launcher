@@ -179,3 +179,58 @@ Actual successful grouped command:
 ```powershell
 cargo nextest run --lib --no-fail-fast -E 'test(coordinate_tool::settings::tests::) | test(coordinate_tool::render::tests::crosshair) | test(coordinate_tool::render::tests::guide_geometry) | test(gui::coordinate_tool::tests::preference_updates_persist_transactionally_before_runtime_publication) | test(gui::coordinate_tool::tests::draft_commit_merges_only_edited_fields_into_the_latest_settings_transaction) | test(gui::coordinate_tool::tests::crosshair_gap_command_updates_the_live_frame_without_restarting_the_worker) | test(gui::mouse_settings_dialog::tests::) | test(commands::parser::mouse_command_parser_tests::) | test(commands::handlers::coordinate_tool::tests::) | test(plugins::mouse::tests::)'
 ```
+
+## M5-C production integration observation — first run
+
+On October 8, the actual production controller/backend was exercised through
+`target/debug/coordinate_tool_smoke.exe --cursor-effects-auto` on the interactive
+desktop. This finite fixture changes only its own controller, never synthesizes
+input, moves the pointer or accesses the clipboard. PID 8204 ran 12 named stages
+with pointer fixed at `(14,632)`, near the monitor's left edge. Raw BMP readbacks
+and native diagnostics are retained under ignored `target/coordinate-tool-smoke`.
+
+Observed successes:
+
+- Halo source `[-46,572..74,692]`, radius60, native scale1. On 2,491 static client
+  pixels inside the visible circle, every 40% pixel matched `round(.2*c+102)` and
+  every 100% pixel matched `255-c`; 4,150 static outside pixels stayed unchanged.
+  Background `(248,248,248)` became `(152,152,152)` and `(7,7,7)`.
+- Offset zoom used actual source `[0,592..54,672]`, exact native factor2, host
+  `[54,632..214,792]` and child `[106,632..214,792]`. The missing off-monitor
+  source was masked rather than fabricated. All 10,685 compared interior lens
+  pixels sampling visible client content matched their native source coordinates
+  exactly. 580 differences in the broader comparison were confined to native
+  window-border/shadow pixels; these are not claimed as exact client evidence.
+- Centered and fractional1.7/163px stages rendered real content with the logged
+  native transforms and monitor-clipped source. All-four stationary captures
+  changed 1,282 pixels in a lens region while cursor/source geometry and the
+  cheap-render counter stayed unchanged (7 renders).
+- Effects-off and repeated disable preserved the visible HUD, released effect
+  hosts/ring and reported both effects Disabled. Foreground stayed `0xce0e16`.
+  Exit0, one sampler/backend, 429 samples, 11 renders, one backend shutdown,
+  zero owned windows remaining. Counts are observations, not an FPS benchmark.
+
+**Integration gate remains open:** all-four capture
+`desktop-readback-all-four-default-guides-1791506639919.bmp` shows source guide
+feedback inside the lens despite seven correct filter HWNDs. A red vertical
+line appears at lens center x134 (true guide x14), and a magnified horizontal
+line near y712 (true guide y632). At `(134,748)`, zoom-only is `(248,248,248)` but
+all-four is red `(255,0,0)`. The HUD drawing above the lens is an intentional
+composition layer and is distinct from this source feedback defect.
+
+The bounded next check recreates effects after cheap guides are already visible,
+to distinguish filter/presentation timing from `UpdateLayeredWindow(ULW_ALPHA)`
+compatibility. Actual corrected composed pixels are required before closing M5-C.
+### Exclusion timing diagnostic
+
+A second finite production run (PID28120, stationary cursor `(2,842)`) added a
+final stage with guides already visible before effect recreation. It exited0:
+one sampler/backend, 571 samples, 14 renders, one shutdown, zero owned windows.
+`desktop-readback-recreated-effects-after-guides-1791507227540.bmp` shows normal
+source content without magnified guide/crosshair/HUD feedback. The same direct
+per-pixel-alpha surfaces are effectively excluded when already presentable;
+there is no evidence requiring a renderer or global capture-affinity change.
+The native repair will present cheap surfaces first and invalidate filters only
+on presentation/backing transitions, without clearing failure latches.
+Original logs are preserved as `native-run-1.log` and `native-run-2.log` beside
+raw BMPs. The first run's observed defect remains required to pass after repair.

@@ -694,3 +694,12 @@ cargo nextest run --lib --no-fail-fast --no-capture -E 'test(coordinate_tool::se
   but actual all-four BMPs exposed magnified red source guides despite a complete
   filter list. Gate remains open. See `cursor_effects_feasibility.md` for exact
   pixel evidence and the bounded visible-cheap-before-effects diagnostic.
+- M5-C dialog repair checkpoint: `a8ff0b2b`.
+- Retained production fixture and README are compiled/reviewed and have actual
+  native observations. The warning-producing unused draft test now meaningfully
+  checks draft values against saved summaries; exact test passed1/1, with only
+  the three existing unrelated gui/render.rs warnings.
+- A discriminating second native run proves exclusion works after guides are
+  already visible. Preserve the existing ULW_ALPHA renderer; implement a narrow
+  presentation-transition filter invalidation repair. This is a separate
+  remediation after the retained fixture/evidence checkpoint; M5-C remains open.
