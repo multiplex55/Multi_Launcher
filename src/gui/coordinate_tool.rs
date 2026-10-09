@@ -8,8 +8,9 @@ use eframe::egui;
 use crate::commands::CoordinateToolCommand;
 use crate::coordinate_tool::{
     CaptureOutcome, CaptureRuntime, CaptureSessionId, CoordinateCaptureController,
-    CoordinateRuntimeFactory, CoordinateSpace, CoordinateToolController, CoordinateToolPreferences,
-    CoordinateUnavailable, NativeCoordinateCaptureRuntime, format_coordinate,
+    CoordinateEffectsStatus, CoordinateRuntimeFactory, CoordinateSpace, CoordinateToolController,
+    CoordinateToolPreferences, CoordinateUnavailable, NativeCoordinateCaptureRuntime,
+    format_coordinate,
 };
 use crate::launcher_parking::LauncherParkingTransaction;
 use crate::settings::Settings;
@@ -60,7 +61,7 @@ impl CoordinateToolGui {
         )
     }
 
-    fn with_backends(
+    pub(crate) fn with_backends(
         settings_path: String,
         preferences: CoordinateToolPreferences,
         factory: Arc<dyn CoordinateRuntimeFactory>,
@@ -629,6 +630,18 @@ impl CoordinateToolGui {
         self.controller.runtime_state()
     }
 
+    pub(crate) fn set_halo_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        self.controller.set_halo_enabled(enabled)
+    }
+
+    pub(crate) fn set_zoom_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        self.controller.set_zoom_enabled(enabled)
+    }
+
+    pub(crate) fn effects_status(&self) -> CoordinateEffectsStatus {
+        self.controller.effects_status()
+    }
+
     #[cfg(test)]
     pub(crate) fn is_running(&self) -> bool {
         self.controller.is_running()
@@ -677,6 +690,45 @@ impl CoordinateToolGui {
             }
             if draft.crosshair.high_contrast_outline != baseline.crosshair.high_contrast_outline {
                 current.crosshair.high_contrast_outline = draft.crosshair.high_contrast_outline;
+            }
+            if draft.halo.radius != baseline.halo.radius {
+                current.halo.radius = draft.halo.radius;
+            }
+            if draft.halo.inversion_strength != baseline.halo.inversion_strength {
+                current.halo.inversion_strength = draft.halo.inversion_strength;
+            }
+            if draft.halo.outline_enabled != baseline.halo.outline_enabled {
+                current.halo.outline_enabled = draft.halo.outline_enabled;
+            }
+            if draft.halo.outline_color != baseline.halo.outline_color {
+                current.halo.outline_color = draft.halo.outline_color;
+            }
+            if draft.halo.outline_thickness != baseline.halo.outline_thickness {
+                current.halo.outline_thickness = draft.halo.outline_thickness;
+            }
+            if draft.zoom.mode != baseline.zoom.mode {
+                current.zoom.mode = draft.zoom.mode;
+            }
+            if draft.zoom.zoom_factor != baseline.zoom.zoom_factor {
+                current.zoom.zoom_factor = draft.zoom.zoom_factor;
+            }
+            if draft.zoom.diameter != baseline.zoom.diameter {
+                current.zoom.diameter = draft.zoom.diameter;
+            }
+            if draft.zoom.destination_offset.x != baseline.zoom.destination_offset.x {
+                current.zoom.destination_offset.x = draft.zoom.destination_offset.x;
+            }
+            if draft.zoom.destination_offset.y != baseline.zoom.destination_offset.y {
+                current.zoom.destination_offset.y = draft.zoom.destination_offset.y;
+            }
+            if draft.zoom.outline_enabled != baseline.zoom.outline_enabled {
+                current.zoom.outline_enabled = draft.zoom.outline_enabled;
+            }
+            if draft.zoom.outline_color != baseline.zoom.outline_color {
+                current.zoom.outline_color = draft.zoom.outline_color;
+            }
+            if draft.zoom.outline_thickness != baseline.zoom.outline_thickness {
+                current.zoom.outline_thickness = draft.zoom.outline_thickness;
             }
         })
     }
@@ -736,8 +788,8 @@ mod tests {
     use crate::coordinate_tool::{
         CaptureOutcome, CapturePhase, CaptureRuntime, CaptureSessionId, CoordinateOffset,
         CoordinateRenderFrame, CoordinateSample, CoordinateSampler, CoordinateSpace,
-        CoordinateSurfaceBackend, ForegroundClientGeometry, MonitorGeometry, MonitorId,
-        PhysicalPoint, PhysicalRect,
+        CoordinateSurfaceBackend, CrosshairColor, ForegroundClientGeometry, HaloPreferences,
+        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect, ZoomMode, ZoomPreferences,
     };
 
     #[derive(Clone)]
@@ -1041,12 +1093,32 @@ mod tests {
         draft.space = crate::coordinate_tool::CoordinateSpace::ForegroundClient;
         draft.crosshair.opacity = 0.45;
         draft.crosshair.center_gap = 37;
+        draft.halo.radius = 80;
+        draft.halo.inversion_strength = 0.8;
+        draft.halo.outline_enabled = true;
+        draft.zoom.mode = ZoomMode::Centered;
+        draft.zoom.zoom_factor = 3.25;
+        draft.zoom.diameter = 300;
+        draft.zoom.destination_offset.x = -321;
+        draft.zoom.outline_enabled = false;
 
         Settings::update(&path, |settings| {
             settings.coordinate_tool.space = crate::coordinate_tool::CoordinateSpace::Monitor;
             settings.coordinate_tool.cursor_offset.x = 99;
             settings.coordinate_tool.crosshair.thickness = 7;
             settings.coordinate_tool.crosshair.center_gap = 80;
+            settings.coordinate_tool.halo.radius = 240;
+            settings.coordinate_tool.halo.inversion_strength = 0.2;
+            settings.coordinate_tool.halo.outline_enabled = false;
+            settings.coordinate_tool.halo.outline_color = CrosshairColor::new(70, 80, 90);
+            settings.coordinate_tool.halo.outline_thickness = 3;
+            settings.coordinate_tool.zoom.mode = ZoomMode::Offset;
+            settings.coordinate_tool.zoom.zoom_factor = 1.5;
+            settings.coordinate_tool.zoom.diameter = 420;
+            settings.coordinate_tool.zoom.destination_offset = CoordinateOffset::new(777, -800);
+            settings.coordinate_tool.zoom.outline_enabled = true;
+            settings.coordinate_tool.zoom.outline_color = CrosshairColor::new(100, 110, 120);
+            settings.coordinate_tool.zoom.outline_thickness = 2;
             Ok(())
         })
         .unwrap();
@@ -1061,13 +1133,45 @@ mod tests {
         assert_eq!(committed.crosshair.thickness, 7);
         assert_eq!(committed.crosshair.opacity, 0.45);
         assert_eq!(committed.crosshair.center_gap, 37);
+        assert_eq!(committed.halo.radius, 80);
+        assert_eq!(committed.halo.inversion_strength, 0.8);
+        assert!(committed.halo.outline_enabled);
+        assert_eq!(
+            committed.halo.outline_color,
+            CrosshairColor::new(70, 80, 90)
+        );
+        assert_eq!(committed.halo.outline_thickness, 3);
+        assert_eq!(committed.zoom.mode, ZoomMode::Centered);
+        assert_eq!(committed.zoom.zoom_factor, 3.25);
+        assert_eq!(committed.zoom.diameter, 300);
+        assert_eq!(
+            committed.zoom.destination_offset,
+            CoordinateOffset::new(-321, -800)
+        );
+        assert!(!committed.zoom.outline_enabled);
+        assert_eq!(
+            committed.zoom.outline_color,
+            CrosshairColor::new(100, 110, 120)
+        );
+        assert_eq!(committed.zoom.outline_thickness, 2);
         assert_eq!(gui.preferences(), &committed);
 
         let baseline = committed;
         let mut draft = baseline.clone();
         draft.crosshair.opacity = 0.6;
+        draft.halo.outline_color = CrosshairColor::new(5, 6, 7);
+        draft.halo.outline_thickness = 6;
+        draft.zoom.outline_color = CrosshairColor::new(8, 9, 10);
+        draft.zoom.outline_thickness = 4;
+        draft.zoom.destination_offset.y = 999;
         Settings::update(&path, |settings| {
             settings.coordinate_tool.crosshair.center_gap = 96;
+            settings.coordinate_tool.halo.radius = 150;
+            settings.coordinate_tool.halo.outline_thickness = 2;
+            settings.coordinate_tool.zoom.mode = ZoomMode::Offset;
+            settings.coordinate_tool.zoom.diameter = 400;
+            settings.coordinate_tool.zoom.destination_offset = CoordinateOffset::new(901, -700);
+            settings.coordinate_tool.zoom.outline_thickness = 1;
             Ok(())
         })
         .unwrap();
@@ -1075,6 +1179,17 @@ mod tests {
         let committed = Settings::load(&path).unwrap().coordinate_tool;
         assert_eq!(committed.crosshair.opacity, 0.6);
         assert_eq!(committed.crosshair.center_gap, 96);
+        assert_eq!(committed.halo.radius, 150);
+        assert_eq!(committed.halo.outline_color, CrosshairColor::new(5, 6, 7));
+        assert_eq!(committed.halo.outline_thickness, 6);
+        assert_eq!(committed.zoom.mode, ZoomMode::Offset);
+        assert_eq!(committed.zoom.diameter, 400);
+        assert_eq!(
+            committed.zoom.destination_offset,
+            CoordinateOffset::new(901, 999)
+        );
+        assert_eq!(committed.zoom.outline_color, CrosshairColor::new(8, 9, 10));
+        assert_eq!(committed.zoom.outline_thickness, 4);
         assert_eq!(gui.preferences(), &committed);
     }
 
