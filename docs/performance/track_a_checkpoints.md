@@ -14,8 +14,8 @@
 | Checkpoint | Objective | State | Tests / evidence | Review | Commit | Push |
 | --- | --- | --- | --- | --- | --- | --- |
 | M0-A | Bounded opt-in owner metrics | complete | PASS: 3 performance library tests; changed-file rustfmt and diff checks | planner + parent diff review; corrections resolved | 193b300c8fd2704e565a38e0928122201c7ada1b | FAIL: GitHub credentials unavailable |
-| M0-B | Deterministic isolated fixtures | complete | PASS: 1 builder test, all 6 small owner harnesses, 1 unprofiled backlink test; rustfmt/diff checks | independent scoped review findings resolved | pending local commit | LOCAL ONLY |
-| M0-C | Freeze pre-change baseline | in_progress | full serial capture and repeat pending | — | — | LOCAL ONLY |
+| M0-B | Deterministic isolated fixtures | complete | PASS: 1 builder test, all 6 small owner harnesses, 1 unprofiled backlink test; rustfmt/diff checks | independent scoped review findings resolved | d003b4a35ef3fafd75438493199cb20463378baf | LOCAL ONLY |
+| M0-C | Freeze pre-change baseline | complete | PASS: 6 full owner tests/39 scenarios; 1 repeat owner/2 stable-signature scenarios | parent source/signature/counter audit; limitations explicit | pending local commit | LOCAL ONLY |
 | M1-A | Consistent note revision publication | pending | — | — | — | — |
 | M1-B | Cheap note refresh gate | pending | — | — | — | — |
 | M1-C | Notes regression and comparison | pending | — | — | — | — |

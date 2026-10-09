@@ -1,0 +1,88 @@
+{
+  "source_commit": "d003b4a35ef3fafd75438493199cb20463378baf",
+  "profile": "debug-test",
+  "mode": "small",
+  "nextest": "1 passed,5037 skipped,1.017s",
+  "comparisons": [
+    {
+      "scenario": "launcher-100-list",
+      "stable_signatures": true,
+      "baseline_p50_nanos": 1797400,
+      "repeat_p50_nanos": 1926800,
+      "baseline_p95_nanos": 1953800,
+      "repeat_p95_nanos": 3256200
+    },
+    {
+      "scenario": "launcher-100-grid-3-column",
+      "stable_signatures": true,
+      "baseline_p50_nanos": 1669000,
+      "repeat_p50_nanos": 1794900,
+      "baseline_p95_nanos": 2571700,
+      "repeat_p95_nanos": 2909300
+    }
+  ],
+  "scenarios": [
+    {
+      "estimated_fixture_bytes": 23096,
+      "fixture_count": 100,
+      "fixture_signature": "3c1fcdbaf0c5e639",
+      "max_nanos": 3286900,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 2723900,
+          "elapsed_nanos_total": 35343200,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 2000
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "c0cdf7e50e2f88b4",
+      "output_signature": "9c403dfa3b041826",
+      "p50_nanos": 1926800,
+      "p95_nanos": 3256200,
+      "profile": "debug-test",
+      "samples": 20,
+      "scenario": "launcher-100-list",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    },
+    {
+      "estimated_fixture_bytes": 23096,
+      "fixture_count": 100,
+      "fixture_signature": "3c1fcdbaf0c5e639",
+      "max_nanos": 2974600,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 2412600,
+          "elapsed_nanos_total": 34051500,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 2000
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "c0cdf7e50e2f88b4",
+      "output_signature": "9c403dfa3b041826",
+      "p50_nanos": 1794900,
+      "p95_nanos": 2909300,
+      "profile": "debug-test",
+      "samples": 20,
+      "scenario": "launcher-100-grid-3-column",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    }
+  ]
+}
