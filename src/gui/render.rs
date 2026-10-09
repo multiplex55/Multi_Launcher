@@ -1924,6 +1924,11 @@ impl LauncherApp {
                                 .and_then(|m| m.get("folders"))
                                 .map(|caps| caps.contains(&"show_full_path".to_string()))
                                 .unwrap_or(false);
+                            let mut rows_timer = crate::performance::MetricTimer::start(
+                                crate::performance::Metric::LauncherRowsBuilt,
+                            );
+                            rows_timer.set_work_units(0);
+                            let mut rows_built = 0_u64;
                             if self.resolved_grid_layout {
                                 let cols = self.query_results_layout.cols.max(1);
                                 let col_width = ((ui.available_width()
@@ -1944,6 +1949,7 @@ impl LauncherApp {
                                                     text,
                                                 ),
                                             );
+                                            rows_built = rows_built.saturating_add(1);
                                             let menu_resp = self.attach_result_context_menu(
                                                 &action,
                                                 resp,
@@ -1993,6 +1999,7 @@ impl LauncherApp {
                                             text,
                                         ),
                                     );
+                                    rows_built = rows_built.saturating_add(1);
                                     let tooltip = if a.desc == "Timer"
                                         && a.action.starts_with("timer:show:")
                                     {
@@ -2041,6 +2048,8 @@ impl LauncherApp {
                                     }
                                 }
                             }
+                            rows_timer.set_work_units(rows_built);
+                            drop(rows_timer);
                             if refresh {
                                 self.last_results_valid = false;
                                 self.search();

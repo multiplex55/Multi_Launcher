@@ -467,6 +467,10 @@ impl NotesDialog {
                     let filter = self.search.to_lowercase();
                     let mut remove: Option<usize> = None;
                     let area_height = ui.available_height();
+                    let mut rows_timer = crate::performance::MetricTimer::start(
+                        crate::performance::Metric::QuickNotesRowsBuilt,
+                    );
+                    rows_timer.set_work_units(0);
                     egui::ScrollArea::both()
                         .max_height(area_height)
                         .show(ui, |ui| {
@@ -622,9 +626,11 @@ impl NotesDialog {
                                         }
                                     });
                                 });
+                                rows_timer.add_work_units(1);
                                 ui.separator();
                             }
                         });
+                    drop(rows_timer);
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
                         rebuild_idx = true;

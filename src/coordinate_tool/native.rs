@@ -31,6 +31,8 @@ impl NativeCoordinatePointSampler {
         &mut self,
         point: super::model::PhysicalPoint,
     ) -> Result<super::model::CoordinateSample, String> {
+        let _timer =
+            crate::performance::MetricTimer::start(crate::performance::Metric::CoordinateSample);
         #[cfg(windows)]
         {
             self.sampler.sample_at(point)
@@ -183,6 +185,9 @@ mod windows_runtime {
 
     impl CoordinateSampler for WindowsSampler {
         fn sample(&mut self) -> Result<CoordinateSample, String> {
+            let _timer = crate::performance::MetricTimer::start(
+                crate::performance::Metric::CoordinateSample,
+            );
             let mut point = POINT::default();
             unsafe { GetCursorPos(&mut point) }
                 .map_err(|error| format!("Could not sample the physical cursor: {error}"))?;
@@ -445,7 +450,10 @@ mod windows_runtime {
                 return Err("HUD dimensions do not match its backing DIB".into());
             }
             unsafe { ptr::write_bytes(self.bits, 0, self.byte_len) };
+            let brush_timer =
+                crate::performance::MetricTimer::start(crate::performance::Metric::HudGdiCreate);
             let brush = unsafe { CreateSolidBrush(COLORREF(0x001B_1B_1B)) };
+            drop(brush_timer);
             if brush.0.is_null() {
                 return Err("Could not create coordinate HUD background".into());
             }
@@ -461,6 +469,8 @@ mod windows_runtime {
                 return Err("Could not paint coordinate HUD background".into());
             }
 
+            let font_timer =
+                crate::performance::MetricTimer::start(crate::performance::Metric::HudGdiCreate);
             let font = unsafe {
                 CreateFontW(
                     i32::try_from(font_size).unwrap_or(14),
@@ -479,6 +489,7 @@ mod windows_runtime {
                     w!("Segoe UI"),
                 )
             };
+            drop(font_timer);
             if font.0.is_null() {
                 return Err("Could not create coordinate HUD font".into());
             }

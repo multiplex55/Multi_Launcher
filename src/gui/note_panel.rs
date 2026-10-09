@@ -1229,6 +1229,8 @@ impl NotePanel {
             return;
         }
 
+        let _recompute_timer =
+            crate::performance::MetricTimer::start(crate::performance::Metric::NoteHeavyRecompute);
         let todos = load_todos_or_last_good(TODO_FILE);
         self.derived.todo_label_map = todos
             .iter()
@@ -1301,6 +1303,9 @@ impl NotePanel {
     }
 
     fn maybe_refresh_heavy_derived(&mut self, ctx: &egui::Context, backlinks_enabled: bool) {
+        let mut refresh_check_timer =
+            crate::performance::MetricTimer::start(crate::performance::Metric::NoteRefreshCheck);
+        refresh_check_timer.set_work_units(0);
         let notes_changed = self.last_notes_version != note_version();
         let todos_changed = self.last_todo_revision != todo_version();
         let alias_changed = self.last_alias_map_hash != alias_map_hash(&note_cache_snapshot());
@@ -1311,10 +1316,13 @@ impl NotePanel {
             .unwrap_or(false);
         if notes_changed || todos_changed || alias_changed || (content_changed && debounce_elapsed)
         {
+            refresh_check_timer.set_work_units(1);
+            drop(refresh_check_timer);
             self.refresh_heavy_derived(false, backlinks_enabled);
             return;
         }
 
+        drop(refresh_check_timer);
         if self.heavy_recompute_requested {
             ctx.request_repaint_after(HEAVY_RECOMPUTE_IDLE_DEBOUNCE);
         }
@@ -4364,6 +4372,8 @@ fn format_note_updated(note: &Note) -> String {
 }
 
 fn alias_map_hash(notes: &[Note]) -> u64 {
+    let mut timer =
+        crate::performance::MetricTimer::start(crate::performance::Metric::NoteAliasHash);
     let mut aliases: Vec<(&str, &str)> = notes
         .iter()
         .filter_map(|note| {
@@ -4372,6 +4382,7 @@ fn alias_map_hash(notes: &[Note]) -> u64 {
                 .map(|alias| (alias, note.slug.as_str()))
         })
         .collect();
+    timer.set_work_units(aliases.len() as u64);
     aliases.sort_unstable();
     let mut hasher = DefaultHasher::new();
     aliases.hash(&mut hasher);

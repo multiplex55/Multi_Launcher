@@ -130,6 +130,8 @@ impl CommandHistoryWidget {
         args: Option<&str>,
         saved_action: &Action,
     ) -> Option<Action> {
+        let _timer =
+            crate::performance::MetricTimer::start(crate::performance::Metric::HistoryResolve);
         let snapshot = ctx.data_cache.snapshot();
         if action_id.starts_with("snippet:run:") {
             return crate::plugins::snippets::resolve_snippet_run_action_from_entries(
@@ -143,7 +145,15 @@ impl CommandHistoryWidget {
             return Some(action.clone());
         }
 
-        let commands = ctx.plugins.commands_filtered(ctx.enabled_plugins);
+        let commands = {
+            let mut catalog_timer = crate::performance::MetricTimer::start(
+                crate::performance::Metric::HistoryCatalogBuild,
+            );
+            catalog_timer.set_work_units(0);
+            let commands = ctx.plugins.commands_filtered(ctx.enabled_plugins);
+            catalog_timer.set_work_units(commands.len() as u64);
+            commands
+        };
         if let Some(action) = commands
             .into_iter()
             .find(|action| action.action == action_id && action.args.as_deref() == args)
@@ -338,9 +348,13 @@ impl Widget for CommandHistoryWidget {
             });
         }
 
+        let mut prepare_timer =
+            crate::performance::MetricTimer::start(crate::performance::Metric::HistoryPrepare);
+        prepare_timer.set_work_units(0);
         let history_entries =
             crate::history::with_history(|h| h.iter().cloned().collect::<Vec<_>>())
                 .unwrap_or_default();
+        prepare_timer.set_work_units(history_entries.len() as u64);
 
         let mut entries: Vec<DisplayEntry> = Vec::new();
         if self.cfg.show_pinned_only {
@@ -371,6 +385,7 @@ impl Widget for CommandHistoryWidget {
             .filter(|entry| Self::entry_matches_filter(entry, &self.filter))
             .take(self.cfg.count)
             .collect::<Vec<_>>();
+        drop(prepare_timer);
 
         if filtered.is_empty() {
             ui.label("No history entries.");

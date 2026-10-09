@@ -42,6 +42,9 @@ pub struct IndexBatchIter {
     seen: HashSet<PathBuf>,
     options: IndexOptions,
     produced: usize,
+    metric_scan_started: bool,
+    metric_scan_failed: bool,
+    metric_scan_finished: bool,
 }
 
 impl IndexBatchIter {
@@ -57,6 +60,9 @@ impl IndexBatchIter {
             seen: HashSet::new(),
             options,
             produced: 0,
+            metric_scan_started: false,
+            metric_scan_failed: false,
+            metric_scan_finished: false,
         }
     }
 
@@ -73,7 +79,16 @@ impl Iterator for IndexBatchIter {
     type Item = anyhow::Result<Vec<Action>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Each sample covers this traversal call only, not time between batches.
+        let mut timer =
+            crate::performance::MetricTimer::start(crate::performance::Metric::IndexScan);
+        timer.set_work_units(0);
+        if timer.is_enabled() {
+            self.metric_scan_started = true;
+        }
+
         if self.produced >= self.options.max_items {
+            self.finish_metric_scan();
             return None;
         }
 
@@ -99,6 +114,8 @@ impl Iterator for IndexBatchIter {
                     let canonical = match fs::canonicalize(entry.path()) {
                         Ok(path) => path,
                         Err(err) => {
+                            timer.set_work_units(batch.len() as u64);
+                            self.fail_metric_scan();
                             tracing::error!(
                                 path = %entry.path().display(),
                                 error = %err,
@@ -123,6 +140,8 @@ impl Iterator for IndexBatchIter {
                     self.produced += 1;
                 }
                 Some(Err(err)) => {
+                    timer.set_work_units(batch.len() as u64);
+                    self.fail_metric_scan();
                     tracing::error!(error = %err, "failed to read directory entry");
                     return Some(Err(err.into()));
                 }
@@ -132,10 +151,52 @@ impl Iterator for IndexBatchIter {
             }
         }
 
+        timer.set_work_units(batch.len() as u64);
         if batch.is_empty() {
+            self.finish_metric_scan();
             None
         } else {
+            if self.produced >= self.options.max_items {
+                self.finish_metric_scan();
+            }
             Some(Ok(batch))
+        }
+    }
+}
+
+impl IndexBatchIter {
+    fn finish_metric_scan(&mut self) {
+        if self.metric_scan_started && !self.metric_scan_finished {
+            if !self.metric_scan_failed {
+                crate::performance::record_metric_outcome(
+                    crate::performance::Metric::IndexScan,
+                    crate::performance::MetricOutcome::Completed,
+                );
+            }
+            self.metric_scan_finished = true;
+        }
+    }
+
+    fn fail_metric_scan(&mut self) {
+        // The first error is terminal for metrics, but the iterator keeps its
+        // existing behavior if a caller asks for later batches.
+        if self.metric_scan_started && !self.metric_scan_failed {
+            crate::performance::record_metric_outcome(
+                crate::performance::Metric::IndexScan,
+                crate::performance::MetricOutcome::Error,
+            );
+            self.metric_scan_failed = true;
+        }
+    }
+}
+
+impl Drop for IndexBatchIter {
+    fn drop(&mut self) {
+        if self.metric_scan_started && !self.metric_scan_failed && !self.metric_scan_finished {
+            crate::performance::record_metric_outcome(
+                crate::performance::Metric::IndexScan,
+                crate::performance::MetricOutcome::Abandoned,
+            );
         }
     }
 }

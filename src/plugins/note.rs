@@ -1027,7 +1027,85 @@ pub fn note_version() -> u64 {
 
 /// Return a snapshot of notes from the in-memory cache without hitting disk.
 pub fn note_cache_snapshot() -> Vec<Note> {
-    CACHE.lock().map(|c| c.notes.clone()).unwrap_or_default()
+    let perf_enabled = crate::performance::enabled();
+    let wait_started = crate::performance::started_if(perf_enabled);
+    let cache = match CACHE.lock() {
+        Ok(cache) => cache,
+        Err(_) => {
+            if let Some(wait_started) = wait_started {
+                crate::performance::record_metric_sample(
+                    crate::performance::Metric::NoteSnapshot,
+                    0,
+                    std::time::Duration::ZERO,
+                    Some(wait_started.elapsed()),
+                );
+                crate::performance::record_metric_outcome(
+                    crate::performance::Metric::NoteSnapshot,
+                    crate::performance::MetricOutcome::Error,
+                );
+            }
+            return Vec::new();
+        }
+    };
+    let lock_wait = wait_started.map(|started| started.elapsed());
+
+    if !perf_enabled {
+        return cache.notes.clone();
+    }
+
+    let hold_started = std::time::Instant::now();
+    let estimated_bytes = cache
+        .notes
+        .iter()
+        .map(estimated_note_clone_bytes)
+        .fold(0_usize, usize::saturating_add);
+    let notes = cache.notes.clone();
+    let hold_time = hold_started.elapsed();
+    drop(cache);
+    crate::performance::record_metric_sample(
+        crate::performance::Metric::NoteSnapshot,
+        u64::try_from(estimated_bytes).unwrap_or(u64::MAX),
+        hold_time,
+        lock_wait,
+    );
+    notes
+}
+
+fn estimated_note_clone_bytes(note: &Note) -> usize {
+    use std::mem::size_of;
+
+    let string_bytes = note
+        .tags
+        .iter()
+        .chain(&note.links)
+        .chain(&note.aliases)
+        .map(String::len)
+        .fold(0_usize, usize::saturating_add);
+    let entity_bytes = note
+        .entity_refs
+        .iter()
+        .map(|entity| {
+            size_of::<crate::common::entity_ref::EntityRef>()
+                .saturating_add(entity.id.len())
+                .saturating_add(entity.title.as_ref().map_or(0, String::len))
+        })
+        .fold(0_usize, usize::saturating_add);
+
+    size_of::<Note>()
+        .saturating_add(note.path.as_os_str().len())
+        .saturating_add(note.title.len())
+        .saturating_add(note.content.len())
+        .saturating_add(note.slug.len())
+        .saturating_add(note.alias.as_ref().map_or(0, String::len))
+        .saturating_add(
+            note.tags
+                .len()
+                .saturating_add(note.links.len())
+                .saturating_add(note.aliases.len())
+                .saturating_mul(size_of::<String>()),
+        )
+        .saturating_add(string_bytes)
+        .saturating_add(entity_bytes)
 }
 
 /// Return the cached lowercased alias -> note slug map without hitting disk.

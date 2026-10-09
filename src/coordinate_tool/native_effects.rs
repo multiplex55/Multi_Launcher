@@ -137,6 +137,26 @@ pub(crate) trait EffectNativeOperations {
     fn uninitialize_session(&mut self) -> Result<(), String>;
 }
 
+fn measured_refresh_visible_source<O: EffectNativeOperations>(
+    operations: &mut O,
+    kind: EffectKind,
+    source: &EffectLiveSource,
+) -> Result<(), String> {
+    let _timer =
+        crate::performance::MetricTimer::start(crate::performance::Metric::EffectsRefreshSource);
+    operations.refresh_visible_source(kind, source)
+}
+
+fn measured_present_live_source<O: EffectNativeOperations>(
+    operations: &mut O,
+    kind: EffectKind,
+    source: &EffectLiveSource,
+) -> Result<(), String> {
+    let _timer =
+        crate::performance::MetricTimer::start(crate::performance::Metric::EffectsPresentSource);
+    operations.present_live_source(kind, source)
+}
+
 /// Reconciles requested effect state against native resources. This is owned
 /// by the passive worker's surface backend and never runs on the GUI thread.
 pub(crate) struct CursorEffectsRuntime<O: EffectNativeOperations> {
@@ -461,7 +481,9 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                     }
                     continue;
                 };
-                if let Err(error) = self.operations.refresh_visible_source(kind, &source) {
+                if let Err(error) =
+                    measured_refresh_visible_source(&mut self.operations, kind, &source)
+                {
                     self.fail_halo_presentation(format!(
                         "Could not refresh visible halo fallback: {error}"
                     ));
@@ -493,7 +515,8 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                 }
                 continue;
             };
-            if let Err(error) = self.operations.refresh_visible_source(kind, &source) {
+            if let Err(error) = measured_refresh_visible_source(&mut self.operations, kind, &source)
+            {
                 failed_surface = true;
                 self.fail_native_surface(
                     kind,
@@ -746,7 +769,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                 continue;
             };
 
-            if let Err(error) = self.operations.present_live_source(kind, source) {
+            if let Err(error) = measured_present_live_source(&mut self.operations, kind, source) {
                 self.fail_native_surface(
                     kind,
                     format!("Could not present live {}: {error}", kind.label()),
@@ -987,9 +1010,8 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
             }
             return;
         };
-        if let Err(error) = self
-            .operations
-            .present_live_source(EffectKind::Halo, source)
+        if let Err(error) =
+            measured_present_live_source(&mut self.operations, EffectKind::Halo, source)
         {
             self.fail_halo_presentation(format!(
                 "Could not present contrasting halo fallback: {error}"

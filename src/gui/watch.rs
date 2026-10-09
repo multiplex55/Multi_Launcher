@@ -154,6 +154,10 @@ impl LauncherApp {
                         default_submenu_presentation;
                 }
                 WatchEvent::Actions => {
+                    let mut reload_timer = crate::performance::MetricTimer::start(
+                        crate::performance::Metric::ActionsReload,
+                    );
+                    reload_timer.set_work_units(0);
                     let _transaction = crate::actions::transaction_guard();
                     let custom = match load_actions_typed(&self.actions_path) {
                         Ok(crate::common::persistence::LoadState::Missing) => {
@@ -182,6 +186,7 @@ impl LauncherApp {
                             continue;
                         }
                     };
+                    reload_timer.set_work_units(custom.len() as u64);
                     let current_custom_len = self.custom_len.min(self.actions.len());
                     if self.actions[..current_custom_len] == custom {
                         self.actions_persistence_diagnostic = None;
@@ -206,6 +211,7 @@ impl LauncherApp {
                             }
                         }
                     }
+                    reload_timer.set_work_units(custom.len().saturating_add(indexed.len()) as u64);
                     self.publish_actions(custom, indexed);
                     self.actions_persistence_diagnostic = None;
                     crate::actions::bump_actions_version();
