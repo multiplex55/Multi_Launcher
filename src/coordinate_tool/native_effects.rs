@@ -109,6 +109,15 @@ pub(crate) trait EffectNativeOperations {
         kind: EffectKind,
         excluded_windows: &[usize],
     ) -> Result<(), String>;
+    fn auxiliary_input_needs_presentation(&self, kind: EffectKind) -> bool;
+    /// Present the effect's auxiliary outline at the live destination before
+    /// installing Magnification exclusions. This prevents a newly shown
+    /// layered ring from being captured into a sibling magnifier.
+    fn present_filter_input(
+        &mut self,
+        kind: EffectKind,
+        source: &EffectLiveSource,
+    ) -> Result<(), String>;
     fn is_visible(&self, kind: EffectKind) -> bool;
     fn is_halo_fallback_visible(&self) -> bool;
     fn raise_visible_effect_stack(&mut self) -> Result<(), String>;
@@ -186,6 +195,15 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
 
     pub(crate) fn status(&self) -> CoordinateEffectsStatus {
         self.status.clone()
+    }
+
+    /// Mark the cheap layered surfaces as newly available filter inputs.
+    /// This is deliberately independent of display-topology invalidation:
+    /// it refreshes exclusions without clearing native-effect retry latches.
+    pub(crate) fn invalidate_filter_lists(&mut self) {
+        if !self.shutdown_complete {
+            self.filters_dirty = true;
+        }
     }
 
     pub(crate) fn raise_visible_effect_stack(&mut self) -> Result<(), String> {
@@ -400,9 +418,9 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         if topology_invalidated {
             self.filters_dirty = true;
         }
-        self.apply_filter_lists(cheap_window_ids, requests);
         let (live_sources, geometry_errors) =
             self.resolve_live_sources(requests, preferences, current_sample);
+        self.apply_filter_lists(cheap_window_ids, requests, &live_sources);
         self.update_live_status(
             requests,
             current_sample.is_some(),
@@ -487,10 +505,11 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         }
         if failed_surface {
             let requests = self.requested;
-            self.apply_filter_lists(cheap_window_ids, requests);
-            let source = self.cached_live_sources[EffectKind::Halo.index()].clone();
+            let live_sources = self.cached_live_sources.clone();
+            self.apply_filter_lists(cheap_window_ids, requests, &live_sources);
+            let source = live_sources[EffectKind::Halo.index()].as_ref();
             if self.halo_fallback_ready() && requests.halo {
-                self.update_halo_fallback(source.as_ref());
+                self.update_halo_fallback(source);
             }
             self.maybe_uninitialize(requests, false, false);
         }
@@ -552,15 +571,29 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         }
     }
 
-    fn apply_filter_lists(&mut self, cheap_window_ids: &[usize], requests: EffectRequests) {
-        if !self.filters_dirty {
+    fn apply_filter_lists(
+        &mut self,
+        cheap_window_ids: &[usize],
+        requests: EffectRequests,
+        live_sources: &[Option<EffectLiveSource>; 2],
+    ) {
+        let has_unpresented_live_input = EFFECT_KINDS.into_iter().any(|kind| {
+            requests.enabled(kind)
+                && live_sources[kind.index()].is_some()
+                && (!self.is_unavailable(kind)
+                    || (kind == EffectKind::Halo && self.halo_fallback_ready()))
+                && self.operations.auxiliary_input_needs_presentation(kind)
+        });
+        if !self.filters_dirty && !has_unpresented_live_input {
             return;
         }
+        self.filters_dirty = true;
 
         // There are only two magnifiers. A failure disables that target and a
         // second pass refreshes the surviving target with the final host list.
         let mut failed = [false; 2];
         for _ in 0..EFFECT_KINDS.len() {
+            self.present_filter_inputs(requests, live_sources);
             let mut failures = Vec::new();
             let excluded = self.complete_exclusion_list(cheap_window_ids);
             for kind in EFFECT_KINDS {
@@ -593,6 +626,44 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
             }
         }
         self.filters_dirty = false;
+    }
+
+    fn present_filter_inputs(
+        &mut self,
+        requests: EffectRequests,
+        live_sources: &[Option<EffectLiveSource>; 2],
+    ) {
+        for kind in EFFECT_KINDS {
+            if !requests.enabled(kind)
+                || (self.is_unavailable(kind)
+                    && !(kind == EffectKind::Halo && self.halo_fallback_ready()))
+            {
+                continue;
+            }
+            let Some(source) = live_sources[kind.index()].as_ref() else {
+                continue;
+            };
+            if let Err(error) = self.operations.present_filter_input(kind, source) {
+                self.fail_native_surface(
+                    kind,
+                    format!(
+                        "Could not prepare {} outline before refreshing exclusions: {error}",
+                        kind.label()
+                    ),
+                );
+                // A failed native halo can fall back to its independently
+                // owned ring. Make that ring visible at the same successful
+                // live source before the sibling filter list is retried.
+                if kind == EffectKind::Halo
+                    && self.halo_fallback_ready()
+                    && let Err(fallback_error) = self.operations.present_filter_input(kind, source)
+                {
+                    self.fail_halo_presentation(format!(
+                        "Could not prepare contrasting halo fallback before refreshing exclusions: {fallback_error}"
+                    ));
+                }
+            }
+        }
     }
 
     fn complete_exclusion_list(&self, cheap_window_ids: &[usize]) -> Vec<usize> {
@@ -681,7 +752,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                     format!("Could not present live {}: {error}", kind.label()),
                 );
                 if kind == EffectKind::Halo && self.halo_fallback_ready() {
-                    self.apply_filter_lists(cheap_window_ids, requests);
+                    self.apply_filter_lists(cheap_window_ids, requests, live_sources);
                     self.update_halo_fallback(live_sources[kind.index()].as_ref());
                 }
                 continue;
@@ -695,7 +766,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
                     ),
                 );
                 if kind == EffectKind::Halo && self.halo_fallback_ready() {
-                    self.apply_filter_lists(cheap_window_ids, requests);
+                    self.apply_filter_lists(cheap_window_ids, requests, live_sources);
                     self.update_halo_fallback(live_sources[kind.index()].as_ref());
                 }
                 continue;
@@ -1108,6 +1179,7 @@ mod tests {
         ConfigureFallback,
         ConfigureZoomOutline,
         Filter(EffectKind),
+        PrepareFilterInput(EffectKind),
         Hide(EffectKind),
         Refresh(EffectKind),
         RefreshFallback,
@@ -1141,9 +1213,11 @@ mod tests {
         resource_counts: [usize; 2],
         configure_calls: usize,
         filter_calls: usize,
+        filter_saw_visible_outline: [bool; 2],
         release_outline_calls: usize,
         refresh_calls: usize,
         present_calls: usize,
+        prepared_filter_inputs: Vec<(EffectKind, EffectLiveSource)>,
         presented_points: Vec<PhysicalPoint>,
         presented_zoom: Vec<ZoomPresentationGeometry>,
         partial_resources: usize,
@@ -1317,6 +1391,12 @@ mod tests {
         ) -> Result<(), String> {
             self.filter_calls += 1;
             self.events.push(format!("filter:{}", kind.label()));
+            self.filter_saw_visible_outline[kind.index()] = match kind {
+                EffectKind::Halo => {
+                    !self.outline_fallback && !self.outline_enabled || self.outline_visible
+                }
+                EffectKind::Zoom => !self.zoom_outline_enabled || self.zoom_outline_visible,
+            };
             if !self.child_ready[kind.index()] {
                 return Err("injected missing magnifier child".into());
             }
@@ -1325,6 +1405,40 @@ mod tests {
             }
             self.filter_lists[kind.index()] = excluded_windows.to_vec();
             Ok(())
+        }
+
+        fn auxiliary_input_needs_presentation(&self, kind: EffectKind) -> bool {
+            match kind {
+                EffectKind::Halo => {
+                    (self.outline_fallback || self.outline_enabled) && !self.outline_visible
+                }
+                EffectKind::Zoom => self.zoom_outline_enabled && !self.zoom_outline_visible,
+            }
+        }
+
+        fn present_filter_input(
+            &mut self,
+            kind: EffectKind,
+            source: &EffectLiveSource,
+        ) -> Result<(), String> {
+            self.events
+                .push(format!("present-filter-input:{}", kind.label()));
+            if self.fails(FailurePoint::PrepareFilterInput(kind)) {
+                return Err("injected auxiliary presentation failure".into());
+            }
+            match (kind, source) {
+                (EffectKind::Halo, EffectLiveSource::Halo(_)) => {
+                    self.prepared_filter_inputs.push((kind, source.clone()));
+                    self.outline_visible = self.outline_fallback || self.outline_enabled;
+                    Ok(())
+                }
+                (EffectKind::Zoom, EffectLiveSource::Zoom(_)) => {
+                    self.prepared_filter_inputs.push((kind, source.clone()));
+                    self.zoom_outline_visible = self.zoom_outline_enabled;
+                    Ok(())
+                }
+                _ => Err("live-source geometry did not match effect kind".into()),
+            }
         }
 
         fn is_visible(&self, kind: EffectKind) -> bool {
@@ -1691,6 +1805,13 @@ mod tests {
             Some(EffectConfiguration::Halo(changed.halo))
         );
         assert!(runtime.operations.outline_visible);
+        assert_eq!(runtime.operations.filter_saw_visible_outline, [true, true]);
+        assert!(
+            runtime
+                .operations
+                .prepared_filter_inputs
+                .contains(&(EffectKind::Halo, EffectLiveSource::Halo(live_point)))
+        );
         let expected_filter = [
             1,
             2,
@@ -1721,6 +1842,18 @@ mod tests {
             .iter()
             .position(|event| event == "configure-outline")
             .unwrap();
+        let halo_filter_input = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "present-filter-input:halo")
+            .unwrap();
+        let zoom_filter_input = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "present-filter-input:zoom")
+            .unwrap();
         let halo_filter = runtime
             .operations
             .events
@@ -1741,8 +1874,120 @@ mod tests {
             .unwrap();
         assert!(outline_configuration < halo_filter);
         assert!(outline_configuration < zoom_filter);
+        assert!(halo_filter_input < halo_filter);
+        assert!(zoom_filter_input < halo_filter);
+        assert!(halo_filter_input < zoom_filter);
+        assert!(zoom_filter_input < zoom_filter);
         assert!(halo_filter < presentation);
         assert!(zoom_filter < presentation);
+
+        let filter_calls = runtime.operations.filter_calls;
+        let staged_inputs = runtime.operations.prepared_filter_inputs.len();
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &changed,
+            Some(PhysicalPoint::new(live_point.x + 1, live_point.y)),
+            false,
+        );
+        assert_eq!(runtime.operations.filter_calls, filter_calls);
+        assert_eq!(
+            runtime.operations.prepared_filter_inputs.len(),
+            staged_inputs
+        );
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn resumed_outlines_are_staged_at_the_live_destination_before_filter_refresh() {
+        let mut runtime = CursorEffectsRuntime::new(FakeOperations::default());
+        let mut preferences = CoordinateToolPreferences::default();
+        preferences.halo.outline_enabled = true;
+        preferences.zoom.outline_enabled = true;
+        let first = PhysicalPoint::new(-420, 330);
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(first),
+            false,
+        );
+
+        let filters_before_pause = runtime.operations.filter_calls;
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            None,
+            false,
+        );
+        assert!(!runtime.operations.outline_visible);
+        assert!(!runtime.operations.zoom_outline_visible);
+        assert_eq!(runtime.operations.filter_calls, filters_before_pause);
+
+        runtime.operations.events.clear();
+        let recovered = PhysicalPoint::new(-418, 331);
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(recovered),
+            false,
+        );
+        assert_eq!(runtime.operations.filter_calls, filters_before_pause + 2);
+        assert_eq!(runtime.operations.filter_saw_visible_outline, [true, true]);
+        assert!(
+            runtime
+                .operations
+                .prepared_filter_inputs
+                .contains(&(EffectKind::Halo, EffectLiveSource::Halo(recovered)))
+        );
+        let halo_input = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "present-filter-input:halo")
+            .unwrap();
+        let zoom_input = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event == "present-filter-input:zoom")
+            .unwrap();
+        let first_filter = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event.starts_with("filter:"))
+            .unwrap();
+        assert!(halo_input < first_filter);
+        assert!(zoom_input < first_filter);
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn auxiliary_presentation_failure_is_contained_to_its_effect() {
+        let mut operations = FakeOperations::default();
+        operations.fail_next(FailurePoint::PrepareFilterInput(EffectKind::Zoom));
+        let mut runtime = CursorEffectsRuntime::new(operations);
+        let mut preferences = CoordinateToolPreferences::default();
+        preferences.zoom.outline_enabled = true;
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(PhysicalPoint::new(-70, 91)),
+            false,
+        );
+
+        assert_eq!(*runtime.status().halo(), CursorEffectStatus::Active);
+        assert!(matches!(
+            runtime.status().zoom(),
+            CursorEffectStatus::Unavailable(reason) if reason.contains("before refreshing exclusions")
+        ));
+        assert!(!runtime.operations.has_surface(EffectKind::Zoom));
+        assert!(runtime.operations.has_surface(EffectKind::Halo));
+        assert_eq!(runtime.operations.filter_calls, 1);
         runtime.shutdown().unwrap();
     }
 
@@ -1979,10 +2224,114 @@ mod tests {
             CursorEffectStatus::Fallback(_)
         ));
         assert!(runtime.operations.outline_fallback);
+        assert!(runtime.operations.filter_saw_visible_outline[EffectKind::Zoom.index()]);
+        assert!(runtime.operations.prepared_filter_inputs.contains(&(
+            EffectKind::Halo,
+            EffectLiveSource::Halo(PhysicalPoint::new(0, 0))
+        )));
         assert_eq!(
             runtime.operations.filter_lists[1],
             [1, 2, 3, 4, FakeOperations::outline_id(), 101, 103]
         );
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn filter_input_invalidation_refreshes_once_without_cursor_movement_churn() {
+        let mut runtime = CursorEffectsRuntime::new(FakeOperations::default());
+        let preferences = CoordinateToolPreferences::default();
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(PhysicalPoint::new(12, 24)),
+            false,
+        );
+        let initial_filter_calls = runtime.operations.filter_calls;
+        assert_eq!(initial_filter_calls, 2);
+
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(PhysicalPoint::new(13, 24)),
+            false,
+        );
+        assert_eq!(runtime.operations.filter_calls, initial_filter_calls);
+
+        // The native backend sends this signal only after a cheap surface's
+        // first upload/visibility transition or backing-DIB replacement.
+        runtime.invalidate_filter_lists();
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(PhysicalPoint::new(14, 24)),
+            false,
+        );
+        assert_eq!(runtime.operations.filter_calls, initial_filter_calls + 2);
+
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(PhysicalPoint::new(15, 24)),
+            false,
+        );
+        assert_eq!(runtime.operations.filter_calls, initial_filter_calls + 2);
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn filter_input_invalidation_does_not_reset_a_latched_native_failure() {
+        let mut operations = FakeOperations::default();
+        operations.fail_next(FailurePoint::Initialize);
+        let mut runtime = CursorEffectsRuntime::new(operations);
+        let preferences = CoordinateToolPreferences::default();
+        reconcile(
+            &mut runtime,
+            requests(true, false),
+            &preferences,
+            Some(PhysicalPoint::new(12, 24)),
+            false,
+        );
+        assert!(matches!(
+            runtime.status().halo(),
+            CursorEffectStatus::Fallback(_)
+        ));
+        let initialize_attempts = runtime
+            .operations
+            .events
+            .iter()
+            .filter(|event| *event == "initialize")
+            .count();
+        assert_eq!(initialize_attempts, 1);
+
+        runtime.invalidate_filter_lists();
+        reconcile(
+            &mut runtime,
+            requests(true, false),
+            &preferences,
+            Some(PhysicalPoint::new(13, 24)),
+            false,
+        );
+        assert_eq!(
+            runtime
+                .operations
+                .events
+                .iter()
+                .filter(|event| *event == "initialize")
+                .count(),
+            initialize_attempts
+        );
+        assert_eq!(
+            runtime.operations.create_attempts[EffectKind::Halo.index()],
+            0
+        );
+        assert!(matches!(
+            runtime.status().halo(),
+            CursorEffectStatus::Fallback(_)
+        ));
         runtime.shutdown().unwrap();
     }
 
@@ -2849,6 +3198,13 @@ mod tests {
             .rposition(|event| event == "present:halo")
             .unwrap();
         assert!(filter < presentation);
+        let fallback_input = runtime
+            .operations
+            .events
+            .iter()
+            .rposition(|event| event == "present-filter-input:halo")
+            .unwrap();
+        assert!(fallback_input < filter);
 
         reconcile(
             &mut runtime,

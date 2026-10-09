@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use multi_launcher::coordinate_tool::{
-    CoordinateToolController, CoordinateToolPreferences, ZoomMode,
+    CoordinateToolController, CoordinateToolPreferences, CrosshairColor, ZoomMode,
 };
 use windows::Win32::Foundation::{
     BOOL, COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
@@ -48,7 +48,7 @@ const TIMER_MS: u32 = 350;
 const READBACK_WIDTH: i32 = 480;
 const READBACK_HEIGHT: i32 = 520;
 const AUTO_STAGE_HOLD: Duration = Duration::from_millis(1_400);
-const AUTO_STAGES: [&str; 15] = [
+const AUTO_STAGES: [&str; 16] = [
     "hud-only",
     "halo-0-percent",
     "halo-40-percent",
@@ -63,7 +63,8 @@ const AUTO_STAGES: [&str; 15] = [
     "repeat-halo-zoom-disable",
     "guides-visible-effects-off",
     "recreated-effects-after-guides",
-    "effects-off-after-guides",
+    "all-four-magenta-halo-ring",
+    "effects-off-after-ring",
 ];
 
 pub(super) fn run(auto: bool) -> Result<(), String> {
@@ -455,7 +456,7 @@ impl App {
             return;
         }
         let _ = self.dump_diagnostics();
-        if matches!(stage, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 13) {
+        if matches!(stage, 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 13 | 14) {
             let _ = self.save_readback(AUTO_STAGES[stage]);
         }
         let next = stage + 1;
@@ -567,6 +568,18 @@ impl App {
                 modes = (true, true, true, true);
             }
             14 => {
+                self.preferences.halo.radius = 20;
+                self.preferences.halo.inversion_strength = 0.4;
+                self.preferences.halo.outline_enabled = true;
+                self.preferences.halo.outline_color = CrosshairColor::new(255, 0, 255);
+                self.preferences.halo.outline_thickness = 2;
+                self.preferences.zoom.mode = ZoomMode::Offset;
+                self.preferences.zoom.zoom_factor = 2.0;
+                self.preferences.zoom.diameter = 160;
+                self.preferences.crosshair.virtual_desktop_guides = true;
+                modes = (true, true, true, true);
+            }
+            15 => {
                 modes.0 = true;
                 self.controller.set_hud_enabled(true)?;
                 self.controller.disable_effects()?;
@@ -574,7 +587,7 @@ impl App {
             _ => return Err(format!("invalid auto stage index {stage}")),
         }
         self.publish_preferences()?;
-        if stage != 9 && stage != 11 && stage != 14 {
+        if stage != 9 && stage != 11 && stage != 15 {
             self.apply_modes(modes)?;
         }
         let foreground_after = foreground_hwnd();

@@ -234,3 +234,51 @@ The native repair will present cheap surfaces first and invalidate filters only
 on presentation/backing transitions, without clearing failure latches.
 Original logs are preserved as `native-run-1.log` and `native-run-2.log` beside
 raw BMPs. The first run's observed defect remains required to pass after repair.
+### Production repair validation — third run
+
+PID27384 held the cursor at `(7,634)` through 16 stages. Presenting cheap
+surfaces before filtering fixed initial all-four guide feedback: zero red
+pixels in 4,203 lower-lens interior samples. The stationary repeat changed
+665 pixels in that region without cursor/source movement. Foreground remained
+`0x2e0e70`; exit0, one sampler/backend, 592 samples, 15 cheap renders, one
+shutdown, zero owned windows remaining. Log: `native-run-3.log`.
+
+The additional radius20 magenta-outline test exposed the same presentation
+ordering problem for a newly shown ordinary ring. Hidden backing preparation
+was insufficient: the physical ring had 126 magenta pixels, and its magnified
+feedback had 264 magenta pixels in the selected lens interior. Capture:
+`desktop-readback-all-four-magenta-halo-ring-1791508190675.bmp`.
+M5-C remains open until rings are presented at their live destinations before
+exclusions are refreshed and corrected actual pixels pass. No alternate
+capture backend is justified; the cheap-surface ordering fix passed natively.
+
+### Final production gate — fourth run (passed)
+
+After staging both auxiliary rings visibly at validated live destinations
+before filtering, PID31416 completed all16 stages with cursor fixed at
+`(1280,720)`. Native zoom source was `[1240,680..1320,760]` at exact2x;
+halo sources remained cursor-centered. In 7,449 lower-lens interior pixels,
+initial all-four guides produced zero red feedback pixels and the new
+radius20 magenta ring produced zero magenta feedback pixels. The actual
+physical ring contained212 magenta pixels, so this confirms exclusion rather
+than an absent ring. The same stationary lens region changed4,032 pixels
+between repeat captures. Direct composition and circular real-content zoom
+were inspected in the raw BMP, including text and the animated scene marker.
+
+Foreground stayed `0x1f10e40`. Effects-off preserved HUD and disabled both
+effects. Exit0, one sampler/backend, 817 samples, 15 cheap renders, one
+backend shutdown and zero owned windows remaining. No fixture process remains.
+Logs: `native-run-4.log`; final captures:
+`desktop-readback-all-four-default-guides-1791509018058.bmp`,
+`desktop-readback-all-four-stationary-repeat-1791509019853.bmp`,
+`desktop-readback-all-four-magenta-halo-ring-1791509032461.bmp`.
+
+The earlier native guide/ring defects are resolved. The production native
+core gate is complete together with first-run exact inversion/zoom evidence
+and the user's physical click-through/stationary-update confirmations.
+Remaining unperformed checks are mixed-DPI/multiple-monitor visual transitions,
+exclusive fullscreen/protected/game content, a sustained performance campaign,
+and unrelated picker/Screen Draw/OCR workflows. Signed geometry is unit-tested;
+these remaining environment checks are not represented as native passes.
+API-success protected black pixels are not heuristically diagnosed. The
+supported target is the ordinary composited Windows desktop.

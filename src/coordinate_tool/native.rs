@@ -534,6 +534,7 @@ mod windows_runtime {
         position: Option<PhysicalPoint>,
         visible: bool,
         dirty: bool,
+        filter_input_changed: bool,
     }
 
     impl LayeredSurface {
@@ -566,6 +567,7 @@ mod windows_runtime {
                 position: None,
                 visible: false,
                 dirty: true,
+                filter_input_changed: false,
             })
         }
 
@@ -576,7 +578,9 @@ mod windows_runtime {
                 .is_none_or(|dib| (dib.width, dib.height) != (width, height));
             if replace {
                 self.dirty = true;
-                self.dib = Some(LayeredDib::new(width, height)?);
+                let dib = LayeredDib::new(width, height)?;
+                self.dib = Some(dib);
+                self.filter_input_changed = true;
             }
             self.dib
                 .as_mut()
@@ -725,6 +729,7 @@ mod windows_runtime {
                     return Err("Coordinate passive surface did not become visible".into());
                 }
                 self.visible = true;
+                self.filter_input_changed = true;
             }
             Ok(())
         }
@@ -735,15 +740,16 @@ mod windows_runtime {
                     let _ = ShowWindow(self.hwnd, SW_HIDE);
                 }
                 self.visible = false;
+                self.filter_input_changed = true;
             }
+        }
+
+        fn take_filter_input_change(&mut self) -> bool {
+            mem::take(&mut self.filter_input_changed)
         }
 
         fn needs_upload(&self) -> bool {
             self.dirty || self.dib.is_none()
-        }
-
-        fn mark_dirty(&mut self) {
-            self.dirty = true;
         }
 
         fn is_visible(&self) -> bool {
@@ -938,10 +944,20 @@ mod windows_runtime {
                 if self.halo_outline.is_none() {
                     self.halo_outline = Some(LayeredSurface::new(self.instance)?);
                 }
+                let outline = self
+                    .halo_outline
+                    .as_mut()
+                    .ok_or_else(|| "Halo outline window is missing".to_string())?;
+                // Install the layered backing before Magnification receives
+                // this HWND in its filter list. It stays hidden until a live
+                // sample supplies the outline's physical destination. Keep
+                // an existing ring at its current destination while replacing
+                // its backing; a newly created hidden ring has no destination
+                // yet and can safely be prepared at the origin.
+                let destination = outline.position.unwrap_or(PhysicalPoint::new(0, 0));
+                outline.prepare_image(destination, &image)?;
+                let _ = outline.take_filter_input_change();
                 self.halo_outline_image = Some(image);
-                if let Some(outline) = self.halo_outline.as_mut() {
-                    outline.mark_dirty();
-                }
             } else {
                 self.hide_halo_outline()?;
                 self.halo_outline_image = None;
@@ -969,6 +985,10 @@ mod windows_runtime {
             if outline.is_visible() {
                 return Err("Halo outline remained visible after SW_HIDE".into());
             }
+            // The runtime already refreshes exclusions on outline
+            // configuration/backing changes; hiding this existing HWND does
+            // not change the exclusion set or its prepared layered content.
+            let _ = outline.take_filter_input_change();
             Ok(())
         }
 
@@ -985,7 +1005,11 @@ mod windows_runtime {
             } else {
                 outline.reposition_without_raising(origin)?;
             }
-            outline.show()
+            outline.show()?;
+            // Its HWND is already excluded and its backing was prepared
+            // before the runtime's filter pass.
+            let _ = outline.take_filter_input_change();
+            Ok(())
         }
 
         fn configure_zoom_outline_surface(
@@ -1001,10 +1025,19 @@ mod windows_runtime {
                 if self.zoom_outline.is_none() {
                     self.zoom_outline = Some(LayeredSurface::new(self.instance)?);
                 }
+                let outline = self
+                    .zoom_outline
+                    .as_mut()
+                    .ok_or_else(|| "Zoom outline window is missing".to_string())?;
+                // As with the halo ring, upload its backing while hidden so
+                // first Magnification filtering sees a ready layered HWND.
+                // If this is an already-presented ring, keep the replacement
+                // backing at its current destination instead of flashing it
+                // at the desktop origin.
+                let destination = outline.position.unwrap_or(PhysicalPoint::new(0, 0));
+                outline.prepare_image(destination, &image)?;
+                let _ = outline.take_filter_input_change();
                 self.zoom_outline_image = Some(image);
-                if let Some(outline) = self.zoom_outline.as_mut() {
-                    outline.mark_dirty();
-                }
             } else {
                 self.hide_zoom_outline()?;
                 self.zoom_outline_image = None;
@@ -1026,7 +1059,9 @@ mod windows_runtime {
             } else {
                 outline.reposition_without_raising(origin)?;
             }
-            outline.show()
+            outline.show()?;
+            let _ = outline.take_filter_input_change();
+            Ok(())
         }
 
         fn hide_zoom_outline(&mut self) -> Result<(), String> {
@@ -1037,6 +1072,7 @@ mod windows_runtime {
             if outline.is_visible() {
                 return Err("Zoom outline remained visible after SW_HIDE".into());
             }
+            let _ = outline.take_filter_input_change();
             Ok(())
         }
 
@@ -1691,6 +1727,68 @@ mod windows_runtime {
             Ok(())
         }
 
+        fn auxiliary_input_needs_presentation(&self, kind: EffectKind) -> bool {
+            let configured = match kind {
+                EffectKind::Halo => {
+                    self.halo_outline_configuration
+                        .is_some_and(|(_, fallback)| fallback)
+                        || self
+                            .halo_outline_configuration
+                            .is_some_and(|(preferences, _)| preferences.outline_enabled)
+                }
+                EffectKind::Zoom => self
+                    .zoom_outline_configuration
+                    .is_some_and(|preferences| preferences.outline_enabled),
+            };
+            let visible = match kind {
+                EffectKind::Halo => self
+                    .halo_outline
+                    .as_ref()
+                    .is_some_and(LayeredSurface::is_visible),
+                EffectKind::Zoom => self
+                    .zoom_outline
+                    .as_ref()
+                    .is_some_and(LayeredSurface::is_visible),
+            };
+            configured && !visible
+        }
+
+        fn present_filter_input(
+            &mut self,
+            kind: EffectKind,
+            source: &EffectLiveSource,
+        ) -> Result<(), String> {
+            match (kind, source) {
+                (EffectKind::Halo, EffectLiveSource::Halo(point))
+                    if self
+                        .halo_outline_configuration
+                        .is_some_and(|(_, fallback)| fallback) =>
+                {
+                    self.present_halo_fallback(*point)
+                }
+                (EffectKind::Halo, EffectLiveSource::Halo(point)) => {
+                    let diameter = self
+                        .surface(kind)
+                        .map(|surface| surface.diameter / 2)
+                        .ok_or_else(|| "Halo host is missing".to_string())?;
+                    let geometry = halo_geometry(*point, diameter).ok_or_else(|| {
+                        "Halo geometry overflows physical coordinates".to_string()
+                    })?;
+                    self.present_halo_outline(geometry.origin)
+                }
+                (EffectKind::Zoom, EffectLiveSource::Zoom(geometry)) => {
+                    self.present_zoom_outline(PhysicalPoint::new(
+                        geometry.lens.destination.left(),
+                        geometry.lens.destination.top(),
+                    ))
+                }
+                _ => Err(format!(
+                    "{} received mismatched live geometry before filtering",
+                    kind.label()
+                )),
+            }
+        }
+
         fn is_visible(&self, kind: EffectKind) -> bool {
             let host_visible = self
                 .surface(kind)
@@ -2187,6 +2285,15 @@ mod windows_runtime {
                 self.ordered_effect_stack = Some(signature);
             }
         }
+
+        fn take_cheap_filter_input_change(&mut self) -> bool {
+            // Evaluate every surface so each transition is consumed even if
+            // an earlier one already requested an exclusion refresh.
+            self.hud.take_filter_input_change()
+                | self.crosshair.take_filter_input_change()
+                | self.horizontal_guide.take_filter_input_change()
+                | self.vertical_guide.take_filter_input_change()
+        }
     }
 
     impl CoordinateSurfaceBackend for WindowsSurfaceBackend {
@@ -2231,13 +2338,6 @@ mod windows_runtime {
             ];
             self.halo_outline_enabled = frame.preferences.halo.outline_enabled;
             self.zoom_outline_enabled = frame.preferences.zoom.outline_enabled;
-            self.effects.reconcile(
-                EffectRequests::from_runtime(&frame.runtime_state),
-                &frame.preferences,
-                frame.current_sample.as_ref(),
-                &cheap_window_ids,
-                topology_invalidated,
-            );
             let mut errors = Vec::new();
             if let Err(error) = self.render_crosshair(frame, force) {
                 self.crosshair.hide();
@@ -2249,6 +2349,16 @@ mod windows_runtime {
                 self.hud.hide();
                 errors.push(error);
             }
+            if self.take_cheap_filter_input_change() {
+                self.effects.invalidate_filter_lists();
+            }
+            self.effects.reconcile(
+                EffectRequests::from_runtime(&frame.runtime_state),
+                &frame.preferences,
+                frame.current_sample.as_ref(),
+                &cheap_window_ids,
+                topology_invalidated,
+            );
             self.sync_effect_stack_order();
             errors.into_iter().next().map_or(Ok(()), Err)
         }

@@ -639,7 +639,7 @@ The orchestrator must provide:
 - M1-C: complete core feasibility gate. Retained isolated harness implemented and reviewed; standalone build, 1 matrix test, formatter/diff checks pass. Native startup/keyboard/independent lens disable and resource teardown observed. Bounded F12 composed desktop readback proved actual 0/40/100% inversion and exact 2x offset zoom, with captured sibling/self exclusion. User confirmed physical click-through and stationary live updates on October 8. Select Windows Magnification API for production integration. See `cursor_effects_feasibility.md` for evidence and remaining final acceptance limits.
 - M1-B checkpoint: `60689d88`.
 - Grouped A/B Nextest: first run 19 passed, 1 test-helper failure, 5 not run due to fail-fast. Negative rays now stop at the bitmap edge. Rerun with `--no-fail-fast`: **25 passed**, 4,940 unrelated tests skipped; compile produced 3 existing warnings in untouched `src/gui/render.rs`. Filter covered settings, crosshair/guide rendering, transactional adapter and worker update, dialog, exact parser, handler and mouse plugin.
-- M5-C: in progress; focused final compilation/Nextest gate, production-backend native scene/readback and documentation. No unrelated regression campaign. Final M5-A/B independent review found one P2: asynchronous effect status needs a bounded dialog repaint while open; correction is assigned to the sole writer. No other substantive M5-A/B findings. The production fixture implements a bounded opt-in automatic sequence driven directly through its own public controller (no synthetic desktop input), so production pixel/lifecycle evidence does not depend on general Computer Use after its Escape stop. First smoke build exposed a missing zoom-mode label helper in the committed M5-A dialog; the sole writer is correcting this attributable compile failure before continuing the gate.
+- M5-C: complete; the focused final compilation/111-test gate passed. Dialog label and bounded repaint findings are resolved (`a8ff0b2b`); retained production native fixture/evidence is committed (`f125a08b`). Actual native pixels exposed guide and then outline presentation-order exclusions; bounded transition-aware fixes passed targeted tests and final native acceptance (see completed gate below). No unrelated regression campaign.
 - Desktop access: ordinary Computer Use pixel capture times out, but the native fixture's bounded desktop readback includes composed output. Physical click automation fails because coordinate geometry is unavailable; user-performed click-through and stationary-update checks were explicitly confirmed.
 - Gap independent review: no substantive findings. Native harness review's child-redraw finding resolved; parent reentrancy and scene-creation fixes applied before native evaluation.
 - Test-helper remediation checkpoint: `9998849a`.
@@ -703,3 +703,32 @@ cargo nextest run --lib --no-fail-fast --no-capture -E 'test(coordinate_tool::se
   already visible. Preserve the existing ULW_ALPHA renderer; implement a narrow
   presentation-transition filter invalidation repair. This is a separate
   remediation after the retained fixture/evidence checkpoint; M5-C remains open.
+### M5-C completed acceptance and final verification
+
+- M5-C complete: all requested behavior is integrated through the existing
+  controller/worker, settings draft/Apply and typed command paths. Native
+  inversion, real circular cursor-centered zoom, initial simultaneous guide
+  exclusion, new-ring exclusion, stationary refresh and resource cleanup have
+  observed production evidence; user confirmed physical click-through.
+- Retained native fixture/evidence checkpoint: `f125a08b`. Subsequent native
+  presentation-order repairs form one coherent remediation: cheap surfaces and
+  both auxiliary rings must be presentable/visible at the validated destination
+  before Magnification filtering. Failure retry latches stay independent from
+  exclusion invalidation; ordinary motion does not churn filters. Review found
+  and resolved a visible-ring origin flash; final scoped review has no findings.
+- Earlier repair gate:42 passed/4,985 skipped. Final ring-ordering gate:
+  `cargo nextest run --lib --no-fail-fast --no-capture -E 'test(coordinate_tool::native_effects::tests::)'`
+  passed33/33, 4,996 skipped, 0.656s execution (1m35s compile). One new test-only
+  undefined point was fixed before the passing rerun. Only the three pre-existing
+  untouched gui/render.rs warnings remained.
+- Final `cargo build --bin coordinate_tool_smoke` passed1m04s;
+  `cargo fmt --all -- --check` and `git diff --check` passed. Earlier final
+  application check and111-test integration gate remain recorded above.
+- Final actual native run4 passed16 stages, exit0, no owned windows/process
+  remaining; 7,449 sampled lens pixels contained0 red-guide and0 magenta-ring
+  feedback, while the physical ring was present. Stationary repeat changed4,032
+  lens pixels. Detailed observations and unperformed environment checks are in
+  `cursor_effects_feasibility.md`. No unfiltered repository suite was run.
+- Final scope: original `mouse-improvements` branch retained; no push, history
+  rewrite, alternate capture backend, cursor replacement or new input hooks.
+  Cumulative file/diff inspection found only task-owned changes.
