@@ -1229,20 +1229,31 @@ pub fn note_alias_map_snapshot() -> HashMap<String, Vec<String>> {
 
 /// Return lightweight note link menu targets from the in-memory cache without hitting disk.
 pub fn note_link_menu_targets_snapshot() -> Vec<NoteLinkMenuTarget> {
-    CACHE
-        .lock()
-        .map(|c| {
-            c.notes
-                .iter()
-                .map(|note| NoteLinkMenuTarget {
-                    slug: note.slug.clone(),
-                    title: note.title.clone(),
-                    alias: note.alias.clone(),
-                    aliases: note.aliases.clone(),
-                })
-                .collect()
-        })
+    note_link_menu_targets_snapshot_with_version()
+        .map(|(_, targets)| targets)
         .unwrap_or_default()
+}
+
+/// Return `(revision, link targets)` captured together under the cache lock.
+///
+/// The target projection avoids cloning note bodies for link-menu refreshes.
+pub fn note_link_menu_targets_snapshot_with_version()
+-> anyhow::Result<(u64, Vec<NoteLinkMenuTarget>)> {
+    let cache = CACHE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note cache lock poisoned while taking link targets"))?;
+    let version = NOTE_VERSION.load(Ordering::SeqCst);
+    let targets = cache
+        .notes
+        .iter()
+        .map(|note| NoteLinkMenuTarget {
+            slug: note.slug.clone(),
+            title: note.title.clone(),
+            alias: note.alias.clone(),
+            aliases: note.aliases.clone(),
+        })
+        .collect();
+    Ok((version, targets))
 }
 
 /// Return a list of all unique tags from the cached notes.

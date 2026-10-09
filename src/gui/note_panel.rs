@@ -12,8 +12,9 @@ use crate::notes_markdown::{
 use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
     available_tags, extract_aliases, image_files, load_notes, note_alias_map_snapshot,
-    note_cache_snapshot, note_link_menu_targets_snapshot, note_version, resolve_note_query,
-    save_note, save_note_image_asset,
+    note_cache_snapshot, note_cache_snapshot_with_version,
+    note_link_menu_targets_snapshot_with_version, note_version, resolve_note_query, save_note,
+    save_note_image_asset,
 };
 use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good, todo_version};
 use crate::process::configure_background_command;
@@ -34,13 +35,22 @@ use std::process::Command;
 use std::{
     env,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use url::Url;
 
 const BACKLINK_PAGE_SIZE: usize = 12;
 const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
+const HEAVY_RECOMPUTE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
+
+#[derive(Clone, Copy)]
+struct HeavyRefreshRetry {
+    notes_revision: u64,
+    todo_revision: u64,
+    backlinks_enabled: bool,
+    retry_at: Instant,
+}
 
 #[derive(Debug)]
 pub(super) struct ClipboardRgbaData {
@@ -745,10 +755,12 @@ pub struct NotePanel {
     last_edit_at_secs: Option<f64>,
     last_notes_version: u64,
     last_todo_revision: u64,
-    last_backlink_content_hash: Option<u64>,
-    last_alias_map_hash: u64,
+    last_backlinks_enabled: Option<bool>,
+    heavy_refresh_retry: Option<HeavyRefreshRetry>,
     #[cfg(test)]
     heavy_recompute_count: usize,
+    #[cfg(test)]
+    fail_next_heavy_snapshot: bool,
     #[cfg(test)]
     last_ui_sections: NotePanelUiSections,
     #[cfg(test)]
@@ -1029,10 +1041,12 @@ impl NotePanel {
             last_edit_at_secs: None,
             last_notes_version: 0,
             last_todo_revision: 0,
-            last_backlink_content_hash: None,
-            last_alias_map_hash: 0,
+            last_backlinks_enabled: None,
+            heavy_refresh_retry: None,
             #[cfg(test)]
             heavy_recompute_count: 0,
+            #[cfg(test)]
+            fail_next_heavy_snapshot: false,
             #[cfg(test)]
             last_ui_sections: NotePanelUiSections::default(),
             #[cfg(test)]
@@ -1151,6 +1165,7 @@ impl NotePanel {
         self.note.alias = self.note.aliases.first().cloned();
         self.fast_derived_dirty = true;
         self.heavy_recompute_requested = true;
+        self.heavy_refresh_retry = None;
     }
 
     fn save_alias_metadata_change(&mut self, app: &mut LauncherApp) {
@@ -1203,57 +1218,85 @@ impl NotePanel {
         }
     }
 
-    fn refresh_heavy_derived(&mut self, force: bool, backlinks_enabled: bool) {
+    fn refresh_heavy_derived(&mut self, force: bool, backlinks_enabled: bool) -> bool {
         let current_notes_version = note_version();
         let current_todo_revision = todo_version();
-        let current_content_hash = self.content_hash();
-        let notes = note_cache_snapshot();
-        let current_alias_map_hash = alias_map_hash(&notes);
+        let settings_changed = self.last_backlinks_enabled != Some(backlinks_enabled);
+        let refresh_needed = force
+            || settings_changed
+            || self.last_notes_version != current_notes_version
+            || self.last_todo_revision != current_todo_revision
+            || self.heavy_recompute_requested
+            || self.heavy_refresh_retry.is_some();
+        if !refresh_needed {
+            return true;
+        }
 
         if !backlinks_enabled {
             self.last_notes_version = current_notes_version;
             self.last_todo_revision = current_todo_revision;
-            self.last_backlink_content_hash = Some(current_content_hash);
-            self.last_alias_map_hash = current_alias_map_hash;
+            self.last_backlinks_enabled = Some(false);
             self.heavy_recompute_requested = false;
-            return;
+            self.heavy_refresh_retry = None;
+            return true;
         }
 
-        if !force
-            && self.last_notes_version == current_notes_version
-            && self.last_todo_revision == current_todo_revision
-            && self.last_backlink_content_hash == Some(current_content_hash)
-            && self.last_alias_map_hash == current_alias_map_hash
-        {
-            self.heavy_recompute_requested = false;
-            return;
-        }
+        #[cfg(test)]
+        let snapshot = if std::mem::take(&mut self.fail_next_heavy_snapshot) {
+            Err(anyhow::anyhow!("injected note snapshot failure"))
+        } else {
+            note_cache_snapshot_with_version()
+        };
+        #[cfg(not(test))]
+        let snapshot = note_cache_snapshot_with_version();
+
+        let (snapshot_notes_revision, notes) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                self.heavy_refresh_retry = Some(HeavyRefreshRetry {
+                    notes_revision: current_notes_version,
+                    todo_revision: current_todo_revision,
+                    backlinks_enabled,
+                    retry_at: Instant::now() + HEAVY_RECOMPUTE_RETRY_DELAY,
+                });
+                return false;
+            }
+        };
 
         let _recompute_timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::NoteHeavyRecompute);
         let todos = load_todos_or_last_good(TODO_FILE);
-        self.derived.todo_label_map = todos
+        let todo_label_map = todos
             .iter()
-            .filter(|t| !t.id.is_empty())
-            .map(|t| (t.id.clone(), t.text.clone()))
+            .filter(|todo| !todo.id.is_empty())
+            .map(|todo| (todo.id.clone(), todo.text.clone()))
             .collect::<HashMap<_, _>>();
 
-        self.derived.backlink_rows_linked_todos =
+        let linked_todo_rows =
             backlink_rows_for_note(&self.note, BacklinkTab::LinkedTodos, &todos, &notes);
-        self.derived.backlink_rows_related_notes =
+        let related_note_rows =
             backlink_rows_for_note(&self.note, BacklinkTab::RelatedNotes, &todos, &notes);
-        self.derived.backlink_rows_mentions =
+        let mention_rows =
             backlink_rows_for_note(&self.note, BacklinkTab::Mentions, &todos, &notes);
 
-        self.last_notes_version = current_notes_version;
+        self.derived.todo_label_map = todo_label_map;
+        self.derived.backlink_rows_linked_todos = linked_todo_rows;
+        self.derived.backlink_rows_related_notes = related_note_rows;
+        self.derived.backlink_rows_mentions = mention_rows;
+
+        // The note revision came with this exact snapshot. Todo revisions are
+        // sampled before loading so a concurrent write can only leave an older
+        // applied revision and cause a safe follow-up recompute.
+        self.last_notes_version = snapshot_notes_revision;
         self.last_todo_revision = current_todo_revision;
-        self.last_backlink_content_hash = Some(current_content_hash);
-        self.last_alias_map_hash = current_alias_map_hash;
+        self.last_backlinks_enabled = Some(true);
         self.heavy_recompute_requested = false;
+        self.heavy_refresh_retry = None;
         #[cfg(test)]
         {
             self.heavy_recompute_count += 1;
         }
+        true
     }
 
     fn content_hash(&self) -> u64 {
@@ -1283,6 +1326,7 @@ impl NotePanel {
         self.markdown_cache.clear_scrollable();
         self.fast_derived_dirty = true;
         self.heavy_recompute_requested = true;
+        self.heavy_refresh_retry = None;
         self.last_edit_at_secs = Some(now_secs);
     }
 
@@ -1306,35 +1350,82 @@ impl NotePanel {
         let mut refresh_check_timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::NoteRefreshCheck);
         refresh_check_timer.set_work_units(0);
-        let notes_changed = self.last_notes_version != note_version();
-        let todos_changed = self.last_todo_revision != todo_version();
-        let alias_changed = self.last_alias_map_hash != alias_map_hash(&note_cache_snapshot());
-        let content_changed = self.last_backlink_content_hash != Some(self.content_hash());
-        let debounce_elapsed = self
-            .last_edit_at_secs
-            .map(|t| ctx.input(|i| i.time - t) >= HEAVY_RECOMPUTE_IDLE_DEBOUNCE.as_secs_f64())
-            .unwrap_or(false);
-        if notes_changed || todos_changed || alias_changed || (content_changed && debounce_elapsed)
-        {
+        let current_notes_version = note_version();
+        let current_todo_revision = todo_version();
+        let notes_changed = self.last_notes_version != current_notes_version;
+        let todos_changed = self.last_todo_revision != current_todo_revision;
+        let settings_changed = self.last_backlinks_enabled != Some(backlinks_enabled);
+        let now_secs = ctx.input(|i| i.time);
+        let debounce_remaining = self.last_edit_at_secs.map(|edited_at| {
+            let remaining = edited_at + HEAVY_RECOMPUTE_IDLE_DEBOUNCE.as_secs_f64() - now_secs;
+            if remaining.is_finite() {
+                Duration::from_secs_f64(
+                    remaining.clamp(0.0, HEAVY_RECOMPUTE_IDLE_DEBOUNCE.as_secs_f64()),
+                )
+            } else {
+                HEAVY_RECOMPUTE_IDLE_DEBOUNCE
+            }
+        });
+        let local_edit_due = self.heavy_recompute_requested
+            && debounce_remaining
+                .map(|remaining| remaining.is_zero())
+                .unwrap_or(true);
+        let refresh_needed = notes_changed
+            || todos_changed
+            || settings_changed
+            || local_edit_due
+            || self.heavy_refresh_retry.is_some();
+
+        if refresh_needed {
+            let retry_matches_current_inputs = self.heavy_refresh_retry.is_some_and(|retry| {
+                retry.notes_revision == current_notes_version
+                    && retry.todo_revision == current_todo_revision
+                    && retry.backlinks_enabled == backlinks_enabled
+            });
+            if retry_matches_current_inputs && let Some(retry) = self.heavy_refresh_retry {
+                let retry_remaining = retry.retry_at.saturating_duration_since(Instant::now());
+                if !retry_remaining.is_zero() {
+                    drop(refresh_check_timer);
+                    self.request_heavy_refresh_retry(ctx);
+                    return;
+                }
+            }
+
             refresh_check_timer.set_work_units(1);
             drop(refresh_check_timer);
-            self.refresh_heavy_derived(false, backlinks_enabled);
+            if !self.refresh_heavy_derived(false, backlinks_enabled) {
+                self.request_heavy_refresh_retry(ctx);
+            }
             return;
         }
 
         drop(refresh_check_timer);
-        if self.heavy_recompute_requested {
-            ctx.request_repaint_after(HEAVY_RECOMPUTE_IDLE_DEBOUNCE);
+        if self.heavy_recompute_requested
+            && let Some(debounce_remaining) = debounce_remaining
+            && !debounce_remaining.is_zero()
+        {
+            ctx.request_repaint_after(debounce_remaining);
         }
     }
 
-    fn refresh_link_menu_targets_if_needed(&mut self) {
+    fn request_heavy_refresh_retry(&self, ctx: &egui::Context) {
+        if let Some(retry) = self.heavy_refresh_retry {
+            let retry_remaining = retry.retry_at.saturating_duration_since(Instant::now());
+            ctx.request_repaint_after(retry_remaining);
+        }
+    }
+
+    fn refresh_link_menu_targets_if_needed(&mut self) -> Option<u64> {
         let current_version = note_version();
         if self.link_menu_targets_version == Some(current_version) {
-            return;
+            return Some(current_version);
         }
 
-        self.link_menu_targets = note_link_menu_targets_snapshot()
+        let (target_revision, targets) = match note_link_menu_targets_snapshot_with_version() {
+            Ok(snapshot) => snapshot,
+            Err(_) => return None,
+        };
+        self.link_menu_targets = targets
             .into_iter()
             .map(|target: NoteLinkMenuTarget| LinkMenuResult {
                 display_title: target.display_title().to_string(),
@@ -1342,18 +1433,19 @@ impl NotePanel {
                 slug: target.slug,
             })
             .collect();
-        self.link_menu_targets_version = Some(current_version);
+        self.link_menu_targets_version = Some(target_revision);
         self.invalidate_link_menu_results();
         #[cfg(test)]
         {
             self.link_menu_target_refresh_count += 1;
         }
+        Some(target_revision)
     }
 
     fn refresh_link_menu_results_if_needed(&mut self) {
-        self.refresh_link_menu_targets_if_needed();
-
-        let current_version = note_version();
+        let Some(current_version) = self.refresh_link_menu_targets_if_needed() else {
+            return;
+        };
         let query = self.link_search.trim().to_lowercase();
         let key = LinkMenuResultsKey {
             notes_version: current_version,
@@ -1598,6 +1690,7 @@ impl NotePanel {
         self.link_menu_targets_version = None;
         self.fast_derived_dirty = true;
         self.heavy_recompute_requested = true;
+        self.heavy_refresh_retry = None;
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -1886,6 +1979,7 @@ impl NotePanel {
                     });
                 });
         }
+        self.request_heavy_refresh_retry(ctx);
     }
 
     fn render_toolbar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) -> bool {
@@ -3399,6 +3493,7 @@ impl NotePanel {
             .collect();
         self.fast_derived_dirty = true;
         self.heavy_recompute_requested = true;
+        self.heavy_refresh_retry = None;
         if let Some(first) = self.note.content.lines().next()
             && let Some(t) = first.strip_prefix("# ")
         {
@@ -4371,24 +4466,6 @@ fn format_note_updated(note: &Note) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn alias_map_hash(notes: &[Note]) -> u64 {
-    let mut timer =
-        crate::performance::MetricTimer::start(crate::performance::Metric::NoteAliasHash);
-    let mut aliases: Vec<(&str, &str)> = notes
-        .iter()
-        .filter_map(|note| {
-            note.alias
-                .as_deref()
-                .map(|alias| (alias, note.slug.as_str()))
-        })
-        .collect();
-    timer.set_work_units(aliases.len() as u64);
-    aliases.sort_unstable();
-    let mut hasher = DefaultHasher::new();
-    aliases.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn note_display_with_secondary(note: &Note) -> String {
     if let Some(alias) = note.alias.as_deref().filter(|a| !a.trim().is_empty()) {
         format!("{alias} ({} · {})", note.title, note.slug)
@@ -4707,6 +4784,8 @@ mod tests {
             assert_eq!(derived_workload_signature(&panel), initial_derived);
             assert_eq!(panel.heavy_recompute_count, initial_recomputes);
             assert_eq!(idle_metrics[0].work_units, 0);
+            assert_eq!(idle_metrics[1].calls, 0);
+            assert_eq!(idle_metrics[2].calls, 0);
             assert_eq!(idle_metrics[3].calls, 0);
             workloads::emit_summary(
                 &format!("note-{count}-idle-refresh-check"),
@@ -4780,6 +4859,32 @@ mod tests {
             aliases: Vec::new(),
             entity_refs: Vec::new(),
         }
+    }
+
+    fn backlink_rows_signature(
+        rows: &[BacklinkRow],
+    ) -> Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )> {
+        rows.iter()
+            .map(|row| {
+                (
+                    row.title.clone(),
+                    row.type_badge.clone(),
+                    row.updated.clone(),
+                    row.snippet.clone(),
+                    row.reason.clone(),
+                    row.note_slug.clone(),
+                    row.todo_id.clone(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -7022,6 +7127,33 @@ More text.
     }
 
     #[test]
+    fn empty_link_menu_targets_are_cached_at_their_captured_revision() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.refresh_cache();
+
+        let mut panel = NotePanel::from_note(note_with_slug("Current", "current"));
+        panel.refresh_link_menu_results_if_needed();
+        let target_refresh_count = panel.link_menu_target_refresh_count;
+        let captured_revision = panel
+            .link_menu_targets_version
+            .expect("empty targets still have a cache revision");
+        assert!(panel.link_menu_targets.is_empty());
+        assert_eq!(captured_revision, note_version());
+        assert_eq!(
+            panel
+                .link_menu_results_key
+                .as_ref()
+                .expect("results should be keyed after target capture")
+                .notes_version,
+            captured_revision
+        );
+
+        panel.refresh_link_menu_results_if_needed();
+
+        assert_eq!(panel.link_menu_target_refresh_count, target_refresh_count);
+    }
+
+    #[test]
     fn link_menu_search_reuses_targets_but_refreshes_results() {
         let notes_dir = TempNotesDir::new();
         notes_dir.write_note("alpha.md", "# Alpha\n\nAlpha body");
@@ -7073,12 +7205,30 @@ More text.
         let mut panel = NotePanel::from_note(note_with_slug("Current", "current"));
         let results = panel.link_menu_results_snapshot();
         assert!(results.iter().any(|result| result.display_title == "Alpha"));
+        assert_eq!(panel.link_menu_targets_version, Some(note_version()));
+        assert_eq!(
+            panel
+                .link_menu_results_key
+                .as_ref()
+                .expect("link menu results should be cached")
+                .notes_version,
+            panel.link_menu_targets_version.expect("targets are cached")
+        );
 
         notes_dir.write_note("beta.md", "# Beta\n\nBeta body");
         notes_dir.refresh_cache();
         let results = panel.link_menu_results_snapshot();
 
         assert!(results.iter().any(|result| result.display_title == "Beta"));
+        assert_eq!(panel.link_menu_targets_version, Some(note_version()));
+        assert_eq!(
+            panel
+                .link_menu_results_key
+                .as_ref()
+                .expect("link menu results should be cached")
+                .notes_version,
+            panel.link_menu_targets_version.expect("targets are cached")
+        );
     }
 
     #[test]
@@ -7964,6 +8114,56 @@ Body visible always",
     }
 
     #[test]
+    fn backlink_setting_transitions_rebuild_only_when_enabled_and_preserve_rows() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("current.md", "# Current\n\nBody");
+        notes_dir.write_note("other.md", "# Other\n\n[[Current]]");
+        notes_dir.refresh_cache();
+
+        let current = note_cache_snapshot()
+            .into_iter()
+            .find(|note| note.slug == "current")
+            .expect("current note should exist in cache");
+        let mut panel = NotePanel::from_note_with_details_and_view_mode_and_backlink_setting(
+            current,
+            true,
+            NoteViewMode::Preview,
+            false,
+        );
+        assert_eq!(panel.heavy_recompute_count, 0);
+        assert!(panel.derived.backlink_rows_related_notes.is_empty());
+
+        let ctx = egui::Context::default();
+        let refresh_with_setting = |panel: &mut NotePanel, enabled| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    time: Some(1.0),
+                    ..Default::default()
+                },
+                |ctx| panel.maybe_refresh_heavy_derived(ctx, enabled),
+            );
+        };
+
+        refresh_with_setting(&mut panel, true);
+        assert_eq!(panel.heavy_recompute_count, 1);
+        assert_eq!(panel.last_backlinks_enabled, Some(true));
+        assert_eq!(panel.derived.backlink_rows_related_notes.len(), 1);
+        let enabled_rows = backlink_rows_signature(&panel.derived.backlink_rows_related_notes);
+
+        refresh_with_setting(&mut panel, false);
+        assert_eq!(panel.heavy_recompute_count, 1);
+        assert_eq!(panel.last_backlinks_enabled, Some(false));
+
+        refresh_with_setting(&mut panel, true);
+        assert_eq!(panel.heavy_recompute_count, 2);
+        assert_eq!(panel.last_backlinks_enabled, Some(true));
+        assert_eq!(
+            backlink_rows_signature(&panel.derived.backlink_rows_related_notes),
+            enabled_rows
+        );
+    }
+
+    #[test]
     fn backlink_rows_ignore_fenced_code_links() {
         let current = Note {
             title: "Central Note".into(),
@@ -8278,6 +8478,227 @@ Body with [[Other]]"
         }
 
         assert_eq!(panel.heavy_recompute_count, initial);
+    }
+
+    #[test]
+    fn unchanged_heavy_check_skips_note_snapshot_alias_hash_and_recompute() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
+        let initial_recomputes = panel.heavy_recompute_count;
+        let ctx = egui::Context::default();
+        crate::performance::reset_metrics();
+
+        panel.maybe_refresh_heavy_derived(&ctx, true);
+
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes);
+        if crate::performance::enabled() {
+            let metrics = crate::performance::snapshot_metrics();
+            assert_eq!(
+                metrics[crate::performance::Metric::NoteSnapshot as usize].calls,
+                0
+            );
+            assert_eq!(
+                metrics[crate::performance::Metric::NoteAliasHash as usize].calls,
+                0
+            );
+            assert_eq!(
+                metrics[crate::performance::Metric::NoteHeavyRecompute as usize].calls,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn pending_external_mutation_without_edit_time_refreshes_immediately() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
+        let initial_recomputes = panel.heavy_recompute_count;
+        panel.invalidate_note_derived_data_after_external_mutation();
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(0.0),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
+        assert!(!panel.heavy_recompute_requested);
+    }
+
+    #[test]
+    fn todo_revision_change_bypasses_local_edit_debounce() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
+        let initial_recomputes = panel.heavy_recompute_count;
+        panel.mark_content_changed(f64::MAX);
+        panel.last_todo_revision = todo_version().wrapping_add(1);
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(0.0),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
+        assert!(!panel.heavy_recompute_requested);
+    }
+
+    #[test]
+    fn persisted_note_revision_bypasses_local_edit_debounce() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("alpha.md", "# Alpha\n\nBody");
+        notes_dir.refresh_cache();
+
+        let mut panel = NotePanel::from_note(empty_note("# Current\n\nBody"));
+        let initial_recomputes = panel.heavy_recompute_count;
+        panel.mark_content_changed(f64::MAX);
+        notes_dir.write_note("beta.md", "# Beta\n\nBody");
+        notes_dir.refresh_cache();
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(0.0),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
+        assert_eq!(panel.last_notes_version, note_version());
+        assert!(!panel.heavy_recompute_requested);
+    }
+
+    #[test]
+    fn changed_note_revision_and_setting_bypass_retry_deadline() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("alpha.md", "# Alpha\n\nBody");
+        notes_dir.refresh_cache();
+
+        let mut panel = NotePanel::from_note(empty_note("# Current\n\nBody"));
+        let initial_recomputes = panel.heavy_recompute_count;
+        let initial_notes_revision = panel.last_notes_version;
+        panel.heavy_refresh_retry = Some(HeavyRefreshRetry {
+            notes_revision: initial_notes_revision,
+            todo_revision: panel.last_todo_revision,
+            backlinks_enabled: true,
+            retry_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        });
+
+        notes_dir.write_note("beta.md", "# Beta\n\nBody");
+        notes_dir.refresh_cache();
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(0.0),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
+        assert!(panel.heavy_refresh_retry.is_none());
+
+        panel.heavy_refresh_retry = Some(HeavyRefreshRetry {
+            notes_revision: panel.last_notes_version,
+            todo_revision: panel.last_todo_revision,
+            backlinks_enabled: true,
+            retry_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
+        });
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(0.1),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, false),
+        );
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
+        assert_eq!(panel.last_backlinks_enabled, Some(false));
+        assert!(panel.heavy_refresh_retry.is_none());
+    }
+
+    #[test]
+    fn failed_heavy_snapshot_retains_rows_and_retries_after_cooldown() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
+        let initial_signature = derived_workload_signature(&panel);
+        let initial_notes_revision = panel.last_notes_version;
+        let initial_todo_revision = panel.last_todo_revision;
+        let initial_applied_setting = panel.last_backlinks_enabled;
+        let initial_recomputes = panel.heavy_recompute_count;
+        panel.fail_next_heavy_snapshot = true;
+
+        assert!(!panel.refresh_heavy_derived(true, true));
+
+        assert_eq!(derived_workload_signature(&panel), initial_signature);
+        assert_eq!(panel.last_notes_version, initial_notes_revision);
+        assert_eq!(panel.last_todo_revision, initial_todo_revision);
+        assert_eq!(panel.last_backlinks_enabled, initial_applied_setting);
+        assert!(!panel.heavy_recompute_requested);
+        assert!(panel.heavy_refresh_retry.is_some());
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes);
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(0.1),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes);
+
+        panel
+            .heavy_refresh_retry
+            .as_mut()
+            .expect("force failure should schedule a retry")
+            .retry_at = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(0.2),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
+        assert!(!panel.heavy_recompute_requested);
+        assert!(panel.heavy_refresh_retry.is_none());
+    }
+
+    #[test]
+    fn new_draft_after_failed_refresh_uses_normal_edit_debounce() {
+        let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
+        let initial_recomputes = panel.heavy_recompute_count;
+        panel.fail_next_heavy_snapshot = true;
+        assert!(!panel.refresh_heavy_derived(true, true));
+        assert!(panel.heavy_refresh_retry.is_some());
+
+        panel.note.content.push_str("\nDraft");
+        panel.mark_content_changed(10.0);
+        assert!(panel.heavy_refresh_retry.is_none());
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(10.1),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes);
+        assert!(panel.heavy_recompute_requested);
+
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(10.251),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+        assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
+        assert!(!panel.heavy_recompute_requested);
     }
 
     #[test]
