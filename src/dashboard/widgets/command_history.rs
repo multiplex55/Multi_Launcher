@@ -56,6 +56,12 @@ pub struct CommandHistoryWidget {
     last_pins_load: Instant,
 }
 
+struct HistoryResolutionContext<'a> {
+    snapshot: &'a crate::dashboard::data_cache::DashboardDataSnapshot,
+    commands: &'a [Action],
+    actions_by_id: &'a std::collections::HashMap<String, Action>,
+}
+
 impl CommandHistoryWidget {
     pub fn new(cfg: CommandHistoryConfig) -> Self {
         Self {
@@ -125,19 +131,18 @@ impl CommandHistoryWidget {
     }
 
     fn resolve_action(
-        ctx: &DashboardContext<'_>,
+        ctx: &HistoryResolutionContext<'_>,
         action_id: &str,
         args: Option<&str>,
         saved_action: &Action,
     ) -> Option<Action> {
         let _timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::HistoryResolve);
-        let snapshot = ctx.data_cache.snapshot();
         if action_id.starts_with("snippet:run:") {
             return crate::plugins::snippets::resolve_snippet_run_action_from_entries(
                 action_id,
                 args,
-                &snapshot.snippets,
+                &ctx.snapshot.snippets,
             );
         }
 
@@ -145,23 +150,16 @@ impl CommandHistoryWidget {
             return Some(action.clone());
         }
 
-        let commands = {
-            let mut catalog_timer = crate::performance::MetricTimer::start(
-                crate::performance::Metric::HistoryCatalogBuild,
-            );
-            catalog_timer.set_work_units(0);
-            let commands = ctx.plugins.commands_filtered(ctx.enabled_plugins);
-            catalog_timer.set_work_units(commands.len() as u64);
-            commands
-        };
-        if let Some(action) = commands
-            .into_iter()
+        if let Some(action) = ctx
+            .commands
+            .iter()
             .find(|action| action.action == action_id && action.args.as_deref() == args)
         {
-            return Some(action);
+            return Some(action.clone());
         }
 
-        if let Some(action) = snapshot
+        if let Some(action) = ctx
+            .snapshot
             .processes
             .iter()
             .find(|action| action.action == action_id && action.args.as_deref() == args)
@@ -169,7 +167,8 @@ impl CommandHistoryWidget {
             return Some(action.clone());
         }
 
-        if let Some(fav) = snapshot
+        if let Some(fav) = ctx
+            .snapshot
             .favorites
             .iter()
             .find(|fav| fav.action == action_id && fav.args.as_deref() == args)
@@ -183,7 +182,7 @@ impl CommandHistoryWidget {
         }
 
         if let Some(slug) = action_id.strip_prefix("note:open:")
-            && let Some(note) = snapshot.notes.iter().find(|note| note.slug == slug)
+            && let Some(note) = ctx.snapshot.notes.iter().find(|note| note.slug == slug)
         {
             return Some(Action {
                 label: note.alias.as_ref().unwrap_or(&note.title).clone(),
@@ -196,7 +195,7 @@ impl CommandHistoryWidget {
         if let Some(idx) = action_id
             .strip_prefix("clipboard:copy:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(entry) = snapshot.clipboard_history.get(idx)
+            && let Some(entry) = ctx.snapshot.clipboard_history.get(idx)
         {
             return Some(Action {
                 label: entry.clone(),
@@ -209,7 +208,7 @@ impl CommandHistoryWidget {
         if let Some(idx) = action_id
             .strip_prefix("todo:done:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(todo) = snapshot.todos.get(idx)
+            && let Some(todo) = ctx.snapshot.todos.get(idx)
         {
             return Some(Action {
                 label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
@@ -222,7 +221,7 @@ impl CommandHistoryWidget {
         if let Some(idx) = action_id
             .strip_prefix("todo:edit:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(todo) = snapshot.todos.get(idx)
+            && let Some(todo) = ctx.snapshot.todos.get(idx)
         {
             return Some(Action {
                 label: format!("{} {}", if todo.done { "[x]" } else { "[ ]" }, todo.text),
@@ -235,7 +234,7 @@ impl CommandHistoryWidget {
         if let Some(idx) = action_id
             .strip_prefix("todo:remove:")
             .and_then(|s| s.parse::<usize>().ok())
-            && let Some(todo) = snapshot.todos.get(idx)
+            && let Some(todo) = ctx.snapshot.todos.get(idx)
         {
             return Some(Action {
                 label: format!("Remove todo {}", todo.text),
@@ -246,7 +245,7 @@ impl CommandHistoryWidget {
         }
 
         if let Some(alias) = action_id.strip_prefix("snippet:edit:")
-            && snapshot.snippets.iter().any(|s| s.alias == alias)
+            && ctx.snapshot.snippets.iter().any(|s| s.alias == alias)
         {
             return Some(Action {
                 label: format!("Edit snippet {alias}"),
@@ -257,7 +256,7 @@ impl CommandHistoryWidget {
         }
 
         if let Some(alias) = action_id.strip_prefix("snippet:remove:")
-            && snapshot.snippets.iter().any(|s| s.alias == alias)
+            && ctx.snapshot.snippets.iter().any(|s| s.alias == alias)
         {
             return Some(Action {
                 label: format!("Remove snippet {alias}"),
@@ -281,7 +280,10 @@ impl CommandHistoryWidget {
         None
     }
 
-    fn entry_from_history(ctx: &DashboardContext<'_>, entry: &HistoryEntry) -> DisplayEntry {
+    fn entry_from_history(
+        ctx: &HistoryResolutionContext<'_>,
+        entry: &HistoryEntry,
+    ) -> DisplayEntry {
         let resolved = Self::resolve_action(
             ctx,
             &entry.action.action,
@@ -299,7 +301,7 @@ impl CommandHistoryWidget {
         }
     }
 
-    fn entry_from_pin(ctx: &DashboardContext<'_>, pin: &HistoryPin) -> DisplayEntry {
+    fn entry_from_pin(ctx: &HistoryResolutionContext<'_>, pin: &HistoryPin) -> DisplayEntry {
         let fallback = Action {
             label: pin.label.clone(),
             desc: pin.desc.clone(),
@@ -332,18 +334,34 @@ impl CommandHistoryWidget {
                 .unwrap_or_default();
         prepare_timer.set_work_units(history_entries.len() as u64);
 
+        let snapshot = ctx.data_cache.snapshot();
+        let commands = {
+            let mut catalog_timer = crate::performance::MetricTimer::start(
+                crate::performance::Metric::HistoryCatalogBuild,
+            );
+            catalog_timer.set_work_units(0);
+            let commands = ctx.plugins.commands_filtered(ctx.enabled_plugins);
+            catalog_timer.set_work_units(commands.len() as u64);
+            commands
+        };
+        let resolution = HistoryResolutionContext {
+            snapshot: &snapshot,
+            commands: &commands,
+            actions_by_id: ctx.actions_by_id,
+        };
+
         let mut entries: Vec<DisplayEntry> = Vec::new();
         if self.cfg.show_pinned_only {
             entries.extend(
                 self.cached_pins
                     .iter()
-                    .map(|pin| Self::entry_from_pin(ctx, pin)),
+                    .map(|pin| Self::entry_from_pin(&resolution, pin)),
             );
         } else {
             let mut pinned: Vec<DisplayEntry> = self
                 .cached_pins
                 .iter()
-                .map(|pin| Self::entry_from_pin(ctx, pin))
+                .map(|pin| Self::entry_from_pin(&resolution, pin))
                 .collect();
             pinned.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
             entries.extend(pinned);
@@ -352,7 +370,7 @@ impl CommandHistoryWidget {
                 if Self::is_pinned(&self.cached_pins, entry) {
                     continue;
                 }
-                entries.push(Self::entry_from_history(ctx, entry));
+                entries.push(Self::entry_from_history(&resolution, entry));
             }
         }
 
@@ -466,7 +484,9 @@ mod tests {
     use crate::dashboard::data_cache::{DashboardDataCache, DashboardDataSnapshot};
     use crate::performance::{Metric, workloads};
     use crate::plugin::{Plugin, PluginManager};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, RwLock};
 
     fn context<'a>(
         data_cache: &'a DashboardDataCache,
@@ -475,12 +495,23 @@ mod tests {
         actions_by_id: &'a HashMap<String, Action>,
         usage: &'a HashMap<String, u32>,
     ) -> DashboardContext<'a> {
+        context_with_enabled(data_cache, plugins, actions, actions_by_id, usage, None)
+    }
+
+    fn context_with_enabled<'a>(
+        data_cache: &'a DashboardDataCache,
+        plugins: &'a PluginManager,
+        actions: &'a [Action],
+        actions_by_id: &'a HashMap<String, Action>,
+        usage: &'a HashMap<String, u32>,
+        enabled_plugins: Option<&'a HashSet<String>>,
+    ) -> DashboardContext<'a> {
         DashboardContext {
             actions,
             actions_by_id,
             usage,
             plugins,
-            enabled_plugins: None,
+            enabled_plugins,
             default_location: None,
             data_cache,
             actions_version: 0,
@@ -495,6 +526,38 @@ mod tests {
             reduce_dashboard_work_when_unfocused: false,
             diagnostics: None,
             show_diagnostics_widget: false,
+        }
+    }
+
+    fn resolution_context<'a>(
+        snapshot: &'a DashboardDataSnapshot,
+        commands: &'a [Action],
+        actions_by_id: &'a HashMap<String, Action>,
+    ) -> HistoryResolutionContext<'a> {
+        HistoryResolutionContext {
+            snapshot,
+            commands,
+            actions_by_id,
+        }
+    }
+
+    fn action(label: &str, action_id: &str, args: Option<&str>) -> Action {
+        Action {
+            label: label.into(),
+            desc: "fixture".into(),
+            action: action_id.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    fn history_entry(action: Action, index: usize) -> HistoryEntry {
+        let query = format!("history query {index}");
+        HistoryEntry {
+            query: query.clone(),
+            query_lc: query.to_lowercase(),
+            action,
+            source: Some("history_resolution_fixture".into()),
+            timestamp: 1_700_000_000 + index as i64,
         }
     }
 
@@ -519,6 +582,38 @@ mod tests {
 
         fn commands(&self) -> Vec<Action> {
             vec![self.0.clone()]
+        }
+    }
+
+    struct CountingCatalogPlugin {
+        name: &'static str,
+        actions: Arc<RwLock<Vec<Action>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for CountingCatalogPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            "Synthetic history command catalog"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn commands(&self) -> Vec<Action> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.actions
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
         }
     }
 
@@ -678,8 +773,8 @@ mod tests {
                     .iter()
                     .find(|metric| metric.metric == Metric::HistoryCatalogBuild)
                     .expect("history command catalog metric is reported");
-                assert!(catalog_metric.calls > 0);
-                assert!(catalog_metric.work_units > 0);
+                assert_eq!(catalog_metric.calls, workloads::SAMPLE_COUNT as u64);
+                assert_eq!(catalog_metric.work_units, workloads::SAMPLE_COUNT as u64);
                 assert_history_scenario(scenario, &final_entries, &fixture);
                 let summary = fixture
                     .summary
@@ -743,11 +838,10 @@ mod tests {
             },
         ]);
         data_cache.set_snapshot_for_test(snapshot);
-        let plugins = PluginManager::new();
-        let actions = Vec::new();
+        let snapshot = data_cache.snapshot();
+        let commands = Vec::new();
         let actions_by_id = HashMap::new();
-        let usage = HashMap::new();
-        let ctx = context(&data_cache, &plugins, &actions, &actions_by_id, &usage);
+        let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
 
         let opaque = HistoryPin {
             action_id: "clipboard:same body {{literal}}".into(),
@@ -757,7 +851,7 @@ mod tests {
             query: "old query".into(),
             timestamp: 1,
         };
-        let displayed = CommandHistoryWidget::entry_from_pin(&ctx, &opaque);
+        let displayed = CommandHistoryWidget::entry_from_pin(&resolution, &opaque);
         assert!(!displayed.missing);
         assert_eq!(displayed.action.label, "Old saved snippet label");
         assert_eq!(displayed.action.desc, "Snippet");
@@ -765,13 +859,13 @@ mod tests {
         assert_eq!(displayed.action.args, opaque.args);
 
         let current_run = pin(&crate::plugins::snippets::snippet_run_action("second"));
-        let displayed = CommandHistoryWidget::entry_from_pin(&ctx, &current_run);
+        let displayed = CommandHistoryWidget::entry_from_pin(&resolution, &current_run);
         assert!(!displayed.missing);
         assert_eq!(displayed.action.label, "second");
         assert_eq!(displayed.action.action, current_run.action_id);
 
         let missing_run = pin(&crate::plugins::snippets::snippet_run_action("removed"));
-        let displayed = CommandHistoryWidget::entry_from_pin(&ctx, &missing_run);
+        let displayed = CommandHistoryWidget::entry_from_pin(&resolution, &missing_run);
         assert!(displayed.missing);
         assert_eq!(displayed.action.action, missing_run.action_id);
 
@@ -787,7 +881,474 @@ mod tests {
             source: None,
             timestamp: 1,
         };
-        let displayed = CommandHistoryWidget::entry_from_history(&ctx, &history);
+        let displayed = CommandHistoryWidget::entry_from_history(&resolution, &history);
         assert_eq!(displayed.action, history.action);
+        assert!(!displayed.missing);
+    }
+
+    #[test]
+    fn history_resolution_enumerates_one_current_catalog_per_prepare() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let mut plugins = PluginManager::new_inert_for_test();
+        let first_calls = Arc::new(AtomicUsize::new(0));
+        let second_calls = Arc::new(AtomicUsize::new(0));
+        let first_actions = Arc::new(RwLock::new(vec![action(
+            "Zulu registration-first command",
+            "plugin:shared",
+            Some("arg"),
+        )]));
+        let second_actions = Arc::new(RwLock::new(vec![action(
+            "Alpha registration-second command",
+            "plugin:shared",
+            Some("arg"),
+        )]));
+        plugins.register(Box::new(CountingCatalogPlugin {
+            name: "catalog_first",
+            actions: Arc::clone(&first_actions),
+            calls: Arc::clone(&first_calls),
+        }));
+        plugins.register(Box::new(CountingCatalogPlugin {
+            name: "catalog_second",
+            actions: Arc::clone(&second_actions),
+            calls: Arc::clone(&second_calls),
+        }));
+
+        let entries = (0..24)
+            .map(|index| {
+                history_entry(
+                    action("Saved plugin label", "plugin:shared", Some("arg")),
+                    index,
+                )
+            })
+            .collect::<VecDeque<_>>();
+        let _history_guard = crate::history::replace_history_for_test(entries);
+        let data_cache = DashboardDataCache::new();
+        let widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 50,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let both_enabled = HashSet::from(["catalog_first".to_owned(), "catalog_second".to_owned()]);
+
+        let ctx = context_with_enabled(
+            &data_cache,
+            &plugins,
+            &actions,
+            &actions_by_id,
+            &usage,
+            Some(&both_enabled),
+        );
+        let first = widget.prepare_entries(&ctx);
+        assert_eq!(first.len(), 24);
+        assert!(
+            first
+                .iter()
+                .all(|entry| entry.action.label == "Zulu registration-first command")
+        );
+        assert_eq!(first_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(second_calls.load(Ordering::Relaxed), 1);
+        drop(ctx);
+
+        *first_actions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = vec![action(
+            "Zulu command after catalog rebuild",
+            "plugin:shared",
+            Some("arg"),
+        )];
+        let first_only = HashSet::from(["catalog_first".to_owned()]);
+        let ctx = context_with_enabled(
+            &data_cache,
+            &plugins,
+            &actions,
+            &actions_by_id,
+            &usage,
+            Some(&first_only),
+        );
+        let rebuilt = widget.prepare_entries(&ctx);
+        assert!(
+            rebuilt
+                .iter()
+                .all(|entry| entry.action.label == "Zulu command after catalog rebuild")
+        );
+        assert_eq!(first_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(second_calls.load(Ordering::Relaxed), 1);
+        drop(ctx);
+
+        let second_only = HashSet::from(["catalog_second".to_owned()]);
+        let ctx = context_with_enabled(
+            &data_cache,
+            &plugins,
+            &actions,
+            &actions_by_id,
+            &usage,
+            Some(&second_only),
+        );
+        let enabled = widget.prepare_entries(&ctx);
+        assert!(
+            enabled
+                .iter()
+                .all(|entry| entry.action.label == "Alpha registration-second command")
+        );
+        assert_eq!(first_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(second_calls.load(Ordering::Relaxed), 2);
+        drop(ctx);
+
+        *second_actions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
+        let ctx = context_with_enabled(
+            &data_cache,
+            &plugins,
+            &actions,
+            &actions_by_id,
+            &usage,
+            Some(&second_only),
+        );
+        let removed = widget.prepare_entries(&ctx);
+        assert!(
+            removed
+                .iter()
+                .all(|entry| { entry.action.label == "Saved plugin label" && !entry.missing })
+        );
+        assert_eq!(second_calls.load(Ordering::Relaxed), 3);
+        drop(ctx);
+        drop(plugins);
+        drop(workspace);
+    }
+
+    #[test]
+    fn history_resolution_preserves_duplicate_order_and_exact_args() {
+        let snapshot = DashboardDataSnapshot::default();
+        let commands = vec![
+            action("Zulu first, no args", "plugin:duplicate", None),
+            action("Empty args, first", "plugin:duplicate", Some("")),
+            action("Alpha second, no args", "plugin:duplicate", None),
+            action("Empty args, second", "plugin:duplicate", Some("")),
+        ];
+        let actions_by_id = HashMap::new();
+        let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
+        let saved = action("Saved label", "plugin:duplicate", None);
+
+        assert_eq!(
+            CommandHistoryWidget::resolve_action(&resolution, "plugin:duplicate", None, &saved,)
+                .expect("first duplicate should resolve")
+                .label,
+            "Zulu first, no args"
+        );
+        assert_eq!(
+            CommandHistoryWidget::resolve_action(
+                &resolution,
+                "plugin:duplicate",
+                Some(""),
+                &saved,
+            )
+            .expect("empty args should match only empty args")
+            .label,
+            "Empty args, first"
+        );
+        assert!(
+            CommandHistoryWidget::resolve_action(
+                &resolution,
+                "plugin:duplicate",
+                Some("different"),
+                &saved,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn history_resolution_preserves_snippet_short_circuit_and_id_only_action_lookup() {
+        let mut snapshot = DashboardDataSnapshot::default();
+        snapshot.snippets = Arc::new(vec![crate::plugins::snippets::SnippetEntry {
+            alias: "prompted".into(),
+            text: "Hello {{name}}".into(),
+            hide_contents: true,
+            prompt_for_fields: true,
+            fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
+                "name",
+            )],
+        }]);
+        let known_snippet = crate::plugins::snippets::snippet_run_action("prompted");
+        let missing_snippet = crate::plugins::snippets::snippet_run_action("removed");
+        let commands = vec![action("Plugin fallback", &missing_snippet, None)];
+        let actions_by_id = HashMap::from([
+            (
+                known_snippet.clone(),
+                action("Actions map collision", &known_snippet, None),
+            ),
+            (
+                missing_snippet.clone(),
+                action("Must not fall through", &missing_snippet, None),
+            ),
+            (
+                "actions:current".into(),
+                action("Current action by ID", "actions:current", None),
+            ),
+        ]);
+        let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
+
+        let resolved = CommandHistoryWidget::resolve_action(
+            &resolution,
+            &known_snippet,
+            None,
+            &action("Saved snippet label", &known_snippet, None),
+        )
+        .expect("prompted snippet still resolves to its canonical action");
+        assert_eq!(resolved.label, "prompted");
+        assert_eq!(resolved.action, known_snippet);
+        assert_eq!(resolved.desc, "Snippet");
+        assert!(resolved.args.is_none());
+
+        assert!(
+            CommandHistoryWidget::resolve_action(
+                &resolution,
+                &known_snippet,
+                Some("name=filled"),
+                &action("Saved snippet label", &known_snippet, Some("name=filled")),
+            )
+            .is_none()
+        );
+        assert!(
+            CommandHistoryWidget::resolve_action(
+                &resolution,
+                &missing_snippet,
+                None,
+                &action("Saved missing snippet", &missing_snippet, None),
+            )
+            .is_none()
+        );
+
+        let current = CommandHistoryWidget::resolve_action(
+            &resolution,
+            "actions:current",
+            Some("old saved args"),
+            &action(
+                "Saved old action",
+                "actions:current",
+                Some("old saved args"),
+            ),
+        )
+        .expect("actions_by_id keeps its ID-only matching behavior");
+        assert_eq!(current.label, "Current action by ID");
+        assert!(current.args.is_none());
+    }
+
+    #[test]
+    fn history_resolution_uses_snapshot_precedence_and_rebuilds_fallback_actions() {
+        let mut snapshot = DashboardDataSnapshot::default();
+        snapshot.processes = Arc::new(vec![
+            action("Process beats favorite", "shared:process", Some("x")),
+            action("Process fallback", "process:only", Some("exact")),
+            action("Process loses to plugin", "plugin:collision", Some("x")),
+        ]);
+        snapshot.favorites = Arc::new(vec![
+            crate::plugins::fav::FavEntry {
+                label: "Favorite loses to process".into(),
+                action: "shared:process".into(),
+                args: Some("x".into()),
+            },
+            crate::plugins::fav::FavEntry {
+                label: "Favorite beats note fallback".into(),
+                action: "note:open:note-favorite".into(),
+                args: None,
+            },
+        ]);
+        snapshot.notes = Arc::new(vec![
+            crate::plugins::note::Note {
+                title: "Note title".into(),
+                path: Default::default(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "note-only".into(),
+                alias: Some("Primary note alias".into()),
+                aliases: vec!["Primary note alias".into()],
+                entity_refs: Vec::new(),
+            },
+            crate::plugins::note::Note {
+                title: "Favorite note title".into(),
+                path: Default::default(),
+                content: String::new(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: "note-favorite".into(),
+                alias: Some("Favorite note alias".into()),
+                aliases: vec!["Favorite note alias".into()],
+                entity_refs: Vec::new(),
+            },
+        ]);
+        snapshot.clipboard_history = Arc::new(vec!["Copied clipboard text".into()]);
+        snapshot.todos = Arc::new(vec![crate::plugins::todo::TodoEntry {
+            id: "todo-one".into(),
+            text: "Ship the release".into(),
+            done: true,
+            priority: 1,
+            tags: Vec::new(),
+            entity_refs: Vec::new(),
+        }]);
+        snapshot.snippets = Arc::new(vec![crate::plugins::snippets::SnippetEntry {
+            alias: "existing".into(),
+            text: "snippet text".into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        }]);
+
+        let commands = vec![action("Plugin wins", "plugin:collision", Some("x"))];
+        let actions_by_id = HashMap::new();
+        let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
+        let resolve = |action_id: &str, args: Option<&str>| {
+            CommandHistoryWidget::resolve_action(
+                &resolution,
+                action_id,
+                args,
+                &action("Saved label", action_id, args),
+            )
+        };
+
+        assert_eq!(
+            resolve("plugin:collision", Some("x"))
+                .expect("plugin catalog wins over process snapshot")
+                .label,
+            "Plugin wins"
+        );
+        assert_eq!(
+            resolve("shared:process", Some("x"))
+                .expect("process snapshot wins over matching favorite")
+                .label,
+            "Process beats favorite"
+        );
+        assert!(resolve("process:only", None).is_none());
+        assert_eq!(
+            resolve("process:only", Some("exact"))
+                .expect("process action args match exactly")
+                .label,
+            "Process fallback"
+        );
+        let favorite = resolve("note:open:note-favorite", None)
+            .expect("favorite matching the note prefix wins first");
+        assert_eq!(favorite.label, "Favorite beats note fallback");
+        assert_eq!(favorite.desc, "Fav");
+
+        let note = resolve("note:open:note-only", None).expect("current note resolves by slug");
+        assert_eq!(note.label, "Primary note alias");
+        assert_eq!(note.desc, "Note");
+        assert!(note.args.is_none());
+
+        let clipboard = resolve("clipboard:copy:0", None).expect("indexed clipboard still exists");
+        assert_eq!(clipboard.label, "Copied clipboard text");
+        assert_eq!(clipboard.desc, "Clipboard");
+        assert!(resolve("clipboard:copy:1", None).is_none());
+
+        assert_eq!(
+            resolve("todo:done:0", None)
+                .expect("done todo resolves")
+                .label,
+            "[x] Ship the release"
+        );
+        assert_eq!(
+            resolve("todo:edit:0", None)
+                .expect("todo edit resolves")
+                .label,
+            "[x] Ship the release"
+        );
+        assert_eq!(
+            resolve("todo:remove:0", None)
+                .expect("todo removal resolves")
+                .label,
+            "Remove todo Ship the release"
+        );
+        assert_eq!(
+            resolve("snippet:edit:existing", Some("ignored"))
+                .expect("snippet edit remains available")
+                .label,
+            "Edit snippet existing"
+        );
+        assert_eq!(
+            resolve("snippet:remove:existing", None)
+                .expect("snippet removal remains available")
+                .label,
+            "Remove snippet existing"
+        );
+    }
+
+    #[test]
+    fn history_resolution_snapshot_capture_survives_later_publication() {
+        let cache = DashboardDataCache::new();
+        let mut initial = DashboardDataSnapshot::default();
+        initial.processes = Arc::new(vec![action(
+            "Process snapshot before rename",
+            "process:current",
+            None,
+        )]);
+        cache.set_snapshot_for_test(initial);
+        let captured = cache.snapshot();
+        let commands = Vec::new();
+        let actions_by_id = HashMap::new();
+        let captured_context = resolution_context(&captured, &commands, &actions_by_id);
+
+        let mut renamed = DashboardDataSnapshot::default();
+        renamed.processes = Arc::new(vec![action(
+            "Process snapshot after rename",
+            "process:current",
+            None,
+        )]);
+        cache.set_snapshot_for_test(renamed);
+
+        assert_eq!(
+            CommandHistoryWidget::resolve_action(
+                &captured_context,
+                "process:current",
+                None,
+                &action("Saved label", "process:current", None),
+            )
+            .expect("captured snapshot remains internally consistent")
+            .label,
+            "Process snapshot before rename"
+        );
+        let current = cache.snapshot();
+        let current_context = resolution_context(&current, &commands, &actions_by_id);
+        assert_eq!(
+            CommandHistoryWidget::resolve_action(
+                &current_context,
+                "process:current",
+                None,
+                &action("Saved label", "process:current", None),
+            )
+            .expect("next preparation observes the new snapshot")
+            .label,
+            "Process snapshot after rename"
+        );
+
+        let mut deleted = DashboardDataSnapshot::default();
+        deleted.processes = Arc::new(Vec::new());
+        cache.set_snapshot_for_test(deleted);
+        let latest = cache.snapshot();
+        let latest_context = resolution_context(&latest, &commands, &actions_by_id);
+        assert!(
+            CommandHistoryWidget::resolve_action(
+                &latest_context,
+                "process:current",
+                None,
+                &action("Saved label", "process:current", None),
+            )
+            .is_none()
+        );
+        assert_eq!(
+            CommandHistoryWidget::resolve_action(
+                &current_context,
+                "process:current",
+                None,
+                &action("Saved label", "process:current", None),
+            )
+            .expect("previous captured context still sees its snapshot")
+            .label,
+            "Process snapshot after rename"
+        );
     }
 }
