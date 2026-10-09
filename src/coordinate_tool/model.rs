@@ -300,6 +300,11 @@ pub enum CursorEffectStatus {
     Fallback(String),
     /// The effect remains requested but has no live cursor sample to follow.
     Paused,
+    /// Live zoom presentation is temporarily unsafe for the current sample,
+    /// usually because the sampled monitor does not provide source coverage.
+    /// This is recoverable on a later valid sample and does not latch a native
+    /// Magnification failure.
+    GeometryPaused(String),
     /// Resource preparation or cleanup failed. The reason is retained for the
     /// effect status UI without turning into a shared HUD/crosshair error.
     Unavailable(String),

@@ -2,8 +2,8 @@ use image::{Rgba, RgbaImage};
 
 use super::controller::CoordinateRenderFrame;
 use super::model::{
-    CoordinateSample, CoordinateSpace, CoordinateUnavailable, PhysicalPoint, PhysicalRect,
-    PhysicalSize,
+    CoordinateSample, CoordinateSpace, CoordinateUnavailable, MonitorId, PhysicalPoint,
+    PhysicalRect, PhysicalSize,
 };
 use super::settings::{
     CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
@@ -78,10 +78,11 @@ pub(crate) struct HaloGeometry {
 /// How a source rectangle is known to intersect readable physical content.
 /// The virtual desktop rectangle is deliberately not used as evidence here:
 /// it can span gaps between monitors and does not prove those pixels exist.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ZoomSourceCoverage {
     Unknown,
     SampledMonitor {
+        id: MonitorId,
         bounds: PhysicalRect,
         visible: Option<PhysicalRect>,
         missing: PhysicalInsets,
@@ -145,7 +146,7 @@ pub(crate) struct ZoomRasterAlignment {
 }
 
 /// Cursor-anchored source and monitor-aware destination for a circular lens.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ZoomLensGeometry {
     /// Source remains centered on `hotspot`, irrespective of destination
     /// mirroring or clamping.
@@ -164,10 +165,286 @@ pub(crate) struct ZoomLensGeometry {
     pub alignment: ZoomRasterAlignment,
 }
 
+/// Integer child placement and a conservative destination mask for presenting
+/// one validated zoom source. The child origin is relative to the circular
+/// host; `client_coverage` is the part of that host which can show pixels from
+/// the sampled monitor after source clipping and native integer placement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ZoomRasterRect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ZoomPresentationGeometry {
+    pub lens: ZoomLensGeometry,
+    /// The exact source rectangle passed to MagSetWindowSource.
+    pub source: PhysicalRect,
+    /// Rounded child position in host-client pixels. The configured zoom
+    /// factor is never changed to compensate for this integer placement.
+    pub child_origin: PhysicalPoint,
+    /// Child extent rounds upward to contain the exact transformed source.
+    pub child_size: PhysicalSize,
+    /// Error introduced by SetWindowPos' integer coordinate requirement; each
+    /// axis is at most half a physical pixel from the desired fractional map.
+    pub child_rounding_error: RasterTranslation,
+    /// Source-backed pixel-center coverage clipped to the monitor and lens
+    /// viewport before the native circular host region is applied.
+    pub client_coverage: ZoomRasterRect,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ZoomGeometryError {
     PlacementBoundsUnavailable,
     ArithmeticOverflow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ZoomPresentationError {
+    UnknownSourceCoverage,
+    HotspotOutsideSampledMonitor,
+    EmptySourceCoverage,
+    EmptyDestinationCoverage,
+    ArithmeticOverflow,
+}
+
+/// Resolve the geometry that the native magnifier can safely present.
+///
+/// A sampled monitor is the only proof that a desktop source rectangle names
+/// readable pixels. Virtual-desktop placement fallback is deliberately not
+/// accepted as source coverage. The source rectangle remains the intersection
+/// of the cursor-anchored request and that monitor; it is never shifted or
+/// stretched to fill the lens. The exact configured transform is preserved,
+/// while child dimensions round up and the host mask includes only pixel
+/// centers backed by the selected source rectangle. Win32 child placement is integral, so the
+/// returned residual records its bounded subpixel alignment error.
+pub(crate) fn zoom_presentation_geometry(
+    lens: ZoomLensGeometry,
+) -> Result<ZoomPresentationGeometry, ZoomPresentationError> {
+    let (monitor_bounds, visible_source, missing) = match &lens.source_coverage {
+        ZoomSourceCoverage::Unknown => return Err(ZoomPresentationError::UnknownSourceCoverage),
+        ZoomSourceCoverage::SampledMonitor {
+            bounds,
+            visible,
+            missing,
+            ..
+        } => (*bounds, *visible, *missing),
+    };
+    if lens.hotspot.x < monitor_bounds.left()
+        || lens.hotspot.x >= monitor_bounds.right()
+        || lens.hotspot.y < monitor_bounds.top()
+        || lens.hotspot.y >= monitor_bounds.bottom()
+    {
+        return Err(ZoomPresentationError::HotspotOutsideSampledMonitor);
+    }
+    let source = visible_source.ok_or(ZoomPresentationError::EmptySourceCoverage)?;
+    let factor = f64::from(lens.alignment.zoom_factor);
+    if !factor.is_finite() || factor <= 0.0 {
+        return Err(ZoomPresentationError::ArithmeticOverflow);
+    }
+
+    let ideal_child_x =
+        f64::from(lens.alignment.hotspot_translation.x) + missing.left as f64 * factor;
+    let ideal_child_y =
+        f64::from(lens.alignment.hotspot_translation.y) + missing.top as f64 * factor;
+
+    // Integer child placement can move a fractional transform by half a
+    // pixel. Add only monitor-proven guard pixels on whichever edge needs
+    // them. Moving the child with a leading guard preserves the original
+    // cursor-to-lens mapping; if a monitor edge prevents a guard, the mask
+    // clips that genuinely unavailable destination edge.
+    let visible_destination = lens
+        .visible_destination
+        .ok_or(ZoomPresentationError::EmptyDestinationCoverage)?;
+    let local_visible = ZoomRasterRect {
+        left: i32::try_from(
+            i64::from(visible_destination.left()) - i64::from(lens.destination.left()),
+        )
+        .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        top: i32::try_from(
+            i64::from(visible_destination.top()) - i64::from(lens.destination.top()),
+        )
+        .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        right: i32::try_from(
+            i64::from(visible_destination.right()) - i64::from(lens.destination.left()),
+        )
+        .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        bottom: i32::try_from(
+            i64::from(visible_destination.bottom()) - i64::from(lens.destination.top()),
+        )
+        .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+    };
+    let (source_left, source_right, child_x) = guard_source_axis(
+        lens.source.left(),
+        lens.source.right(),
+        source.left(),
+        source.right(),
+        monitor_bounds.left(),
+        monitor_bounds.right(),
+        ideal_child_x,
+        local_visible.left,
+        local_visible.right,
+        factor,
+    )?;
+    let (source_top, source_bottom, child_y) = guard_source_axis(
+        lens.source.top(),
+        lens.source.bottom(),
+        source.top(),
+        source.bottom(),
+        monitor_bounds.top(),
+        monitor_bounds.bottom(),
+        ideal_child_y,
+        local_visible.top,
+        local_visible.bottom,
+        factor,
+    )?;
+    let original_source = source;
+    let source = PhysicalRect::new(source_left, source_top, source_right, source_bottom)
+        .ok_or(ZoomPresentationError::EmptySourceCoverage)?;
+
+    let exact_width = source.width() as f64 * factor;
+    let exact_height = source.height() as f64 * factor;
+    let child_width = checked_ceil_extent(exact_width)?;
+    let child_height = checked_ceil_extent(exact_height)?;
+    let backed_right = checked_ceil_position(f64::from(child_x) + exact_width - 0.5)?;
+    let backed_bottom = checked_ceil_position(f64::from(child_y) + exact_height - 0.5)?;
+
+    let mut backed = ZoomRasterRect {
+        left: child_x,
+        top: child_y,
+        right: backed_right,
+        bottom: backed_bottom,
+    };
+    let diameter = lens.destination.width();
+    let diameter =
+        i32::try_from(diameter).map_err(|_| ZoomPresentationError::ArithmeticOverflow)?;
+    backed = intersect_raster_rect(
+        backed,
+        ZoomRasterRect {
+            left: 0,
+            top: 0,
+            right: diameter,
+            bottom: diameter,
+        },
+    )
+    .ok_or(ZoomPresentationError::EmptyDestinationCoverage)?;
+
+    // Destination visibility is clipped to the sampled monitor by the pure
+    // placement helper. Convert it to host-local coordinates and intersect it
+    // with the mapped source coverage before creating the native window region.
+    let destination_origin_x = i64::from(lens.destination.left());
+    let destination_origin_y = i64::from(lens.destination.top());
+    let monitor_clip = ZoomRasterRect {
+        left: i32::try_from(i64::from(visible_destination.left()) - destination_origin_x)
+            .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        top: i32::try_from(i64::from(visible_destination.top()) - destination_origin_y)
+            .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        right: i32::try_from(i64::from(visible_destination.right()) - destination_origin_x)
+            .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        bottom: i32::try_from(i64::from(visible_destination.bottom()) - destination_origin_y)
+            .map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+    };
+    backed = intersect_raster_rect(backed, monitor_clip)
+        .ok_or(ZoomPresentationError::EmptyDestinationCoverage)?;
+
+    Ok(ZoomPresentationGeometry {
+        lens,
+        source,
+        child_origin: PhysicalPoint::new(child_x, child_y),
+        child_size: PhysicalSize::new(i64::from(child_width), i64::from(child_height))
+            .ok_or(ZoomPresentationError::ArithmeticOverflow)?,
+        child_rounding_error: RasterTranslation {
+            x: (f64::from(child_x)
+                - (ideal_child_x
+                    - (i64::from(original_source.left()) - i64::from(source.left())) as f64
+                        * factor)) as f32,
+            y: (f64::from(child_y)
+                - (ideal_child_y
+                    - (i64::from(original_source.top()) - i64::from(source.top())) as f64 * factor))
+                as f32,
+        },
+        client_coverage: backed,
+    })
+}
+
+fn rounded_i32(value: f64) -> Result<i32, ZoomPresentationError> {
+    if !value.is_finite() || value < i32::MIN as f64 || value > i32::MAX as f64 {
+        return Err(ZoomPresentationError::ArithmeticOverflow);
+    }
+    i32::try_from(value.round() as i64).map_err(|_| ZoomPresentationError::ArithmeticOverflow)
+}
+
+fn checked_ceil_extent(value: f64) -> Result<i32, ZoomPresentationError> {
+    if !value.is_finite() || value <= 0.0 || value.ceil() > i32::MAX as f64 {
+        return Err(ZoomPresentationError::ArithmeticOverflow);
+    }
+    Ok(value.ceil() as i32)
+}
+
+fn guard_source_axis(
+    requested_start: i32,
+    requested_end: i32,
+    visible_start: i32,
+    visible_end: i32,
+    monitor_start: i32,
+    monitor_end: i32,
+    ideal_child_start: f64,
+    visible_destination_start: i32,
+    visible_destination_end: i32,
+    factor: f64,
+) -> Result<(i32, i32, i32), ZoomPresentationError> {
+    let mut source_start = i64::from(visible_start);
+    let mut source_end = i64::from(visible_end);
+    let can_guard_leading = visible_start == requested_start && visible_start > monitor_start;
+    if can_guard_leading {
+        let guard_needed =
+            ((ideal_child_start - f64::from(visible_destination_start) - 0.5) / factor).floor()
+                + 1.0;
+        let guard = guard_needed
+            .max(0.0)
+            .min((visible_start - monitor_start) as f64) as i64;
+        source_start -= guard;
+    }
+    let child_origin =
+        rounded_i32(ideal_child_start - (i64::from(visible_start) - source_start) as f64 * factor)?;
+
+    let source_extent = source_end - source_start;
+    let rightmost_pixel_center = f64::from(visible_destination_end) - 0.5 - f64::from(child_origin);
+    let needed_extent = (rightmost_pixel_center / factor).floor() + 1.0;
+    if !needed_extent.is_finite() || needed_extent > i64::MAX as f64 {
+        return Err(ZoomPresentationError::ArithmeticOverflow);
+    }
+    if visible_end == requested_end && visible_end < monitor_end {
+        let available = i64::from(monitor_end) - source_end;
+        let trailing_guard = (needed_extent.max(0.0) as i64 - source_extent)
+            .max(0)
+            .min(available);
+        source_end += trailing_guard;
+    }
+    Ok((
+        i32::try_from(source_start).map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        i32::try_from(source_end).map_err(|_| ZoomPresentationError::ArithmeticOverflow)?,
+        child_origin,
+    ))
+}
+
+fn checked_ceil_position(value: f64) -> Result<i32, ZoomPresentationError> {
+    if !value.is_finite() || value < i32::MIN as f64 || value > i32::MAX as f64 {
+        return Err(ZoomPresentationError::ArithmeticOverflow);
+    }
+    Ok(value.ceil() as i32)
+}
+
+fn intersect_raster_rect(first: ZoomRasterRect, second: ZoomRasterRect) -> Option<ZoomRasterRect> {
+    let result = ZoomRasterRect {
+        left: first.left.max(second.left),
+        top: first.top.max(second.top),
+        right: first.right.min(second.right),
+        bottom: first.bottom.min(second.bottom),
+    };
+    (result.right > result.left && result.bottom > result.top).then_some(result)
 }
 
 /// Calculate source and destination geometry using only this live sample's
@@ -209,6 +486,7 @@ pub(crate) fn zoom_lens_geometry(
 
     let source_coverage = if let Some(monitor) = sample.monitor.as_ref() {
         ZoomSourceCoverage::SampledMonitor {
+            id: monitor.id.clone(),
             bounds: monitor.bounds,
             visible: intersect_rect(source, monitor.bounds),
             missing: rectangle_missing(source, monitor.bounds),
@@ -421,6 +699,19 @@ fn axis_leading_if_fits(center: i64, bound_start: i64, bound_end: i64, extent: i
     (leading >= bound_start && trailing <= bound_end).then_some(leading)
 }
 
+/// Identity color matrix used by the ordinary zoom lens. Magnification uses a
+/// 5x5 row-major affine RGB transform; keeping this pure lets the native zoom
+/// path share the same explicit no-recolor contract as the tests.
+pub(crate) const fn zoom_identity_color_matrix() -> [f32; 25] {
+    [
+        1.0, 0.0, 0.0, 0.0, 0.0, // output red = input red
+        0.0, 1.0, 0.0, 0.0, 0.0, // output green = input green
+        0.0, 0.0, 1.0, 0.0, 0.0, // output blue = input blue
+        0.0, 0.0, 0.0, 1.0, 0.0, // preserve alpha
+        0.0, 0.0, 0.0, 0.0, 1.0, // no additive color
+    ]
+}
+
 /// Five-by-five Magnification color matrix and equivalent RGB pixel blend.
 /// Windows applies input channel vectors across matrix rows, so the additive
 /// offset belongs in the final row (indices 20..23). Alpha is passed through.
@@ -514,27 +805,60 @@ pub(crate) fn halo_outline_bitmap(preferences: HaloPreferences) -> Option<RgbaIm
         return None;
     }
 
-    let radius = preferences.radius;
-    let diameter = radius.checked_mul(2)? as u32;
-    let thickness = preferences.outline_thickness.min(radius - 1);
-    let outer_radius = radius as f32;
-    let inner_radius = (radius - thickness) as f32;
-    let outer_squared = outer_radius * outer_radius;
+    annulus_bitmap(
+        preferences.radius.checked_mul(2)? as u32,
+        preferences.outline_thickness,
+        Rgba([
+            preferences.outline_color.red,
+            preferences.outline_color.green,
+            preferences.outline_color.blue,
+            255,
+        ]),
+    )
+}
+
+/// Build the optional transparent zoom-lens border in physical pixels. Like
+/// the halo border it is independent of the magnifier host, which lets native
+/// geometry and overlay exclusion own the ring separately.
+pub(crate) fn zoom_outline_bitmap(preferences: ZoomPreferences) -> Option<RgbaImage> {
+    let preferences = preferences.normalized();
+    if !preferences.outline_enabled {
+        return None;
+    }
+
+    annulus_bitmap(
+        preferences.diameter as u32,
+        preferences.outline_thickness,
+        Rgba([
+            preferences.outline_color.red,
+            preferences.outline_color.green,
+            preferences.outline_color.blue,
+            255,
+        ]),
+    )
+}
+
+/// Rasterize a physical-pixel circular outline with a transparent center.
+/// Effective thickness is capped so the innermost pixel centers remain clear,
+/// including the minimum configured diameter with maximum border thickness.
+fn annulus_bitmap(diameter: u32, requested_thickness: i32, color: Rgba<u8>) -> Option<RgbaImage> {
+    let radius = diameter as f32 / 2.0;
+    let maximum_hollow_thickness = i32::try_from(diameter / 2).ok()?.checked_sub(1)?;
+    if maximum_hollow_thickness < 1 {
+        return None;
+    }
+    let thickness = requested_thickness.max(1).min(maximum_hollow_thickness) as f32;
+    let outer_squared = radius * radius;
+    let inner_radius = radius - thickness;
     let inner_squared = inner_radius * inner_radius;
     let mut image = RgbaImage::new(diameter, diameter);
-    let outline = Rgba([
-        preferences.outline_color.red,
-        preferences.outline_color.green,
-        preferences.outline_color.blue,
-        255,
-    ]);
     for y in 0..diameter {
-        let dy = y as f32 + 0.5 - outer_radius;
+        let dy = y as f32 + 0.5 - radius;
         for x in 0..diameter {
-            let dx = x as f32 + 0.5 - outer_radius;
+            let dx = x as f32 + 0.5 - radius;
             let distance_squared = dx * dx + dy * dy;
             if distance_squared <= outer_squared && distance_squared > inner_squared {
-                image.put_pixel(x, y, outline);
+                image.put_pixel(x, y, color);
             }
         }
     }
@@ -987,9 +1311,10 @@ fn concise_error(error: &str) -> String {
 mod tests {
     use super::{
         CrosshairGeometry, GuideOrientation, HaloColorTransform, PhysicalInsets, ZoomAxisPlacement,
-        ZoomDestinationBounds, ZoomGeometryError, ZoomSourceCoverage, crosshair_bitmap,
-        crosshair_geometry, guide_geometry, halo_fallback_bitmap, halo_geometry,
-        halo_outline_bitmap, zoom_lens_geometry,
+        ZoomDestinationBounds, ZoomGeometryError, ZoomPresentationError, ZoomSourceCoverage,
+        crosshair_bitmap, crosshair_geometry, guide_geometry, halo_fallback_bitmap, halo_geometry,
+        halo_outline_bitmap, zoom_identity_color_matrix, zoom_lens_geometry, zoom_outline_bitmap,
+        zoom_presentation_geometry,
     };
     use crate::coordinate_tool::controller::CoordinateRenderFrame;
     use crate::coordinate_tool::model::{
@@ -1101,6 +1426,19 @@ mod tests {
         );
         assert_eq!(centered.destination_hotspot, sample.desktop_point);
         assert_eq!(centered.placement, [ZoomAxisPlacement::Centered; 2]);
+    }
+
+    #[test]
+    fn zoom_color_transform_is_identity_for_rgb_and_alpha() {
+        let matrix = zoom_identity_color_matrix();
+        for row in 0..5 {
+            for column in 0..5 {
+                assert_eq!(
+                    matrix[row * 5 + column],
+                    if row == column { 1.0 } else { 0.0 }
+                );
+            }
+        }
     }
 
     #[test]
@@ -1333,6 +1671,7 @@ mod tests {
         assert_eq!(
             geometry.source_coverage,
             ZoomSourceCoverage::SampledMonitor {
+                id: MonitorId::new("DISPLAY_TEST"),
                 bounds: monitor,
                 visible: Some(PhysicalRect::new(-45, -45, 0, 0).unwrap()),
                 missing: PhysicalInsets {
@@ -1374,6 +1713,7 @@ mod tests {
         assert_eq!(
             before.source_coverage,
             ZoomSourceCoverage::SampledMonitor {
+                id: MonitorId::new("DISPLAY_TEST"),
                 bounds: monitor,
                 visible: None,
                 missing: PhysicalInsets {
@@ -1405,6 +1745,7 @@ mod tests {
         assert_eq!(
             after.source_coverage,
             ZoomSourceCoverage::SampledMonitor {
+                id: MonitorId::new("DISPLAY_TEST"),
                 bounds: monitor,
                 visible: None,
                 missing: PhysicalInsets {
@@ -1469,6 +1810,169 @@ mod tests {
             PhysicalRect::new(36, -32, 100, 32).unwrap()
         );
         assert_eq!(geometry.source_coverage, ZoomSourceCoverage::Unknown);
+    }
+
+    #[test]
+    fn zoom_presentation_uses_full_source_with_exact_scale_and_circular_client_bounds() {
+        let sample = zoom_sample(
+            PhysicalPoint::new(500, 400),
+            Some(PhysicalRect::new(-1000, -1000, 1000, 1000).unwrap()),
+            None,
+        );
+        let geometry = zoom_presentation_geometry(
+            zoom_lens_geometry(
+                &sample,
+                ZoomPreferences {
+                    mode: ZoomMode::Centered,
+                    ..ZoomPreferences::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            geometry.source,
+            PhysicalRect::new(460, 360, 540, 440).unwrap()
+        );
+        assert_eq!(geometry.child_origin, PhysicalPoint::new(0, 0));
+        assert_eq!(geometry.child_size.width(), 160);
+        assert_eq!(geometry.child_size.height(), 160);
+        assert_eq!(geometry.client_coverage.left, 0);
+        assert_eq!(geometry.client_coverage.top, 0);
+        assert_eq!(geometry.client_coverage.right, 160);
+        assert_eq!(geometry.client_coverage.bottom, 160);
+        assert_eq!(geometry.lens.alignment.zoom_factor, 2.0);
+        assert_eq!(
+            geometry.child_rounding_error,
+            super::RasterTranslation { x: 0.0, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn zoom_partial_source_clips_without_reanchoring_and_preserves_fractional_scale() {
+        let sample = zoom_sample(
+            PhysicalPoint::new(10, 10),
+            Some(PhysicalRect::new(0, 0, 100, 100).unwrap()),
+            Some(PhysicalRect::new(-100, -100, 100, 100).unwrap()),
+        );
+        let geometry = zoom_presentation_geometry(
+            zoom_lens_geometry(
+                &sample,
+                ZoomPreferences {
+                    mode: ZoomMode::Centered,
+                    ..ZoomPreferences::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(geometry.source, PhysicalRect::new(0, 0, 50, 50).unwrap());
+        assert_eq!(geometry.child_origin, PhysicalPoint::new(60, 60));
+        assert_eq!(geometry.child_size.width(), 100);
+        assert_eq!(geometry.client_coverage.left, 70);
+        assert_eq!(geometry.client_coverage.top, 70);
+        assert_eq!(geometry.client_coverage.right, 160);
+        assert_eq!(geometry.client_coverage.bottom, 160);
+        // The cursor source pixel remains mapped to the center of the lens,
+        // even though the unavailable leading source pixels were clipped.
+        assert_eq!(geometry.child_origin.x + (10 * 2), 80);
+
+        let fractional_sample = zoom_sample(
+            PhysicalPoint::new(300, 300),
+            Some(PhysicalRect::new(0, 0, 1000, 1000).unwrap()),
+            None,
+        );
+        let fractional = zoom_presentation_geometry(
+            zoom_lens_geometry(
+                &fractional_sample,
+                ZoomPreferences {
+                    diameter: 163,
+                    zoom_factor: 1.7,
+                    mode: ZoomMode::Centered,
+                    ..ZoomPreferences::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fractional.lens.alignment.zoom_factor, 1.7);
+        assert_eq!(
+            fractional.source,
+            PhysicalRect::new(252, 252, 349, 349).unwrap()
+        );
+        assert_eq!(fractional.child_size.width(), 165);
+        assert_eq!(fractional.client_coverage.right, 163);
+        assert!((fractional.child_rounding_error.x.abs()) <= 0.5);
+        assert!((fractional.child_rounding_error.y.abs()) <= 0.5);
+
+        // At this exact half-pixel translation Rust rounds the child origin
+        // outward. A leading source guard keeps the full destination covered
+        // without changing the cursor-anchored mapping or configured factor.
+        let leading_guard = zoom_presentation_geometry(
+            zoom_lens_geometry(
+                &fractional_sample,
+                ZoomPreferences {
+                    diameter: 166,
+                    zoom_factor: 1.25,
+                    mode: ZoomMode::Centered,
+                    ..ZoomPreferences::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(leading_guard.lens.alignment.zoom_factor, 1.25);
+        assert_eq!(
+            leading_guard.source,
+            PhysicalRect::new(233, 233, 367, 367).unwrap()
+        );
+        assert_eq!(leading_guard.child_origin, PhysicalPoint::new(-1, -1));
+        assert_eq!(leading_guard.client_coverage.left, 0);
+        assert_eq!(leading_guard.client_coverage.top, 0);
+        assert_eq!(leading_guard.client_coverage.right, 166);
+        assert_eq!(leading_guard.client_coverage.bottom, 166);
+        assert!(leading_guard.child_rounding_error.x.abs() <= 0.5);
+        assert!(leading_guard.child_rounding_error.y.abs() <= 0.5);
+    }
+
+    #[test]
+    fn zoom_presentation_requires_known_nonempty_monitor_and_destination_coverage() {
+        let virtual_only = zoom_sample(
+            PhysicalPoint::new(0, 0),
+            None,
+            Some(PhysicalRect::new(-100, -100, 100, 100).unwrap()),
+        );
+        let lens = zoom_lens_geometry(
+            &virtual_only,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            zoom_presentation_geometry(lens),
+            Err(ZoomPresentationError::UnknownSourceCoverage)
+        );
+
+        let outside = zoom_sample(
+            PhysicalPoint::new(200, 200),
+            Some(PhysicalRect::new(0, 0, 100, 100).unwrap()),
+            Some(PhysicalRect::new(-100, -100, 300, 300).unwrap()),
+        );
+        let lens = zoom_lens_geometry(
+            &outside,
+            ZoomPreferences {
+                mode: ZoomMode::Centered,
+                ..ZoomPreferences::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            zoom_presentation_geometry(lens),
+            Err(ZoomPresentationError::HotspotOutsideSampledMonitor)
+        );
     }
 
     #[test]
@@ -1544,6 +2048,31 @@ mod tests {
         assert_eq!(minimum.get_pixel(8, 7).0[3], 0);
         assert_eq!(minimum.get_pixel(7, 8).0[3], 0);
         assert_eq!(minimum.get_pixel(8, 8).0[3], 0);
+    }
+
+    #[test]
+    fn zoom_outline_preserves_odd_size_color_thickness_and_transparent_center() {
+        let mut preferences = ZoomPreferences {
+            diameter: 65,
+            outline_enabled: true,
+            outline_color: CrosshairColor::new(17, 83, 201),
+            outline_thickness: 4,
+            ..ZoomPreferences::default()
+        };
+        let thin = zoom_outline_bitmap(preferences).unwrap();
+        assert_eq!(thin.dimensions(), (65, 65));
+        assert_eq!(thin.get_pixel(32, 0).0, [17, 83, 201, 255]);
+        assert_eq!(thin.get_pixel(32, 4).0[3], 0);
+        assert_eq!(thin.get_pixel(32, 32).0[3], 0);
+        assert_eq!(thin.get_pixel(0, 0).0[3], 0);
+
+        preferences.outline_thickness = 8;
+        let thick = zoom_outline_bitmap(preferences).unwrap();
+        assert_eq!(thick.get_pixel(32, 4).0, [17, 83, 201, 255]);
+        assert_eq!(thick.get_pixel(32, 32).0[3], 0);
+
+        preferences.outline_enabled = false;
+        assert!(zoom_outline_bitmap(preferences).is_none());
     }
 
     #[test]
