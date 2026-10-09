@@ -4,6 +4,7 @@ pub(crate) use color_pick::handle_color_pick;
 pub(crate) use ocr::handle_ocr;
 mod calendar;
 mod clipboard_modify;
+mod coordinate_tool;
 mod data;
 mod dialog_crop;
 mod file_search_diff;
@@ -23,6 +24,7 @@ pub(crate) use calendar::handle_calendar;
 pub(crate) use clipboard_modify::{
     handle_clipboard_modify, handle_clipboard_modify_with_history_query,
 };
+pub(crate) use coordinate_tool::handle_coordinate_tool;
 pub(crate) use data::handle_data;
 pub(crate) use dialog_crop::{handle_crop, handle_simple_dialog};
 pub(crate) use file_search_diff::{handle_diff, handle_file_search};

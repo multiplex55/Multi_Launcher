@@ -262,6 +262,10 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         return Ok(Command::Data(parse_data(action)));
     }
 
+    if let Some(command) = parse_mouse_wire(action) {
+        return Ok(Command::CoordinateTool(command));
+    }
+
     if let Some(command) = parse_screen_draw(s) {
         return Ok(Command::ScreenDraw(command));
     }
@@ -406,6 +410,224 @@ fn parse_screen_draw(action: &str) -> Option<ScreenDrawCommand> {
         "screen_draw:close" => ScreenDrawCommand::Close,
         _ => return None,
     })
+}
+
+/// Parse the private, colon-delimited action protocol emitted by the built-in
+/// Mouse plugin. Malformed controls in the recognized namespace remain typed
+/// invalid operations instead of falling through to external launch.
+pub(crate) fn parse_mouse_wire(action: &Action) -> Option<CoordinateToolCommand> {
+    let (family, operation) = action.action.split_once(':')?;
+    if !family.eq_ignore_ascii_case("mouse") {
+        return None;
+    }
+
+    let invalid = |error: String| CoordinateToolCommand::Invalid {
+        raw: action.action.clone(),
+        error,
+    };
+    if action.args.is_some() {
+        return Some(invalid(
+            "mouse controls do not accept action arguments".into(),
+        ));
+    }
+
+    let normalized = operation
+        .split(':')
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let tokens = normalized.iter().map(String::as_str).collect::<Vec<_>>();
+    let command = match tokens.as_slice() {
+        ["settings"] => Ok(CoordinateToolCommand::Settings),
+        ["help"] => Ok(CoordinateToolCommand::Help),
+        ["coords", ..] => parse_coord_operation(&tokens[1..]),
+        ["crosshair", ..] => parse_crosshair_operation(&tokens[1..]),
+        ["halo", ..] => parse_halo_operation(&tokens[1..]),
+        ["zoom", ..] => parse_zoom_operation(&tokens[1..]),
+        ["effects", ..] => parse_effects_operation(&tokens[1..]),
+        [] => Err("mouse command is missing".into()),
+        [operation, ..] => Err(format!("unknown mouse command `{operation}`")),
+    };
+    Some(command.unwrap_or_else(invalid))
+}
+
+fn parse_coord_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    use crate::coordinate_tool::{CoordinateOffset, CoordinateSpace, HudDetail};
+
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleHud),
+        ["on"] => Ok(CoordinateToolCommand::SetHudEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetHudEnabled(false)),
+        ["space", space] if space.eq_ignore_ascii_case("desktop") => {
+            Ok(CoordinateToolCommand::SetSpace(CoordinateSpace::Desktop))
+        }
+        ["space", space] if space.eq_ignore_ascii_case("monitor") => {
+            Ok(CoordinateToolCommand::SetSpace(CoordinateSpace::Monitor))
+        }
+        ["space", space] if space.eq_ignore_ascii_case("client") => Ok(
+            CoordinateToolCommand::SetSpace(CoordinateSpace::ForegroundClient),
+        ),
+        [detail] if detail.eq_ignore_ascii_case("compact") => {
+            Ok(CoordinateToolCommand::SetHudDetail(HudDetail::Compact))
+        }
+        [detail] if detail.eq_ignore_ascii_case("detailed") => {
+            Ok(CoordinateToolCommand::SetHudDetail(HudDetail::Detailed))
+        }
+        ["offset", x, y] => {
+            let x = parse_bounded_integer(x, -512, 512, "mouse coords offset x")?;
+            let y = parse_bounded_integer(y, -512, 512, "mouse coords offset y")?;
+            Ok(CoordinateToolCommand::SetOffset(CoordinateOffset::new(
+                x, y,
+            )))
+        }
+        ["freeze"] => Ok(CoordinateToolCommand::Freeze),
+        ["unfreeze"] => Ok(CoordinateToolCommand::Unfreeze),
+        ["copy"] => Ok(CoordinateToolCommand::Copy),
+        ["pick"] => Ok(CoordinateToolCommand::Pick),
+        ["cancel"] => Ok(CoordinateToolCommand::Cancel),
+        ["help"] => Ok(CoordinateToolCommand::HudHelp),
+        [operation, ..] if operation.eq_ignore_ascii_case("space") => {
+            Err("mouse coords space must be desktop, monitor, or client".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("offset") => {
+            Err("mouse coords offset requires signed x and y values in the range -512..512".into())
+        }
+        [operation, ..] => Err(format!("unknown mouse coords command `{operation}`")),
+        [] => Err("mouse coords command is missing".into()),
+    }
+}
+
+fn parse_crosshair_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleCrosshair),
+        ["on"] => Ok(CoordinateToolCommand::SetCrosshairEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetCrosshairEnabled(false)),
+        ["color", value] => parse_crosshair_color(value),
+        ["thickness", value] => Ok(CoordinateToolCommand::SetCrosshairThickness(
+            parse_bounded_integer(value, 1, 16, "mouse crosshair thickness")?,
+        )),
+        ["length", value] => Ok(CoordinateToolCommand::SetCrosshairLength(
+            parse_bounded_integer(value, 2, 256, "mouse crosshair length")?,
+        )),
+        ["gap", value] => Ok(CoordinateToolCommand::SetCrosshairGap(
+            parse_bounded_integer(value, 0, 128, "mouse crosshair gap")?,
+        )),
+        ["opacity", value] => {
+            let opacity = value
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite() && (0.1..=1.0).contains(value))
+                .ok_or_else(|| {
+                    "mouse crosshair opacity must be in the range 0.1..1.0".to_string()
+                })?;
+            Ok(CoordinateToolCommand::SetCrosshairOpacity(opacity))
+        }
+        ["guides", state] => {
+            parse_toggle(state, "mouse crosshair guides").map(CoordinateToolCommand::SetGuides)
+        }
+        ["contrast", state] => {
+            parse_toggle(state, "mouse crosshair contrast").map(CoordinateToolCommand::SetContrast)
+        }
+        ["help"] => Ok(CoordinateToolCommand::CrosshairHelp),
+        [operation, ..] if operation.eq_ignore_ascii_case("color") => {
+            Err("mouse crosshair color requires #rrggbb".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("thickness") => {
+            Err("mouse crosshair thickness must be in the range 1..16".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("length") => {
+            Err("mouse crosshair length must be in the range 2..256".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("gap") => {
+            Err("mouse crosshair gap requires one integer in the range 0..128".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("opacity") => {
+            Err("mouse crosshair opacity must be in the range 0.1..1.0".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("guides") => {
+            Err("mouse crosshair guides must be on or off".into())
+        }
+        [operation, ..] if operation.eq_ignore_ascii_case("contrast") => {
+            Err("mouse crosshair contrast must be on or off".into())
+        }
+        [operation, ..] => Err(format!("unknown mouse crosshair command `{operation}`")),
+        [] => Err("mouse crosshair command is missing".into()),
+    }
+}
+
+fn parse_halo_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleHalo),
+        ["on"] => Ok(CoordinateToolCommand::SetHaloEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetHaloEnabled(false)),
+        ["help"] => Ok(CoordinateToolCommand::HaloHelp),
+        ["toggle" | "on" | "off" | "help", ..] => {
+            Err("mouse halo toggle, on, off, and help do not take arguments".into())
+        }
+        [operation, ..] => Err(format!("unknown mouse halo command `{operation}`")),
+        [] => Err("mouse halo command is missing; use toggle, on, off, or help".into()),
+    }
+}
+
+fn parse_zoom_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleZoom),
+        ["on"] => Ok(CoordinateToolCommand::SetZoomEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetZoomEnabled(false)),
+        ["help"] => Ok(CoordinateToolCommand::ZoomHelp),
+        ["toggle" | "on" | "off" | "help", ..] => {
+            Err("mouse zoom toggle, on, off, and help do not take arguments".into())
+        }
+        [operation, ..] => Err(format!("unknown mouse zoom command `{operation}`")),
+        [] => Err("mouse zoom command is missing; use toggle, on, off, or help".into()),
+    }
+}
+
+fn parse_effects_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["off"] => Ok(CoordinateToolCommand::EffectsOff),
+        ["off", ..] => Err("mouse effects off does not take arguments".into()),
+        [] => Err("mouse effects command is missing; use off".into()),
+        [operation, ..] => Err(format!("unknown mouse effects command `{operation}`")),
+    }
+}
+
+fn parse_bounded_integer(
+    value: &str,
+    minimum: i32,
+    maximum: i32,
+    label: &str,
+) -> Result<i32, String> {
+    value
+        .parse::<i32>()
+        .ok()
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| format!("{label} must be in the range {minimum}..{maximum}"))
+}
+
+fn parse_crosshair_color(value: &str) -> Result<CoordinateToolCommand, String> {
+    use crate::coordinate_tool::CrosshairColor;
+
+    let hex = value
+        .strip_prefix('#')
+        .ok_or_else(|| "mouse crosshair color must use #rrggbb format".to_string())?;
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("mouse crosshair color must use #rrggbb format".into());
+    }
+    let parse =
+        |start| u8::from_str_radix(&hex[start..start + 2], 16).map_err(|error| error.to_string());
+    Ok(CoordinateToolCommand::SetCrosshairColor(
+        CrosshairColor::new(parse(0)?, parse(2)?, parse(4)?),
+    ))
+}
+
+fn parse_toggle(value: &str, label: &str) -> Result<bool, String> {
+    if value.eq_ignore_ascii_case("on") {
+        Ok(true)
+    } else if value.eq_ignore_ascii_case("off") {
+        Ok(false)
+    } else {
+        Err(format!("{label} must be on or off"))
+    }
 }
 
 fn parse_json_utility(action: &str) -> Option<JsonUtilityCommand> {
@@ -2080,5 +2302,215 @@ mod qr_parser_tests {
         assert_eq!(error.domain, "qr");
         assert_eq!(error.message, "Unknown QR command");
         assert!(!format!("{error:?}").contains("secret"));
+    }
+}
+
+#[cfg(test)]
+mod mouse_command_parser_tests {
+    use super::*;
+
+    fn parse(action: &str) -> CoordinateToolCommand {
+        let action = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: action.into(),
+            args: None,
+        };
+        match parse_action(&action).unwrap() {
+            Command::CoordinateTool(command) => command,
+            other => panic!("expected coordinate command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn control_tokens_are_case_insensitive_and_typed() {
+        assert_eq!(parse("MoUsE:SeTtInGs"), CoordinateToolCommand::Settings);
+        assert_eq!(parse("MOUSE:HELP"), CoordinateToolCommand::Help);
+        assert_eq!(parse("mouse:coords:help"), CoordinateToolCommand::HudHelp);
+        assert_eq!(
+            parse("mouse:crosshair:help"),
+            CoordinateToolCommand::CrosshairHelp
+        );
+        assert_eq!(
+            parse("MoUsE:CoOrDs:ToGgLe"),
+            CoordinateToolCommand::ToggleHud
+        );
+        assert_eq!(parse("MoUsE:CoOrDs:PiCk"), CoordinateToolCommand::Pick);
+        assert_eq!(parse("mouse:coords:CANCEL"), CoordinateToolCommand::Cancel);
+        assert_eq!(
+            parse("mouse:coords:space:CLIENT"),
+            CoordinateToolCommand::SetSpace(
+                crate::coordinate_tool::CoordinateSpace::ForegroundClient,
+            )
+        );
+        assert_eq!(
+            parse("mouse:coords:offset:-512:+512"),
+            CoordinateToolCommand::SetOffset(crate::coordinate_tool::CoordinateOffset::new(
+                -512, 512
+            ),)
+        );
+        assert_eq!(
+            parse("mouse:crosshair:color:#Aa00fF"),
+            CoordinateToolCommand::SetCrosshairColor(crate::coordinate_tool::CrosshairColor::new(
+                0xaa, 0x00, 0xff
+            ),)
+        );
+        assert_eq!(
+            parse("MOUSE:CROSSHAIR:opacity:0.5"),
+            CoordinateToolCommand::SetCrosshairOpacity(0.5)
+        );
+        assert_eq!(
+            parse("MOUSE:CROSSHAIR:GAP:0"),
+            CoordinateToolCommand::SetCrosshairGap(0)
+        );
+        assert_eq!(
+            parse("mouse:crosshair:gap:16"),
+            CoordinateToolCommand::SetCrosshairGap(16)
+        );
+        assert_eq!(
+            parse("mouse:crosshair:gap:128"),
+            CoordinateToolCommand::SetCrosshairGap(128)
+        );
+        assert_eq!(
+            parse("MOUSE:HALO:TOGGLE"),
+            CoordinateToolCommand::ToggleHalo
+        );
+        assert_eq!(
+            parse("mouse:halo:on"),
+            CoordinateToolCommand::SetHaloEnabled(true)
+        );
+        assert_eq!(
+            parse("MoUsE:HaLo:OfF"),
+            CoordinateToolCommand::SetHaloEnabled(false)
+        );
+        assert_eq!(parse("mouse:halo:help"), CoordinateToolCommand::HaloHelp);
+        assert_eq!(
+            parse("mouse:zoom:toggle"),
+            CoordinateToolCommand::ToggleZoom
+        );
+        assert_eq!(
+            parse("MOUSE:ZOOM:ON"),
+            CoordinateToolCommand::SetZoomEnabled(true)
+        );
+        assert_eq!(
+            parse("mouse:zoom:off"),
+            CoordinateToolCommand::SetZoomEnabled(false)
+        );
+        assert_eq!(parse("mouse:zoom:help"), CoordinateToolCommand::ZoomHelp);
+        assert_eq!(
+            parse("MoUsE:EfFeCtS:OfF"),
+            CoordinateToolCommand::EffectsOff
+        );
+        assert_eq!(
+            CoordinateToolCommand::SetCrosshairGap(16).kind_name(),
+            "set_crosshair_gap"
+        );
+        assert_eq!(CoordinateToolCommand::ToggleHalo.kind_name(), "toggle_halo");
+        assert_eq!(
+            CoordinateToolCommand::SetHaloEnabled(true).kind_name(),
+            "set_halo_enabled"
+        );
+        assert_eq!(CoordinateToolCommand::ToggleZoom.kind_name(), "toggle_zoom");
+        assert_eq!(
+            CoordinateToolCommand::SetZoomEnabled(true).kind_name(),
+            "set_zoom_enabled"
+        );
+        assert_eq!(CoordinateToolCommand::EffectsOff.kind_name(), "effects_off");
+        assert_eq!(
+            parse("mouse:crosshair:guides:OFF"),
+            CoordinateToolCommand::SetGuides(false)
+        );
+        assert_eq!(
+            Command::CoordinateTool(parse("mouse:settings")).domain(),
+            "mouse"
+        );
+    }
+
+    #[test]
+    fn malformed_coordinate_controls_remain_typed_and_never_external() {
+        for raw in [
+            "mouse:coords:offset:513:0",
+            "mouse:coords:offset:1",
+            "mouse:coords:space:virtual",
+            "mouse:crosshair:thickness:0",
+            "mouse:crosshair:length:257",
+            "mouse:crosshair:gap",
+            "mouse:crosshair:gap:1:2",
+            "mouse:crosshair:gap:-1",
+            "mouse:crosshair:gap:129",
+            "mouse:crosshair:gap:1.5",
+            "mouse:crosshair:gap:NaN",
+            "mouse:crosshair:gap:Infinity",
+            "mouse:crosshair:gap:2147483648",
+            "mouse:crosshair:opacity:NaN",
+            "mouse:crosshair:color:red",
+            "mouse:crosshair:guides:maybe",
+            "mouse:coords:pick:extra",
+            "mouse:coords:cancel:extra",
+            "mouse:settings:extra",
+            "mouse:unknown",
+            "mouse:halo",
+            "mouse:halo:toggle:extra",
+            "mouse:halo:on:extra",
+            "mouse:halo:radius:60",
+            "mouse:halo:strength:0.4",
+            "mouse:halo:help:extra",
+            "mouse:zoom",
+            "mouse:zoom:off:extra",
+            "mouse:zoom:factor:2",
+            "mouse:zoom:diameter:160",
+            "mouse:zoom:help:extra",
+            "mouse:effects",
+            "mouse:effects:on",
+            "mouse:effects:off:extra",
+        ] {
+            assert!(
+                matches!(parse(raw), CoordinateToolCommand::Invalid { .. }),
+                "{raw}"
+            );
+        }
+        for raw in ["coord:copy", "crosshair:on", "mousex:coords:copy"] {
+            let lookalike = Action {
+                label: String::new(),
+                desc: String::new(),
+                action: raw.into(),
+                args: None,
+            };
+            assert!(
+                matches!(parse_action(&lookalike).unwrap(), Command::External(_)),
+                "{raw}"
+            );
+        }
+
+        let action_with_args = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "mouse:halo:on".into(),
+            args: Some("unexpected".into()),
+        };
+        assert!(matches!(
+            parse_action(&action_with_args).unwrap(),
+            Command::CoordinateTool(CoordinateToolCommand::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_crosshair_gaps_explain_the_required_value_and_range() {
+        for raw in [
+            "mouse:crosshair:gap",
+            "mouse:crosshair:gap:1:2",
+            "mouse:crosshair:gap:-1",
+            "mouse:crosshair:gap:129",
+            "mouse:crosshair:gap:1.5",
+            "mouse:crosshair:gap:NaN",
+            "mouse:crosshair:gap:Infinity",
+            "mouse:crosshair:gap:2147483648",
+        ] {
+            let CoordinateToolCommand::Invalid { error, .. } = parse(raw) else {
+                panic!("{raw} should be rejected");
+            };
+            assert!(error.contains("mouse crosshair gap"), "{error}");
+            assert!(error.contains("0..128"), "{error}");
+        }
     }
 }

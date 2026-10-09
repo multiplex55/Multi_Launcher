@@ -27,6 +27,7 @@ pub mod color_pick;
 pub mod commands;
 pub mod common;
 pub mod completion;
+pub mod coordinate_tool;
 pub mod dashboard;
 pub mod date_arithmetic;
 pub mod diff;

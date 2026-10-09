@@ -47,6 +47,12 @@ impl SettingsEditor {
         new_settings: Settings,
     ) {
         crate::plugins::macros::configure_search_runtime(&new_settings, &app.actions_path);
+        if let Err(error) = app
+            .coordinate_tool
+            .apply_loaded_preferences(new_settings.coordinate_tool.clone())
+        {
+            app.report_error_message("coordinate_tool.settings_reload", error);
+        }
         app.update_paths(
             new_settings.plugin_dirs.clone(),
             new_settings.index_paths.clone(),

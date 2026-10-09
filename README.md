@@ -26,6 +26,7 @@ It’s designed to be “one hotkey away” from:
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
+- [Mouse coordinates and crosshair](#mouse-coordinates-and-crosshair)
 - [Regex Tester](#regex-tester)
 - [Screen region OCR](#screen-region-ocr)
 - [Dashboard](#dashboard)
@@ -96,6 +97,7 @@ Multi Launcher is centered around a **single query box**:
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
 | `regex` | Local Rust regex tester | `regex` |
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
+| `mouse` | Mouse settings, coordinates, picking, and independent crosshair | `mouse settings` / `mouse coords copy` / `mouse crosshair toggle` |
 | `ocr` | Local English text recognition from a screen region | `ocr` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
@@ -535,6 +537,110 @@ with the usual `color #rrggbb` HEX/RGB/HSL results after selection. Choose a res
 to copy it; selecting a pixel alone leaves the clipboard unchanged. The picker
 supports signed desktop coordinates, including monitors to the left or above the
 primary monitor, and samples the frozen image throughout the session.
+
+## Mouse coordinates and crosshair
+
+On Windows, `mouse` discovers the common Mouse actions. `mouse settings`
+opens the focused Mouse Settings dialog; `mouse help` describes the command
+hierarchy. Settings are grouped into Crosshair, Cursor Halo, Cursor Magnifier,
+and Coordinate Display, using the same saved appearance preferences as
+commands. Appearance options primarily live in this dialog rather than filling
+normal launcher discovery with parameter commands.
+
+`mouse coords toggle` toggles a cursor-following, click-through coordinate HUD.
+`mouse crosshair toggle` independently toggles a passive crosshair at the cursor. Both can run
+together without taking focus or intercepting ordinary typing and clicks.
+`mouse coords on|off` and `mouse crosshair on|off` set a mode explicitly. Their
+Enabled checkboxes in Mouse Settings change live, transient runtime state;
+opening settings does not enable a mode. Apply saves appearance changes.
+
+Coordinates are signed physical pixels, including negative desktop positions.
+`mouse coords space desktop|monitor|client` selects desktop coordinates, coordinates
+relative to the containing monitor's full bounds, or coordinates relative to the
+foreground window's client origin. While the launcher is foreground, client
+space uses the last external target window. Missing geometry is reported as
+unavailable rather than copied as zero.
+
+Use Mouse Settings for the coordinate space, compact/detailed presentation and
+cursor offset. Advanced queries `mouse coords compact|detailed` and
+`mouse coords offset -32 48` remain available for automation.
+`mouse coords freeze|unfreeze` controls the displayed sample. `mouse coords copy` writes the displayed
+sample as `x,y`; a frozen HUD copies its frozen sample. Detailed presentation
+includes monitor/context information and the last successful copy.
+
+`mouse coords pick` starts a one-shot capture and temporarily parks the launcher so
+targets remain visible. A fresh left click copies that pixel's live coordinates
+as `x,y`, using the space selected when the session began, even if the HUD is
+frozen. The capture consumes both the press and its matching release; the
+underlying application does not receive the capture click. Escape or
+`mouse coords cancel` cancels without writing the clipboard. The session stays active
+while an already consumed press waits for release, then cleans up before
+publishing a result. Repeating `mouse coords pick` keeps the existing session.
+
+Coordinate capture cannot overlap OCR, Color Pick, Screen Draw, screenshot crop,
+or a MkMacro point/rectangle overlay. A radial action that starts pick closes its
+radial session first; a new radial overlay cannot open until capture cleanup finishes.
+Passive HUD and crosshair operation remain independent of those capture tools.
+
+Mouse Settings provides crosshair RGB color, thickness, arm length, opacity,
+center gap in physical pixels, guides and contrast outline. The center gap is
+measured from the cursor hotspot to the nearest visible colored or outlined
+crosshair stroke. Advanced controls remain available as
+`mouse crosshair color #ff0000`, `mouse crosshair thickness 2`,
+`mouse crosshair length 12`, `mouse crosshair opacity 0.8`,
+`mouse crosshair gap 16` (0..128 physical pixels; default 16 per arm),
+`mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`.
+Guides span the virtual desktop; contrast adds an
+outline for visibility. Preferences are saved, while activation and frozen/copy
+state are temporary. `mouse coords help` and `mouse crosshair help` show the
+feature controls. Old standalone `coord` and `crosshair` queries/raw actions
+are removed; this branch's inspected stored data had no references requiring aliases.
+
+Cursor Halo inverts actual desktop pixels in a circular region centered on the
+live cursor. Cursor Magnifier shows real screen content at its configured
+factor; Offset mode moves the lens while keeping its source centered on the
+cursor, and Centered mode places the lens at the cursor. Their radius, inversion
+strength, destination mode, zoom factor, diameter, outline and colors are saved
+through Mouse Settings. `mouse halo toggle|on|off` and
+`mouse zoom toggle|on|off` change independent session-only switches; both start
+off each time the app starts. `mouse effects off` disables the crosshair, halo
+and magnifier while leaving the coordinate HUD and pick/freeze/copy state alone.
+The dialog reports whether a native effect is active, paused, unavailable, or
+using the halo's clearly labeled **non-inverting outline fallback**. That
+fallback keeps a contrasting cursor ring visible when desktop inversion cannot
+be initialized or presented; it does not claim inversion is occurring.
+
+The native effects use Windows Magnification on supported composited desktop
+content. Protected surfaces, exclusive fullscreen applications, some games,
+remote desktops, screenshot tools and video/streaming capture paths may omit or
+alter the effect output. A screenshot or stream is not guaranteed to contain the
+same composed pixels visible on the desktop; API success and saved readbacks
+alone do not prove that composition was included.
+
+For an opt-in native runtime check, run `cargo run --bin coordinate_tool_smoke`
+on an interactive Windows desktop for the existing passive/capture fixture, or
+`cargo run --bin coordinate_tool_smoke -- --cursor-effects` for the cursor
+effects fixture. The latter opens an ordinary controlled scene with a palette,
+checkerboard, text and a changing marker. F1 toggles the HUD, F2 the crosshair,
+F3 the halo, F4 the magnifier, and F5 turns effects off while retaining the HUD.
+F6 cycles halo inversion through 0%, 40% and 100%; F7 switches centered/offset
+zoom; F8 cycles through 1.25×, 1.7×, 2× and 4×; F9 switches between 160- and
+163-pixel lens diameters; F10 toggles guides. F11 writes current status and
+own-process HWND/source/transform/filter diagnostics, F12 saves a bounded
+desktop BMP under `target/coordinate-tool-smoke`, and Escape exits. The fixture
+uses no synthetic input or clipboard access. Its GDI readback can omit
+magnifier-composited output, so inspect any saved image and treat the parent
+desktop observation as the native visual check.
+
+For a finite controller-driven observation sequence, use
+`cargo run --bin coordinate_tool_smoke -- --cursor-effects-auto`. It holds each
+named mode/appearance stage for about 1.4 seconds, logs foreground and native
+window diagnostics, saves bounded readbacks for halo strengths and zoom modes,
+then turns effects off and shuts down. It does not synthesize input or move the
+cursor. Saved halo defaults are 60 physical pixels and 40% inversion; the
+magnifier defaults to 2×, 160 physical pixels, Offset mode, and a (+120,+80)
+physical-pixel destination displacement. Supported zoom factors are 1.25× to
+4×.
 
 ## Regex Tester
 

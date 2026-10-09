@@ -105,7 +105,13 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::ScreenDraw(_)
         | Command::Macro(_)
         | Command::Screenshot(_)
-        | Command::MouseGesture(_) => InteractionRequirement::ExclusiveCapture,
+        | Command::MouseGesture(_)
+        | Command::CoordinateTool(crate::commands::CoordinateToolCommand::Pick) => {
+            InteractionRequirement::ExclusiveCapture
+        }
+        Command::CoordinateTool(crate::commands::CoordinateToolCommand::Settings) => {
+            InteractionRequirement::LauncherUi
+        }
         Command::Launcher(_)
         | Command::Radial(
             crate::commands::RadialCommand::Edit | crate::commands::RadialCommand::Skins,
@@ -476,6 +482,28 @@ mod tests {
                 raw_argument: None,
             })),
             InteractionRequirement::None
+        );
+    }
+
+    #[test]
+    fn mouse_pick_and_settings_use_their_required_handoffs() {
+        assert_eq!(
+            command_requirement(&Command::CoordinateTool(
+                crate::commands::CoordinateToolCommand::Pick,
+            )),
+            InteractionRequirement::ExclusiveCapture
+        );
+        assert_eq!(
+            command_requirement(&Command::CoordinateTool(
+                crate::commands::CoordinateToolCommand::Cancel,
+            )),
+            InteractionRequirement::None
+        );
+        assert_eq!(
+            command_requirement(&Command::CoordinateTool(
+                crate::commands::CoordinateToolCommand::Settings,
+            )),
+            InteractionRequirement::LauncherUi
         );
     }
 

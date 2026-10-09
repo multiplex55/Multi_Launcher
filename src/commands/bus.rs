@@ -1,10 +1,11 @@
 use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcome};
 use crate::commands::handlers::{
-    handle_calendar, handle_clipboard_modify_with_history_query, handle_color_pick, handle_crop,
-    handle_data, handle_diff, handle_file_search, handle_headless_gui_with_history_query,
-    handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
-    handle_note, handle_ocr, handle_query, handle_radial, handle_screen_draw, handle_screenshot,
-    handle_simple_dialog, handle_snippet_run, handle_todo,
+    handle_calendar, handle_clipboard_modify_with_history_query, handle_color_pick,
+    handle_coordinate_tool, handle_crop, handle_data, handle_diff, handle_file_search,
+    handle_headless_gui_with_history_query, handle_json_utility, handle_launcher, handle_link,
+    handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr, handle_query,
+    handle_radial, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run,
+    handle_todo,
 };
 
 #[derive(Debug, Default)]
@@ -52,6 +53,7 @@ impl CommandBus {
             Command::Diff(command) => handle_diff(host, command),
             Command::Screenshot(command) => handle_screenshot(host, command),
             Command::ScreenDraw(command) => handle_screen_draw(host, command),
+            Command::CoordinateTool(command) => handle_coordinate_tool(host, command),
             Command::ClipboardModify(command) => Ok(handle_clipboard_modify_with_history_query(
                 host,
                 command,
@@ -90,10 +92,10 @@ mod tests {
     use super::*;
     use crate::actions::Action;
     use crate::commands::{
-        ActivationSource, CalendarCommandHost, CropCommandHost, DialogCommandHost,
-        HeadlessCommandHost, HistoryPolicy, LauncherCommand, LauncherCommandHost,
-        MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy, RadialCommandHost,
-        TodoCommandHost, VisibilityPolicy,
+        ActivationSource, CalendarCommandHost, CoordinateToolCommand, CropCommandHost,
+        DialogCommandHost, HeadlessCommandHost, HistoryPolicy, LauncherCommand,
+        LauncherCommandHost, MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy,
+        RadialCommandHost, TodoCommandHost, VisibilityPolicy,
     };
 
     #[derive(Default)]
@@ -110,6 +112,8 @@ mod tests {
         diff_calls: usize,
         screenshot_calls: usize,
         screen_draw_calls: Vec<crate::commands::ScreenDrawCommand>,
+        coordinate_tool_calls: Vec<CoordinateToolCommand>,
+        mouse_settings_calls: usize,
         clipboard_modify_calls: usize,
         clipboard_modify_metadata:
             Option<crate::clipboard_modify::coordinator::ImmediateRequestMetadata>,
@@ -123,6 +127,19 @@ mod tests {
     impl LauncherCommandHost for FakeHost {
         fn launcher_is_visible(&self) -> bool {
             self.visible
+        }
+
+        fn open_mouse_settings(&mut self) -> Result<(), String> {
+            self.mouse_settings_calls += 1;
+            Ok(())
+        }
+
+        fn execute_coordinate_tool_command(
+            &mut self,
+            command: &CoordinateToolCommand,
+        ) -> Result<Option<String>, String> {
+            self.coordinate_tool_calls.push(command.clone());
+            Ok(None)
         }
     }
 
@@ -624,6 +641,31 @@ mod tests {
         );
         assert_eq!(screen_draw.visibility, VisibilityPolicy::Keep);
         assert_eq!(screen_draw.history, crate::commands::HistoryPolicy::Record);
+
+        let coordinate = CommandBus
+            .dispatch(
+                &invocation(Command::CoordinateTool(CoordinateToolCommand::ToggleHud)),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(
+            host.coordinate_tool_calls,
+            [CoordinateToolCommand::ToggleHud]
+        );
+        assert_eq!(coordinate, CommandOutcome::default());
+
+        let settings = CommandBus
+            .dispatch(
+                &invocation(Command::CoordinateTool(CoordinateToolCommand::Settings)),
+                &mut host,
+            )
+            .unwrap();
+        assert_eq!(host.mouse_settings_calls, 1);
+        assert_eq!(
+            host.coordinate_tool_calls,
+            [CoordinateToolCommand::ToggleHud]
+        );
+        assert_eq!(settings, CommandOutcome::default());
 
         CommandBus
             .dispatch(

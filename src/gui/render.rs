@@ -1243,9 +1243,13 @@ impl LauncherApp {
             self.launcher_hwnd = Some(hwnd.0 as usize);
         }
         self.cancel_screen_draw_startup_on_escape(ctx);
+        self.poll_coordinate_pick(ctx);
         self.poll_color_pick(ctx);
         self.poll_ocr_selection(ctx);
         self.poll_screen_draw_capture(ctx);
+        if let Some(error) = self.coordinate_tool.poll_error() {
+            self.report_error_message("coordinate_tool.runtime", error);
+        }
         self.show_screen_draw_toolbar(ctx);
         self.multi_manager_drain_runtime_events();
         self.poll_clipboard_modify_runtime(ctx);
@@ -1359,6 +1363,9 @@ impl LauncherApp {
         }
         if reconcile_native_presentation && self.ocr_owns_root() {
             self.reconcile_ocr_parking();
+        }
+        if reconcile_native_presentation && self.coordinate_capture_parking.is_some() {
+            self.reconcile_coordinate_pick_parking();
         }
         let screen_draw_repark_result = if reconcile_native_presentation && !should_be_visible {
             let controller = &self.screen_draw_controller;
@@ -2213,6 +2220,8 @@ impl LauncherApp {
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(ctx, self);
         self.macro_dialog = macro_dlg;
+        self.mkmacro_dialog
+            .set_coordinate_capture_active(self.coordinate_pick_blocks_other_screen_actions());
         self.mkmacro_dialog.ui(ctx);
         while let Some(notice) = self.mkmacro_dialog.take_ui_notice() {
             if self.enable_toasts {
@@ -2234,6 +2243,9 @@ impl LauncherApp {
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
         mg_settings_dlg.ui(ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
+        let mut mouse_settings_dlg = std::mem::take(&mut self.mouse_settings_dialog);
+        mouse_settings_dlg.ui(ctx, &mut self.coordinate_tool);
+        self.mouse_settings_dialog = mouse_settings_dlg;
         let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
         let mut theme_open = self.theme_settings_dialog_open;
         crate::gui::theme_settings_dialog::ui(ctx, self, &mut theme_open, &mut theme_state);
@@ -2462,6 +2474,10 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Err(error) = self.coordinate_tool.shutdown() {
+            self.report_error("coordinate_tool.shutdown", error);
+        }
+        self.shutdown_coordinate_pick();
         self.shutdown_color_pick();
         self.shutdown_ocr_selection();
         self.root_window_bridge.clear();
@@ -3338,6 +3354,247 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn reopening_pick_restores_previous_parking_after_its_result_was_consumed() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (outcomes_tx, outcomes_rx) = std::sync::mpsc::channel();
+        let capture_runtime = Arc::new(CoordinateCaptureFixture {
+            started: started_tx,
+            outcomes: Mutex::new(outcomes_rx),
+        });
+        let copied = Arc::new(Mutex::new(Vec::new()));
+        app.coordinate_tool =
+            crate::gui::coordinate_tool::CoordinateToolGui::with_backends_and_capture(
+                "settings.json".into(),
+                crate::coordinate_tool::CoordinateToolPreferences::default(),
+                Arc::new(crate::coordinate_tool::NativeCoordinateRuntimeFactory),
+                Box::new(CoordinateClipboardFixture(Arc::clone(&copied))),
+                capture_runtime,
+            );
+
+        app.begin_coordinate_pick().unwrap();
+        let first = started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let revision_before_conflicts = app.visibility_revision.current();
+        assert!(app.begin_color_pick().is_err());
+        assert!(app.begin_ocr_selection().is_err());
+        assert!(app.start_or_focus_screen_draw().is_err());
+        app.begin_crop_screenshot();
+        app.begin_screen_draw_region_picker(crate::screen_draw::ScreenDrawRegionPickerReady {
+            generation: crate::screen_draw::ScreenDrawGeneration::from_raw(99),
+            bounds: crate::mkmacro::screen::ScreenRect::new(0, 0, 100, 100),
+        });
+        assert!(
+            <LauncherApp as crate::commands::RadialCommandHost>::request_radial_control(
+                &mut app,
+                crate::radial::control::RadialControlRequest::Show(
+                    crate::radial::control::RadialMenuSelector::IdOrName("Work".into()),
+                ),
+            )
+            .is_err()
+        );
+        assert_eq!(app.visibility_revision.current(), revision_before_conflicts);
+        assert!(app.crop_screenshot_operation.is_none());
+        assert!(app.screen_draw_region_operation.is_none());
+        assert!(!app.color_pick_capture_busy());
+        assert!(!app.ocr_capture_busy());
+
+        let original = crate::launcher_parking::LauncherWindowRect {
+            left: 1200,
+            top: 700,
+            right: 1663,
+            bottom: 987,
+        };
+        let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            1_u64,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
+        app.coordinate_capture_parking = Some(crate::gui::coordinate_tool::CoordinatePickParking {
+            transaction: Some(transaction),
+            prior_visible: false,
+            owned_revision: app.visibility_revision.current(),
+        });
+        outcomes_tx
+            .send(crate::coordinate_tool::CaptureOutcome::Captured(
+                crate::coordinate_tool::CoordinateSample::new(
+                    crate::coordinate_tool::PhysicalPoint::new(91, -27),
+                    None,
+                    None,
+                    None,
+                ),
+            ))
+            .unwrap();
+
+        // Model completion arriving before the next command: the adapter may
+        // consume the result first, while LauncherApp still owns parking.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while app.coordinate_tool.capture_pending() && std::time::Instant::now() < deadline {
+            app.coordinate_tool.poll_capture();
+            thread::yield_now();
+        }
+        assert!(!app.coordinate_tool.capture_pending());
+        assert!(app.coordinate_capture_parking.is_some());
+        assert_eq!(*copied.lock().unwrap(), ["91,-27"]);
+
+        app.begin_coordinate_pick().unwrap();
+        let second = started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(observer.restored_rects(), [original]);
+        assert!(
+            app.coordinate_capture_parking
+                .as_ref()
+                .is_some_and(|state| state.transaction.is_none()),
+            "the new lifecycle must own fresh parking state only after the old restore"
+        );
+
+        app.cancel_coordinate_pick();
+        outcomes_tx
+            .send(crate::coordinate_tool::CaptureOutcome::Cancelled)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while app.coordinate_tool.capture_pending() && std::time::Instant::now() < deadline {
+            app.poll_coordinate_pick(&ctx);
+            thread::yield_now();
+        }
+        assert!(!app.coordinate_tool.capture_pending());
+        app.coordinate_tool.shutdown().unwrap();
+    }
+
+    #[test]
+    fn coordinate_pick_restore_failure_blocks_reopen_and_other_capture_admission() {
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (outcomes_tx, outcomes_rx) = std::sync::mpsc::channel();
+        app.coordinate_tool =
+            crate::gui::coordinate_tool::CoordinateToolGui::with_backends_and_capture(
+                "settings.json".into(),
+                crate::coordinate_tool::CoordinateToolPreferences::default(),
+                Arc::new(crate::coordinate_tool::NativeCoordinateRuntimeFactory),
+                Box::new(CoordinateClipboardFixture(Arc::new(Mutex::new(Vec::new())))),
+                Arc::new(CoordinateCaptureFixture {
+                    started: started_tx,
+                    outcomes: Mutex::new(outcomes_rx),
+                }),
+            );
+
+        app.begin_coordinate_pick().unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let original = crate::launcher_parking::LauncherWindowRect {
+            left: 1200,
+            top: 700,
+            right: 1663,
+            bottom: 987,
+        };
+        let (transaction, observer) = crate::launcher_parking::launcher_parking_test_fixture(
+            2_u64,
+            original,
+            crate::mkmacro::screen::ScreenRect::new(0, 0, 1920, 1080),
+        );
+        app.coordinate_capture_parking = Some(crate::gui::coordinate_tool::CoordinatePickParking {
+            transaction: Some(transaction),
+            prior_visible: false,
+            owned_revision: app.visibility_revision.current(),
+        });
+        outcomes_tx
+            .send(crate::coordinate_tool::CaptureOutcome::Captured(
+                crate::coordinate_tool::CoordinateSample::new(
+                    crate::coordinate_tool::PhysicalPoint::new(91, -27),
+                    None,
+                    None,
+                    None,
+                ),
+            ))
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while app.coordinate_tool.capture_pending() && std::time::Instant::now() < deadline {
+            app.coordinate_tool.poll_capture();
+            thread::yield_now();
+        }
+        assert!(!app.coordinate_tool.capture_pending());
+
+        observer.fail_next_restore();
+        app.poll_coordinate_pick(&ctx);
+        assert!(app.coordinate_capture_parking.is_some());
+        assert!(observer.restored_rects().is_empty());
+        assert!(app.ensure_no_coordinate_pick().is_err());
+        assert!(app.ensure_coordinate_pick_admitted().is_err());
+        assert!(app.begin_color_pick().is_err());
+        assert!(app.begin_ocr_selection().is_err());
+        assert!(app.start_or_focus_screen_draw().is_err());
+        assert!(
+            <LauncherApp as crate::commands::RadialCommandHost>::request_radial_control(
+                &mut app,
+                crate::radial::control::RadialControlRequest::Show(
+                    crate::radial::control::RadialMenuSelector::IdOrName("Work".into()),
+                ),
+            )
+            .is_err()
+        );
+
+        observer.fail_next_restore();
+        assert!(app.begin_coordinate_pick().is_err());
+        assert!(app.coordinate_capture_parking.is_some());
+        assert!(started_rx.try_recv().is_err());
+        assert!(observer.restored_rects().is_empty());
+
+        app.begin_coordinate_pick().unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(observer.restored_rects(), [original]);
+
+        app.cancel_coordinate_pick();
+        outcomes_tx
+            .send(crate::coordinate_tool::CaptureOutcome::Cancelled)
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while app.coordinate_tool.capture_pending() && std::time::Instant::now() < deadline {
+            app.poll_coordinate_pick(&ctx);
+            thread::yield_now();
+        }
+        assert!(!app.coordinate_tool.capture_pending());
+        app.coordinate_tool.shutdown().unwrap();
+    }
+
+    struct CoordinateCaptureFixture {
+        started: std::sync::mpsc::Sender<crate::coordinate_tool::CaptureSessionId>,
+        outcomes: Mutex<std::sync::mpsc::Receiver<crate::coordinate_tool::CaptureOutcome>>,
+    }
+
+    impl crate::coordinate_tool::CaptureRuntime for CoordinateCaptureFixture {
+        fn run_session(
+            &self,
+            session_id: crate::coordinate_tool::CaptureSessionId,
+            _control: crate::coordinate_tool::capture::CaptureControl,
+            updates: crate::coordinate_tool::capture::CaptureUpdatePublisher,
+        ) -> crate::coordinate_tool::CaptureOutcome {
+            let _ =
+                updates.publish_phase(crate::coordinate_tool::CapturePhase::WaitingForFreshClick);
+            let _ = self.started.send(session_id);
+            self.outcomes.lock().unwrap().recv().unwrap_or_else(|_| {
+                crate::coordinate_tool::CaptureOutcome::Failed("fixture closed".into())
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct CoordinateClipboardFixture(Arc<Mutex<Vec<String>>>);
+
+    impl crate::gui::coordinate_tool::CoordinateClipboardWriter for CoordinateClipboardFixture {
+        fn set_text(&mut self, text: &str) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(text.to_owned());
+            Ok(())
+        }
     }
 
     fn new_prompt_app(ctx: &egui::Context) -> (LauncherApp, tempfile::TempDir) {

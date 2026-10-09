@@ -30,6 +30,17 @@ pub enum ScreenshotCommandResult {
 
 pub trait LauncherCommandHost {
     fn launcher_is_visible(&self) -> bool;
+
+    fn open_mouse_settings(&mut self) -> Result<(), String> {
+        Err("Mouse settings require the launcher interface".into())
+    }
+
+    fn execute_coordinate_tool_command(
+        &mut self,
+        _command: &super::CoordinateToolCommand,
+    ) -> Result<Option<String>, String> {
+        Err("coordinate inspector commands require the launcher interface".into())
+    }
 }
 
 pub trait RadialCommandHost {

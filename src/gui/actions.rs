@@ -405,6 +405,10 @@ impl LauncherApp {
     }
 
     pub(crate) fn begin_crop_screenshot(&mut self) {
+        if let Err(error) = self.ensure_no_coordinate_pick() {
+            self.report_error_message("crop.screenshot", error);
+            return;
+        }
         if self.crop_screenshot_operation.is_some() {
             self.add_error_toast("A screenshot crop selection is already active");
             return;
@@ -485,6 +489,10 @@ impl LauncherApp {
         &mut self,
         ready: crate::screen_draw::ScreenDrawRegionPickerReady,
     ) {
+        if let Err(error) = self.ensure_no_coordinate_pick() {
+            self.report_error_message("screen_draw.region_picker", error);
+            return;
+        }
         if self.screen_draw_controller.state().generation() != Some(ready.generation)
             || !matches!(
                 self.screen_draw_controller.state(),

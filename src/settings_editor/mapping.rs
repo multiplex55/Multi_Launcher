@@ -346,6 +346,7 @@ impl SettingsEditor {
             },
             note_graph: current.note_graph.clone(),
             multi_manager: current.multi_manager.clone(),
+            coordinate_tool: current.coordinate_tool.clone(),
             radial: self.radial_settings(),
             // The Designer persists independently from this editor.  Use the
             // latest settings snapshot supplied by the caller so an older
@@ -388,6 +389,21 @@ mod tests {
         let editor = SettingsEditor::new(&initial);
         let saved = editor.to_settings(&initial);
         assert_eq!(saved.query_results_layout, initial.query_results_layout);
+    }
+
+    #[test]
+    fn settings_editor_save_preserves_coordinate_tool_preferences() {
+        let mut initial = Settings::default();
+        initial.coordinate_tool.space = crate::coordinate_tool::CoordinateSpace::ForegroundClient;
+        initial.coordinate_tool.hud_detail = crate::coordinate_tool::HudDetail::Detailed;
+        initial.coordinate_tool.cursor_offset =
+            crate::coordinate_tool::CoordinateOffset::new(-32, 48);
+        initial.coordinate_tool.crosshair.virtual_desktop_guides = true;
+
+        let editor = SettingsEditor::new(&initial);
+        let saved = editor.to_settings(&initial);
+
+        assert_eq!(saved.coordinate_tool, initial.coordinate_tool);
     }
 
     #[test]

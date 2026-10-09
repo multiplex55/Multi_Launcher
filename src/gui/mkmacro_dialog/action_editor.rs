@@ -270,6 +270,7 @@ pub struct ActionEditorState {
     overlay_diagnostic: Option<(super::visual_overlay::OperationId, String)>,
     active_point_pick: Option<super::visual_overlay::OperationId>,
     pending_visual_region: Option<PendingVisualRegionOperation>,
+    coordinate_capture_active: bool,
     picker: NativePositionPicker,
     notification_preview: NotificationPreview,
     sound_preview: SoundPreview,
@@ -597,6 +598,7 @@ impl ActionEditorState {
             overlay_diagnostic: None,
             active_point_pick: None,
             pending_visual_region: None,
+            coordinate_capture_active: false,
             picker: Default::default(),
             notification_preview: Arc::new(production_notification_preview),
             sound_preview: Arc::new(crate::sound::play_sound),
@@ -608,6 +610,10 @@ impl ActionEditorState {
             call_target_search: String::new(),
             pending_call_target: None,
         }
+    }
+
+    pub(crate) fn set_coordinate_capture_active(&mut self, active: bool) {
+        self.coordinate_capture_active = active;
     }
 
     #[cfg(test)]
@@ -1160,6 +1166,11 @@ impl ActionEditorState {
         purpose: super::visual_overlay::RectanglePurpose,
         destination: VisualRegionDestination,
     ) -> anyhow::Result<()> {
+        if self.coordinate_capture_active {
+            anyhow::bail!(
+                "Finish or cancel coordinate picking before starting a MkMacro screen selection"
+            );
+        }
         self.pending_visual_region = None;
         if let Some(workflow) = &mut self.visual_capture {
             if workflow.active() {
@@ -2027,6 +2038,13 @@ impl ActionEditorState {
         macro_id: u64,
         destination: super::visual_overlay::VisualPointDestination,
     ) {
+        if self.coordinate_capture_active {
+            self.capture_message = Some(
+                "Finish or cancel coordinate picking before starting a MkMacro screen selection"
+                    .into(),
+            );
+            return;
+        }
         if self.active_point_pick.is_some() {
             return;
         }
@@ -10559,6 +10577,31 @@ mod tests {
         }
 
         #[test]
+        fn coordinate_pick_blocks_rectangle_start_without_cancelling_existing_workflow() {
+            let mut f = Fixture::new();
+            f.begin_selecting(RectanglePurpose::SearchRegion);
+            let snapshots = f.snapshots();
+
+            f.editor.set_coordinate_capture_active(true);
+            let error = f
+                .editor
+                .request_rectangle_selection(
+                    MACRO_ID,
+                    RectanglePurpose::ReferenceImageCapture,
+                    VisualRegionDestination::ImageActionReferenceAsset,
+                )
+                .unwrap_err();
+
+            assert!(error.to_string().contains("coordinate picking"));
+            assert!(f.editor.visual_capture.as_ref().unwrap().active());
+            assert_eq!(
+                f.fake.lock().unwrap().purposes,
+                [RectanglePurpose::SearchRegion]
+            );
+            assert_eq!(f.snapshots(), snapshots);
+        }
+
+        #[test]
         fn pick_region_changes_only_search_geometry() {
             let mut f = Fixture::new();
             let unrelated = f.draft_payload().clone();
@@ -11045,6 +11088,28 @@ mod tests {
                 request,
                 point,
             }
+        }
+
+        #[test]
+        fn coordinate_pick_blocks_mkmacro_point_pick_start() {
+            let (mut editor, fixture) = fixture_editor();
+            editor.begin_edit(&variable_step(
+                55,
+                "p",
+                MkValue::Point(MkPoint { x: 1, y: 2 }),
+            ));
+            editor.set_coordinate_capture_active(true);
+
+            editor.request_point_pick(7, VisualPointDestination::SetVariablePoint);
+
+            assert!(editor.active_point_pick.is_none());
+            assert!(fixture.controller.operation_id().is_none());
+            assert!(
+                editor
+                    .capture_message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("coordinate picking"))
+            );
         }
 
         #[test]
