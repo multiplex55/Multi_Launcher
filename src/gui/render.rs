@@ -17,9 +17,14 @@ struct RootListGeometryKey {
     button_padding_x_bits: u32,
     button_padding_y_bits: u32,
     interaction_height_bits: u32,
+    interaction_width_bits: u32,
     item_spacing_y_bits: u32,
     show_full_paths: bool,
     is_grid: bool,
+    grid_columns: usize,
+    grid_nominal_width_bits: u32,
+    grid_spacing_x_bits: u32,
+    grid_spacing_y_bits: u32,
 }
 
 /// Cached actual SelectableLabel row geometry for the root list.
@@ -35,6 +40,16 @@ pub(super) struct RootListGeometryCache {
     row_response_x_offsets: Vec<f32>,
     row_widths: Vec<f32>,
     row_response_widths: Vec<f32>,
+    grid_columns: usize,
+    grid_nominal_width: f32,
+    grid_column_x_offsets: Vec<f32>,
+    grid_column_widths: Vec<f32>,
+    grid_full_width: f32,
+    grid_cell_widths: Vec<f32>,
+    grid_cell_heights: Vec<f32>,
+    grid_visual_row_tops: Vec<f32>,
+    grid_visual_row_bottoms: Vec<f32>,
+    grid_visual_max_end_tree: Vec<f32>,
     total_height: f32,
     content_x_offset: f32,
     content_width: f32,
@@ -49,6 +64,8 @@ pub(super) struct RootListGeometryCache {
     #[cfg(test)]
     measured_rows: u64,
     #[cfg(test)]
+    measured_cells: u64,
+    #[cfg(test)]
     last_rebuild_nanos: u64,
 }
 
@@ -57,6 +74,7 @@ pub(super) struct RootListGeometryCache {
 pub(crate) struct RootListGeometryObservation {
     pub(crate) rebuild_count: u64,
     pub(crate) measured_rows: u64,
+    pub(crate) measured_cells: u64,
     pub(crate) last_rebuild_nanos: u64,
 }
 
@@ -70,6 +88,16 @@ impl Default for RootListGeometryCache {
             row_response_x_offsets: Vec::new(),
             row_widths: Vec::new(),
             row_response_widths: Vec::new(),
+            grid_columns: 0,
+            grid_nominal_width: 0.0,
+            grid_column_x_offsets: Vec::new(),
+            grid_column_widths: Vec::new(),
+            grid_full_width: 0.0,
+            grid_cell_widths: Vec::new(),
+            grid_cell_heights: Vec::new(),
+            grid_visual_row_tops: Vec::new(),
+            grid_visual_row_bottoms: Vec::new(),
+            grid_visual_max_end_tree: Vec::new(),
             total_height: 0.0,
             content_x_offset: 0.0,
             content_width: 0.0,
@@ -83,6 +111,8 @@ impl Default for RootListGeometryCache {
             rebuild_count: 0,
             #[cfg(test)]
             measured_rows: 0,
+            #[cfg(test)]
+            measured_cells: 0,
             #[cfg(test)]
             last_rebuild_nanos: 0,
         }
@@ -98,6 +128,16 @@ impl RootListGeometryCache {
         self.row_response_x_offsets.clear();
         self.row_widths.clear();
         self.row_response_widths.clear();
+        self.grid_columns = 0;
+        self.grid_nominal_width = 0.0;
+        self.grid_column_x_offsets.clear();
+        self.grid_column_widths.clear();
+        self.grid_full_width = 0.0;
+        self.grid_cell_widths.clear();
+        self.grid_cell_heights.clear();
+        self.grid_visual_row_tops.clear();
+        self.grid_visual_row_bottoms.clear();
+        self.grid_visual_max_end_tree.clear();
         self.total_height = 0.0;
         self.content_x_offset = 0.0;
         self.content_width = 0.0;
@@ -149,6 +189,7 @@ impl RootListGeometryCache {
         RootListGeometryObservation {
             rebuild_count: self.rebuild_count,
             measured_rows: self.measured_rows,
+            measured_cells: self.measured_cells,
             last_rebuild_nanos: self.last_rebuild_nanos,
         }
     }
@@ -179,9 +220,14 @@ impl RootListGeometryCache {
             button_padding_x_bits: spacing.button_padding.x.to_bits(),
             button_padding_y_bits: spacing.button_padding.y.to_bits(),
             interaction_height_bits: spacing.interact_size.y.to_bits(),
+            interaction_width_bits: spacing.interact_size.x.to_bits(),
             item_spacing_y_bits: spacing.item_spacing.y.to_bits(),
             show_full_paths,
             is_grid,
+            grid_columns: 0,
+            grid_nominal_width_bits: 0,
+            grid_spacing_x_bits: 0,
+            grid_spacing_y_bits: 0,
         };
         if self.key.as_ref() == Some(&key)
             && self
@@ -245,6 +291,16 @@ impl RootListGeometryCache {
         self.total_height = cursor_y;
         self.content_x_offset = content_x_offset;
         self.content_width = content_width;
+        self.grid_columns = 0;
+        self.grid_nominal_width = 0.0;
+        self.grid_column_x_offsets.clear();
+        self.grid_column_widths.clear();
+        self.grid_full_width = 0.0;
+        self.grid_cell_widths.clear();
+        self.grid_cell_heights.clear();
+        self.grid_visual_row_tops.clear();
+        self.grid_visual_row_bottoms.clear();
+        self.grid_visual_max_end_tree.clear();
         self.key = Some(key);
         self.font_atlas = Some(font_atlas);
         #[cfg(test)]
@@ -252,6 +308,173 @@ impl RootListGeometryCache {
             self.rebuild_count = self.rebuild_count.saturating_add(1);
             self.measured_rows = self
                 .measured_rows
+                .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
+            self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        }
+    }
+
+    fn ensure_grid(&mut self, ui: &egui::Ui, results: &[Action], columns: usize) {
+        let spacing = ui.spacing();
+        let columns = columns.max(1);
+        let grid_spacing_x = 8.0_f32;
+        let grid_spacing_y = 6.0_f32;
+        let width = ui.available_width();
+        let nominal_width = ((width - (columns.saturating_sub(1) as f32 * grid_spacing_x))
+            / columns as f32)
+            .max(160.0);
+        let effective_text_style = ui
+            .style()
+            .override_text_style
+            .as_ref()
+            .unwrap_or(&egui::TextStyle::Button);
+        let button_font = effective_text_style.resolve(ui.style());
+        let wrap = ui.style().wrap.unwrap_or(false);
+        let font_atlas = ui.fonts(|fonts| fonts.texture_atlas());
+        let key = RootListGeometryKey {
+            result_generation: self.result_generation,
+            result_count: results.len(),
+            width_bits: width.to_bits(),
+            pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
+            button_font,
+            wrap,
+            button_padding_x_bits: spacing.button_padding.x.to_bits(),
+            button_padding_y_bits: spacing.button_padding.y.to_bits(),
+            interaction_height_bits: spacing.interact_size.y.to_bits(),
+            interaction_width_bits: spacing.interact_size.x.to_bits(),
+            item_spacing_y_bits: spacing.item_spacing.y.to_bits(),
+            show_full_paths: false,
+            is_grid: true,
+            grid_columns: columns,
+            grid_nominal_width_bits: nominal_width.to_bits(),
+            grid_spacing_x_bits: grid_spacing_x.to_bits(),
+            grid_spacing_y_bits: grid_spacing_y.to_bits(),
+        };
+        if self.key.as_ref() == Some(&key)
+            && self
+                .font_atlas
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
+        {
+            return;
+        }
+
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let padding = spacing.button_padding;
+        let interaction_width = spacing.interact_size.x;
+        let interaction_height = spacing.interact_size.y;
+        let actual_columns = columns.min(results.len());
+        let mut column_widths = vec![interaction_width; actual_columns];
+        let mut cell_widths = Vec::with_capacity(results.len());
+        let mut cell_heights = Vec::with_capacity(results.len());
+        let mut row_heights = vec![interaction_height.max(44.0); results.len().div_ceil(columns)];
+
+        for (index, action) in results.iter().enumerate() {
+            let text = format!("{}\n{}", action.label, action.desc);
+            let galley = egui::WidgetText::from(text).into_galley_impl(
+                ui.ctx(),
+                ui.style(),
+                wrap,
+                (nominal_width - 2.0 * padding.x).max(0.0),
+                egui::FontSelection::Style(egui::TextStyle::Button),
+                egui::Align::Center,
+            );
+            let cell_width = nominal_width.max(galley.size().x + 2.0 * padding.x);
+            let cell_height = 44.0_f32
+                .max(interaction_height)
+                .max(galley.size().y + 2.0 * padding.y);
+            let column = index % columns;
+            let row = index / columns;
+            column_widths[column] = column_widths[column].max(cell_width);
+            row_heights[row] = row_heights[row].max(cell_height);
+            cell_widths.push(cell_width);
+            cell_heights.push(cell_height);
+        }
+
+        let mut column_x_offsets = Vec::with_capacity(actual_columns);
+        let mut grid_full_width = 0.0_f32;
+        for (index, width) in column_widths.iter().copied().enumerate() {
+            if index > 0 {
+                grid_full_width += grid_spacing_x;
+            }
+            column_x_offsets.push(grid_full_width);
+            grid_full_width += width;
+        }
+        let content_width = cell_widths
+            .iter()
+            .enumerate()
+            .map(|(index, width)| column_x_offsets[index % columns] + width)
+            .fold(0.0_f32, f32::max);
+        let mut row_tops = Vec::with_capacity(row_heights.len());
+        let mut cursor_y = 0.0_f32;
+        for (index, height) in row_heights.iter().copied().enumerate() {
+            row_tops.push(cursor_y);
+            cursor_y += height;
+            if index + 1 < row_heights.len() {
+                cursor_y += grid_spacing_y;
+            }
+        }
+
+        // Grid centers its fixed 44pt allocation in each logical row. If the
+        // actual selectable is taller, egui lets it spill below that row.
+        // Keep logical prefixes for row placement and a max-end tree for
+        // viewport queries, since visual row bottoms are not monotonic.
+        let grid_visual_row_tops = row_tops
+            .iter()
+            .zip(&row_heights)
+            .map(|(top, height)| top + ((height - 44.0) * 0.5).max(0.0))
+            .collect::<Vec<_>>();
+        let grid_visual_row_bottoms = grid_visual_row_tops
+            .iter()
+            .zip(&row_heights)
+            .map(|(top, height)| top + height)
+            .collect::<Vec<_>>();
+        let tree_leaves = row_heights.len().next_power_of_two().max(1);
+        let mut grid_visual_max_end_tree = vec![f32::NEG_INFINITY; tree_leaves * 2];
+        for (index, bottom) in grid_visual_row_bottoms.iter().copied().enumerate() {
+            grid_visual_max_end_tree[tree_leaves + index] = bottom;
+        }
+        for index in (1..tree_leaves).rev() {
+            grid_visual_max_end_tree[index] =
+                grid_visual_max_end_tree[index * 2].max(grid_visual_max_end_tree[index * 2 + 1]);
+        }
+        let visual_bottom = grid_visual_row_bottoms
+            .iter()
+            .copied()
+            .fold(cursor_y, f32::max);
+        let empty_grid = row_heights.is_empty();
+
+        self.row_tops = row_tops;
+        self.row_heights = row_heights;
+        self.row_x_offsets.clear();
+        self.row_response_x_offsets.clear();
+        self.row_widths.clear();
+        self.row_response_widths.clear();
+        self.content_x_offset = 0.0;
+        self.content_width = content_width;
+        self.grid_columns = columns;
+        self.grid_nominal_width = nominal_width;
+        self.grid_column_x_offsets = column_x_offsets;
+        self.grid_column_widths = column_widths;
+        self.grid_full_width = grid_full_width;
+        self.grid_cell_widths = cell_widths;
+        self.grid_cell_heights = cell_heights;
+        self.grid_visual_row_tops = grid_visual_row_tops;
+        self.grid_visual_row_bottoms = grid_visual_row_bottoms;
+        self.grid_visual_max_end_tree = grid_visual_max_end_tree;
+        // An empty egui Grid still lays out its centered horizontal row shell.
+        self.total_height = if empty_grid {
+            interaction_height * 0.5
+        } else {
+            visual_bottom
+        };
+        self.key = Some(key);
+        self.font_atlas = Some(font_atlas);
+        #[cfg(test)]
+        {
+            self.rebuild_count = self.rebuild_count.saturating_add(1);
+            self.measured_cells = self
+                .measured_cells
                 .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
             self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         }
@@ -276,6 +499,50 @@ impl RootListGeometryCache {
         low.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)..end
     }
 
+    fn visible_grid_rows(&self, viewport: egui::Rect) -> Vec<usize> {
+        let mut rows = self.visible_range(viewport).collect::<Vec<_>>();
+        let row_count = self.grid_visual_row_tops.len();
+        let visual_end = self
+            .grid_visual_row_tops
+            .partition_point(|top| *top < viewport.max.y);
+        if row_count > 0 {
+            self.collect_visual_grid_rows(
+                1,
+                0,
+                self.grid_visual_max_end_tree.len() / 2,
+                visual_end,
+                viewport.min.y,
+                &mut rows,
+            );
+        }
+        rows.sort_unstable();
+        rows.dedup();
+        rows
+    }
+
+    fn collect_visual_grid_rows(
+        &self,
+        node: usize,
+        start: usize,
+        end: usize,
+        query_end: usize,
+        viewport_top: f32,
+        rows: &mut Vec<usize>,
+    ) {
+        if start >= query_end || self.grid_visual_max_end_tree[node] <= viewport_top {
+            return;
+        }
+        if end - start == 1 {
+            if start < self.grid_visual_row_bottoms.len() {
+                rows.push(start);
+            }
+            return;
+        }
+        let middle = start + (end - start) / 2;
+        self.collect_visual_grid_rows(node * 2, start, middle, query_end, viewport_top, rows);
+        self.collect_visual_grid_rows(node * 2 + 1, middle, end, query_end, viewport_top, rows);
+    }
+
     fn set_popup_owner(&mut self, index: usize, response: &egui::Response) {
         self.popup_owner = Some((self.result_generation, index));
         self.popup_response = Some(response.clone());
@@ -284,7 +551,11 @@ impl RootListGeometryCache {
     fn popup_owner(&self) -> Option<usize> {
         self.popup_owner
             .filter(|(generation, index)| {
-                *generation == self.result_generation && *index < self.row_tops.len()
+                *generation == self.result_generation
+                    && self
+                        .key
+                        .as_ref()
+                        .is_some_and(|key| *index < key.result_count)
             })
             .map(|(_, index)| index)
     }
@@ -312,6 +583,52 @@ fn root_list_display_text<'a>(
     } else {
         std::borrow::Cow::Borrowed(action.label.as_str())
     }
+}
+
+fn root_grid_cell_response(
+    ui: &egui::Ui,
+    geometry: &RootListGeometryCache,
+    index: usize,
+    action: &Action,
+    selected: bool,
+) -> egui::Response {
+    let columns = geometry.grid_columns.max(1);
+    let column = index % columns;
+    let row = index / columns;
+    let row_height = geometry.row_heights[row];
+    let row_rect = egui::Rect::from_min_size(
+        ui.max_rect().min
+            + egui::vec2(
+                geometry.grid_column_x_offsets[column],
+                geometry.row_tops[row],
+            ),
+        egui::vec2(geometry.grid_column_widths[column], row_height),
+    );
+    let mut cell_ui = egui::Ui::new(
+        ui.ctx().clone(),
+        ui.layer_id(),
+        geometry.row_widget_id(ui.id(), index),
+        row_rect,
+        ui.clip_rect(),
+    );
+    cell_ui.set_style(ui.style().clone());
+    cell_ui.set_enabled(ui.is_enabled());
+    let text = format!("{}\n{}", action.label, action.desc);
+    cell_ui
+        .with_layout(
+            egui::Layout::left_to_right(egui::Align::Center),
+            |cell_ui| {
+                cell_ui.add_sized(
+                    [geometry.grid_nominal_width, 44.0],
+                    egui::SelectableLabel::new(selected, text),
+                )
+            },
+        )
+        .inner
+}
+
+fn root_grid_row_color(row: usize, visuals: &egui::Visuals) -> Option<egui::Color32> {
+    (visuals.striped && row % 2 == 1).then_some(visuals.faint_bg_color)
 }
 
 #[derive(Clone, Debug)]
@@ -1469,6 +1786,11 @@ impl LauncherApp {
         self.test_root_rendered_row_ids.clear();
         #[cfg(test)]
         self.test_root_rendered_row_rects.clear();
+        #[cfg(test)]
+        {
+            self.test_root_scroll_viewport_rect = None;
+            self.test_root_scroll_area_extent = None;
+        }
 
         self.root_list_geometry
             .observe_grid_mode(self.resolved_grid_layout);
@@ -2241,9 +2563,13 @@ impl LauncherApp {
                 }
             } else {
                 let area_height = ui.available_height();
-                let _root_scroll_output = ScrollArea::vertical()
+                let root_scroll_output = ScrollArea::vertical()
                     .max_height(area_height)
                     .show_viewport(ui, |ui, viewport| {
+                        #[cfg(test)]
+                        {
+                            self.test_root_scroll_viewport_rect = Some(ui.clip_rect());
+                        }
                         scale_ui(ui, self.list_scale, |ui| {
                             let mut refresh = false;
                             let mut set_focus = false;
@@ -2260,64 +2586,118 @@ impl LauncherApp {
                             let mut rows_built = 0_u64;
                             if self.resolved_grid_layout {
                                 let cols = self.query_results_layout.cols.max(1);
-                                let col_width = ((ui.available_width()
-                                    - ((cols.saturating_sub(1)) as f32 * 8.0))
-                                    / cols as f32)
-                                    .max(160.0);
-                                egui::Grid::new("query_results_grid")
-                                    .num_columns(cols)
-                                    .spacing([8.0, 6.0])
-                                    .show(ui, |ui| {
-                                        for idx in 0..self.results.len() {
-                                            let action = self.results[idx].clone();
-                                            let text = format!("{}\n{}", action.label, action.desc);
-                                            let resp = ui.add_sized(
-                                                [col_width, 44.0],
-                                                egui::SelectableLabel::new(
-                                                    self.selected == Some(idx),
-                                                    text,
+                                self.root_list_geometry.ensure_grid(ui, &self.results, cols);
+                                let content_origin = ui.max_rect().min;
+                                let total_height = self.root_list_geometry.total_height;
+                                let content_width = self.root_list_geometry.content_width;
+
+                                if !ui.ctx().is_context_menu_open() {
+                                    self.root_list_geometry.clear_popup_owner();
+                                }
+                                if let Some(selected) =
+                                    self.selected.filter(|index| *index < self.results.len())
+                                {
+                                    let column = selected % cols;
+                                    let row = selected / cols;
+                                    let cell_height =
+                                        self.root_list_geometry.grid_cell_heights[selected];
+                                    let row_height = self.root_list_geometry.row_heights[row];
+                                    let selected_rect = egui::Rect::from_min_size(
+                                        content_origin
+                                            + egui::vec2(
+                                                self.root_list_geometry.grid_column_x_offsets
+                                                    [column],
+                                                self.root_list_geometry.row_tops[row]
+                                                    + ((row_height - 44.0) * 0.5).max(0.0),
+                                            ),
+                                        egui::vec2(
+                                            self.root_list_geometry.grid_cell_widths[selected],
+                                            cell_height,
+                                        ),
+                                    );
+                                    ui.scroll_to_rect(selected_rect, Some(egui::Align::Center));
+                                }
+
+                                let mut visible_rows =
+                                    self.root_list_geometry.visible_grid_rows(viewport);
+                                if let Some(owner) = self.root_list_geometry.popup_owner() {
+                                    visible_rows.push(owner / cols);
+                                    visible_rows.sort_unstable();
+                                    visible_rows.dedup();
+                                }
+
+                                for row in visible_rows {
+                                    if let Some(color) = root_grid_row_color(row, ui.visuals()) {
+                                        let stripe = egui::Rect::from_min_size(
+                                            content_origin
+                                                + egui::vec2(
+                                                    0.0,
+                                                    self.root_list_geometry.row_tops[row],
                                                 ),
-                                            );
-                                            #[cfg(test)]
-                                            self.test_root_rendered_rows
-                                                .push((idx, action.action.clone()));
-                                            #[cfg(test)]
-                                            self.test_root_rendered_row_ids.push((idx, resp.id));
-                                            #[cfg(test)]
-                                            self.test_root_rendered_row_rects
-                                                .push((idx, resp.rect));
-                                            rows_built = rows_built.saturating_add(1);
-                                            let menu_resp = self.attach_result_context_menu(
-                                                &action,
-                                                resp,
-                                                &mut refresh,
-                                                &mut set_focus,
-                                                &mut deferred_universal_action,
-                                                &mut deferred_radial_authoring_add,
-                                            );
-                                            trace_root_result_pointer(
-                                                ui,
-                                                &menu_resp,
-                                                root_result_kind(&action.action),
-                                                idx,
-                                                menu_resp.clicked(),
-                                            );
-                                            if self.selected == Some(idx) {
-                                                menu_resp.scroll_to_me(Some(egui::Align::Center));
-                                            }
-                                            if menu_resp.clicked() {
-                                                self.selected = Some(idx);
-                                                deferred_activation = Some(DeferredActivation {
-                                                    action,
-                                                    query_override: None,
-                                                    source: ActivationSource::Click,
-                                                });
-                                            }
-                                            if (idx + 1) % cols == 0 {
-                                                ui.end_row();
-                                            }
+                                            egui::vec2(
+                                                self.root_list_geometry.grid_full_width,
+                                                self.root_list_geometry.row_heights[row],
+                                            ),
+                                        )
+                                        .expand2(egui::vec2(2.0, 3.0));
+                                        ui.painter().rect_filled(stripe, 2.0, color);
+                                    }
+                                    let row_start = row.saturating_mul(cols);
+                                    let row_end =
+                                        row_start.saturating_add(cols).min(self.results.len());
+                                    for idx in row_start..row_end {
+                                        let action = self.results[idx].clone();
+                                        let resp = root_grid_cell_response(
+                                            ui,
+                                            &self.root_list_geometry,
+                                            idx,
+                                            &action,
+                                            self.selected == Some(idx),
+                                        );
+                                        #[cfg(test)]
+                                        self.test_root_rendered_rows
+                                            .push((idx, action.action.clone()));
+                                        #[cfg(test)]
+                                        self.test_root_rendered_row_ids.push((idx, resp.id));
+                                        #[cfg(test)]
+                                        self.test_root_rendered_row_rects.push((idx, resp.rect));
+                                        rows_built = rows_built.saturating_add(1);
+                                        let menu_resp = self.attach_result_context_menu(
+                                            &action,
+                                            resp,
+                                            &mut refresh,
+                                            &mut set_focus,
+                                            &mut deferred_universal_action,
+                                            &mut deferred_radial_authoring_add,
+                                        );
+                                        if menu_resp.context_menu_opened() {
+                                            self.root_list_geometry
+                                                .set_popup_owner(idx, &menu_resp);
+                                        } else if self.root_list_geometry.popup_owner() == Some(idx)
+                                        {
+                                            self.root_list_geometry.clear_popup_owner();
                                         }
-                                    });
+                                        trace_root_result_pointer(
+                                            ui,
+                                            &menu_resp,
+                                            root_result_kind(&action.action),
+                                            idx,
+                                            menu_resp.clicked(),
+                                        );
+                                        if menu_resp.clicked() {
+                                            self.selected = Some(idx);
+                                            deferred_activation = Some(DeferredActivation {
+                                                action,
+                                                query_override: None,
+                                                source: ActivationSource::Click,
+                                            });
+                                        }
+                                    }
+                                }
+                                ui.expand_to_include_rect(egui::Rect::from_min_size(
+                                    content_origin,
+                                    egui::vec2(content_width, total_height),
+                                ));
                             } else {
                                 self.root_list_geometry.ensure(
                                     ui,
@@ -2478,7 +2858,15 @@ impl LauncherApp {
                     });
                 #[cfg(test)]
                 {
-                    self.test_root_scroll_area_id = Some(_root_scroll_output.id);
+                    self.test_root_scroll_area_extent = Some((
+                        root_scroll_output.inner_rect,
+                        root_scroll_output.content_size,
+                        root_scroll_output.state.offset,
+                    ));
+                }
+                #[cfg(test)]
+                {
+                    self.test_root_scroll_area_id = Some(root_scroll_output.id);
                 }
             }
             if let Some(deferred) = deferred_activation_unless_radial_add(
@@ -3972,6 +4360,336 @@ mod tests {
         }
     }
 
+    #[test]
+    fn root_grid_geometry_matches_settled_grid_cells_and_global_extents() {
+        let cases: [(
+            f32,
+            usize,
+            f32,
+            Option<bool>,
+            bool,
+            usize,
+            Option<f32>,
+            bool,
+        ); 9] = [
+            (360.0, 1, 1.0, None, false, 4, None, true),
+            (480.0, 2, 1.25, None, false, 9, None, true),
+            (960.0, 3, 1.0, Some(true), true, 7, None, true),
+            (230.0, 5, 0.9, Some(false), false, 3, None, true),
+            (1_600.0, 6, 1.0, None, true, 13, None, true),
+            (1_600.0, 6, 1.0, None, false, 3, None, false),
+            (420.0, 3, 1.0, None, false, 8, Some(210.0), true),
+            (800.0, 3, 1.35, None, false, 0, None, false),
+            (800.0, 3, 1.0, None, false, 1, None, false),
+        ];
+
+        for (
+            case_index,
+            (width, columns, scale, wrap, heading, count, interaction_width, wide_last),
+        ) in cases.into_iter().enumerate()
+        {
+            let ctx = egui::Context::default();
+            if heading || interaction_width.is_some() {
+                let mut style = (*ctx.style()).clone();
+                if heading {
+                    style.override_text_style = Some(egui::TextStyle::Heading);
+                }
+                if let Some(interaction_width) = interaction_width {
+                    style.spacing.interact_size.x = interaction_width;
+                }
+                ctx.set_style(style);
+            }
+            let actions = (0..count)
+                .map(|index| Action {
+                    label: if wide_last && index == count - 1 {
+                        format!(
+                            "Offscreen wide result {}",
+                            "unwrapped/path-segment/".repeat(12)
+                        )
+                    } else if index == 1 {
+                        "Explicit first line\nsecond line λ🙂".into()
+                    } else {
+                        format!("Grid result {index}")
+                    },
+                    desc: if index == 0 {
+                        "A tall first-cell description\nwith another line".into()
+                    } else {
+                        format!("Description for cell {index}")
+                    },
+                    action: format!("test:grid-{index}"),
+                    args: None,
+                })
+                .collect::<Vec<_>>();
+            let outer =
+                egui::Rect::from_min_size(egui::pos2(31.0, 17.0), egui::vec2(width, 1_400.0));
+            let layer = egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new(("root-grid-geometry-oracle", case_index)),
+            );
+            let mut cache = RootListGeometryCache::default();
+            let mut eager_cells = Vec::new();
+            let mut eager_grid_cursors = Vec::new();
+            let mut eager_grid_bounds = egui::Rect::NOTHING;
+            let mut eager_content_bounds = egui::Rect::NOTHING;
+            let mut cached_cells = Vec::new();
+            let mut interaction_size = egui::Vec2::ZERO;
+            let mut measured_root_cursor = egui::Pos2::ZERO;
+
+            for frame in 0..4 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_800.0, 1_500.0),
+                    )),
+                    time: Some(1.0 + frame as f64 / 60.0),
+                    ..Default::default()
+                };
+                let _ = ctx.run(input, |ctx| {
+                    let mut eager = egui::Ui::new(
+                        ctx.clone(),
+                        layer,
+                        egui::Id::new("root-grid-eager-oracle"),
+                        outer,
+                        outer,
+                    );
+                    eager.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        if let Some(wrap) = wrap {
+                            let mut style = ui.style().as_ref().clone();
+                            style.wrap = Some(wrap);
+                            ui.set_style(style);
+                        }
+                        scale_ui(ui, scale, |ui| {
+                            let nominal_width = ((ui.available_width()
+                                - columns.saturating_sub(1) as f32 * 8.0)
+                                / columns as f32)
+                                .max(160.0);
+                            let mut actual = Vec::new();
+                            eager_grid_cursors.clear();
+                            let grid = egui::Grid::new(("root-grid-real", case_index))
+                                .num_columns(columns)
+                                .spacing([8.0, 6.0])
+                                .show(ui, |ui| {
+                                    for (index, action) in actions.iter().enumerate() {
+                                        eager_grid_cursors.push(ui.cursor().min);
+                                        let response = ui.add_sized(
+                                            [nominal_width, 44.0],
+                                            egui::SelectableLabel::new(
+                                                false,
+                                                format!("{}\n{}", action.label, action.desc),
+                                            ),
+                                        );
+                                        actual.push(response.rect);
+                                        if (index + 1) % columns == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+                            eager_grid_bounds = grid.response.rect;
+                            eager_content_bounds = ui.min_rect();
+                            eager_cells = actual;
+                        });
+                    });
+
+                    let mut measured = egui::Ui::new(
+                        ctx.clone(),
+                        layer,
+                        egui::Id::new("root-grid-geometry-cache"),
+                        outer,
+                        outer,
+                    );
+                    measured.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        if let Some(wrap) = wrap {
+                            let mut style = ui.style().as_ref().clone();
+                            style.wrap = Some(wrap);
+                            ui.set_style(style);
+                        }
+                        scale_ui(ui, scale, |ui| {
+                            measured_root_cursor = ui.cursor().min;
+                            interaction_size = ui.spacing().interact_size;
+                            cache.ensure_grid(ui, &actions, columns);
+                            cached_cells = actions
+                                .iter()
+                                .enumerate()
+                                .map(|(index, action)| {
+                                    root_grid_cell_response(ui, &cache, index, action, false).rect
+                                })
+                                .collect();
+                        });
+                    });
+                });
+            }
+
+            assert_eq!(eager_cells.len(), actions.len());
+            assert_eq!(cached_cells.len(), actions.len());
+            for (index, (eager, cached)) in eager_cells.iter().zip(&cached_cells).enumerate() {
+                assert!(
+                    eager.min.distance(cached.min) <= 1.0 && eager.max.distance(cached.max) <= 1.0,
+                    "case {case_index} cell {index}: cached={cached:?}, real Grid={eager:?}"
+                );
+                assert!(
+                    (cache.grid_cell_widths[index] - eager.width()).abs() <= 1.0
+                        && (cache.grid_cell_heights[index] - eager.height()).abs() <= 1.0,
+                    "case {case_index} selected-cell extent {index}: cached={}x{}, real Grid={}x{}",
+                    cache.grid_cell_widths[index],
+                    cache.grid_cell_heights[index],
+                    eager.width(),
+                    eager.height()
+                );
+                let column = index % columns;
+                assert!(
+                    (cache.grid_column_x_offsets[column] - (eager.left() - outer.left())).abs()
+                        <= 1.0,
+                    "case {case_index} cell {index} global column offset differs"
+                );
+                let row = index / columns;
+                let expected_row_top = eager_grid_cursors[index].y - outer.top();
+                assert!(
+                    (cache.row_tops[row] - expected_row_top).abs() <= 1.0,
+                    "case {case_index} cell {index} global row offset differs: cache={} expected={} eager={eager:?} grid_cursor={:?} root_cursor={measured_root_cursor:?}",
+                    cache.row_tops[row],
+                    expected_row_top,
+                    eager_grid_cursors[index],
+                );
+            }
+            for row in 0..cache.row_tops.len() {
+                let row_start = row * columns;
+                let row_end = (row_start + columns).min(eager_cells.len());
+                let actual_visual_top = eager_cells[row_start..row_end]
+                    .iter()
+                    .map(|rect| rect.top() - outer.top())
+                    .fold(f32::INFINITY, f32::min);
+                let actual_visual_bottom = eager_cells[row_start..row_end]
+                    .iter()
+                    .map(|rect| rect.bottom() - outer.top())
+                    .fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    (cache.grid_visual_row_tops[row] - actual_visual_top).abs() <= 1.0,
+                    "case {case_index} visual row {row} top: cached={} eager={actual_visual_top}",
+                    cache.grid_visual_row_tops[row]
+                );
+                assert!(
+                    (cache.grid_visual_row_bottoms[row] - actual_visual_bottom).abs() <= 1.0,
+                    "case {case_index} visual row {row} bottom: cached={} eager={actual_visual_bottom}",
+                    cache.grid_visual_row_bottoms[row]
+                );
+            }
+            let expected_columns = columns.min(actions.len());
+            assert_eq!(cache.grid_column_widths.len(), expected_columns);
+            for column in 0..expected_columns {
+                let actual_width = eager_cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| index % columns == column)
+                    .map(|(_, rect)| rect.width().max(interaction_size.x))
+                    .fold(0.0_f32, f32::max);
+                assert!(
+                    (cache.grid_column_widths[column] - actual_width).abs() <= 1.0,
+                    "case {case_index} column {column}: cached={} real Grid={actual_width}",
+                    cache.grid_column_widths[column]
+                );
+            }
+            let expected_height = eager_content_bounds.bottom() - outer.top();
+            assert!(
+                (cache.total_height - expected_height).abs() <= 1.0,
+                "case {case_index} total height: cached={} Grid response={eager_grid_bounds:?} content min_rect={eager_content_bounds:?} expected={expected_height} row_tops={:?} row_heights={:?}",
+                cache.total_height,
+                cache.row_tops,
+                cache.row_heights,
+            );
+            let expected_width = (0..expected_columns)
+                .map(|column| {
+                    eager_cells
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, _)| index % columns == column)
+                        .map(|(_, rect)| rect.width().max(interaction_size.x))
+                        .fold(0.0_f32, f32::max)
+                })
+                .sum::<f32>()
+                + expected_columns.saturating_sub(1) as f32 * 8.0;
+            assert!(
+                (cache.content_width - (eager_content_bounds.right() - outer.left())).abs() <= 1.0,
+                "case {case_index} actual content width: cached={} real Grid content min_rect={eager_content_bounds:?}",
+                cache.content_width,
+            );
+            assert!(
+                (cache.grid_full_width - expected_width).abs() <= 1.0,
+                "case {case_index} Grid full width: cached={} derived={expected_width}",
+                cache.grid_full_width
+            );
+            assert!(
+                (eager_grid_bounds.width() - eager_content_bounds.width()).abs() <= 1.0,
+                "case {case_index} Grid response/content min_rect widths differ: response={}, min_rect={}",
+                eager_grid_bounds.width(),
+                eager_content_bounds.width(),
+            );
+            if case_index == 5 {
+                assert!(
+                    expected_width < width,
+                    "short partial grid has no phantom columns"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn root_grid_tall_cell_spill_stays_visible_without_intermediate_rows() {
+        let ctx = egui::Context::default();
+        let actions = (0..300)
+            .map(|index| Action {
+                label: if index == 0 {
+                    "Tall cell\n".repeat(150)
+                } else {
+                    format!("Grid result {index}")
+                },
+                desc: format!("Description {index}"),
+                action: format!("test:grid-spill-{index}"),
+                args: None,
+            })
+            .collect::<Vec<_>>();
+        let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 1_400.0));
+        let layer = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("root-grid-tall-cell-spill"),
+        );
+        let mut cache = RootListGeometryCache::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_800.0, 1_500.0),
+            )),
+            time: Some(1.0),
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            let mut ui = egui::Ui::new(
+                ctx.clone(),
+                layer,
+                egui::Id::new("root-grid-tall-cell-cache"),
+                outer,
+                outer,
+            );
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                cache.ensure_grid(ui, &actions, 3);
+            });
+        });
+
+        let row_height = cache.row_heights[0];
+        let viewport_top = row_height * 1.25;
+        assert!(viewport_top < cache.grid_visual_row_bottoms[0]);
+        let viewport =
+            egui::Rect::from_min_size(egui::pos2(0.0, viewport_top), egui::vec2(480.0, 80.0));
+        assert!(!cache.visible_range(viewport).contains(&0));
+
+        let rows = cache.visible_grid_rows(viewport);
+        assert!(rows.contains(&0), "the tall cell is still visually visible");
+        assert!(rows.len() < 10, "visible rows stay bounded: {rows:?}");
+        assert!(
+            rows.get(1).is_some_and(|next| *next > 1),
+            "invisible logical rows are not added just to bridge a spill: {rows:?}"
+        );
+    }
+
     fn root_list_test_app(
         ctx: &egui::Context,
         results: Vec<Action>,
@@ -4121,6 +4839,16 @@ mod tests {
             assert_eq!(
                 rows.iter().filter(|(index, _)| *index == selected).count(),
                 1
+            );
+            let viewport = app.test_root_scroll_viewport_rect.unwrap();
+            let selected_rect = app
+                .test_root_rendered_row_rects
+                .iter()
+                .find_map(|(index, rect)| (*index == selected).then_some(*rect))
+                .expect("the selected list row has a real response rectangle");
+            assert!(
+                viewport.contains_rect(selected_rect),
+                "selected list row {selected} must be fully visible: row={selected_rect:?}, viewport={viewport:?}"
             );
             let selected_id = ids
                 .iter()
@@ -4330,6 +5058,412 @@ mod tests {
     }
 
     #[test]
+    fn root_grid_viewport_builds_complete_bounded_rows_with_absolute_ids_and_click_targets() {
+        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
+        set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+        struct ResetExecuteHook;
+        impl Drop for ResetExecuteHook {
+            fn drop(&mut self) {
+                set_execute_action_hook(None);
+            }
+        }
+        let _reset_hook = ResetExecuteHook;
+
+        let ctx = egui::Context::default();
+        let results = (0..10_000)
+            .map(|index| {
+                let mut action = root_list_action(index);
+                action.action = format!("exec:root-grid-{index}");
+                action
+            })
+            .collect::<Vec<_>>();
+        let expected_ids = results
+            .iter()
+            .map(|action| action.action.clone())
+            .collect::<Vec<_>>();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        // Keep the root fixture alive after synthetic external-action clicks;
+        // the hook isolates command execution but normal UI outcome policies
+        // still run after activation.
+        app.clear_query_after_run = false;
+        app.hide_after_run = false;
+        app.visible_flag.store(true, Ordering::SeqCst);
+
+        let mut frame = 0;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        assert!(app.test_root_rendered_rows.is_empty());
+        assert!(app.root_list_geometry.row_tops.is_empty());
+        assert!(app.root_list_geometry.grid_column_widths.is_empty());
+
+        let single = Action {
+            label: "Single grid cell".into(),
+            desc: "No placeholder columns".into(),
+            action: "exec:root-grid-single".into(),
+            args: None,
+        };
+        app.actions = Arc::new(vec![single.clone()]);
+        app.results = vec![single];
+        app.invalidate_root_list_results();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert_eq!(
+            app.test_root_rendered_rows,
+            vec![(0, "exec:root-grid-single".into())]
+        );
+        assert_eq!(app.root_list_geometry.grid_column_widths.len(), 1);
+        assert_eq!(app.root_list_geometry.grid_cell_widths.len(), 1);
+
+        app.actions = Arc::new(results.clone());
+        app.results = results;
+        app.invalidate_root_list_results();
+
+        let mut first_cell_id = None;
+        for selected in [0, 5_000, 9_999, 0] {
+            settle_root_selection(&ctx, &mut app, &mut frame, selected);
+            let rows = &app.test_root_rendered_rows;
+            let ids = &app.test_root_rendered_row_ids;
+            assert!(!rows.is_empty());
+            assert!(rows.len() <= 64, "built {} grid cells", rows.len());
+            assert_eq!(ids.len(), rows.len());
+            assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            assert!(rows.iter().all(|(index, action_id)| {
+                app.results
+                    .get(*index)
+                    .is_some_and(|action| action.action == *action_id)
+                    && *action_id == expected_ids[*index]
+            }));
+            let first_row = rows[0].0 / 3;
+            let last_row = rows.last().unwrap().0 / 3;
+            for row in first_row..=last_row {
+                let row_indices = rows
+                    .iter()
+                    .filter_map(|(index, _)| (*index / 3 == row).then_some(*index))
+                    .collect::<Vec<_>>();
+                let row_start = row * 3;
+                let row_end = (row_start + 3).min(app.results.len());
+                assert_eq!(
+                    row_indices,
+                    (row_start..row_end).collect::<Vec<_>>(),
+                    "grid viewport constructs complete absolute row {row}"
+                );
+            }
+            assert_eq!(
+                rows.iter().filter(|(index, _)| *index == selected).count(),
+                1,
+                "selected cell is built exactly once"
+            );
+            let viewport = app.test_root_scroll_viewport_rect.unwrap();
+            let selected_rect = app
+                .test_root_rendered_row_rects
+                .iter()
+                .find_map(|(index, rect)| (*index == selected).then_some(*rect))
+                .expect("the selected grid cell has a real response rectangle");
+            assert!(
+                selected_rect.top() >= viewport.top()
+                    && selected_rect.bottom() <= viewport.bottom()
+                    && selected_rect.intersects(viewport),
+                "selected grid cell {selected} must be vertically visible and horizontally intersecting: cell={selected_rect:?}, viewport={viewport:?}"
+            );
+            let selected_id = ids
+                .iter()
+                .find_map(|(index, id)| (*index == selected).then_some(*id))
+                .expect("settled selected cell is constructed");
+            if selected == 0 {
+                if let Some(previous) = first_cell_id {
+                    assert_eq!(selected_id, previous, "absolute cell identity is stable");
+                }
+                first_cell_id = Some(selected_id);
+            }
+        }
+
+        for target in [0, 9_999] {
+            app.selected = None;
+            let scroll_id = app.test_root_scroll_area_id.unwrap();
+            let mut state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
+            let (inner_rect, content_size, _) = app.test_root_scroll_area_extent.unwrap();
+            let max_scroll = (content_size.y - inner_rect.height()).max(0.0);
+            state.offset.y = if target == 0 { 0.0 } else { max_scroll };
+            state.store(&ctx, scroll_id);
+            for _ in 0..30 {
+                let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+                frame += 1;
+            }
+            let target_rect = app
+                .test_root_rendered_row_rects
+                .iter()
+                .find_map(|(index, rect)| (*index == target).then_some(*rect))
+                .expect("the first and distant final grid cells are hit-testable");
+            let viewport = app.test_root_scroll_viewport_rect.unwrap();
+            let scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
+            let (inner_rect, content_size, _) = app.test_root_scroll_area_extent.unwrap();
+            let max_scroll = (content_size.y - inner_rect.height()).max(0.0);
+            let pointer = target_rect.center();
+            assert!(
+                inner_rect.contains_rect(target_rect)
+                    && viewport.intersects(target_rect)
+                    && viewport.contains(pointer),
+                "target {target} must be inside the scroll viewport before click: cell={target_rect:?}, clip={viewport:?}, inner_rect={inner_rect:?}, scroll_area={:?}, scroll_offset={}, expected_max={max_scroll}, content_size={content_size:?}, cache_height={}",
+                app.test_root_scroll_area_extent,
+                scroll_state.offset.y,
+                app.root_list_geometry.total_height,
+            );
+            let _ = run_root_list_frame(
+                &ctx,
+                &mut app,
+                frame,
+                960.0,
+                640.0,
+                vec![egui::Event::PointerMoved(pointer)],
+            );
+            frame += 1;
+            let pressed = vec![egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }];
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+            frame += 1;
+            let released = vec![egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }];
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+            frame += 1;
+            assert_eq!(
+                app.selected,
+                Some(target),
+                "target {target} click at {pointer:?} in {target_rect:?}; clip={:?}, scroll_area={:?}, visible={}, query={:?}, results={}, last activation={:?}, rendered rows={:?}",
+                app.test_root_scroll_viewport_rect,
+                app.test_root_scroll_area_extent,
+                app.visible_flag.load(Ordering::SeqCst),
+                app.query,
+                app.results.len(),
+                app.test_last_activation,
+                app.test_root_rendered_rows
+            );
+            assert_eq!(
+                app.test_last_activation
+                    .as_ref()
+                    .map(|(action, _)| action.action.as_str()),
+                Some(expected_ids[target].as_str()),
+                "pointer dispatch targets the absolute cell action"
+            );
+            assert_eq!(
+                app.test_last_activation.as_ref().map(|(_, source)| *source),
+                Some(ActivationSource::Click),
+                "the real root-cell response dispatches as a click"
+            );
+        }
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn root_grid_geometry_reuses_warm_cache_and_tracks_grid_layout_inputs() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) =
+            root_list_test_app(&ctx, (0..48).map(root_list_action).collect::<Vec<_>>());
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        let mut frame = 0;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        let mut rebuilds = app.root_list_geometry.test_observation().rebuild_count;
+        assert!(rebuilds > 0);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert_eq!(
+            app.root_list_geometry.test_observation().rebuild_count,
+            rebuilds
+        );
+
+        let mut expect_rebuild = |app: &LauncherApp| {
+            rebuilds += 1;
+            assert_eq!(
+                app.root_list_geometry.test_observation().rebuild_count,
+                rebuilds
+            );
+        };
+        app.query_results_layout.cols = 4;
+        app.recompute_query_results_layout();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        app.list_scale = 1.15;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        let mut style = (*ctx.style()).clone();
+        style.override_text_style = Some(egui::TextStyle::Heading);
+        ctx.set_style(style);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        let mut style = (*ctx.style()).clone();
+        style.wrap = Some(true);
+        ctx.set_style(style);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        ctx.set_pixels_per_point(1.25);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        app.results[0].label.push_str(" replacement");
+        app.actions = Arc::new(app.results.clone());
+        app.invalidate_root_list_results();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        app.query_results_layout.enabled = false;
+        app.recompute_query_results_layout();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+        app.query_results_layout.enabled = true;
+        app.recompute_query_results_layout();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        expect_rebuild(&app);
+
+        let mut visuals = egui::Visuals::dark();
+        visuals.striped = true;
+        assert_eq!(root_grid_row_color(0, &visuals), None);
+        assert_eq!(
+            root_grid_row_color(1, &visuals),
+            Some(visuals.faint_bg_color)
+        );
+        assert_eq!(root_grid_row_color(2, &visuals), None);
+        visuals.striped = false;
+        assert_eq!(root_grid_row_color(1, &visuals), None);
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn root_grid_popup_owner_retains_complete_row_without_retargeting() {
+        let ctx = egui::Context::default();
+        let results = (0..120).map(root_list_action).collect::<Vec<_>>();
+        let (workspace, mut app) = root_list_test_app(&ctx, results);
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        let mut frame = 0;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        let row_zero = app
+            .test_root_rendered_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 0).then_some(*rect))
+            .expect("initial viewport includes the first grid cell");
+        let pointer = row_zero.center();
+        let pressed = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+        frame += 1;
+        let released = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+        frame += 1;
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+        let old_row_id = app
+            .test_root_rendered_row_ids
+            .iter()
+            .find_map(|(index, id)| (*index == 0).then_some(*id))
+            .expect("the popup-owning cell has an absolute ID");
+
+        let scroll_id = app.test_root_scroll_area_id.unwrap();
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
+        scroll_state.offset.y = app.root_list_geometry.row_tops[25];
+        scroll_state.store(&ctx, scroll_id);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+        assert!(ctx.is_context_menu_open());
+        for index in 0..3 {
+            assert!(
+                app.test_root_rendered_rows
+                    .iter()
+                    .any(|(built, _)| *built == index),
+                "popup owner retains complete row zero"
+            );
+        }
+        assert!(app.test_root_rendered_rows.len() <= 64);
+        assert_eq!(
+            app.test_root_rendered_row_ids
+                .iter()
+                .find_map(|(index, id)| (*index == 0).then_some(*id)),
+            Some(old_row_id)
+        );
+
+        let replacement = (0..120)
+            .map(|index| Action {
+                label: format!("Replacement {index}"),
+                desc: "replacement result".into(),
+                action: format!("app:replacement-{index}"),
+                args: None,
+            })
+            .collect::<Vec<_>>();
+        app.results = replacement.clone();
+        app.actions = Arc::new(replacement);
+        app.invalidate_root_list_results();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        assert_eq!(app.root_list_geometry.popup_owner(), None);
+        assert!(
+            !ctx.is_context_menu_open(),
+            "the old row menu closes on replacement"
+        );
+        assert!(
+            app.test_root_rendered_row_ids
+                .iter()
+                .all(|(_, id)| *id != old_row_id)
+        );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
     #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
     fn track_a_benchmark_launcher_root_rows() {
         use crate::performance::{Metric, workloads};
@@ -4436,6 +5570,7 @@ mod tests {
             app.dashboard_data_cache.wait_for_refresh();
 
             for (scenario, grid) in [("list", false), ("grid-3-column", true)] {
+                let geometry_before_mode = app.root_list_geometry.test_observation();
                 app.query_results_layout.enabled = grid;
                 app.query_results_layout.cols = 3;
                 app.query_results_layout.respect_plugin_capability = false;
@@ -4481,6 +5616,16 @@ mod tests {
                             .count(),
                         1,
                         "selection scroll should build the selected result exactly once"
+                    );
+                }
+                let mode_geometry = app.root_list_geometry.test_observation();
+                if grid {
+                    assert!(
+                        mode_geometry
+                            .measured_cells
+                            .saturating_sub(geometry_before_mode.measured_cells)
+                            >= count as u64,
+                        "cold grid geometry measures every fixture cell"
                     );
                 }
                 app.selected = Some(count / 2);
@@ -4578,8 +5723,35 @@ mod tests {
                     Some(membership_signature.finish()),
                     Some(signature.finish()),
                 );
-                let root_list_geometry = if grid {
-                    None
+                let (root_list_geometry, root_grid_geometry) = if grid {
+                    let warm_rebuild_count = geometry_after
+                        .rebuild_count
+                        .saturating_sub(geometry_before.rebuild_count);
+                    let warm_cells_measured = geometry_after
+                        .measured_cells
+                        .saturating_sub(geometry_before.measured_cells);
+                    assert_eq!(
+                        warm_rebuild_count, 0,
+                        "warm grid frames reuse cell geometry"
+                    );
+                    assert_eq!(warm_cells_measured, 0, "warm grid frames measure no cells");
+                    let cold_rebuild_count = mode_geometry
+                        .rebuild_count
+                        .saturating_sub(geometry_before_mode.rebuild_count);
+                    let cold_cells_measured = mode_geometry
+                        .measured_cells
+                        .saturating_sub(geometry_before_mode.measured_cells);
+                    assert_eq!(cold_rebuild_count, 1, "grid mode builds one geometry cache");
+                    (
+                        None,
+                        Some(workloads::RootGridGeometrySummary {
+                            cold_rebuild_count,
+                            cold_cells_measured,
+                            last_cold_rebuild_nanos: mode_geometry.last_rebuild_nanos,
+                            warm_rebuild_count,
+                            warm_cells_measured,
+                        }),
+                    )
                 } else {
                     let warm_rebuild_count = geometry_after
                         .rebuild_count
@@ -4589,21 +5761,25 @@ mod tests {
                         .saturating_sub(geometry_before.measured_rows);
                     assert_eq!(warm_rebuild_count, 0, "warm list frames reuse row geometry");
                     assert_eq!(warm_rows_measured, 0, "warm list frames measure no rows");
-                    Some(workloads::RootListGeometrySummary {
-                        cold_rebuild_count: cold_geometry.rebuild_count,
-                        cold_rows_measured: cold_geometry.measured_rows,
-                        last_cold_rebuild_nanos: cold_geometry.last_rebuild_nanos,
-                        warm_rebuild_count,
-                        warm_rows_measured,
-                    })
+                    (
+                        Some(workloads::RootListGeometrySummary {
+                            cold_rebuild_count: cold_geometry.rebuild_count,
+                            cold_rows_measured: cold_geometry.measured_rows,
+                            last_cold_rebuild_nanos: cold_geometry.last_rebuild_nanos,
+                            warm_rebuild_count,
+                            warm_rows_measured,
+                        }),
+                        None,
+                    )
                 };
-                workloads::emit_summary_with_root_list_geometry(
+                workloads::emit_summary_with_root_geometries(
                     &format!("launcher-{count}-{scenario}"),
                     "production render_root_frame(None); headless egui debug-test CPU",
                     summary,
                     timing,
                     &metrics,
                     root_list_geometry,
+                    root_grid_geometry,
                 );
             }
             drop(app);

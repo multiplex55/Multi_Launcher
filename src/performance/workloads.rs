@@ -595,6 +595,17 @@ pub struct RootListGeometrySummary {
     pub warm_rows_measured: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootGridGeometrySummary {
+    pub cold_rebuild_count: u64,
+    pub cold_cells_measured: u64,
+    /// Duration of the last cold grid geometry rebuild; this is one
+    /// observation, not a percentile distribution.
+    pub last_cold_rebuild_nanos: u64,
+    pub warm_rebuild_count: u64,
+    pub warm_cells_measured: u64,
+}
+
 fn nearest_rank(sorted: &[u64; SAMPLE_COUNT], percentile: usize) -> u64 {
     let rank = (sorted.len() * percentile).div_ceil(100).max(1);
     sorted[rank - 1]
@@ -710,6 +721,26 @@ pub fn emit_summary_with_root_list_geometry(
     metrics: &[MetricSnapshot],
     root_list_geometry: Option<RootListGeometrySummary>,
 ) {
+    emit_summary_with_root_geometries(
+        scenario,
+        scope,
+        fixture,
+        timing,
+        metrics,
+        root_list_geometry,
+        None,
+    );
+}
+
+pub fn emit_summary_with_root_geometries(
+    scenario: &str,
+    scope: &str,
+    fixture: FixtureSummary,
+    timing: TimingSummary,
+    metrics: &[MetricSnapshot],
+    root_list_geometry: Option<RootListGeometrySummary>,
+    root_grid_geometry: Option<RootGridGeometrySummary>,
+) {
     let metrics = metrics
         .iter()
         .map(|snapshot| {
@@ -756,6 +787,13 @@ pub fn emit_summary_with_root_list_geometry(
                 "last_cold_rebuild_nanos": geometry.last_cold_rebuild_nanos,
                 "warm_rebuild_count": geometry.warm_rebuild_count,
                 "warm_rows_measured": geometry.warm_rows_measured,
+            })),
+            "root_grid_geometry": root_grid_geometry.map(|geometry| serde_json::json!({
+                "cold_rebuild_count": geometry.cold_rebuild_count,
+                "cold_cells_measured": geometry.cold_cells_measured,
+                "last_cold_rebuild_nanos": geometry.last_cold_rebuild_nanos,
+                "warm_rebuild_count": geometry.warm_rebuild_count,
+                "warm_cells_measured": geometry.warm_cells_measured,
             })),
             "metrics": metrics,
         })

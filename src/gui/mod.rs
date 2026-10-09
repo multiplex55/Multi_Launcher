@@ -808,6 +808,10 @@ pub struct LauncherApp {
     #[cfg(test)]
     pub(crate) test_root_rendered_row_rects: Vec<(usize, egui::Rect)>,
     #[cfg(test)]
+    pub(crate) test_root_scroll_viewport_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    pub(crate) test_root_scroll_area_extent: Option<(egui::Rect, egui::Vec2, egui::Vec2)>,
+    #[cfg(test)]
     pub(crate) test_root_scroll_area_id: Option<egui::Id>,
     #[cfg(test)]
     pub(crate) test_defer_virtual_desktop_completion: bool,
@@ -2206,6 +2210,10 @@ impl LauncherApp {
             test_root_rendered_row_ids: Vec::new(),
             #[cfg(test)]
             test_root_rendered_row_rects: Vec::new(),
+            #[cfg(test)]
+            test_root_scroll_viewport_rect: None,
+            #[cfg(test)]
+            test_root_scroll_area_extent: None,
             #[cfg(test)]
             test_root_scroll_area_id: None,
             #[cfg(test)]

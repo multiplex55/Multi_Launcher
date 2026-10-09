@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "phase": "M3-A launcher list comparison",
+  "source_commit": "89fe30f9f1295ddb69fe1d5672dd79501bfc3fd6",
+  "baseline_source_commit": "d003b4a35ef3fafd75438493199cb20463378baf",
+  "profile": "debug-test",
+  "owner_test_threads": 1,
+  "os": "Windows NT10.0.19045.0 x86_64 MSVC",
+  "logical_processors": 8,
+  "power_scheme": "Balanced",
+  "summary_count": 6,
+  "nextest": "1 passed,5071 skipped,27.14s test duration",
+  "measurement_log_last_write_utc": "2026-10-09T21:38:40.3903236Z",
+  "duplicated_output_note": "immediate-final repeats identical summaries; exact identical JSON lines deduplicated",
+  "receipt_note": "List signatures hash actual bounded viewport widgets and intentionally differ from eager baseline; complete fixture/selected identities remain asserted. Grid remains eager and receipts match baseline.",
+  "scenarios": [
+    {
+      "estimated_fixture_bytes": 23096,
+      "fixture_count": 100,
+      "fixture_signature": "3c1fcdbaf0c5e639",
+      "max_nanos": 1016700,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 631800,
+          "elapsed_nanos_total": 11629600,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 560
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "7770e878af1fc1ec",
+      "output_signature": "e7ba78a87d74e725",
+      "p50_nanos": 844600,
+      "p95_nanos": 944500,
+      "profile": "debug-test",
+      "root_list_geometry": {
+        "cold_rebuild_count": 1,
+        "cold_rows_measured": 100,
+        "last_cold_rebuild_nanos": 6326300,
+        "warm_rebuild_count": 0,
+        "warm_rows_measured": 0
+      },
+      "samples": 20,
+      "scenario": "launcher-100-list",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    },
+    {
+      "estimated_fixture_bytes": 23096,
+      "fixture_count": 100,
+      "fixture_signature": "3c1fcdbaf0c5e639",
+      "max_nanos": 2149900,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 1728300,
+          "elapsed_nanos_total": 28673800,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 2000
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "c0cdf7e50e2f88b4",
+      "output_signature": "9c403dfa3b041826",
+      "p50_nanos": 1676700,
+      "p95_nanos": 1933500,
+      "profile": "debug-test",
+      "root_list_geometry": null,
+      "samples": 20,
+      "scenario": "launcher-100-grid-3-column",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    },
+    {
+      "estimated_fixture_bytes": 232657,
+      "fixture_count": 1000,
+      "fixture_signature": "9d765ca53e4931a5",
+      "max_nanos": 1422200,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 931800,
+          "elapsed_nanos_total": 12000900,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 540
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "77f6cb3752d67823",
+      "output_signature": "598e85bae370e853",
+      "p50_nanos": 826100,
+      "p95_nanos": 1277800,
+      "profile": "debug-test",
+      "root_list_geometry": {
+        "cold_rebuild_count": 1,
+        "cold_rows_measured": 1000,
+        "last_cold_rebuild_nanos": 63100000,
+        "warm_rebuild_count": 0,
+        "warm_rows_measured": 0
+      },
+      "samples": 20,
+      "scenario": "launcher-1000-list",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    },
+    {
+      "estimated_fixture_bytes": 232657,
+      "fixture_count": 1000,
+      "fixture_signature": "9d765ca53e4931a5",
+      "max_nanos": 15526200,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 15038500,
+          "elapsed_nanos_total": 283187000,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 20000
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "78d09b044cc5773b",
+      "output_signature": "a3f83f2172d826c9",
+      "p50_nanos": 14524800,
+      "p95_nanos": 15416700,
+      "profile": "debug-test",
+      "root_list_geometry": null,
+      "samples": 20,
+      "scenario": "launcher-1000-grid-3-column",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    },
+    {
+      "estimated_fixture_bytes": 2332759,
+      "fixture_count": 10000,
+      "fixture_signature": "82453f33d7d58ea0",
+      "max_nanos": 1028800,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 662100,
+          "elapsed_nanos_total": 11890700,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 560
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "95b8031cd0bed7d0",
+      "output_signature": "750ea193668e5002",
+      "p50_nanos": 870300,
+      "p95_nanos": 971900,
+      "profile": "debug-test",
+      "root_list_geometry": {
+        "cold_rebuild_count": 1,
+        "cold_rows_measured": 10000,
+        "last_cold_rebuild_nanos": 631978900,
+        "warm_rebuild_count": 0,
+        "warm_rows_measured": 0
+      },
+      "samples": 20,
+      "scenario": "launcher-10000-list",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    },
+    {
+      "estimated_fixture_bytes": 2332759,
+      "fixture_count": 10000,
+      "fixture_signature": "82453f33d7d58ea0",
+      "max_nanos": 145880300,
+      "metrics": [
+        {
+          "abandoned": 0,
+          "calls": 20,
+          "completed": 0,
+          "elapsed_nanos_max": 144735800,
+          "elapsed_nanos_total": 2835876400,
+          "errors": 0,
+          "lock_wait_nanos_max": 0,
+          "lock_wait_nanos_total": 0,
+          "metric": "launcher.rows_built",
+          "work_unit": "widgets_built",
+          "work_units": 200000
+        }
+      ],
+      "os": "windows",
+      "output_order_signature": "d2150a3e4b190ef4",
+      "output_signature": "4b8f2d1c490c798a",
+      "p50_nanos": 142502300,
+      "p95_nanos": 145203000,
+      "profile": "debug-test",
+      "root_list_geometry": null,
+      "samples": 20,
+      "scenario": "launcher-10000-grid-3-column",
+      "scope": "production render_root_frame(None); headless egui debug-test CPU",
+      "warmups": 5
+    }
+  ],
+  "nextest_run_id": "49fe73ca-8248-4989-8a4a-a106b9c32085"
+}
