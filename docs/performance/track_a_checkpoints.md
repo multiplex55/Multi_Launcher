@@ -19,8 +19,8 @@
 | M1-A | Consistent note revision publication | complete | PASS: 16 focused unit + 4 notes_plugin integration tests; formatting/diff checks | independent review; fixture cleanup finding resolved with regression | a47461ab7f6f312858ae98a62fe76cf360061645 | LOCAL ONLY |
 | M1-B | Cheap note refresh gate | complete | PASS: 21 focused panel tests + 1 small owner; 20 idle checks have zero snapshots/alias hashes/recomputes; rustfmt/diff checks | independent retry/debounce/repaint findings resolved | 9793d385a6165a6032165398c85b1d0b46b4c737 | LOCAL ONLY |
 | M1-C | Notes regression and comparison | complete | PASS: 6 full note scenarios, exact signatures; 30 focused library + 4 notes_plugin + 1 save-on-close tests; rustfmt/diff checks | independent findings resolved; slower draft timing retained with unresolved cause | 0ebd6fbce9d7f5a2418dde9b235275484d80ab55 | LOCAL ONLY |
-| M2-A | Shared command resolution context | complete | PASS: 7 focused library + 2 routing tests + 1 small owner; 4 signatures match baseline, one catalog/prepare; rustfmt/diff | independent scoped review clear | this checkpoint | LOCAL ONLY |
-| M2-B | Bounded matching history candidates | pending | — | — | — | — |
+| M2-A | Shared command resolution context | complete | PASS: 7 focused library + 2 routing tests + 1 small owner; 4 signatures match baseline, one catalog/prepare; rustfmt/diff | independent scoped review clear | 34d85982b83f83328e53a272a7efb9dd16991ba5 | LOCAL ONLY |
+| M2-B | Bounded matching history candidates | complete | PASS: 13 focused library + 1 small owner; zero full-record copies, common8 resolutions/prepare, exact signatures; rustfmt/diff | independent review clear; parent allocation/benchmark assertions corrected | this checkpoint | LOCAL ONLY |
 | M2-C | History parity and comparison | pending | — | — | — | — |
 | M3-A | Visible launcher list rows | pending | — | — | — | — |
 | M3-B | Complete visible grid rows | pending | — | — | — | — |

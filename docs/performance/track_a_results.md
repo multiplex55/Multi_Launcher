@@ -1,6 +1,6 @@
 # Track A runtime results
 
-Status: implementation in progress. M1-A/B/C are verified; the full note comparison below establishes the idle fast path and retains the slower large-draft result. M2-A history work is in progress.
+Status: implementation in progress. M1-A/B/C and M2-A/B are verified; M2-C parity/comparison follows. The full note comparison below establishes the idle fast path and retains the slower large-draft result.
 
 See `track_a_baseline.md` for the authoritative source and host, and `track_a_checkpoints.md` for checkpoint state, test evidence, review, commit and push outcomes.
 
@@ -102,3 +102,15 @@ History preparation now captures one shallow dashboard snapshot and one current 
 Independent scoped review found no concrete issue. PASS: `cargo nextest run --lib -E 'test(history_resolution_) | test(history_pins_keep_opaque_clipboard_literals_and_resolve_snippets_by_alias) | test(failed_pin_reload_retains_last_good_then_recovers)'` (7 passed, 5,053 skipped), covering catalog/enablement changes, duplicate argument identity, precedence and captured snapshot consistency. PASS: `cargo nextest run --test plugin_routing -E 'test(data_prefix_routes_only_when_the_builtin_plugin_is_enabled) | test(ocr_prefix_and_inventory_respect_plugin_and_search_capability_enablement)'` (2 passed, 15 skipped).
 
 PASS: small serial opt-in `track_a_benchmark_history_prepare_owner` (1 passed, 5,059 skipped). All four 100-entry fixture/output signatures match the frozen baseline: fixture `fa44f92296bc978a`; outputs mixed8 `ba0b7576ea7d372a`, pins-only `4b77c403d753452a`, rare filter `992bfbcf088924e3`, renamed/missing count50 `30cf9432c6fcaba2`. Each scenario recorded20 prepares and20 catalog builds (one command enumerated per preparation in this fixture). Small p50/p95/max timings in microseconds were222.2/392.6/554.2,142.4/145.9/148.8,257.5/351.6/398.3,195.8/207.8/214.2 respectively; smoke evidence only. Full comparison follows M2-B/C. Changed-file rustfmt and diff checks pass. Local checkpoint commit follows; no push will be attempted.
+
+M2-A local commit: `34d85982b83f83328e53a272a7efb9dd16991ba5`. No push attempted.
+
+### M2-B — bounded matching history preparation
+
+Preparation now retains only matching requested output, skips ordinary history entirely for count zero/pins-only/pin-filled output, and otherwise traverses the borrowed deque under one read guard. Snapshot/catalog acquisition and callbacks remain outside that guard. Mixed pins retain stable descending timestamp order, pins-only cached order, and every pin identity suppresses ordinary duplicates even if filtered out. Borrowed identity keys preserve None versus empty arguments. Sparse filters can scan many in-memory candidates; no constant-time claim is made.
+
+PASS: `cargo nextest run --lib -E 'test(history_prepare_) | test(history_resolution_) | test(history_pins_keep_opaque_clipboard_literals_and_resolve_snippets_by_alias) | test(failed_pin_reload_retains_last_good_then_recovers)'` (13 passed, 5,053 skipped). PASS: final small serial opt-in history owner (1 passed, 5,065 skipped). The library run preceded a benchmark-assertion-only correction; the final owner compiled and verified that correction. Changed-file rustfmt/diff checks pass. Independent source review is clear. Parent review corrected direct allocation from an unclamped configured count (now tested with usize::MAX/small input) and a benchmark expectation that missed mixed pin-filled output's zero-read path.
+
+Small owner outputs match all four baseline signatures. Each scenario records20 prepares, zero full input records copied and20 catalog builds. Resolutions per20 measured preparations: mixed8=160, pins-only8=160, rare=1,540, renamed/missing count50=1,000. Actual test-only boundary observations include five warmups: mixed cases needing ordinary rows use25 reads, pins-only zero; separate unit cases prove count0/pin-filled zero and mixed underfilled one. Remaining output Action/string construction is not claimed eliminated.
+
+Small p50/p95/max microseconds were16.9/24.8/25.3,10.3/10.9/22.1,198.5/203.9/206.2,76.6/99.0/106.3 for mixed8, pins-only, rare, renamed/missing respectively. These are headless debug-test smoke timings; full exact-source comparison follows C. Local checkpoint commit follows; no push will be attempted.

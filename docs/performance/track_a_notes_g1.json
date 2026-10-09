@@ -432,5 +432,7 @@
       "scope": "production NotePanel::maybe_refresh_heavy_derived; synthetic draft rearmed outside timed interval",
       "warmups": 5
     }
-  ]
+  ],
+  "measurement_log_last_write_utc": "2026-10-09T19:54:56.1091827Z",
+  "nextest_run_id": "fe818417-344d-4b90-bff8-9371d1b1f793"
 }

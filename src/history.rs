@@ -90,6 +90,21 @@ static HISTORY: Lazy<RwLock<VecDeque<HistoryEntry>>> = Lazy::new(|| {
     RwLock::new(hist)
 });
 
+#[cfg(test)]
+std::thread_local! {
+    static WITH_HISTORY_TEST_ACQUISITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_with_history_test_acquisition_count() {
+    WITH_HISTORY_TEST_ACQUISITIONS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn with_history_test_acquisition_count() -> usize {
+    WITH_HISTORY_TEST_ACQUISITIONS.with(std::cell::Cell::get)
+}
+
 pub fn poison_history_lock() {
     let _ = std::panic::catch_unwind(|| {
         if let Ok(_guard) = HISTORY.write() {
@@ -148,6 +163,8 @@ pub fn append_history(mut entry: HistoryEntry, limit: usize) -> anyhow::Result<(
 /// history for read-only operations.
 pub fn with_history<R>(f: impl FnOnce(&VecDeque<HistoryEntry>) -> R) -> Option<R> {
     let h = HISTORY.read().ok()?;
+    #[cfg(test)]
+    WITH_HISTORY_TEST_ACQUISITIONS.with(|count| count.set(count.get().saturating_add(1)));
     Some(f(&h))
 }
 

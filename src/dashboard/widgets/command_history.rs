@@ -8,6 +8,7 @@ use crate::history::{HISTORY_PINS_FILE, HistoryEntry, HistoryPin, toggle_pin};
 use chrono::TimeZone;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 fn default_count() -> usize {
@@ -60,6 +61,21 @@ struct HistoryResolutionContext<'a> {
     snapshot: &'a crate::dashboard::data_cache::DashboardDataSnapshot,
     commands: &'a [Action],
     actions_by_id: &'a std::collections::HashMap<String, Action>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static HISTORY_RESOLUTION_TEST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_history_resolution_test_calls() {
+    HISTORY_RESOLUTION_TEST_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn history_resolution_test_calls() -> usize {
+    HISTORY_RESOLUTION_TEST_CALLS.with(std::cell::Cell::get)
 }
 
 impl CommandHistoryWidget {
@@ -125,9 +141,8 @@ impl CommandHistoryWidget {
         if filter.is_empty() {
             return true;
         }
-        let filter = filter.to_lowercase();
-        entry.action.label.to_lowercase().contains(&filter)
-            || entry.query.to_lowercase().contains(&filter)
+        entry.action.label.to_lowercase().contains(filter)
+            || entry.query.to_lowercase().contains(filter)
     }
 
     fn resolve_action(
@@ -136,6 +151,8 @@ impl CommandHistoryWidget {
         args: Option<&str>,
         saved_action: &Action,
     ) -> Option<Action> {
+        #[cfg(test)]
+        HISTORY_RESOLUTION_TEST_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
         let _timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::HistoryResolve);
         if action_id.starts_with("snippet:run:") {
@@ -320,19 +337,17 @@ impl CommandHistoryWidget {
         }
     }
 
-    fn is_pinned(pins: &[HistoryPin], entry: &HistoryEntry) -> bool {
-        let pin = HistoryPin::from_history(entry);
-        pins.iter().any(|p| p == &pin)
-    }
-
     fn prepare_entries(&self, ctx: &DashboardContext<'_>) -> Vec<DisplayEntry> {
         let mut prepare_timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::HistoryPrepare);
+        // M2-B keeps the metric's original meaning (history input records copied).
+        // Preparation now borrows the deque, so this remains zero.
         prepare_timer.set_work_units(0);
-        let history_entries =
-            crate::history::with_history(|h| h.iter().cloned().collect::<Vec<_>>())
-                .unwrap_or_default();
-        prepare_timer.set_work_units(history_entries.len() as u64);
+        if self.cfg.count == 0 {
+            return Vec::new();
+        }
+
+        let filter = self.filter.to_lowercase();
 
         let snapshot = ctx.data_cache.snapshot();
         let commands = {
@@ -350,37 +365,66 @@ impl CommandHistoryWidget {
             actions_by_id: ctx.actions_by_id,
         };
 
-        let mut entries: Vec<DisplayEntry> = Vec::new();
+        let mut entries = Vec::new();
         if self.cfg.show_pinned_only {
-            entries.extend(
-                self.cached_pins
-                    .iter()
-                    .map(|pin| Self::entry_from_pin(&resolution, pin)),
-            );
-        } else {
-            let mut pinned: Vec<DisplayEntry> = self
-                .cached_pins
-                .iter()
-                .map(|pin| Self::entry_from_pin(&resolution, pin))
-                .collect();
-            pinned.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
-            entries.extend(pinned);
-
-            for entry in &history_entries {
-                if Self::is_pinned(&self.cached_pins, entry) {
-                    continue;
+            for pin in &self.cached_pins {
+                let entry = Self::entry_from_pin(&resolution, pin);
+                if Self::entry_matches_filter(&entry, &filter) {
+                    entries.push(entry);
+                    if entries.len() == self.cfg.count {
+                        break;
+                    }
                 }
-                entries.push(Self::entry_from_history(&resolution, entry));
+            }
+            return entries;
+        }
+
+        // Sort only references so duplicate pins remain distinct and stable ties
+        // keep their cached order without cloning every pin's presentation data.
+        let mut pins = self.cached_pins.iter().collect::<Vec<_>>();
+        pins.sort_by_key(|pin| std::cmp::Reverse(pin.timestamp));
+        for pin in pins {
+            let entry = Self::entry_from_pin(&resolution, pin);
+            if Self::entry_matches_filter(&entry, &filter) {
+                entries.push(entry);
+                if entries.len() == self.cfg.count {
+                    return entries;
+                }
             }
         }
 
-        let filtered = entries
-            .into_iter()
-            .filter(|entry| Self::entry_matches_filter(entry, &self.filter))
-            .take(self.cfg.count)
-            .collect::<Vec<_>>();
-        drop(prepare_timer);
-        filtered
+        // Pins that were filtered out or not yet visited still suppress their
+        // matching ordinary history identities. Keep the key borrowed from the
+        // cached pins and preserve None versus Some("").
+        let pinned_identities = self
+            .cached_pins
+            .iter()
+            .map(|pin| (pin.action_id.as_str(), pin.args.as_deref()))
+            .collect::<HashSet<_>>();
+        let remaining = self.cfg.count - entries.len();
+        let ordinary = crate::history::with_history(|history| {
+            let mut ordinary = Vec::new();
+            for history_entry in history {
+                if pinned_identities.contains(&(
+                    history_entry.action.action.as_str(),
+                    history_entry.action.args.as_deref(),
+                )) {
+                    continue;
+                }
+
+                let entry = Self::entry_from_history(&resolution, history_entry);
+                if Self::entry_matches_filter(&entry, &filter) {
+                    ordinary.push(entry);
+                    if ordinary.len() == remaining {
+                        break;
+                    }
+                }
+            }
+            ordinary
+        })
+        .unwrap_or_default();
+        entries.extend(ordinary);
+        entries
     }
 }
 
@@ -759,6 +803,8 @@ mod tests {
                 let initial = widget.prepare_entries(&ctx);
                 assert_history_scenario(scenario, &initial, &fixture);
 
+                crate::history::reset_with_history_test_acquisition_count();
+                reset_history_resolution_test_calls();
                 let (timing, final_entries) = workloads::measure(
                     workloads::UI_WARMUPS,
                     |_, _| {},
@@ -769,12 +815,43 @@ mod tests {
                     Metric::HistoryResolve,
                     Metric::HistoryCatalogBuild,
                 ]);
+                let prepare_metric = metrics
+                    .iter()
+                    .find(|metric| metric.metric == Metric::HistoryPrepare)
+                    .expect("history preparation metric is reported");
+                assert_eq!(prepare_metric.calls, workloads::SAMPLE_COUNT as u64);
+                assert_eq!(prepare_metric.work_units, 0);
+                let resolve_metric = metrics
+                    .iter()
+                    .find(|metric| metric.metric == Metric::HistoryResolve)
+                    .expect("history resolver metric is reported");
                 let catalog_metric = metrics
                     .iter()
                     .find(|metric| metric.metric == Metric::HistoryCatalogBuild)
                     .expect("history command catalog metric is reported");
                 assert_eq!(catalog_metric.calls, workloads::SAMPLE_COUNT as u64);
                 assert_eq!(catalog_metric.work_units, workloads::SAMPLE_COUNT as u64);
+                let pins_filled_mixed_output =
+                    initial.len() == widget.cfg.count && initial.iter().all(|entry| entry.pinned);
+                let expected_history_acquisitions =
+                    if widget.cfg.show_pinned_only || pins_filled_mixed_output {
+                        0
+                    } else {
+                        workloads::UI_WARMUPS + workloads::SAMPLE_COUNT
+                    };
+                assert_eq!(
+                    crate::history::with_history_test_acquisition_count(),
+                    expected_history_acquisitions
+                );
+                if matches!(scenario, "mixed-count-8-no-filter" | "pins-only-8") {
+                    let expected_resolutions = workloads::SAMPLE_COUNT as u64 * 8;
+                    assert_eq!(resolve_metric.calls, expected_resolutions);
+                    assert_eq!(resolve_metric.work_units, expected_resolutions);
+                    assert_eq!(
+                        history_resolution_test_calls(),
+                        (workloads::UI_WARMUPS + workloads::SAMPLE_COUNT) * 8
+                    );
+                }
                 assert_history_scenario(scenario, &final_entries, &fixture);
                 let summary = fixture
                     .summary
@@ -794,13 +871,23 @@ mod tests {
     }
 
     fn pin(action_id: &str) -> HistoryPin {
+        history_pin(action_id, None, action_id, action_id, 0)
+    }
+
+    fn history_pin(
+        action_id: &str,
+        args: Option<&str>,
+        label: &str,
+        query: &str,
+        timestamp: i64,
+    ) -> HistoryPin {
         HistoryPin {
             action_id: action_id.into(),
-            label: action_id.into(),
-            desc: String::new(),
-            args: None,
-            query: action_id.into(),
-            timestamp: 0,
+            label: label.into(),
+            desc: "saved pin description".into(),
+            args: args.map(str::to_owned),
+            query: query.into(),
+            timestamp,
         }
     }
 
@@ -1350,5 +1437,390 @@ mod tests {
             .label,
             "Process snapshot after rename"
         );
+    }
+
+    #[test]
+    fn history_prepare_short_circuits_zero_and_pin_satisfied_requests() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let entries = VecDeque::from([history_entry(
+            action("ordinary row", "ordinary:one", None),
+            0,
+        )]);
+        let _history_guard = crate::history::replace_history_for_test(entries);
+        let cache = DashboardDataCache::new();
+        let plugins = PluginManager::new_inert_for_test();
+        let catalog_calls = Arc::new(AtomicUsize::new(0));
+        let catalog_actions = Arc::new(RwLock::new(vec![action(
+            "Catalog action",
+            "catalog:action",
+            None,
+        )]));
+        let mut plugins = plugins;
+        plugins.register(Box::new(CountingCatalogPlugin {
+            name: "prepare_counter",
+            actions: Arc::clone(&catalog_actions),
+            calls: Arc::clone(&catalog_calls),
+        }));
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+
+        let mut zero = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 0,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        zero.cached_pins.push(history_pin(
+            "pinned:zero",
+            None,
+            "zero pin",
+            "zero query",
+            1,
+        ));
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        assert!(zero.prepare_entries(&ctx).is_empty());
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 0);
+        assert_eq!(history_resolution_test_calls(), 0);
+        assert_eq!(catalog_calls.load(Ordering::Relaxed), 0);
+
+        let mut pinned_only = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 8,
+            show_pinned_only: true,
+            show_filter: true,
+        });
+        pinned_only.cached_pins.push(history_pin(
+            "pinned:only",
+            None,
+            "saved pin",
+            "saved query",
+            1,
+        ));
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let pins = pinned_only.prepare_entries(&ctx);
+        assert_eq!(pins.len(), 1);
+        assert!(pins[0].pinned && pins[0].missing);
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 0);
+        assert_eq!(history_resolution_test_calls(), 1);
+
+        let mut pin_filled = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 1,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        pin_filled.cached_pins.push(history_pin(
+            "pinned:first",
+            None,
+            "saved first",
+            "first query",
+            1,
+        ));
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let pins = pin_filled.prepare_entries(&ctx);
+        assert_eq!(pins.len(), 1);
+        assert!(pins[0].pinned);
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 0);
+        assert_eq!(history_resolution_test_calls(), 1);
+        assert_eq!(catalog_calls.load(Ordering::Relaxed), 2);
+        drop(plugins);
+        drop(_history_guard);
+        drop(workspace);
+    }
+
+    #[test]
+    fn history_prepare_resolves_only_the_rows_needed_for_empty_filter() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let entries = (0..20)
+            .map(|index| history_entry(action("saved", &format!("action:{index}"), None), index))
+            .collect::<VecDeque<_>>();
+        let _history_guard = crate::history::replace_history_for_test(entries);
+        let cache = DashboardDataCache::new();
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+        let widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 8,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let prepared = widget.prepare_entries(&ctx);
+        assert_eq!(prepared.len(), 8);
+        assert_eq!(
+            prepared
+                .iter()
+                .map(|entry| entry.action_id.clone())
+                .collect::<Vec<_>>(),
+            (0..8)
+                .map(|index| format!("action:{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 1);
+        assert_eq!(history_resolution_test_calls(), 8);
+        drop(plugins);
+        drop(_history_guard);
+        drop(workspace);
+    }
+
+    #[test]
+    fn history_prepare_handles_unclamped_count_with_small_history() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let entries = VecDeque::from([history_entry(
+            action("one available row", "action:one", None),
+            0,
+        )]);
+        let _history_guard = crate::history::replace_history_for_test(entries);
+        let cache = DashboardDataCache::new();
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+        let widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: usize::MAX,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let prepared = widget.prepare_entries(&ctx);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].action_id, "action:one");
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 1);
+        assert_eq!(history_resolution_test_calls(), 1);
+        drop(plugins);
+        drop(_history_guard);
+        drop(workspace);
+    }
+
+    #[test]
+    fn history_prepare_scans_beyond_eight_for_case_insensitive_matches() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let entries = (0..12)
+            .map(|index| {
+                let mut entry = history_entry(
+                    action("saved label", &format!("action:{index}"), None),
+                    index,
+                );
+                if index == 10 {
+                    entry.query = "Rare query hit".into();
+                }
+                entry
+            })
+            .collect::<VecDeque<_>>();
+        let _history_guard = crate::history::replace_history_for_test(entries);
+        let cache = DashboardDataCache::new();
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::from([(
+            "action:11".into(),
+            action("Rare visible label", "action:11", None),
+        )]);
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+        let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 2,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        widget.filter = "RARE".into();
+
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let prepared = widget.prepare_entries(&ctx);
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared[0].action_id, "action:10");
+        assert_eq!(prepared[0].query, "Rare query hit");
+        assert_eq!(prepared[1].action_id, "action:11");
+        assert_eq!(prepared[1].action.label, "Rare visible label");
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 1);
+        assert_eq!(history_resolution_test_calls(), 12);
+        drop(plugins);
+        drop(_history_guard);
+        drop(workspace);
+    }
+
+    #[test]
+    fn history_prepare_suppresses_filtered_pins_with_exact_optional_args() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let mut hidden_pin_match =
+            history_entry(action("saved pinned history", "pin:hidden", None), 0);
+        hidden_pin_match.query = "needle should be suppressed".into();
+        let mut none_args_match = history_entry(action("saved None history", "arg:case", None), 1);
+        none_args_match.query = "needle None should be suppressed".into();
+        let mut empty_args_match =
+            history_entry(action("saved empty args history", "arg:case", Some("")), 2);
+        empty_args_match.query = "needle empty args remains".into();
+        let mut ordinary_match = history_entry(action("saved ordinary", "ordinary:row", None), 3);
+        ordinary_match.query = "needle ordinary remains".into();
+        let _history_guard = crate::history::replace_history_for_test(VecDeque::from([
+            hidden_pin_match,
+            none_args_match,
+            empty_args_match,
+            ordinary_match,
+        ]));
+        let cache = DashboardDataCache::new();
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+        let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 2,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        widget.filter = "NEEDLE".into();
+        widget.cached_pins = vec![
+            history_pin(
+                "pin:hidden",
+                None,
+                "hidden pin label",
+                "hidden pin query",
+                2,
+            ),
+            history_pin("arg:case", None, "none args pin", "unmatched pin query", 1),
+        ];
+
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let prepared = widget.prepare_entries(&ctx);
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared[0].action_id, "arg:case");
+        assert_eq!(prepared[0].action.args.as_deref(), Some(""));
+        assert_eq!(prepared[0].query, "needle empty args remains");
+        assert_eq!(prepared[1].action_id, "ordinary:row");
+        assert_eq!(prepared[1].query, "needle ordinary remains");
+        assert!(prepared.iter().all(|entry| !entry.pinned));
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 1);
+        assert_eq!(history_resolution_test_calls(), 4);
+        drop(plugins);
+        drop(_history_guard);
+        drop(workspace);
+    }
+
+    #[test]
+    fn history_prepare_preserves_pin_and_history_order_and_observes_pin_changes() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let mut pinned_history = history_entry(
+            action("history version of shared", "shared:action", None),
+            0,
+        );
+        pinned_history.query = "ordinary shared query".into();
+        let mut missing_history = history_entry(
+            action("saved missing history label", "missing:history", None),
+            1,
+        );
+        missing_history.query = "ordinary missing query".into();
+        let _history_guard = crate::history::replace_history_for_test(VecDeque::from([
+            pinned_history,
+            missing_history,
+        ]));
+        let cache = DashboardDataCache::new();
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+        let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 4,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        widget.cached_pins = vec![
+            history_pin(
+                "shared:action",
+                None,
+                "first cached pin",
+                "pin query first",
+                10,
+            ),
+            history_pin("missing:pin", None, "missing pin", "pin query missing", 20),
+            history_pin(
+                "shared:action",
+                None,
+                "duplicate cached pin",
+                "pin query duplicate",
+                10,
+            ),
+        ];
+
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let mixed = widget.prepare_entries(&ctx);
+        assert_eq!(mixed.len(), 4);
+        assert_eq!(
+            mixed
+                .iter()
+                .map(|entry| (entry.action_id.as_str(), entry.pinned))
+                .collect::<Vec<_>>(),
+            vec![
+                ("missing:pin", true),
+                ("shared:action", true),
+                ("shared:action", true),
+                ("missing:history", false),
+            ]
+        );
+        assert_eq!(mixed[1].action.label, "first cached pin");
+        assert_eq!(mixed[2].action.label, "duplicate cached pin");
+        assert_eq!(mixed[1].query, "pin query first");
+        assert_eq!(mixed[2].query, "pin query duplicate");
+        assert!(mixed[0].missing);
+        assert!(!mixed[3].missing);
+        assert_eq!(mixed[3].action.label, "saved missing history label");
+        assert_eq!(mixed[3].query, "ordinary missing query");
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 1);
+        assert_eq!(history_resolution_test_calls(), 4);
+
+        widget.cfg.show_pinned_only = true;
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let pins_only = widget.prepare_entries(&ctx);
+        assert_eq!(
+            pins_only
+                .iter()
+                .map(|entry| entry.action.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first cached pin", "missing pin", "duplicate cached pin"]
+        );
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 0);
+        assert_eq!(history_resolution_test_calls(), 3);
+
+        widget.cfg.show_pinned_only = false;
+        widget.cfg.count = 1;
+        widget.cached_pins = vec![history_pin(
+            "missing:history",
+            None,
+            "newly pinned history row",
+            "new pin query",
+            30,
+        )];
+        crate::history::reset_with_history_test_acquisition_count();
+        reset_history_resolution_test_calls();
+        let changed_pins = widget.prepare_entries(&ctx);
+        assert_eq!(changed_pins.len(), 1);
+        assert_eq!(changed_pins[0].action.label, "newly pinned history row");
+        assert!(changed_pins[0].pinned);
+        assert_eq!(changed_pins[0].query, "new pin query");
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 0);
+
+        widget.cached_pins.clear();
+        crate::history::reset_with_history_test_acquisition_count();
+        let unpinned = widget.prepare_entries(&ctx);
+        assert_eq!(unpinned.len(), 1);
+        assert_eq!(unpinned[0].action_id, "shared:action");
+        assert!(!unpinned[0].pinned);
+        assert_eq!(crate::history::with_history_test_acquisition_count(), 1);
+        drop(plugins);
+        drop(_history_guard);
+        drop(workspace);
     }
 }
