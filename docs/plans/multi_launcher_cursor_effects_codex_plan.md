@@ -639,7 +639,7 @@ The orchestrator must provide:
 - M1-C: complete core feasibility gate. Retained isolated harness implemented and reviewed; standalone build, 1 matrix test, formatter/diff checks pass. Native startup/keyboard/independent lens disable and resource teardown observed. Bounded F12 composed desktop readback proved actual 0/40/100% inversion and exact 2x offset zoom, with captured sibling/self exclusion. User confirmed physical click-through and stationary live updates on October 8. Select Windows Magnification API for production integration. See `cursor_effects_feasibility.md` for evidence and remaining final acceptance limits.
 - M1-B checkpoint: `60689d88`.
 - Grouped A/B Nextest: first run 19 passed, 1 test-helper failure, 5 not run due to fail-fast. Negative rays now stop at the bitmap edge. Rerun with `--no-fail-fast`: **25 passed**, 4,940 unrelated tests skipped; compile produced 3 existing warnings in untouched `src/gui/render.rs`. Filter covered settings, crosshair/guide rendering, transactional adapter and worker update, dialog, exact parser, handler and mouse plugin.
-- M5-C: pending.
+- M5-C: in progress; focused final compilation/Nextest gate, production-backend native scene/readback and documentation. No unrelated regression campaign. Final M5-A/B independent review found one P2: asynchronous effect status needs a bounded dialog repaint while open; correction is assigned to the sole writer. No other substantive M5-A/B findings. The production fixture implements a bounded opt-in automatic sequence driven directly through its own public controller (no synthetic desktop input), so production pixel/lifecycle evidence does not depend on general Computer Use after its Escape stop. First smoke build exposed a missing zoom-mode label helper in the committed M5-A dialog; the sole writer is correcting this attributable compile failure before continuing the gate.
 - Desktop access: ordinary Computer Use pixel capture times out, but the native fixture's bounded desktop readback includes composed output. Physical click automation fails because coordinate geometry is unavailable; user-performed click-through and stationary-update checks were explicitly confirmed.
 - Gap independent review: no substantive findings. Native harness review's child-redraw finding resolved; parent reentrancy and scene-creation fixes applied before native evaluation.
 - Test-helper remediation checkpoint: `9998849a`.
@@ -662,6 +662,7 @@ The orchestrator must provide:
 - M4-B checkpoint: `9044de42`.
 - M5-A: source-complete; existing scrollable Mouse Settings now has crosshair/halo/magnifier/coordinate sections, draft-only appearance controls and resets, immediate session switches through durable typed adapter delegates, and truthful local runtime status separated from saved appearance. Every halo/zoom field merges transactionally, with destination axes compared separately. Parent merge-test setup and fallback wording findings resolved. Formatter/diff checks pass; reopen/save failure/save success/reset/switch/status/external-merge/compact-overflow tests are authored and execute at M5-C.
 - M5-A checkpoint: `555ca6ab`.
+- M5-B checkpoint: `7f906416`.
 - M5-B: source-complete and parent-reviewed; exact typed halo/zoom activation and effects-off use the existing parser/plugin/handler/adapter, preserve HUD/pick/freeze/copy and saved preferences, and reject unsupported arguments. Discovery and help include the new families; headless routing requires the launcher without external fallback. Three test/help wording contradictions were corrected. Formatter/diff checks pass; focused authored tests execute at M5-C.
 
 ---
@@ -669,3 +670,27 @@ The orchestrator must provide:
 # 12. Quick orchestrator handoff summary
 
 **Orchestrator:** Follow repository `AGENTS.md` and the separately supplied `multi_launcher_cursor_effects_codex_start.md`. Keep original branch and unrelated edits. Delegate planner (read-only), implementer (one well-scoped checkpoint at a time), reviewer (read-only). Perform M1-C native feasibility early. Then execute M2→M3→M4→M5 in dependency order, committing coherent checkpoints. Keep builds sparse and targeted; use slower wake-ups for genuinely long tests. Do not hide missing native verification or weaken the user's real-inversion requirement.
+
+### M5-C final gate progress
+
+- `cargo build --bin coordinate_tool_smoke`: passed (52.79s) after resolving
+  the missing dialog zoom label, fixture module path and bounded checkerboard
+  coordinate casts. `cargo check --lib --bin multi_launcher`: passed (1m23s).
+- `cargo fmt --all -- --check` and `git diff --check`: passed.
+- Grouped Nextest: **111 passed**, 4,914 filtered out, 3.261s. Initial `run`
+  invocations returned empty immediate failures before tests started; discovery
+  succeeded, and the same selected run passed with `--no-capture` and captured
+  output under ignored `target/m5c-nextest-output.log`. Actual passing selection:
+
+```powershell
+cargo nextest run --lib --no-fail-fast --no-capture -E 'test(coordinate_tool::settings::tests::) | test(coordinate_tool::model::tests::) | test(coordinate_tool::render::tests::) | test(coordinate_tool::controller::tests::) | test(coordinate_tool::native_effects::tests::) | test(gui::coordinate_tool::tests::) | test(gui::mouse_settings_dialog::tests::) | test(commands::parser::mouse_command_parser_tests::) | test(commands::handlers::coordinate_tool::tests::) | test(plugins::mouse::tests::) | test(commands::headless::screen_draw_headless_tests::mouse_commands_require_the_launcher_interface_without_external_fallback)'
+```
+
+- Dialog remediation: missing `zoom_mode_label` is now defined; open-dialog
+  status repaint is bounded to 250ms. Independent review and relevant grouped
+  tests pass. This repair is a separate coherent checkpoint before native
+  feedback remediation.
+- Production run exited0 with real inversion/zoom and clean resource ownership,
+  but actual all-four BMPs exposed magnified red source guides despite a complete
+  filter list. Gate remains open. See `cursor_effects_feasibility.md` for exact
+  pixel evidence and the bounded visible-cheap-before-effects diagnostic.

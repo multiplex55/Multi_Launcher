@@ -72,6 +72,10 @@ impl MouseSettingsDialog {
         if !self.open {
             return None;
         }
+        // Native effect status arrives asynchronously from the passive worker.
+        // Keep the open dialog's local availability labels fresh even when no
+        // other application activity would otherwise request an egui frame.
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
         if !self.is_dirty() {
             self.sync_clean_draft(adapter.preferences());
         }
@@ -429,6 +433,13 @@ fn applied_zoom_summary(preferences: &CoordinateToolPreferences) -> String {
     )
 }
 
+fn zoom_mode_label(mode: ZoomMode) -> &'static str {
+    match mode {
+        ZoomMode::Offset => "Offset",
+        ZoomMode::Centered => "Centered",
+    }
+}
+
 fn space_label(space: CoordinateSpace) -> &'static str {
     match space {
         CoordinateSpace::Desktop => "Desktop",
@@ -723,6 +734,12 @@ mod tests {
         );
         assert!(!applied_halo_summary(&committed).contains("90%"));
         assert!(!applied_zoom_summary(&committed).contains("4.00×"));
+    }
+
+    #[test]
+    fn zoom_mode_control_labels_both_destination_modes() {
+        assert_eq!(zoom_mode_label(ZoomMode::Offset), "Offset");
+        assert_eq!(zoom_mode_label(ZoomMode::Centered), "Centered");
     }
 
     #[test]
