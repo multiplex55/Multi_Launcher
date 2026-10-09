@@ -640,6 +640,15 @@ pub fn note_backlinks(slug: &str) -> Vec<Note> {
         .unwrap_or_default()
 }
 
+/// Return the number of notes linking to the exact canonical slug without
+/// cloning the linked note bodies.
+pub fn note_backlink_count(slug: &str) -> anyhow::Result<usize> {
+    let cache = CACHE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note cache lock poisoned while counting backlinks"))?;
+    Ok(cache.links.get(slug).map_or(0, Vec::len))
+}
+
 pub fn note_refs_for(slug: &str) -> Vec<WikiReference> {
     CACHE
         .lock()
@@ -3705,6 +3714,31 @@ Body",
         assert_eq!(note_version(), recovered_version);
 
         restore_cache(original);
+    }
+
+    #[test]
+    fn note_backlink_count_matches_resolved_unique_sources_without_note_clones() {
+        let _cache = publish_note_cache_for_test(vec![
+            test_note(
+                "Target Title",
+                "target-title",
+                "# Target Title\nAlias: Target Alias\nAliases: Secondary Target\n",
+            ),
+            test_note(
+                "Source One",
+                "source-one",
+                "# Source One\n[[Target Title]] [[Target Alias]]\n",
+            ),
+            test_note(
+                "Source Two",
+                "source-two",
+                "# Source Two\n[[Secondary Target]]\n",
+            ),
+        ]);
+
+        assert_eq!(note_backlink_count("target-title").unwrap(), 2);
+        assert_eq!(note_backlinks("target-title").len(), 2);
+        assert_eq!(note_backlink_count("missing-target").unwrap(), 0);
     }
 
     #[test]

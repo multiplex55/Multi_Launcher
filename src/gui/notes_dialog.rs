@@ -1,8 +1,8 @@
 use crate::actions::Action;
 use crate::gui::{ActivationSource, LauncherApp};
 use crate::plugins::note::{
-    Note, append_note_content, delete_template, get_template, list_templates, load_notes,
-    note_backlinks, note_cache_snapshot, reload_templates, save_note, save_note_content,
+    Note, append_note_content, delete_template, get_template, list_templates, note_backlink_count,
+    note_cache_snapshot_with_version, note_version, reload_templates, save_note, save_note_content,
     save_template, template_path, validate_template_name,
 };
 use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good};
@@ -33,36 +33,51 @@ fn insert_at_char_boundary(text: &str, idx: usize, insert: &str) -> String {
     out
 }
 
-fn cached_notes_or_load() -> Vec<Note> {
-    let snapshot = note_cache_snapshot();
-    if snapshot.is_empty() {
-        load_notes().unwrap_or_default()
-    } else {
-        snapshot
-    }
-}
-
 fn display_title(note: &Note) -> &str {
     note.alias.as_deref().unwrap_or(&note.title)
 }
 
 fn short_preview(content: &str) -> String {
-    let preview = content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.starts_with("# ") && !trimmed.starts_with("Alias:")
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if preview.chars().count() > 120 {
-        format!("{}…", preview.chars().take(120).collect::<String>())
-    } else {
-        preview
+    const LIMIT: usize = 120;
+
+    let mut preview = String::with_capacity(LIMIT + 3);
+    let mut char_count = 0;
+    let mut pending_space = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("# ") || trimmed.starts_with("Alias:") {
+            continue;
+        }
+        if !preview.is_empty() {
+            pending_space = true;
+        }
+
+        for character in line.chars() {
+            if character.is_whitespace() {
+                pending_space |= !preview.is_empty();
+                continue;
+            }
+            if pending_space {
+                if char_count == LIMIT {
+                    if preview.ends_with(' ') {
+                        preview.pop();
+                    }
+                    preview.push('…');
+                    return preview;
+                }
+                preview.push(' ');
+                char_count += 1;
+                pending_space = false;
+            }
+            if char_count == LIMIT {
+                preview.push('…');
+                return preview;
+            }
+            preview.push(character);
+            char_count += 1;
+        }
     }
+    preview
 }
 
 fn checkbox_count(content: &str) -> usize {
@@ -75,6 +90,69 @@ fn checkbox_count(content: &str) -> usize {
                 || trimmed.starts_with("- [X] ")
         })
         .count()
+}
+
+fn build_search_index(entries: &[Note]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|note| {
+            let mut text = note.content.to_lowercase();
+            if let Some(alias) = &note.alias {
+                text.push('\n');
+                text.push_str(&alias.to_lowercase());
+            }
+            for alias in &note.aliases {
+                text.push('\n');
+                text.push_str(&alias.to_lowercase());
+            }
+            text.push('\n');
+            text.push_str(&note.slug.to_lowercase());
+            for tag in &note.tags {
+                text.push('\n');
+                text.push_str(&tag.to_lowercase());
+            }
+            text
+        })
+        .collect()
+}
+
+fn build_row_metadata(
+    entries: &[Note],
+    backlinks_enabled: bool,
+    task_lists_enabled: bool,
+) -> anyhow::Result<Vec<NoteRowMetadata>> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(original_index, note)| {
+            let mut meta = vec![format!(
+                "slug: {}",
+                if note.slug.is_empty() {
+                    "unsaved"
+                } else {
+                    &note.slug
+                }
+            )];
+            if !note.tags.is_empty() {
+                meta.push(format!("tags: {}", note.tags.join(", ")));
+            }
+            if backlinks_enabled && !note.slug.is_empty() {
+                meta.push(format!("{} backlinks", note_backlink_count(&note.slug)?));
+            }
+            if task_lists_enabled {
+                let count = checkbox_count(&note.content);
+                if count > 0 {
+                    meta.push(format!("{count} checkboxes"));
+                }
+            }
+            Ok(NoteRowMetadata {
+                original_index,
+                display_title: display_title(note).to_owned(),
+                meta: meta.join(" · "),
+                preview: short_preview(&note.content),
+            })
+        })
+        .collect()
 }
 
 fn note_action(label: impl Into<String>, action: impl Into<String>) -> Action {
@@ -90,17 +168,113 @@ fn wrap_links_note_action(slug: &str) -> Action {
     note_action("Wrap links in note", format!("note:meta:wrap-links:{slug}"))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NoteRowMetadata {
+    original_index: usize,
+    display_title: String,
+    meta: String,
+    preview: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MetadataKey {
+    entries_generation: u64,
+    note_revision: u64,
+    backlinks_enabled: bool,
+    task_lists_enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProjectionKey {
+    entries_generation: u64,
+    raw_search: String,
+    filter: String,
+}
+
+#[derive(Clone, Debug)]
+struct RefreshRetry {
+    note_revision: u64,
+    backlinks_enabled: bool,
+    task_lists_enabled: bool,
+    deadline: f64,
+}
+
+fn update_filtered_projection(
+    search: &str,
+    index: &[String],
+    entries_generation: u64,
+    filtered_indices: &mut Vec<usize>,
+    projection_key: &mut Option<ProjectionKey>,
+) -> bool {
+    let raw_search_changed = projection_key
+        .as_ref()
+        .is_none_or(|key| key.raw_search != search);
+    let generation_changed = projection_key
+        .as_ref()
+        .is_none_or(|key| key.entries_generation != entries_generation);
+    if !raw_search_changed && !generation_changed {
+        return false;
+    }
+
+    let filter = if raw_search_changed {
+        search.to_lowercase()
+    } else {
+        projection_key
+            .as_ref()
+            .map(|key| key.filter.clone())
+            .unwrap_or_default()
+    };
+    let filter_changed = projection_key
+        .as_ref()
+        .is_none_or(|key| key.filter != filter);
+    if filter_changed || generation_changed {
+        *filtered_indices = index
+            .iter()
+            .enumerate()
+            .filter_map(|(index, text)| {
+                (filter.is_empty() || text.contains(&filter)).then_some(index)
+            })
+            .collect();
+    }
+    *projection_key = Some(ProjectionKey {
+        entries_generation,
+        raw_search: search.to_owned(),
+        filter,
+    });
+    filter_changed || generation_changed
+}
+
 #[derive(Default)]
 pub struct NotesDialog {
     pub open: bool,
     entries: Vec<Note>,
     index: Vec<String>,
+    entries_revision: Option<u64>,
+    refresh_requested: bool,
+    entries_generation: u64,
+    row_metadata: Vec<NoteRowMetadata>,
+    metadata_key: Option<MetadataKey>,
+    filtered_indices: Vec<usize>,
+    projection_key: Option<ProjectionKey>,
+    refresh_retry: Option<RefreshRetry>,
     edit_idx: Option<usize>,
     text: String,
     search: String,
     template_manager: TemplateManagerState,
     #[cfg(test)]
     last_rendered_indices: Vec<usize>,
+    #[cfg(test)]
+    test_note_snapshot_calls: u64,
+    #[cfg(test)]
+    test_metadata_rebuilds: u64,
+    #[cfg(test)]
+    test_projection_rebuilds: u64,
+    #[cfg(test)]
+    test_preview_builds: u64,
+    #[cfg(test)]
+    test_fail_next_snapshot: bool,
+    #[cfg(test)]
+    test_race_after_candidate: bool,
 }
 
 enum PendingNoteSave {
@@ -280,9 +454,241 @@ impl TemplateManagerState {
 }
 
 impl NotesDialog {
+    fn capture_note_snapshot(&mut self) -> anyhow::Result<(u64, Vec<Note>)> {
+        #[cfg(test)]
+        {
+            self.test_note_snapshot_calls = self.test_note_snapshot_calls.saturating_add(1);
+            if std::mem::take(&mut self.test_fail_next_snapshot) {
+                anyhow::bail!("injected Quick Notes snapshot failure");
+            }
+        }
+        note_cache_snapshot_with_version()
+    }
+
+    fn install_candidate(
+        &mut self,
+        revision: u64,
+        entries: Vec<Note>,
+        index: Vec<String>,
+        metadata: Vec<NoteRowMetadata>,
+        settings: Option<(bool, bool)>,
+    ) {
+        self.entries = entries;
+        self.index = index;
+        self.entries_revision = Some(revision);
+        self.refresh_requested = false;
+        self.entries_generation = self.entries_generation.wrapping_add(1).max(1);
+        self.row_metadata = metadata;
+        self.metadata_key = settings.map(|(backlinks_enabled, task_lists_enabled)| MetadataKey {
+            entries_generation: self.entries_generation,
+            note_revision: revision,
+            backlinks_enabled,
+            task_lists_enabled,
+        });
+        self.filtered_indices.clear();
+        self.projection_key = None;
+        self.refresh_retry = None;
+        #[cfg(test)]
+        if self.metadata_key.is_some() {
+            self.test_metadata_rebuilds = self.test_metadata_rebuilds.saturating_add(1);
+            self.test_preview_builds = self
+                .test_preview_builds
+                .saturating_add(self.row_metadata.len().try_into().unwrap_or(u64::MAX));
+        }
+    }
+
+    fn mark_retry(
+        &mut self,
+        ctx: &egui::Context,
+        revision: u64,
+        backlinks_enabled: bool,
+        task_lists_enabled: bool,
+    ) {
+        const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+        let now = ctx.input(|input| input.time);
+        let deadline = now + RETRY_AFTER.as_secs_f64();
+        self.refresh_retry = Some(RefreshRetry {
+            note_revision: revision,
+            backlinks_enabled,
+            task_lists_enabled,
+            deadline,
+        });
+        ctx.request_repaint_after(RETRY_AFTER);
+    }
+
+    fn retry_wait_remaining(
+        &self,
+        revision: u64,
+        backlinks_enabled: bool,
+        task_lists_enabled: bool,
+        now: f64,
+    ) -> Option<std::time::Duration> {
+        let retry = self.refresh_retry.as_ref()?;
+        if retry.note_revision != revision
+            || retry.backlinks_enabled != backlinks_enabled
+            || retry.task_lists_enabled != task_lists_enabled
+            || now >= retry.deadline
+        {
+            return None;
+        }
+        Some(std::time::Duration::from_secs_f64(retry.deadline - now))
+    }
+
+    fn maybe_refresh_derived(
+        &mut self,
+        ctx: &egui::Context,
+        settings: &crate::settings::NoteSettings,
+    ) {
+        if self.edit_idx.is_some() {
+            return;
+        }
+
+        let backlinks_enabled = settings.backlinks_enabled;
+        let task_lists_enabled = settings.task_lists_enabled;
+        let observed_revision = note_version();
+        let metadata_matches = self.metadata_key.as_ref().is_some_and(|key| {
+            key.entries_generation == self.entries_generation
+                && key.note_revision == observed_revision
+                && key.backlinks_enabled == backlinks_enabled
+                && key.task_lists_enabled == task_lists_enabled
+        });
+        let entries_changed =
+            self.refresh_requested || self.entries_revision != Some(observed_revision);
+        if entries_changed || !metadata_matches {
+            let now = ctx.input(|input| input.time);
+            if let Some(wait) = self.retry_wait_remaining(
+                observed_revision,
+                backlinks_enabled,
+                task_lists_enabled,
+                now,
+            ) {
+                ctx.request_repaint_after(wait);
+                return;
+            }
+        }
+
+        if entries_changed {
+            let (revision, entries) = match self.capture_note_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    self.mark_retry(
+                        ctx,
+                        observed_revision,
+                        backlinks_enabled,
+                        task_lists_enabled,
+                    );
+                    return;
+                }
+            };
+            let index = build_search_index(&entries);
+            let metadata = match build_row_metadata(&entries, backlinks_enabled, task_lists_enabled)
+            {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    self.mark_retry(
+                        ctx,
+                        observed_revision,
+                        backlinks_enabled,
+                        task_lists_enabled,
+                    );
+                    return;
+                }
+            };
+            #[cfg(test)]
+            let forced_race = std::mem::take(&mut self.test_race_after_candidate);
+            #[cfg(not(test))]
+            let forced_race = false;
+            if note_version() != revision || forced_race {
+                self.mark_retry(ctx, note_version(), backlinks_enabled, task_lists_enabled);
+                return;
+            }
+            self.install_candidate(
+                revision,
+                entries,
+                index,
+                metadata,
+                Some((backlinks_enabled, task_lists_enabled)),
+            );
+        } else if !metadata_matches {
+            let metadata =
+                match build_row_metadata(&self.entries, backlinks_enabled, task_lists_enabled) {
+                    Ok(metadata) => metadata,
+                    Err(_) => {
+                        self.mark_retry(
+                            ctx,
+                            observed_revision,
+                            backlinks_enabled,
+                            task_lists_enabled,
+                        );
+                        return;
+                    }
+                };
+            #[cfg(test)]
+            let forced_race = std::mem::take(&mut self.test_race_after_candidate);
+            #[cfg(not(test))]
+            let forced_race = false;
+            if note_version() != observed_revision || forced_race {
+                self.mark_retry(ctx, note_version(), backlinks_enabled, task_lists_enabled);
+                return;
+            }
+            self.row_metadata = metadata;
+            self.metadata_key = Some(MetadataKey {
+                entries_generation: self.entries_generation,
+                note_revision: observed_revision,
+                backlinks_enabled,
+                task_lists_enabled,
+            });
+            self.refresh_retry = None;
+            #[cfg(test)]
+            {
+                self.test_metadata_rebuilds = self.test_metadata_rebuilds.saturating_add(1);
+                self.test_preview_builds = self
+                    .test_preview_builds
+                    .saturating_add(self.row_metadata.len().try_into().unwrap_or(u64::MAX));
+            }
+        }
+
+        self.rebuild_projection_if_needed();
+    }
+
+    fn rebuild_projection_if_needed(&mut self) {
+        if update_filtered_projection(
+            &self.search,
+            &self.index,
+            self.entries_generation,
+            &mut self.filtered_indices,
+            &mut self.projection_key,
+        ) {
+            #[cfg(test)]
+            {
+                self.test_projection_rebuilds = self.test_projection_rebuilds.saturating_add(1);
+            }
+        }
+    }
+
+    fn rebuild_index(&mut self) {
+        self.index = build_search_index(&self.entries);
+        self.entries_generation = self.entries_generation.wrapping_add(1).max(1);
+        self.row_metadata.clear();
+        self.metadata_key = None;
+        self.filtered_indices.clear();
+        self.projection_key = None;
+    }
+
+    fn ensure_entries_for_edit(&mut self) {
+        if self.entries_revision.is_some() {
+            return;
+        }
+        let Ok((revision, entries)) = self.capture_note_snapshot() else {
+            return;
+        };
+        let index = build_search_index(&entries);
+        if note_version() == revision {
+            self.install_candidate(revision, entries, index, Vec::new(), None);
+        }
+    }
+
     pub fn open(&mut self) {
-        self.entries = cached_notes_or_load();
-        self.rebuild_index();
         self.open = true;
         self.edit_idx = None;
         self.text.clear();
@@ -293,13 +699,13 @@ impl NotesDialog {
     }
 
     pub(crate) fn refresh_entries_from_notes(&mut self) {
-        self.entries = cached_notes_or_load();
-        self.rebuild_index();
+        if self.edit_idx.is_none() {
+            self.refresh_requested = true;
+        }
     }
 
     pub fn open_edit(&mut self, idx: usize) {
-        self.entries = cached_notes_or_load();
-        self.rebuild_index();
+        self.ensure_entries_for_edit();
         if idx < self.entries.len() {
             self.text = self.entries[idx].content.clone();
         } else {
@@ -307,31 +713,6 @@ impl NotesDialog {
         }
         self.edit_idx = Some(idx);
         self.open = true;
-    }
-
-    fn rebuild_index(&mut self) {
-        self.index = self
-            .entries
-            .iter()
-            .map(|n| {
-                let mut txt = n.content.to_lowercase();
-                if let Some(a) = &n.alias {
-                    txt.push('\n');
-                    txt.push_str(&a.to_lowercase());
-                }
-                for alias in &n.aliases {
-                    txt.push('\n');
-                    txt.push_str(&alias.to_lowercase());
-                }
-                txt.push('\n');
-                txt.push_str(&n.slug.to_lowercase());
-                for tag in &n.tags {
-                    txt.push('\n');
-                    txt.push_str(&tag.to_lowercase());
-                }
-                txt
-            })
-            .collect();
     }
 
     fn save_note_draft(&mut self, pending: PendingNoteSave, app: &mut LauncherApp) -> bool {
@@ -346,8 +727,9 @@ impl NotesDialog {
         };
         match result {
             Ok(Some(_)) => {
-                self.entries = cached_notes_or_load();
-                self.rebuild_index();
+                if self.edit_idx.is_none() {
+                    self.refresh_entries_from_notes();
+                }
                 app.search();
                 app.focus_input();
                 true
@@ -369,6 +751,7 @@ impl NotesDialog {
         if !self.open {
             return;
         }
+        self.maybe_refresh_derived(ctx, &app.note_settings);
         let mut close = false;
         let mut save_edit = false;
         let mut note_to_save: Option<PendingNoteSave> = None;
@@ -468,7 +851,19 @@ impl NotesDialog {
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search).desired_width(f32::INFINITY),
                     );
-                    let filter = self.search.to_lowercase();
+                    if update_filtered_projection(
+                        &self.search,
+                        &self.index,
+                        self.entries_generation,
+                        &mut self.filtered_indices,
+                        &mut self.projection_key,
+                    ) {
+                        #[cfg(test)]
+                        {
+                            self.test_projection_rebuilds =
+                                self.test_projection_rebuilds.saturating_add(1);
+                        }
+                    }
                     let mut remove: Option<usize> = None;
                     let area_height = ui.available_height();
                     let mut rows_timer = crate::performance::MetricTimer::start(
@@ -478,46 +873,32 @@ impl NotesDialog {
                     egui::ScrollArea::both()
                         .max_height(area_height)
                         .show(ui, |ui| {
-                            for idx in 0..self.entries.len() {
-                                if !filter.is_empty() && !self.index[idx].contains(&filter) {
+                            for projection_index in 0..self.filtered_indices.len() {
+                                let idx = self.filtered_indices[projection_index];
+                                let Some(entry) = self.entries.get(idx) else {
                                     continue;
-                                }
-                                let entry = self.entries[idx].clone();
+                                };
+                                let Some(row) = self
+                                    .row_metadata
+                                    .get(idx)
+                                    .filter(|row| row.original_index == idx)
+                                else {
+                                    continue;
+                                };
                                 ui.vertical(|ui| {
-                                    let title = display_title(&entry);
-                                    let slug = if entry.slug.is_empty() {
-                                        "unsaved"
-                                    } else {
-                                        &entry.slug
-                                    };
-                                    let mut meta = vec![format!("slug: {slug}")];
-                                    if !entry.tags.is_empty() {
-                                        meta.push(format!("tags: {}", entry.tags.join(", ")));
-                                    }
-                                    if app.note_settings.backlinks_enabled && !entry.slug.is_empty()
-                                    {
-                                        meta.push(format!(
-                                            "{} backlinks",
-                                            note_backlinks(&entry.slug).len()
-                                        ));
-                                    }
-                                    if app.note_settings.task_lists_enabled {
-                                        let count = checkbox_count(&entry.content);
-                                        if count > 0 {
-                                            meta.push(format!("{count} checkboxes"));
-                                        }
-                                    }
-                                    let preview = short_preview(&entry.content);
+                                    let preview = row.preview.as_str();
                                     let resp = ui
                                         .horizontal(|ui| {
-                                            ui.strong(title);
-                                            ui.small(meta.join(" · "));
+                                            ui.strong(&row.display_title);
+                                            ui.small(&row.meta);
                                         })
                                         .response
-                                        .on_hover_text(if preview.is_empty() {
-                                            entry.content.clone()
-                                        } else {
-                                            preview.clone()
+                                        .on_hover_ui(|ui| {
+                                            if preview.is_empty() {
+                                                ui.label(&entry.content);
+                                            } else {
+                                                ui.label(preview);
+                                            }
                                         });
                                     if !preview.is_empty() {
                                         ui.small(preview);
@@ -647,8 +1028,7 @@ impl NotesDialog {
             app.activate_action(wrap_links_note_action(&slug), None, ActivationSource::Click);
         }
         if refresh_entries {
-            self.entries = cached_notes_or_load();
-            rebuild_idx = true;
+            self.refresh_entries_from_notes();
         }
         if rebuild_idx {
             self.rebuild_index();
@@ -657,6 +1037,7 @@ impl NotesDialog {
             if self.save_note_draft(note, app) && save_edit {
                 self.edit_idx = None;
                 self.text.clear();
+                self.refresh_entries_from_notes();
             }
         }
         if close {
@@ -707,6 +1088,52 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn new_isolated_app(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn render_notes_frame(
+        ctx: &egui::Context,
+        dialog: &mut NotesDialog,
+        app: &mut LauncherApp,
+        time: f64,
+    ) {
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ctx| dialog.ui(ctx, app),
+        );
     }
 
     fn note(title: &str, slug: &str, content: &str) -> Note {
@@ -790,9 +1217,9 @@ mod tests {
                 count,
                 "launcher construction preserves the fixture note snapshot"
             );
-            dialog.entries = fixture.values.clone();
-            dialog.rebuild_index();
-            dialog.open = true;
+            dialog.open();
+            render_notes_frame(&context, &mut dialog, &mut app, 1.0);
+            assert_eq!(dialog.entries.len(), count);
 
             let edit_index = count / 2;
             dialog.open_edit(edit_index);
@@ -801,9 +1228,6 @@ mod tests {
                 dialog.text == fixture.values[edit_index].content,
                 "editing resolves to the stable source note identity"
             );
-            dialog.entries = fixture.values.clone();
-            dialog.rebuild_index();
-            dialog.open = true;
             dialog.edit_idx = None;
             dialog.text.clear();
 
@@ -844,12 +1268,16 @@ mod tests {
                         context.run(input, |ctx| dialog.ui(ctx, &mut app))
                     },
                 );
-                let metrics = workloads::metrics_for(&[Metric::QuickNotesRowsBuilt]);
-                assert_eq!(metrics.len(), 1);
-                assert_eq!(metrics[0].calls, workloads::SAMPLE_COUNT as u64);
+                let metrics =
+                    workloads::metrics_for(&[Metric::QuickNotesRowsBuilt, Metric::NoteSnapshot]);
+                assert_eq!(metrics.len(), 2);
+                assert_eq!(metrics[0].metric, Metric::NoteSnapshot);
+                assert_eq!(metrics[0].calls, 0, "warm browsing takes no note snapshots");
+                assert_eq!(metrics[1].metric, Metric::QuickNotesRowsBuilt);
+                assert_eq!(metrics[1].calls, workloads::SAMPLE_COUNT as u64);
                 assert!(!dialog.last_rendered_indices.is_empty());
                 assert!(
-                    metrics[0].work_units
+                    metrics[1].work_units
                         == (dialog.last_rendered_indices.len() * workloads::SAMPLE_COUNT) as u64,
                     "row counter tracks actual Quick Notes widget construction"
                 );
@@ -911,14 +1339,42 @@ mod tests {
 
     #[test]
     fn quick_notes_wrap_links_saves_closed_note_and_refreshes_entries() {
-        let _lock = TEST_MUTEX.lock().unwrap();
-        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
         let mut alpha = note("Alpha", "alpha", "visit https://example.com");
         save_note(&mut alpha, true).unwrap();
         app.notes_dialog.open();
         app.notes_dialog.search = "example".into();
 
+        let mut notes_dialog = std::mem::take(&mut app.notes_dialog);
+        render_notes_frame(&ctx, &mut notes_dialog, &mut app, 1.0);
+        app.notes_dialog = notes_dialog;
+        let original_revision = crate::plugins::note::note_version();
+        assert_eq!(app.notes_dialog.entries_revision, Some(original_revision));
+        assert_eq!(app.notes_dialog.entries.len(), 1);
+        assert_eq!(
+            app.notes_dialog.entries[0].content,
+            "# Alpha\n\nvisit https://example.com"
+        );
+        assert!(app.notes_dialog.metadata_key.is_some());
+        assert_eq!(app.notes_dialog.filtered_indices, vec![0]);
+
+        let mut notes_dialog = std::mem::take(&mut app.notes_dialog);
+        assert!(!app.notes_dialog.open);
+
         app.wrap_note_plain_links("alpha");
+        assert_eq!(app.note_mutation_quick_notes_refresh_count, 0);
+        assert_eq!(
+            notes_dialog.entries[0].content, "# Alpha\n\nvisit https://example.com",
+            "the detached dialog retains its last-good presentation until it is rendered again"
+        );
+        assert!(crate::plugins::note::note_version() > original_revision);
+
+        render_notes_frame(&ctx, &mut notes_dialog, &mut app, 1.1);
+        app.notes_dialog = notes_dialog;
 
         let saved = load_notes().unwrap().remove(0);
         assert!(
@@ -931,8 +1387,15 @@ mod tests {
                 .content
                 .contains("[https://example.com](https://example.com)")
         );
+        assert_eq!(
+            app.notes_dialog.entries_revision,
+            Some(crate::plugins::note::note_version())
+        );
         assert_eq!(app.notes_dialog.search, "example");
-        assert_eq!(app.note_mutation_quick_notes_refresh_count, 1);
+        assert_eq!(app.note_mutation_quick_notes_refresh_count, 0);
+
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
@@ -1002,11 +1465,12 @@ mod tests {
     #[test]
     fn stale_quick_notes_edit_retains_a_later_added_note() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let (_dir, _notes_dir, ctx, mut app) = setup();
         let mut alpha = note("Alpha", "alpha", "# Alpha\n\noriginal");
         save_note(&mut alpha, true).unwrap();
         let mut dialog = NotesDialog::default();
         dialog.open();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.0);
 
         let mut beta = note("Beta", "beta", "# Beta\n\nadded later");
         save_note(&mut beta, true).unwrap();
@@ -1017,6 +1481,7 @@ mod tests {
             },
             &mut app,
         ));
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.0);
 
         assert_eq!(dialog.entries.len(), 2);
         assert!(dialog.entries.iter().any(|note| note.slug == "beta"));
@@ -1026,11 +1491,14 @@ mod tests {
     #[test]
     fn failed_quick_notes_edit_retains_dialog_and_committed_note() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let (dir, notes_dir, _ctx, mut app) = setup();
+        let (dir, notes_dir, ctx, mut app) = setup();
         let mut alpha = note("Alpha", "alpha", "# Alpha\n\noriginal");
         save_note(&mut alpha, true).unwrap();
         let mut dialog = NotesDialog::default();
         dialog.open();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.0);
+        dialog.open_edit(0);
+        dialog.text = "unsaved draft retained on failure".into();
         let entries_before = dialog.entries.clone();
         let blocker = dir.path().join("not-a-directory");
         std::fs::write(&blocker, "block note directory creation").unwrap();
@@ -1046,6 +1514,9 @@ mod tests {
         unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
 
         assert!(!saved);
+        assert!(dialog.open);
+        assert_eq!(dialog.edit_idx, Some(0));
+        assert_eq!(dialog.text, "unsaved draft retained on failure");
         assert_eq!(dialog.entries, entries_before);
         assert_eq!(load_notes().unwrap()[0].content, "# Alpha\n\noriginal");
     }
@@ -1109,6 +1580,284 @@ mod tests {
         let preview = short_preview("# Title\nAlias: Primary\n\nBody text\nwith spacing");
 
         assert_eq!(preview, "Body text with spacing");
+    }
+
+    #[test]
+    fn preview_matches_normalized_reference_and_unicode_boundaries() {
+        fn eager_reference(content: &str) -> String {
+            let normalized = content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with("# ") && !trimmed.starts_with("Alias:")
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if normalized.chars().count() > 120 {
+                format!("{}…", normalized.chars().take(120).collect::<String>())
+            } else {
+                normalized
+            }
+        }
+
+        for content in [
+            "\n\u{2003}\t\r\nhello",
+            "## retained heading\r\nAliases: retained metadata\r\n\r\nBody\ttext\nnext line",
+            "  # skipped\nAlias: skipped\n  Body  \t text \r\n",
+            &"x".repeat(119),
+            &"x".repeat(120),
+            &"x".repeat(121),
+            &"東京".repeat(60),
+            &"東京".repeat(61),
+            &format!("{}\nAlias: a very long skipped prefix", "z".repeat(121)),
+        ] {
+            assert_eq!(
+                short_preview(content),
+                eager_reference(content),
+                "{content:?}"
+            );
+        }
+        assert_eq!(short_preview(&"x".repeat(120)).chars().count(), 120);
+        assert_eq!(short_preview(&"x".repeat(121)).chars().count(), 121);
+        assert_eq!(short_preview("\n\u{2003}hello"), "hello");
+    }
+
+    #[test]
+    fn quick_notes_reuses_metadata_and_keeps_sparse_original_indices() {
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        let _outer_cache = crate::plugins::note::publish_note_cache_for_test(Vec::new());
+        let _fixture_cache = crate::plugins::note::publish_note_cache_for_test(vec![
+            note("Alpha", "alpha", "# Alpha\n\n[[Target]]\n- [ ] checkbox"),
+            note("Beta", "beta", "# Beta\n\nordinary body"),
+            note("Target", "target", "# Target\n\nunique-needle"),
+        ]);
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        dialog.open_edit(2);
+        assert_eq!(dialog.text, "# Target\n\nunique-needle");
+        dialog.edit_idx = None;
+        dialog.text.clear();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.0);
+        assert_eq!(dialog.test_note_snapshot_calls, 1);
+        assert_eq!(dialog.test_metadata_rebuilds, 1);
+        assert_eq!(dialog.test_projection_rebuilds, 1);
+        assert_eq!(dialog.test_preview_builds, 3);
+        assert!(dialog.row_metadata[0].meta.contains("1 checkboxes"));
+        assert!(dialog.row_metadata[2].meta.contains("1 backlinks"));
+
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.1);
+        assert_eq!(dialog.test_note_snapshot_calls, 1);
+        assert_eq!(dialog.test_metadata_rebuilds, 1);
+        assert_eq!(dialog.test_projection_rebuilds, 1);
+        assert_eq!(dialog.test_preview_builds, 3);
+
+        dialog.search = "unique-needle".into();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.2);
+        assert_eq!(dialog.filtered_indices, vec![2]);
+        assert_eq!(dialog.last_rendered_indices, vec![2]);
+        assert_eq!(dialog.test_note_snapshot_calls, 1);
+        assert_eq!(dialog.test_metadata_rebuilds, 1);
+        assert_eq!(dialog.test_projection_rebuilds, 2);
+
+        app.note_settings.backlinks_enabled = false;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.3);
+        assert_eq!(dialog.test_note_snapshot_calls, 1);
+        assert_eq!(dialog.test_metadata_rebuilds, 2);
+        assert_eq!(dialog.test_projection_rebuilds, 2);
+        assert!(!dialog.row_metadata[0].meta.contains("backlinks"));
+
+        app.note_settings.task_lists_enabled = false;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.4);
+        assert_eq!(dialog.test_note_snapshot_calls, 1);
+        assert_eq!(dialog.test_metadata_rebuilds, 3);
+        assert!(!dialog.row_metadata[0].meta.contains("checkboxes"));
+
+        app.note_settings.backlinks_enabled = true;
+        app.note_settings.task_lists_enabled = true;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.5);
+        assert_eq!(dialog.test_note_snapshot_calls, 1);
+        assert_eq!(dialog.test_metadata_rebuilds, 4);
+        assert!(dialog.row_metadata[2].meta.contains("1 backlinks"));
+        assert!(dialog.row_metadata[0].meta.contains("1 checkboxes"));
+
+        dialog.open_edit(2);
+        assert_eq!(dialog.text, "# Target\n\nunique-needle");
+        assert_eq!(dialog.edit_idx, Some(2));
+        drop(dialog);
+        drop(app);
+        drop(_fixture_cache);
+        drop(_outer_cache);
+        drop(workspace);
+    }
+
+    #[test]
+    fn quick_notes_defers_drafts_and_keeps_last_good_candidate_until_recovery() {
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        let _outer_cache = crate::plugins::note::publish_note_cache_for_test(Vec::new());
+        let _fixture_cache = crate::plugins::note::publish_note_cache_for_test(vec![note(
+            "Original",
+            "original",
+            "# Original\n\ncommitted body",
+        )]);
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.0);
+
+        let initial_entries = dialog.entries.clone();
+        let initial_index = dialog.index.clone();
+        let initial_metadata = dialog.row_metadata.clone();
+        let initial_projection = dialog.filtered_indices.clone();
+        let initial_metadata_key = dialog.metadata_key.clone();
+        let initial_projection_key = dialog.projection_key.clone();
+        dialog.refresh_entries_from_notes();
+        dialog.test_race_after_candidate = true;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.1);
+        assert_eq!(dialog.entries, initial_entries);
+        assert_eq!(dialog.index, initial_index);
+        assert_eq!(dialog.row_metadata, initial_metadata);
+        assert_eq!(dialog.filtered_indices, initial_projection);
+        assert_eq!(dialog.metadata_key, initial_metadata_key);
+        assert_eq!(dialog.projection_key, initial_projection_key);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.5);
+        assert_eq!(dialog.test_note_snapshot_calls, 2);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.2);
+
+        let original_metadata = dialog.row_metadata.clone();
+        let original_index = dialog.index.clone();
+        let original_projection = dialog.filtered_indices.clone();
+        let original_metadata_key = dialog.metadata_key.clone();
+        let original_projection_key = dialog.projection_key.clone();
+
+        dialog.open_edit(dialog.entries.len());
+        dialog.text = "unsaved draft".into();
+        let _external_draft = crate::plugins::note::publish_note_cache_for_test(vec![
+            note("Original", "original", "# Original\n\nexternal update"),
+            note("Added", "added", "# Added\n\nexternal addition"),
+        ]);
+        dialog.refresh_entries_from_notes();
+        assert_eq!(
+            dialog.entries.len(),
+            1,
+            "a new-note sentinel keeps its old index"
+        );
+        assert_eq!(dialog.edit_idx, Some(1));
+        assert_eq!(dialog.text, "unsaved draft");
+        dialog.edit_idx = None; // cancel; the next browse frame may publish the pending cache.
+        dialog.text.clear();
+
+        dialog.test_fail_next_snapshot = true;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.4);
+        assert_eq!(dialog.entries.len(), 1);
+        assert_eq!(dialog.entries[0].content, "# Original\n\ncommitted body");
+        assert_eq!(dialog.index, original_index);
+        assert_eq!(dialog.row_metadata, original_metadata);
+        assert_eq!(dialog.filtered_indices, original_projection);
+        assert_eq!(dialog.metadata_key, original_metadata_key);
+        assert_eq!(dialog.projection_key, original_projection_key);
+
+        render_notes_frame(&ctx, &mut dialog, &mut app, 3.0);
+        assert_eq!(
+            dialog.entries.len(),
+            1,
+            "failed snapshots use a bounded retry"
+        );
+        assert_eq!(dialog.test_note_snapshot_calls, 4);
+
+        let _newer_cache = crate::plugins::note::publish_note_cache_for_test(vec![
+            note(
+                "Original",
+                "original",
+                "# Original\n\nnewest committed body",
+            ),
+            note("Added", "added", "# Added\n\nexternal addition"),
+        ]);
+        dialog.test_race_after_candidate = true;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 3.1);
+        assert_eq!(
+            dialog.entries.len(),
+            1,
+            "a raced candidate is not partially installed"
+        );
+        assert_eq!(dialog.row_metadata, original_metadata);
+        assert_eq!(dialog.metadata_key, original_metadata_key);
+        assert_eq!(dialog.projection_key, original_projection_key);
+
+        render_notes_frame(&ctx, &mut dialog, &mut app, 4.2);
+        assert_eq!(dialog.entries.len(), 2);
+        assert_eq!(
+            dialog.entries[0].content,
+            "# Original\n\nnewest committed body"
+        );
+        assert_eq!(dialog.entries[1].slug, "added");
+        assert_eq!(dialog.test_metadata_rebuilds, 3);
+
+        drop(dialog);
+        drop(app);
+        drop(_newer_cache);
+        drop(_external_draft);
+        drop(_fixture_cache);
+        drop(_outer_cache);
+        drop(workspace);
+    }
+
+    #[test]
+    fn quick_notes_publishes_a_successful_edit_after_the_editor_closes() {
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let _outer_cache = crate::plugins::note::publish_note_cache_for_test(Vec::new());
+        let mut alpha = note("Alpha", "alpha", "# Alpha\n\noriginal");
+        save_note(&mut alpha, true).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.0);
+
+        dialog.open_edit(0);
+        let edited_content = "# Alpha\n\ncommitted draft".to_string();
+        dialog.test_fail_next_snapshot = true;
+        assert!(dialog.save_note_draft(
+            PendingNoteSave::Existing {
+                identity: "alpha".into(),
+                content: edited_content.clone(),
+            },
+            &mut app,
+        ));
+        assert_eq!(dialog.entries[0].content, "# Alpha\n\noriginal");
+        assert_eq!(dialog.edit_idx, Some(0));
+
+        dialog.edit_idx = None;
+        dialog.text.clear();
+        dialog.refresh_entries_from_notes();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.1);
+        assert_eq!(
+            dialog.edit_idx, None,
+            "a committed disk write closes the editor"
+        );
+        assert_eq!(dialog.entries[0].content, "# Alpha\n\noriginal");
+        assert_eq!(load_notes().unwrap()[0].content, edited_content);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.5);
+        assert_eq!(dialog.entries[0].content, "# Alpha\n\noriginal");
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.2);
+        assert_eq!(dialog.entries[0].content, edited_content);
+        assert_eq!(load_notes().unwrap()[0].content, edited_content);
+
+        drop(dialog);
+        drop(app);
+        drop(_outer_cache);
+        drop(workspace);
     }
 
     #[test]
