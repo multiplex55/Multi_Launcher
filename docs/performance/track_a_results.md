@@ -1,6 +1,6 @@
 # Track A runtime results
 
-Status: implementation in progress. M1-B removes idle note snapshot/hash work; full before/after timing comparison follows in M1-C.
+Status: implementation in progress. M1-A/B/C are verified; the full note comparison below establishes the idle fast path and retains the slower large-draft result. M2 history work follows.
 
 See `track_a_baseline.md` for the authoritative source and host, and `track_a_checkpoints.md` for checkpoint state, test evidence, review, commit and push outcomes.
 
@@ -66,6 +66,29 @@ Snapshot failure retains last-good rows/applied keys and a bounded retry record.
 
 PASS: 21 focused NotePanel library tests with performance counters enabled, plus the small ignored note owner workload (1 test). Over 20 measured idle checks, NoteSnapshot, NoteAliasHash and NoteHeavyRecompute calls were all zero. The draft scenario retained 20 snapshots/recomputes after debounce. PASS: changed-file rustfmt and git diff checks. Three existing render test warnings remain. Full-size comparison is reserved for M1-C; no timing improvement is claimed from this small smoke. Native checks remain NOT RUN.
 
-Final targeted Nextest run `7b606620-c99f-4e0f-9445-48fe57d94b87`: 21 passed, 5,031 skipped, 0.350s. Small owner run `5fcbe3d9-dbe7-46a2-bdf0-9fcdac410327`: 1 passed, 5,051 skipped, 0.902s. Small idle fixture/output signature `40142a5ec2bdddbe`; its timing is smoke evidence only. Exact selection: `cargo nextest run --lib -E 'test(backlink_) | test(link_menu_) | test(empty_link_menu_targets_are_cached) | test(unchanged_heavy_check_skips_note_snapshot_alias_hash_and_recompute) | test(pending_external_mutation_without_edit_time) | test(todo_revision_change_bypasses_local_edit_debounce) | test(persisted_note_revision_bypasses_local_edit_debounce) | test(changed_note_revision_and_setting_bypass_retry_deadline) | test(failed_heavy_snapshot_retains_rows) | test(new_draft_after_failed_refresh_uses_normal_edit_debounce) | test(edits_do_not_trigger_heavy_recompute_every_frame) | test(programmatic_content_replacement) | test(rendered_checkbox_toggle) | test(save_recomputes_derived_and_updates_links) | test(save_invalidates_backlink_rows_when_slug_changes)'`, with `MULTI_LAUNCHER_PERF=1`.
+Final targeted Nextest run `7b606620-c99f-4e0f-9445-48fe57d94b87`: 21 passed, 5,031 skipped, 0.350s. Small owner run `5fcbe3d9-dbe7-46a2-bdf0-9fcdac410327`: 1 passed, 5,051 skipped, 0.902s. Small idle fixture signature `40142a5ec2bdddbe`; its timing is smoke evidence only. Exact selection: `cargo nextest run --lib -E 'test(backlink_) | test(link_menu_) | test(empty_link_menu_targets_are_cached) | test(unchanged_heavy_check_skips_note_snapshot_alias_hash_and_recompute) | test(pending_external_mutation_without_edit_time) | test(todo_revision_change_bypasses_local_edit_debounce) | test(persisted_note_revision_bypasses_local_edit_debounce) | test(changed_note_revision_and_setting_bypass_retry_deadline) | test(failed_heavy_snapshot_retains_rows) | test(new_draft_after_failed_refresh_uses_normal_edit_debounce) | test(edits_do_not_trigger_heavy_recompute_every_frame) | test(programmatic_content_replacement) | test(rendered_checkbox_toggle) | test(save_recomputes_derived_and_updates_links) | test(save_invalidates_backlink_rows_when_slug_changes)'`, with `MULTI_LAUNCHER_PERF=1`.
 
-Local checkpoint commit follows this report; no push will be attempted.
+M1-B local commit: `9793d385a6165a6032165398c85b1d0b46b4c737`. No push attempted.
+
+### M1-C — notes comparison and semantic gate
+
+Full serial note owner PASS on exact M1-B source `9793d385a6165a6032165398c85b1d0b46b4c737`: 1 test, 5,051 skipped, 54.08s test duration. Six summaries, each 5 warmups/20 samples, match the frozen baseline's fixture and derived-output signatures exactly. Exact nanoseconds and bounded counters are retained in `track_a_notes_g1.json`; raw local log is `target/performance/track-a-m1c-notes.log`. Command: `MULTI_LAUNCHER_PERF=1`, `ML_TRACK_A_BENCH_MODE=full`, `cargo nextest run --lib --test-threads 1 --run-ignored ignored-only -E 'test(track_a_benchmark_note_refresh_check_owner)' --success-output immediate-final --no-output-indent`. Identical immediate/final summary lines were deduplicated.
+
+| Notes / operation | Baseline p50 / p95 (ms) | G1 p50 / p95 (ms) |
+| --- | --- | --- |
+| 100 idle check | 0.7434 / 0.7986 | 0.0004 / 0.0005 |
+| 1,000 idle check | 5.5586 / 6.5147 | 0.0006 / 0.0007 |
+| 5,000 idle check | 29.2544 / 31.8605 | 0.0011 / 0.0012 |
+| 100 draft after debounce | 29.0021 / 41.8829 | 28.3448 / 30.7176 |
+| 1,000 draft after debounce | 331.5214 / 368.7641 | 310.1108 / 450.7394 |
+| 5,000 draft after debounce | 1,512.3676 / 1,529.3767 | 1,635.8284 / 2,085.8004 |
+
+Every idle scenario has zero snapshot calls/estimated clone bytes, zero alias hashes and zero heavy recomputes. At 5,000 notes this removes 20 full snapshots/572,131,520 estimated bytes, 100,000 hashed alias pairs and 401,743,700ns aggregate snapshot lock-held work across the measured checks. Lock acquisition wait also becomes zero. Timer resolution and enabled telemetry overhead matter at sub-microsecond scales; these are headless debug-test CPU measurements, not GPU/input latency.
+
+Draft checks still intentionally rebuild derived data. All sizes retain 20 meaningful rebuilds; snapshots fall from 40 to 20 and alias hashes from 40 to 0. The 5,000-note draft estimated clone bytes fall from 1,144,263,040 to 572,131,520, with snapshot lock-held time 677,121,400ns→416,953,100ns. However medium/large draft p95 worsened in this capture; the first result is retained without selecting favorable reruns. Large heavy-recompute aggregate time rose 29.240s→32.730s while its call count/output stayed identical. There is no blanket draft speedup claim or fabricated attribution to host noise.
+
+Bounded independent comparison found the same todo load and three backlink passes inside the heavy timer. Staging new output retains the previous 294 related-note rows through the mentions pass, approximately 0.1–0.2MB extra live row memory for this fixture versus a 28.6MB full note snapshot. This real difference does not establish the cause of the observed timing loss. Host/allocator/cache variation is plausible inference only; cause remains unresolved and the original capture is retained. No concrete source defect justified broader optimization. The current power scheme was rechecked as Balanced.
+
+PASS: 30 selected library tests on final C test source (5,025 skipped, Nextest run `71f49eb5-3bf2-4288-acc9-c5e468598df9`, 0.553s). New regressions retain the same unsaved panel through external note create/edit/rename/delete and alias collision transitions, exercise both RelatedNotes and Mentions, mutate persisted todo text/reference via its owner, and retain populated menu targets/results/applied keys after failure then recover. The test-only failure seam is panel-local. Independent review corrected a mixed-link fixture that was classified as RelatedNotes before reaching its entity-reference Mentions path; separate mention-only data now exercises both existing categories. Review has no unresolved C findings. A publication/last-good/race evidence carries forward.
+
+PASS: `cargo nextest run --test notes_plugin -E 'test(note_alias_supports) | test(launcher_app_delete_note_accepts_alias) | test(note_link_dedupes_backlinks) | test(note_meta_wrap_links_integration)'` (4 passed, 19 skipped, 0.200s; run `d68fff9b-ceae-4da0-b6ae-81be63fc167d`). PASS: `cargo nextest run --test note_panel_auto_save -E 'test(note_panel_auto_saves_on_close)'` (1 passed, 0.174s; run `5b66cdc6-6b85-42ea-831c-a73ab4f9b3c6`). Changed-file rustfmt and diff checks pass; test-generated default config was removed. C source changes are tests/seam only, so measured production source remains the exact B commit above. No push will be attempted.

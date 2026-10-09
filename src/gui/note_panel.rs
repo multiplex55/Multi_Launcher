@@ -762,6 +762,8 @@ pub struct NotePanel {
     #[cfg(test)]
     fail_next_heavy_snapshot: bool,
     #[cfg(test)]
+    fail_next_link_menu_snapshot: bool,
+    #[cfg(test)]
     last_ui_sections: NotePanelUiSections,
     #[cfg(test)]
     last_content_rect: Option<egui::Rect>,
@@ -1047,6 +1049,8 @@ impl NotePanel {
             heavy_recompute_count: 0,
             #[cfg(test)]
             fail_next_heavy_snapshot: false,
+            #[cfg(test)]
+            fail_next_link_menu_snapshot: false,
             #[cfg(test)]
             last_ui_sections: NotePanelUiSections::default(),
             #[cfg(test)]
@@ -1419,6 +1423,11 @@ impl NotePanel {
         let current_version = note_version();
         if self.link_menu_targets_version == Some(current_version) {
             return Some(current_version);
+        }
+
+        #[cfg(test)]
+        if std::mem::take(&mut self.fail_next_link_menu_snapshot) {
+            return None;
         }
 
         let (target_revision, targets) = match note_link_menu_targets_snapshot_with_version() {
@@ -4887,6 +4896,48 @@ mod tests {
             .collect()
     }
 
+    fn related_note_row_identity_text(panel: &NotePanel) -> Vec<(String, String, String)> {
+        let mut rows = panel
+            .derived
+            .backlink_rows_related_notes
+            .iter()
+            .map(|row| {
+                (
+                    row.note_slug.clone().unwrap_or_default(),
+                    row.title.clone(),
+                    row.reason.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        rows
+    }
+
+    fn mentioned_note_row_identity_text(panel: &NotePanel) -> Vec<(String, String, String)> {
+        let mut rows = panel
+            .derived
+            .backlink_rows_mentions
+            .iter()
+            .filter_map(|row| {
+                row.note_slug
+                    .as_ref()
+                    .map(|slug| (slug.clone(), row.title.clone(), row.reason.clone()))
+            })
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        rows
+    }
+
+    fn run_heavy_refresh_at(panel: &mut NotePanel, ctx: &egui::Context, time: f64) {
+        let _ = ctx.run(
+            egui::RawInput {
+                time: Some(time),
+                ..Default::default()
+            },
+            |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
+        );
+    }
+
     #[test]
     fn note_close_observation_uses_real_discard_response_and_counts_unrendered_preview_notes() {
         use super::super::query_observation::{
@@ -7232,6 +7283,69 @@ More text.
     }
 
     #[test]
+    fn link_menu_snapshot_failure_retains_populated_cache_until_recovery() {
+        let notes_dir = TempNotesDir::new();
+        notes_dir.write_note("current.md", "# Current\n\nCurrent body");
+        notes_dir.write_note("before.md", "# Before\n\nBefore body");
+        notes_dir.refresh_cache();
+
+        let current = note_cache_snapshot()
+            .into_iter()
+            .find(|note| note.slug == "current")
+            .expect("current note should be cached");
+        let mut panel = NotePanel::from_note(current);
+        let previous_results = panel.link_menu_results_snapshot();
+        let previous_targets = panel.link_menu_targets.clone();
+        let previous_version = panel
+            .link_menu_targets_version
+            .expect("initial targets should have a revision");
+        let previous_key = panel
+            .link_menu_results_key
+            .clone()
+            .expect("initial results should have a key");
+
+        notes_dir.write_note("before.md", "# Before Updated\n\nUpdated body");
+        notes_dir.write_note("after.md", "# After\n\nAfter body");
+        notes_dir.refresh_cache();
+        let changed_version = note_version();
+        assert_ne!(changed_version, previous_version);
+
+        panel.fail_next_link_menu_snapshot = true;
+        assert_eq!(panel.link_menu_results_snapshot(), previous_results);
+        assert_eq!(panel.link_menu_targets, previous_targets);
+        assert_eq!(panel.link_menu_targets_version, Some(previous_version));
+        assert_eq!(panel.link_menu_results_key, Some(previous_key));
+
+        let recovered_results = panel.link_menu_results_snapshot();
+        let target_slugs = panel
+            .link_menu_targets
+            .iter()
+            .map(|target| target.slug.as_str())
+            .collect::<HashSet<_>>();
+        assert!(target_slugs.contains("after"));
+        assert!(target_slugs.contains("before"));
+        assert_eq!(panel.link_menu_targets_version, Some(changed_version));
+        assert_eq!(
+            panel
+                .link_menu_results_key
+                .as_ref()
+                .expect("recovered results should be keyed")
+                .notes_version,
+            changed_version
+        );
+        assert!(
+            recovered_results
+                .iter()
+                .any(|result| result.slug == "after")
+        );
+        assert!(
+            recovered_results.iter().any(|result| {
+                result.slug == "before" && result.display_title == "Before Updated"
+            })
+        );
+    }
+
+    #[test]
     fn section_keys_include_slug_anchor_title_and_line_tiebreaker() {
         let content = "# Title\n\n## Repeat\nBody\n\n## Repeat\nBody 2";
         let analysis = analyze_markdown(content);
@@ -8547,6 +8661,111 @@ Body with [[Other]]"
     }
 
     #[test]
+    fn persisted_todo_text_and_note_reference_refresh_linked_rows() {
+        use crate::common::entity_ref::{EntityKind, EntityRef};
+        use crate::plugins::todo::{TodoEntry, replace_todos};
+
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let notes_dir = workspace.root().join("notes");
+        fs::write(
+            notes_dir.join("current.md"),
+            "# Current\n\nCurrent note body",
+        )
+        .expect("write isolated current note");
+        crate::plugins::note::refresh_cache().expect("publish current note");
+        let current = note_cache_snapshot()
+            .into_iter()
+            .find(|note| note.slug == "current")
+            .expect("current note should be cached");
+        let mut panel = NotePanel::from_note(current);
+        let ctx = egui::Context::default();
+        run_heavy_refresh_at(&mut panel, &ctx, 0.0);
+        assert!(panel.derived.backlink_rows_linked_todos.is_empty());
+
+        let todo_id = "persisted-todo";
+        let previous_revision = todo_version();
+        replace_todos(
+            crate::plugins::todo::TODO_FILE,
+            vec![TodoEntry {
+                id: todo_id.into(),
+                text: "Unlinked saved label".into(),
+                done: false,
+                priority: 1,
+                tags: Vec::new(),
+                entity_refs: Vec::new(),
+            }],
+        )
+        .expect("persist an initially unlinked todo");
+        assert_ne!(todo_version(), previous_revision);
+        run_heavy_refresh_at(&mut panel, &ctx, 0.1);
+        assert!(panel.derived.backlink_rows_linked_todos.is_empty());
+        assert_eq!(
+            panel
+                .derived
+                .todo_label_map
+                .get(todo_id)
+                .map(String::as_str),
+            Some("Unlinked saved label")
+        );
+
+        let previous_revision = todo_version();
+        replace_todos(
+            crate::plugins::todo::TODO_FILE,
+            vec![TodoEntry {
+                id: todo_id.into(),
+                text: "Readable linked todo label".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["release".into()],
+                entity_refs: vec![EntityRef::new(EntityKind::Note, "current", None)],
+            }],
+        )
+        .expect("persist edited todo text and note reference");
+        assert_ne!(todo_version(), previous_revision);
+        run_heavy_refresh_at(&mut panel, &ctx, 0.2);
+
+        let linked = &panel.derived.backlink_rows_linked_todos;
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].todo_id.as_deref(), Some(todo_id));
+        assert_eq!(linked[0].title, "Readable linked todo label");
+        assert_eq!(linked[0].type_badge, "Todo");
+        assert_eq!(linked[0].reason, "todo linked to note");
+        assert_eq!(
+            panel
+                .derived
+                .todo_label_map
+                .get(todo_id)
+                .map(String::as_str),
+            Some("Readable linked todo label")
+        );
+
+        let previous_revision = todo_version();
+        replace_todos(
+            crate::plugins::todo::TODO_FILE,
+            vec![TodoEntry {
+                id: todo_id.into(),
+                text: "Reference removed".into(),
+                done: false,
+                priority: 1,
+                tags: vec!["release".into()],
+                entity_refs: Vec::new(),
+            }],
+        )
+        .expect("persist todo reference removal");
+        assert_ne!(todo_version(), previous_revision);
+        run_heavy_refresh_at(&mut panel, &ctx, 0.3);
+        assert!(panel.derived.backlink_rows_linked_todos.is_empty());
+        assert_eq!(
+            panel
+                .derived
+                .todo_label_map
+                .get(todo_id)
+                .map(String::as_str),
+            Some("Reference removed")
+        );
+    }
+
+    #[test]
     fn persisted_note_revision_bypasses_local_edit_debounce() {
         let notes_dir = TempNotesDir::new();
         notes_dir.write_note("alpha.md", "# Alpha\n\nBody");
@@ -8570,6 +8789,285 @@ Body with [[Other]]"
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert_eq!(panel.last_notes_version, note_version());
         assert!(!panel.heavy_recompute_requested);
+    }
+
+    #[test]
+    fn open_unsaved_panel_tracks_external_note_and_alias_transitions() {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let notes_dir = workspace.root().join("notes");
+        let write_note = |file_name: &str, content: &str| {
+            fs::write(notes_dir.join(file_name), content).expect("write isolated note");
+        };
+        write_note(
+            "current.md",
+            "# Current\nAlias: Primary Alias\nAliases: Secondary Alias\n\nSaved body",
+        );
+        write_note("primary-source.md", "# Primary Source\n\n[[Primary Alias]]");
+        write_note(
+            "secondary-source.md",
+            "# Secondary Source\n\n[[Secondary Alias]]",
+        );
+        write_note("mention-source.md", "# Mention Source\n\n@note:current");
+        crate::plugins::note::refresh_cache().expect("publish initial notes");
+
+        let current = note_cache_snapshot()
+            .into_iter()
+            .find(|note| note.slug == "current")
+            .expect("current note should be cached");
+        let mut panel = NotePanel::from_note(current);
+        let ctx = egui::Context::default();
+        run_heavy_refresh_at(&mut panel, &ctx, 0.0);
+        assert_eq!(
+            related_note_row_identity_text(&panel),
+            vec![
+                (
+                    "primary-source".into(),
+                    "Primary Source".into(),
+                    "wiki link".into(),
+                ),
+                (
+                    "secondary-source".into(),
+                    "Secondary Source".into(),
+                    "wiki link".into(),
+                ),
+            ]
+        );
+        assert_eq!(
+            mentioned_note_row_identity_text(&panel),
+            vec![(
+                "mention-source".into(),
+                "Mention Source".into(),
+                "entity reference".into(),
+            )]
+        );
+
+        panel.note.content.push_str("\nUnsaved panel draft");
+        panel.mark_content_changed(0.01);
+        assert!(panel.has_unsaved_changes());
+
+        let refresh_after_external_change = |panel: &mut NotePanel, time: f64| {
+            let previous_revision = note_version();
+            crate::plugins::note::refresh_cache().expect("refresh externally changed notes");
+            assert_ne!(note_version(), previous_revision);
+            run_heavy_refresh_at(panel, &ctx, time);
+            assert_eq!(panel.last_notes_version, note_version());
+            assert!(panel.has_unsaved_changes());
+            assert!(panel.note.content.contains("Unsaved panel draft"));
+        };
+
+        write_note(
+            "created-source.md",
+            "# Created Source\n\n[[Secondary Alias]]",
+        );
+        refresh_after_external_change(&mut panel, 0.1);
+        assert_eq!(
+            related_note_row_identity_text(&panel),
+            vec![
+                (
+                    "created-source".into(),
+                    "Created Source".into(),
+                    "wiki link".into(),
+                ),
+                (
+                    "primary-source".into(),
+                    "Primary Source".into(),
+                    "wiki link".into(),
+                ),
+                (
+                    "secondary-source".into(),
+                    "Secondary Source".into(),
+                    "wiki link".into(),
+                ),
+            ]
+        );
+        let initial_menu = panel.link_menu_results_snapshot();
+        assert!(
+            initial_menu
+                .iter()
+                .any(|result| result.slug == "created-source")
+        );
+        assert_eq!(panel.link_menu_targets_version, Some(note_version()));
+        assert_eq!(
+            panel
+                .link_menu_results_key
+                .as_ref()
+                .expect("initial menu results should be keyed")
+                .notes_version,
+            panel
+                .link_menu_targets_version
+                .expect("targets are current")
+        );
+
+        write_note(
+            "current.md",
+            "# Current\nAlias: Primary Renamed\nAliases: Secondary Renamed\n\nSaved body",
+        );
+        write_note(
+            "primary-source.md",
+            "# Primary Source\n\n[[Primary Renamed]]",
+        );
+        write_note(
+            "secondary-source.md",
+            "# Secondary Source\n\n[[Secondary Renamed]]",
+        );
+        write_note(
+            "created-source.md",
+            "# Created Source\n\n[[Secondary Renamed]]",
+        );
+        refresh_after_external_change(&mut panel, 0.2);
+        assert_eq!(
+            related_note_row_identity_text(&panel)
+                .into_iter()
+                .map(|(slug, title, _)| (slug, title))
+                .collect::<Vec<_>>(),
+            vec![
+                ("created-source".into(), "Created Source".into()),
+                ("primary-source".into(), "Primary Source".into()),
+                ("secondary-source".into(), "Secondary Source".into()),
+            ]
+        );
+        assert_eq!(
+            mentioned_note_row_identity_text(&panel),
+            vec![(
+                "mention-source".into(),
+                "Mention Source".into(),
+                "entity reference".into(),
+            )]
+        );
+        let _ = panel.link_menu_results_snapshot();
+        let current_target = panel
+            .link_menu_targets
+            .iter()
+            .find(|target| target.slug == "current")
+            .expect("current target should be present in the target projection");
+        assert_eq!(current_target.display_title, "Primary Renamed");
+        assert!(current_target.search_text.contains("Secondary Renamed"));
+        assert_eq!(panel.link_menu_targets_version, Some(note_version()));
+
+        write_note(
+            "current.md",
+            "# Current\nAlias: Secondary Renamed\n\nSaved body",
+        );
+        refresh_after_external_change(&mut panel, 0.3);
+        assert_eq!(
+            related_note_row_identity_text(&panel)
+                .into_iter()
+                .map(|(slug, title, _)| (slug, title))
+                .collect::<Vec<_>>(),
+            vec![
+                ("created-source".into(), "Created Source".into()),
+                ("secondary-source".into(), "Secondary Source".into()),
+            ]
+        );
+
+        write_note(
+            "collision.md",
+            "# Collision\nAlias: Secondary Renamed\n\nCompeting target",
+        );
+        refresh_after_external_change(&mut panel, 0.4);
+        assert!(related_note_row_identity_text(&panel).is_empty());
+        let collision_results = panel.link_menu_results_snapshot();
+        assert!(
+            collision_results
+                .iter()
+                .any(|result| result.slug == "collision")
+        );
+        assert_eq!(panel.link_menu_targets_version, Some(note_version()));
+        assert_eq!(
+            panel
+                .link_menu_results_key
+                .as_ref()
+                .expect("collision menu results should be keyed")
+                .notes_version,
+            panel
+                .link_menu_targets_version
+                .expect("targets are current")
+        );
+
+        fs::remove_file(notes_dir.join("collision.md")).expect("remove alias collision");
+        refresh_after_external_change(&mut panel, 0.5);
+        assert_eq!(
+            related_note_row_identity_text(&panel)
+                .into_iter()
+                .map(|(slug, title, _)| (slug, title))
+                .collect::<Vec<_>>(),
+            vec![
+                ("created-source".into(), "Created Source".into()),
+                ("secondary-source".into(), "Secondary Source".into()),
+            ]
+        );
+        assert!(
+            panel
+                .link_menu_results_snapshot()
+                .iter()
+                .all(|result| result.slug != "collision")
+        );
+
+        write_note(
+            "mention-source.md",
+            "# Mention Source Edited\n\n@note:other",
+        );
+        refresh_after_external_change(&mut panel, 0.55);
+        assert!(mentioned_note_row_identity_text(&panel).is_empty());
+        assert_eq!(
+            related_note_row_identity_text(&panel)
+                .into_iter()
+                .map(|(slug, title, _)| (slug, title))
+                .collect::<Vec<_>>(),
+            vec![
+                ("created-source".into(), "Created Source".into()),
+                ("secondary-source".into(), "Secondary Source".into()),
+            ]
+        );
+
+        fs::rename(
+            notes_dir.join("secondary-source.md"),
+            notes_dir.join("renamed-secondary-source.md"),
+        )
+        .expect("rename linked note");
+        refresh_after_external_change(&mut panel, 0.6);
+        assert_eq!(
+            related_note_row_identity_text(&panel)
+                .into_iter()
+                .map(|(slug, title, _)| (slug, title))
+                .collect::<Vec<_>>(),
+            vec![
+                ("created-source".into(), "Created Source".into()),
+                ("renamed-secondary-source".into(), "Secondary Source".into(),),
+            ]
+        );
+
+        fs::remove_file(notes_dir.join("renamed-secondary-source.md"))
+            .expect("delete renamed linked note");
+        refresh_after_external_change(&mut panel, 0.7);
+        assert_eq!(
+            related_note_row_identity_text(&panel)
+                .into_iter()
+                .map(|(slug, title, _)| (slug, title))
+                .collect::<Vec<_>>(),
+            vec![("created-source".into(), "Created Source".into())]
+        );
+
+        write_note("current.md", "# Current\n\nSaved body without aliases");
+        refresh_after_external_change(&mut panel, 0.8);
+        assert!(related_note_row_identity_text(&panel).is_empty());
+
+        write_note(
+            "created-source.md",
+            "# Created Source Edited\n\n[[current]]",
+        );
+        refresh_after_external_change(&mut panel, 0.9);
+        assert_eq!(
+            related_note_row_identity_text(&panel),
+            vec![(
+                "created-source".into(),
+                "Created Source Edited".into(),
+                "wiki link".into(),
+            )]
+        );
+        fs::remove_file(notes_dir.join("created-source.md")).expect("delete edited linked note");
+        refresh_after_external_change(&mut panel, 1.0);
+        assert!(related_note_row_identity_text(&panel).is_empty());
     }
 
     #[test]
