@@ -15,8 +15,8 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | M0-A | Bounded opt-in owner metrics | complete | PASS: 3 performance library tests; changed-file rustfmt and diff checks | planner + parent diff review; corrections resolved | 193b300c8fd2704e565a38e0928122201c7ada1b | FAIL: GitHub credentials unavailable |
 | M0-B | Deterministic isolated fixtures | complete | PASS: 1 builder test, all 6 small owner harnesses, 1 unprofiled backlink test; rustfmt/diff checks | independent scoped review findings resolved | d003b4a35ef3fafd75438493199cb20463378baf | LOCAL ONLY |
-| M0-C | Freeze pre-change baseline | complete | PASS: 6 full owner tests/39 scenarios; 1 repeat owner/2 stable-signature scenarios | parent source/signature/counter audit; limitations explicit | pending local commit | LOCAL ONLY |
-| M1-A | Consistent note revision publication | pending | — | — | — | — |
+| M0-C | Freeze pre-change baseline | complete | PASS: 6 full owner tests/39 scenarios; 1 repeat owner/2 stable-signature scenarios | parent source/signature/counter audit; limitations explicit | e9695fe4edda98eb12f0e5ca4f8f5b12465e6bcc | LOCAL ONLY |
+| M1-A | Consistent note revision publication | complete | PASS: 16 focused unit + 4 notes_plugin integration tests; formatting/diff checks | independent review; fixture cleanup finding resolved with regression | pending local commit | LOCAL ONLY |
 | M1-B | Cheap note refresh gate | pending | — | — | — | — |
 | M1-C | Notes regression and comparison | pending | — | — | — | — |
 | M2-A | Shared command resolution context | pending | — | — | — | — |

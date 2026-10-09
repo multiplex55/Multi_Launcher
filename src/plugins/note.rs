@@ -285,6 +285,50 @@ static IMAGE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"!\[[^\]]*\]\(([^)]+)\)"
 static NOTE_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
+type NoteReloadBeforePublishHook = Box<dyn FnOnce() + Send + 'static>;
+#[cfg(test)]
+static NOTE_RELOAD_BEFORE_PUBLISH_HOOK_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static NOTE_RELOAD_BEFORE_PUBLISH_HOOK: Lazy<Mutex<Option<NoteReloadBeforePublishHook>>> =
+    Lazy::new(|| Mutex::new(None));
+
+#[cfg(test)]
+type NoteSnapshotAfterRevisionHook = Box<dyn FnOnce(u64) + Send + 'static>;
+#[cfg(test)]
+static NOTE_SNAPSHOT_AFTER_REVISION_HOOK_ARMED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static NOTE_SNAPSHOT_AFTER_REVISION_HOOK: Lazy<Mutex<Option<NoteSnapshotAfterRevisionHook>>> =
+    Lazy::new(|| Mutex::new(None));
+
+#[cfg(test)]
+fn run_note_reload_before_publish_hook() {
+    if !NOTE_RELOAD_BEFORE_PUBLISH_HOOK_ARMED.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let hook = NOTE_RELOAD_BEFORE_PUBLISH_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(test)]
+fn run_note_snapshot_after_revision_hook(version: u64) {
+    if !NOTE_SNAPSHOT_AFTER_REVISION_HOOK_ARMED.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let hook = NOTE_SNAPSHOT_AFTER_REVISION_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(hook) = hook {
+        hook(version);
+    }
+}
+
+#[cfg(test)]
 type NoteSaveHook = dyn Fn(&std::path::Path, &[u8]) -> anyhow::Result<()> + Send + Sync;
 
 #[cfg(test)]
@@ -959,7 +1003,6 @@ pub fn unused_assets() -> Vec<String> {
 pub fn load_notes() -> anyhow::Result<Vec<Note>> {
     let dir = notes_dir();
     std::fs::create_dir_all(&dir)?;
-    reset_slug_lookup();
     let mut notes = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
@@ -972,7 +1015,6 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
             .and_then(|s| s.to_str())
             .unwrap_or_default()
             .to_string();
-        register_slug(&slug);
         let content = std::fs::read_to_string(&path)?;
         let aliases = extract_aliases(&content);
         let alias = aliases.first().cloned();
@@ -1001,20 +1043,33 @@ pub fn load_notes() -> anyhow::Result<Vec<Note>> {
 }
 
 pub fn refresh_cache() -> anyhow::Result<()> {
-    let notes = load_notes()?;
-    publish_note_cache(notes);
+    let _mutation = NOTE_MUTATION_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned before cache refresh"))?;
+    let notes = load_notes().context("load notes before refreshing the cache")?;
+    #[cfg(test)]
+    run_note_reload_before_publish_hook();
+    publish_note_cache(notes).context("publish refreshed notes cache")?;
     Ok(())
 }
 
-fn publish_note_cache(notes: Vec<Note>) {
-    let cache = NoteCache::from_notes(notes);
-    if let Ok(mut guard) = CACHE.lock() {
-        if guard.notes == cache.notes {
-            return;
-        }
-        *guard = cache;
-        bump_note_version();
+/// Replace the cache while its lock is held. A changed note list is assigned
+/// before the matching revision bump; equal content leaves both untouched.
+fn replace_note_cache_locked(current: &mut NoteCache, next: NoteCache) -> Option<NoteCache> {
+    if current.notes == next.notes {
+        return None;
     }
+    let previous = std::mem::replace(current, next);
+    bump_note_version();
+    Some(previous)
+}
+
+fn publish_note_cache(notes: Vec<Note>) -> anyhow::Result<bool> {
+    let next = NoteCache::from_notes(notes);
+    let mut current = CACHE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("note cache lock poisoned while publishing notes"))?;
+    Ok(replace_note_cache_locked(&mut current, next).is_some())
 }
 
 fn bump_note_version() {
@@ -1029,13 +1084,17 @@ pub fn note_version() -> u64 {
 /// retaining the original cache for isolated workload-test cleanup.
 #[cfg(test)]
 pub(crate) fn publish_note_cache_for_test(notes: Vec<Note>) -> NoteCachePublicationGuard {
+    let next = NoteCache::from_notes(notes);
     let original = {
         let mut guard = CACHE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::mem::replace(&mut *guard, NoteCache::default())
+        let original = std::mem::replace(&mut *guard, next);
+        if original.notes != guard.notes {
+            bump_note_version();
+        }
+        original
     };
-    publish_note_cache(notes);
     NoteCachePublicationGuard(Some(original))
 }
 
@@ -1049,15 +1108,21 @@ impl Drop for NoteCachePublicationGuard {
             let mut guard = CACHE
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *guard = original;
-            drop(guard);
-            bump_note_version();
+            if guard.notes != original.notes {
+                *guard = original;
+                bump_note_version();
+            }
         }
     }
 }
 
-/// Return a snapshot of notes from the in-memory cache without hitting disk.
-pub fn note_cache_snapshot() -> Vec<Note> {
+/// Return `(revision, notes)` captured together under the cache lock.
+///
+/// Each materially changed publication assigns the new notes and increments
+/// the revision once while holding that lock; an equal publication changes
+/// neither. This helper does no disk I/O and is the consistent API for callers
+/// that need to associate derived work with a note revision.
+pub fn note_cache_snapshot_with_version() -> anyhow::Result<(u64, Vec<Note>)> {
     let perf_enabled = crate::performance::enabled();
     let wait_started = crate::performance::started_if(perf_enabled);
     let cache = match CACHE.lock() {
@@ -1075,23 +1140,30 @@ pub fn note_cache_snapshot() -> Vec<Note> {
                     crate::performance::MetricOutcome::Error,
                 );
             }
-            return Vec::new();
+            return Err(anyhow::anyhow!(
+                "note cache lock poisoned while taking a versioned snapshot"
+            ));
         }
     };
     let lock_wait = wait_started.map(|started| started.elapsed());
+    let hold_started = perf_enabled.then(std::time::Instant::now);
+    let version = NOTE_VERSION.load(Ordering::SeqCst);
+    #[cfg(test)]
+    run_note_snapshot_after_revision_hook(version);
 
     if !perf_enabled {
-        return cache.notes.clone();
+        return Ok((version, cache.notes.clone()));
     }
 
-    let hold_started = std::time::Instant::now();
     let estimated_bytes = cache
         .notes
         .iter()
         .map(estimated_note_clone_bytes)
         .fold(0_usize, usize::saturating_add);
     let notes = cache.notes.clone();
-    let hold_time = hold_started.elapsed();
+    let hold_time = hold_started
+        .expect("enabled note snapshot records its cache hold start")
+        .elapsed();
     drop(cache);
     crate::performance::record_metric_sample(
         crate::performance::Metric::NoteSnapshot,
@@ -1099,7 +1171,18 @@ pub fn note_cache_snapshot() -> Vec<Note> {
         hold_time,
         lock_wait,
     );
-    notes
+    Ok((version, notes))
+}
+
+/// Return a snapshot of notes from the in-memory cache without hitting disk.
+///
+/// This compatibility wrapper retains the historical empty-on-poison behavior;
+/// callers that need to distinguish a failed snapshot should use
+/// [`note_cache_snapshot_with_version`].
+pub fn note_cache_snapshot() -> Vec<Note> {
+    note_cache_snapshot_with_version()
+        .map(|(_, notes)| notes)
+        .unwrap_or_default()
 }
 
 fn estimated_note_clone_bytes(note: &Note) -> usize {
@@ -1283,7 +1366,9 @@ fn save_note_locked(
     let mut next_notes = existing_notes;
     next_notes.retain(|existing| existing.path != note.path && existing.slug != slug);
     next_notes.push(committed);
-    publish_note_cache(next_notes);
+    publish_note_cache(next_notes).with_context(|| {
+        format!("note {slug:?} was committed to disk, but its updated cache could not be published")
+    })?;
     note.path = path;
     note.slug = slug;
     note.aliases = aliases;
@@ -1440,7 +1525,8 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
             .into_iter()
             .map(|(_, _, committed)| committed)
             .collect(),
-    );
+    )
+    .context("notes were written to disk, but the updated cache could not be published")?;
     Ok(())
 }
 
@@ -1478,7 +1564,11 @@ pub fn remove_note_by_identity(identity: &str) -> anyhow::Result<Option<Note>> {
         .with_context(|| format!("remove note {}", removed.path.display()))?;
     let mut next_notes = notes;
     next_notes.retain(|note| note.path != removed.path);
-    publish_note_cache(next_notes);
+    publish_note_cache(next_notes).with_context(|| {
+        format!(
+            "note {identity:?} was removed from disk, but the updated cache could not be published"
+        )
+    })?;
     Ok(Some(removed))
 }
 
@@ -2566,14 +2656,21 @@ mod tests {
 
     fn set_notes(notes: Vec<Note>) -> NoteCache {
         let mut guard = CACHE.lock().expect("note cache lock poisoned");
-        let original = std::mem::take(&mut *guard);
-        *guard = NoteCache::from_notes(notes);
+        let next = NoteCache::from_notes(notes);
+        let original = std::mem::replace(&mut *guard, next);
+        if original.notes != guard.notes {
+            bump_note_version();
+        }
         original
     }
 
     fn restore_cache(original: NoteCache) {
         let mut guard = CACHE.lock().expect("note cache lock poisoned");
+        let changed = guard.notes != original.notes;
         *guard = original;
+        if changed {
+            bump_note_version();
+        }
     }
 
     fn test_note(title: &str, slug: &str, content: &str) -> Note {
@@ -2627,6 +2724,82 @@ mod tests {
                 unsafe { std::env::set_var("ML_NOTES_DIR", previous) };
             } else {
                 unsafe { std::env::remove_var("ML_NOTES_DIR") };
+            }
+        }
+    }
+
+    struct NoteReloadHookGuard;
+
+    impl Drop for NoteReloadHookGuard {
+        fn drop(&mut self) {
+            NOTE_RELOAD_BEFORE_PUBLISH_HOOK_ARMED.store(false, Ordering::Release);
+            NOTE_RELOAD_BEFORE_PUBLISH_HOOK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+    }
+
+    fn pause_note_reload_before_publish(
+        hook: impl FnOnce() + Send + 'static,
+    ) -> NoteReloadHookGuard {
+        *NOTE_RELOAD_BEFORE_PUBLISH_HOOK
+            .lock()
+            .expect("note reload hook lock poisoned") = Some(Box::new(hook));
+        NOTE_RELOAD_BEFORE_PUBLISH_HOOK_ARMED.store(true, Ordering::Release);
+        NoteReloadHookGuard
+    }
+
+    struct NoteSnapshotHookGuard;
+
+    impl Drop for NoteSnapshotHookGuard {
+        fn drop(&mut self) {
+            NOTE_SNAPSHOT_AFTER_REVISION_HOOK_ARMED.store(false, Ordering::Release);
+            NOTE_SNAPSHOT_AFTER_REVISION_HOOK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+        }
+    }
+
+    fn pause_note_snapshot_after_revision(
+        hook: impl FnOnce(u64) + Send + 'static,
+    ) -> NoteSnapshotHookGuard {
+        *NOTE_SNAPSHOT_AFTER_REVISION_HOOK
+            .lock()
+            .expect("note snapshot hook lock poisoned") = Some(Box::new(hook));
+        NOTE_SNAPSHOT_AFTER_REVISION_HOOK_ARMED.store(true, Ordering::Release);
+        NoteSnapshotHookGuard
+    }
+
+    struct ReleaseOnDrop(Option<std::sync::mpsc::Sender<()>>);
+
+    impl ReleaseOnDrop {
+        fn release(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    struct JoinOnDrop<T>(Option<std::thread::JoinHandle<T>>);
+
+    impl<T> JoinOnDrop<T> {
+        fn join(mut self) -> std::thread::Result<T> {
+            self.0.take().expect("test worker handle is present").join()
+        }
+    }
+
+    impl<T> Drop for JoinOnDrop<T> {
+        fn drop(&mut self) {
+            if let Some(worker) = self.0.take() {
+                let _ = worker.join();
             }
         }
     }
@@ -3457,6 +3630,8 @@ mod tests {
         let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
         let dir = tempdir().unwrap();
         let _env = NotesDirEnvGuard::set(dir.path());
+        let original = set_notes(Vec::new());
+        let initial_version = note_version();
 
         fs::write(
             dir.path().join("one.md"),
@@ -3466,10 +3641,10 @@ Body",
         )
         .unwrap();
         refresh_cache().unwrap();
-        let first = note_cache_snapshot();
+        let (first_version, first) = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(first_version, initial_version + 1);
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].slug, "one");
-        let first_version = note_version();
         refresh_cache().unwrap();
         assert_eq!(note_version(), first_version);
 
@@ -3481,9 +3656,12 @@ Body",
         )
         .unwrap();
         refresh_cache().unwrap();
-        let second = note_cache_snapshot();
+        let (second_version, second) = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(second_version, first_version + 1);
         assert_eq!(second.len(), 2);
         assert!(second.iter().any(|n| n.slug == "two"));
+
+        restore_cache(original);
     }
 
     #[test]
@@ -3492,26 +3670,344 @@ Body",
         let dir = tempfile::tempdir().unwrap();
         let _env = NotesDirEnvGuard::set(dir.path());
         let original = set_notes(Vec::new());
+        let initial_version = note_version();
         std::fs::write(dir.path().join("one.md"), "# One\n\nBody").unwrap();
         refresh_cache().unwrap();
-        let committed = note_cache_snapshot();
-        let committed_version = note_version();
+        let (committed_version, committed) = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(committed_version, initial_version + 1);
 
         let unreadable = dir.path().join("broken.md");
         std::fs::create_dir(&unreadable).unwrap();
         assert!(refresh_cache().is_err());
-        assert_eq!(note_cache_snapshot(), committed);
-        assert_eq!(note_version(), committed_version);
+        let (failed_reload_version, failed_reload_notes) =
+            note_cache_snapshot_with_version().unwrap();
+        assert_eq!(failed_reload_notes, committed);
+        assert_eq!(failed_reload_version, committed_version);
 
         std::fs::remove_dir(unreadable).unwrap();
         std::fs::write(dir.path().join("two.md"), "# Two\n\nBody").unwrap();
         refresh_cache().unwrap();
-        assert_eq!(note_cache_snapshot().len(), 2);
-        assert_eq!(note_version(), committed_version + 1);
+        let (recovered_version, recovered_notes) = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(recovered_notes.len(), 2);
+        assert_eq!(recovered_version, committed_version + 1);
         refresh_cache().unwrap();
-        assert_eq!(note_version(), committed_version + 1);
+        assert_eq!(note_version(), recovered_version);
 
         restore_cache(original);
+    }
+
+    #[test]
+    fn note_cache_publishes_alias_title_body_tag_and_backlink_changes_once() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let _original_cache = publish_note_cache_for_test(Vec::new());
+        let initial_version = note_version();
+        let alpha_path = dir.path().join("alpha.md");
+        let beta_path = dir.path().join("beta.md");
+
+        fs::write(
+            &alpha_path,
+            "# Primary Title\nAlias: Primary Alias\nAliases: Secondary Alias, Old Alias\n\n#oldtag\n[[Beta Target]]\nBody before",
+        )
+        .unwrap();
+        fs::write(&beta_path, "# Beta Target\n\nTarget body").unwrap();
+        refresh_cache().unwrap();
+        let first_version = initial_version + 1;
+        let (published_version, first_notes) = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(published_version, first_version);
+        assert_eq!(first_notes.len(), 2);
+        assert_eq!(
+            resolve_note_query("Primary Alias"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(
+            resolve_note_query("Secondary Alias"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(
+            resolve_note_query("Primary Title"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(available_tags(), vec!["oldtag"]);
+        assert_eq!(
+            note_backlinks("beta")
+                .iter()
+                .map(|note| note.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+
+        refresh_cache().unwrap();
+        assert_eq!(note_version(), first_version, "equal reloads are no-ops");
+
+        fs::write(
+            &alpha_path,
+            "# Renamed Title\nAlias: Renamed Alias\nAliases: Secondary Alias, Fresh Alias\n\n#newtag\n[[Beta Target]]\nBody after",
+        )
+        .unwrap();
+        refresh_cache().unwrap();
+        let second_version = first_version + 1;
+        assert_eq!(note_version(), second_version);
+        assert_eq!(resolve_note_query("Primary Alias"), NoteTarget::Broken);
+        assert_eq!(
+            resolve_note_query("Renamed Alias"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(resolve_note_query("Old Alias"), NoteTarget::Broken);
+        assert_eq!(
+            resolve_note_query("Fresh Alias"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(resolve_note_query("Primary Title"), NoteTarget::Broken);
+        assert_eq!(
+            resolve_note_query("Renamed Title"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        assert_eq!(available_tags(), vec!["newtag"]);
+        let (changed_version, changed_notes) = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(changed_version, second_version);
+        let alpha = changed_notes
+            .iter()
+            .find(|note| note.slug == "alpha")
+            .unwrap();
+        assert!(alpha.content.contains("Body after"));
+        assert_eq!(
+            note_backlinks("beta")
+                .iter()
+                .map(|note| note.slug.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha"]
+        );
+
+        fs::write(
+            &alpha_path,
+            "# Renamed Title\nAlias: Renamed Alias\nAliases: Secondary Alias, Another Secondary\n\n#newtag\n[[Beta Target]]\nBody after",
+        )
+        .unwrap();
+        refresh_cache().unwrap();
+        let third_version = second_version + 1;
+        assert_eq!(
+            note_version(),
+            third_version,
+            "secondary alias changes publish once"
+        );
+        assert_eq!(resolve_note_query("Fresh Alias"), NoteTarget::Broken);
+        assert_eq!(
+            resolve_note_query("Another Secondary"),
+            NoteTarget::Resolved("alpha".into())
+        );
+        refresh_cache().unwrap();
+        assert_eq!(
+            note_version(),
+            third_version,
+            "unchanged secondary aliases do not republish"
+        );
+    }
+
+    #[test]
+    fn note_cache_append_delete_and_noop_identity_revisions() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let _original_cache = publish_note_cache_for_test(Vec::new());
+        let path = dir.path().join("alpha.md");
+        let original_content = "# Alpha\nAlias: Primary\nAliases: Secondary\n\n#tag\nBody";
+        fs::write(&path, original_content).unwrap();
+        refresh_cache().unwrap();
+        let initial_version = note_version();
+
+        save_note_content("alpha", original_content)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            note_version(),
+            initial_version,
+            "saving identical content is a no-op"
+        );
+
+        let appended = append_note_content("Secondary", "\nAppended body")
+            .unwrap()
+            .expect("secondary alias resolves the appended note");
+        assert!(appended.content.ends_with("Appended body"));
+        let appended_version = initial_version + 1;
+        assert_eq!(note_version(), appended_version);
+        assert!(
+            note_cache_snapshot_with_version().unwrap().1[0]
+                .content
+                .ends_with("Appended body")
+        );
+
+        let removed = remove_note_by_identity("Secondary")
+            .unwrap()
+            .expect("secondary alias resolves the note to delete");
+        assert_eq!(removed.slug, "alpha");
+        assert_eq!(note_version(), appended_version + 1);
+        assert!(note_cache_snapshot_with_version().unwrap().1.is_empty());
+        assert!(remove_note_by_identity("Secondary").unwrap().is_none());
+        assert_eq!(
+            note_version(),
+            appended_version + 1,
+            "missing identity is a no-op"
+        );
+    }
+
+    #[test]
+    fn note_cache_reload_serializes_with_save_after_loading_disk_state() {
+        use std::fs;
+        use std::sync::mpsc;
+        use std::time::Duration;
+        use tempfile::tempdir;
+
+        const TIMEOUT: Duration = Duration::from_secs(3);
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let _original_cache = publish_note_cache_for_test(Vec::new());
+        let path = dir.path().join("alpha.md");
+        fs::write(&path, "# Alpha\n\nInitial body").unwrap();
+        refresh_cache().unwrap();
+        let initial_version = note_version();
+        fs::write(&path, "# Alpha\n\nExternal edit").unwrap();
+
+        let (loaded_tx, loaded_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _reload_hook = pause_note_reload_before_publish(move || {
+            let _ = loaded_tx.send(());
+            let _ = release_rx.recv_timeout(TIMEOUT);
+        });
+        let reload = JoinOnDrop(Some(std::thread::spawn(refresh_cache)));
+        let mut release_reload = ReleaseOnDrop(Some(release_tx));
+        loaded_rx
+            .recv_timeout(TIMEOUT)
+            .expect("reload reached the pre-publication seam");
+        assert!(matches!(
+            NOTE_MUTATION_LOCK.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+
+        let (save_contended_tx, save_contended_rx) = mpsc::channel();
+        let save = JoinOnDrop(Some(std::thread::spawn(move || {
+            let contended = matches!(
+                NOTE_MUTATION_LOCK.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            let _ = save_contended_tx.send(contended);
+            save_note_content("alpha", "# Alpha\n\nSaved after reload")
+        })));
+        assert!(
+            save_contended_rx
+                .recv_timeout(TIMEOUT)
+                .expect("save worker observed reload ownership")
+        );
+
+        release_reload.release();
+        reload.join().expect("reload thread did not panic").unwrap();
+        save.join()
+            .expect("save thread did not panic")
+            .unwrap()
+            .expect("save found the reloaded note");
+
+        let (version, notes) = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(version, initial_version + 2);
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].content, "# Alpha\n\nSaved after reload");
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "# Alpha\n\nSaved after reload"
+        );
+    }
+
+    #[test]
+    fn note_cache_versioned_snapshot_pairs_revision_and_notes_during_publication() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const TIMEOUT: Duration = Duration::from_secs(3);
+        let _original_cache = publish_note_cache_for_test(vec![test_note(
+            "Old title",
+            "old-note",
+            "# Old title\n\nOld body",
+        )]);
+        let old_pair = note_cache_snapshot_with_version().unwrap();
+        let (version_read_tx, version_read_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let _snapshot_hook = pause_note_snapshot_after_revision(move |version| {
+            let _ = version_read_tx.send(version);
+            let _ = release_rx.recv_timeout(TIMEOUT);
+        });
+        let reader = JoinOnDrop(Some(std::thread::spawn(note_cache_snapshot_with_version)));
+        let mut release_snapshot = ReleaseOnDrop(Some(release_tx));
+        assert_eq!(
+            version_read_rx
+                .recv_timeout(TIMEOUT)
+                .expect("snapshot reached the locked revision seam"),
+            old_pair.0
+        );
+        assert!(matches!(
+            CACHE.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+
+        let (writer_contended_tx, writer_contended_rx) = mpsc::channel();
+        let writer = JoinOnDrop(Some(std::thread::spawn(move || {
+            let contended = matches!(CACHE.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+            let _ = writer_contended_tx.send(contended);
+            publish_note_cache(vec![test_note(
+                "New title",
+                "new-note",
+                "# New title\n\nNew body",
+            )])
+        })));
+        assert!(
+            writer_contended_rx
+                .recv_timeout(TIMEOUT)
+                .expect("writer observed snapshot ownership")
+        );
+
+        release_snapshot.release();
+        assert_eq!(
+            reader
+                .join()
+                .expect("snapshot reader did not panic")
+                .unwrap(),
+            old_pair
+        );
+        assert!(writer.join().expect("cache writer did not panic").unwrap());
+        let new_pair = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(new_pair.0, old_pair.0 + 1);
+        assert_eq!(new_pair.1.len(), 1);
+        assert_eq!(new_pair.1[0].slug, "new-note");
+    }
+
+    #[test]
+    fn note_cache_fixture_guard_restores_after_equal_install_then_change() {
+        let _outer_guard = publish_note_cache_for_test(vec![test_note(
+            "Fixture title",
+            "fixture-note",
+            "# Fixture title\n\nFixture body",
+        )]);
+        let original_pair = note_cache_snapshot_with_version().unwrap();
+        let fixture_guard = publish_note_cache_for_test(original_pair.1.clone());
+        assert_eq!(
+            note_version(),
+            original_pair.0,
+            "equal fixture install is a no-op"
+        );
+
+        assert!(publish_note_cache(Vec::new()).unwrap());
+        assert_eq!(note_version(), original_pair.0 + 1);
+        drop(fixture_guard);
+
+        let restored_pair = note_cache_snapshot_with_version().unwrap();
+        assert_eq!(restored_pair.0, original_pair.0 + 2);
+        assert_eq!(restored_pair.1, original_pair.1);
     }
 
     #[test]
@@ -4310,6 +4806,7 @@ Body",
         let old_path = dir.path().join("alpha.md");
         std::fs::write(&old_path, "# Alpha\n\nbody").unwrap();
         refresh_cache().unwrap();
+        let version_before_save = note_version();
 
         let mut note = Note {
             title: "Alpha renamed".into(),
@@ -4325,6 +4822,7 @@ Body",
 
         let saved = save_note(&mut note, false).unwrap();
         assert!(saved);
+        assert_eq!(note_version(), version_before_save + 1);
         assert!(!old_path.exists());
         assert_eq!(note.path, dir.path().join("alpha-renamed.md"));
         assert!(note.path.exists());
@@ -4349,6 +4847,7 @@ Body",
         let path = dir.path().join("alpha.md");
         fs::write(&path, "# Alpha\n\noriginal").unwrap();
         refresh_cache().unwrap();
+        let version_before_save = note_version();
         set_note_save_hook(|_path, _bytes| anyhow::bail!("deterministic save failure"));
 
         let mut note = Note {
@@ -4371,6 +4870,7 @@ Body",
         assert!(result.is_err());
         assert_eq!(note, draft_before_save);
         assert_eq!(note_cache_snapshot(), cache_before_save);
+        assert_eq!(note_version(), version_before_save);
         assert_eq!(fs::read_to_string(&path).unwrap(), "# Alpha\n\noriginal");
         assert_no_bak_files(dir.path());
 
@@ -4395,6 +4895,7 @@ Body",
         let new_path = dir.path().join("alpha-renamed.md");
         fs::write(&old_path, "# Alpha\n\noriginal").unwrap();
         refresh_cache().unwrap();
+        let version_before_save = note_version();
         set_note_save_hook(|_path, _bytes| anyhow::bail!("deterministic save failure"));
 
         let mut note = Note {
@@ -4418,6 +4919,7 @@ Body",
             fs::read_to_string(&old_path).unwrap(),
             "# Alpha\n\noriginal"
         );
+        assert_eq!(note_version(), version_before_save);
         assert!(!new_path.exists());
         assert_no_bak_files(dir.path());
 
@@ -4442,6 +4944,7 @@ Body",
         fs::write(&old_path, "# Alpha\n\noriginal alpha").unwrap();
         fs::write(&destination_path, "# Beta\n\noriginal beta").unwrap();
         refresh_cache().unwrap();
+        let version_before_save = note_version();
         let cache_before_save = note_cache_snapshot();
         set_note_remove_hook(|_path| anyhow::bail!("deterministic remove failure"));
 
@@ -4464,6 +4967,7 @@ Body",
         assert!(result.is_err());
         assert_eq!(note, draft_before_save);
         assert_eq!(note_cache_snapshot(), cache_before_save);
+        assert_eq!(note_version(), version_before_save);
         assert_eq!(
             fs::read_to_string(old_path).unwrap(),
             "# Alpha\n\noriginal alpha"
@@ -4489,6 +4993,7 @@ Body",
         let stale_path = dir.path().join("stale.md");
         fs::write(&stale_path, "# Stale\n\nkeep me").unwrap();
         refresh_cache().unwrap();
+        let version_before_save = note_version();
         let cache_before_save = note_cache_snapshot();
         let writes = Arc::new(AtomicUsize::new(0));
         let hook_writes = writes.clone();
@@ -4538,6 +5043,7 @@ Body",
         assert!(!dir.path().join("alpha.md").exists());
         assert!(!dir.path().join("beta.md").exists());
         assert_eq!(note_cache_snapshot(), cache_before_save);
+        assert_eq!(note_version(), version_before_save);
         assert_no_bak_files(dir.path());
 
         if let Some(p) = prev {
@@ -4560,6 +5066,7 @@ Body",
         fs::write(&path, "# Alpha\n\noriginal").unwrap();
         fs::write(&other_path, "# Beta\n\nkeep cached").unwrap();
         refresh_cache().unwrap();
+        let version_before_save = note_version();
 
         let hook_other_path = other_path.clone();
         set_note_save_hook(move |path, bytes| {
@@ -4573,6 +5080,7 @@ Body",
 
         let saved = saved.unwrap().unwrap();
         assert_eq!(saved.slug, "alpha");
+        assert_eq!(note_version(), version_before_save + 1);
         assert_eq!(fs::read_to_string(path).unwrap(), "# Alpha\n\nupdated");
         let cached = note_cache_snapshot();
         assert!(
