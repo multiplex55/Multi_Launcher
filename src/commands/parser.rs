@@ -441,6 +441,9 @@ pub(crate) fn parse_mouse_wire(action: &Action) -> Option<CoordinateToolCommand>
         ["help"] => Ok(CoordinateToolCommand::Help),
         ["coords", ..] => parse_coord_operation(&tokens[1..]),
         ["crosshair", ..] => parse_crosshair_operation(&tokens[1..]),
+        ["halo", ..] => parse_halo_operation(&tokens[1..]),
+        ["zoom", ..] => parse_zoom_operation(&tokens[1..]),
+        ["effects", ..] => parse_effects_operation(&tokens[1..]),
         [] => Err("mouse command is missing".into()),
         [operation, ..] => Err(format!("unknown mouse command `{operation}`")),
     };
@@ -548,6 +551,43 @@ fn parse_crosshair_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, S
         }
         [operation, ..] => Err(format!("unknown mouse crosshair command `{operation}`")),
         [] => Err("mouse crosshair command is missing".into()),
+    }
+}
+
+fn parse_halo_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleHalo),
+        ["on"] => Ok(CoordinateToolCommand::SetHaloEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetHaloEnabled(false)),
+        ["help"] => Ok(CoordinateToolCommand::HaloHelp),
+        ["toggle" | "on" | "off" | "help", ..] => {
+            Err("mouse halo toggle, on, off, and help do not take arguments".into())
+        }
+        [operation, ..] => Err(format!("unknown mouse halo command `{operation}`")),
+        [] => Err("mouse halo command is missing; use toggle, on, off, or help".into()),
+    }
+}
+
+fn parse_zoom_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleZoom),
+        ["on"] => Ok(CoordinateToolCommand::SetZoomEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetZoomEnabled(false)),
+        ["help"] => Ok(CoordinateToolCommand::ZoomHelp),
+        ["toggle" | "on" | "off" | "help", ..] => {
+            Err("mouse zoom toggle, on, off, and help do not take arguments".into())
+        }
+        [operation, ..] => Err(format!("unknown mouse zoom command `{operation}`")),
+        [] => Err("mouse zoom command is missing; use toggle, on, off, or help".into()),
+    }
+}
+
+fn parse_effects_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["off"] => Ok(CoordinateToolCommand::EffectsOff),
+        ["off", ..] => Err("mouse effects off does not take arguments".into()),
+        [] => Err("mouse effects command is missing; use off".into()),
+        [operation, ..] => Err(format!("unknown mouse effects command `{operation}`")),
     }
 }
 
@@ -2332,9 +2372,50 @@ mod mouse_command_parser_tests {
             CoordinateToolCommand::SetCrosshairGap(128)
         );
         assert_eq!(
+            parse("MOUSE:HALO:TOGGLE"),
+            CoordinateToolCommand::ToggleHalo
+        );
+        assert_eq!(
+            parse("mouse:halo:on"),
+            CoordinateToolCommand::SetHaloEnabled(true)
+        );
+        assert_eq!(
+            parse("MoUsE:HaLo:OfF"),
+            CoordinateToolCommand::SetHaloEnabled(false)
+        );
+        assert_eq!(parse("mouse:halo:help"), CoordinateToolCommand::HaloHelp);
+        assert_eq!(
+            parse("mouse:zoom:toggle"),
+            CoordinateToolCommand::ToggleZoom
+        );
+        assert_eq!(
+            parse("MOUSE:ZOOM:ON"),
+            CoordinateToolCommand::SetZoomEnabled(true)
+        );
+        assert_eq!(
+            parse("mouse:zoom:off"),
+            CoordinateToolCommand::SetZoomEnabled(false)
+        );
+        assert_eq!(parse("mouse:zoom:help"), CoordinateToolCommand::ZoomHelp);
+        assert_eq!(
+            parse("MoUsE:EfFeCtS:OfF"),
+            CoordinateToolCommand::EffectsOff
+        );
+        assert_eq!(
             CoordinateToolCommand::SetCrosshairGap(16).kind_name(),
             "set_crosshair_gap"
         );
+        assert_eq!(CoordinateToolCommand::ToggleHalo.kind_name(), "toggle_halo");
+        assert_eq!(
+            CoordinateToolCommand::SetHaloEnabled(true).kind_name(),
+            "set_halo_enabled"
+        );
+        assert_eq!(CoordinateToolCommand::ToggleZoom.kind_name(), "toggle_zoom");
+        assert_eq!(
+            CoordinateToolCommand::SetZoomEnabled(true).kind_name(),
+            "set_zoom_enabled"
+        );
+        assert_eq!(CoordinateToolCommand::EffectsOff.kind_name(), "effects_off");
         assert_eq!(
             parse("mouse:crosshair:guides:OFF"),
             CoordinateToolCommand::SetGuides(false)
@@ -2368,6 +2449,20 @@ mod mouse_command_parser_tests {
             "mouse:coords:cancel:extra",
             "mouse:settings:extra",
             "mouse:unknown",
+            "mouse:halo",
+            "mouse:halo:toggle:extra",
+            "mouse:halo:on:extra",
+            "mouse:halo:radius:60",
+            "mouse:halo:strength:0.4",
+            "mouse:halo:help:extra",
+            "mouse:zoom",
+            "mouse:zoom:off:extra",
+            "mouse:zoom:factor:2",
+            "mouse:zoom:diameter:160",
+            "mouse:zoom:help:extra",
+            "mouse:effects",
+            "mouse:effects:on",
+            "mouse:effects:off:extra",
         ] {
             assert!(
                 matches!(parse(raw), CoordinateToolCommand::Invalid { .. }),
@@ -2386,6 +2481,17 @@ mod mouse_command_parser_tests {
                 "{raw}"
             );
         }
+
+        let action_with_args = Action {
+            label: String::new(),
+            desc: String::new(),
+            action: "mouse:halo:on".into(),
+            args: Some("unexpected".into()),
+        };
+        assert!(matches!(
+            parse_action(&action_with_args).unwrap(),
+            Command::CoordinateTool(CoordinateToolCommand::Invalid { .. })
+        ));
     }
 
     #[test]

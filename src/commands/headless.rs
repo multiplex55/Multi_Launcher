@@ -68,6 +68,35 @@ mod screen_draw_headless_tests {
         );
         assert!(external_calls.is_empty());
 
+        for (wire, command) in [
+            ("mouse:halo:on", CoordinateToolCommand::SetHaloEnabled(true)),
+            ("mouse:zoom:toggle", CoordinateToolCommand::ToggleZoom),
+            ("mouse:effects:off", CoordinateToolCommand::EffectsOff),
+        ] {
+            let original = Action {
+                label: wire.into(),
+                desc: String::new(),
+                action: wire.into(),
+                args: None,
+            };
+            let error = execute_with_external(
+                Command::CoordinateTool(command),
+                &original,
+                &mut |target, args| {
+                    external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("mouse commands require the launcher interface"),
+                "{wire}: {error}"
+            );
+            assert!(external_calls.is_empty(), "{wire} fell back externally");
+        }
+
         let original = Action {
             label: "Mouse Settings".into(),
             desc: String::new(),

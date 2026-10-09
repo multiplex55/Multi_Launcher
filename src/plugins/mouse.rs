@@ -8,8 +8,7 @@ impl MousePlugin {
     fn action(label: impl Into<String>, command: impl Into<String>) -> Action {
         Action {
             label: label.into(),
-            desc: "Mouse coordinates, one-shot click-to-copy picking, and independent crosshair"
-                .into(),
+            desc: "Mouse coordinate HUD, one-shot picking, crosshair, actual desktop inversion halo, and live screen magnifier of desktop content. Appearance is saved in Mouse Settings; enablement is session-only. Halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline.".into(),
             action: command.into(),
             args: None,
         }
@@ -29,6 +28,13 @@ impl MousePlugin {
             ("mouse crosshair toggle", "mouse:crosshair:toggle"),
             ("mouse crosshair on", "mouse:crosshair:on"),
             ("mouse crosshair off", "mouse:crosshair:off"),
+            ("mouse halo toggle", "mouse:halo:toggle"),
+            ("mouse halo on", "mouse:halo:on"),
+            ("mouse halo off", "mouse:halo:off"),
+            ("mouse zoom toggle", "mouse:zoom:toggle"),
+            ("mouse zoom on", "mouse:zoom:on"),
+            ("mouse zoom off", "mouse:zoom:off"),
+            ("mouse effects off", "mouse:effects:off"),
             ("mouse help", "mouse:help"),
         ]
         .into_iter()
@@ -75,6 +81,24 @@ impl Plugin for MousePlugin {
                 .filter(|action| action.action.starts_with("mouse:crosshair:"))
                 .collect();
         }
+        if query.eq_ignore_ascii_case("mouse halo") {
+            return Self::inventory()
+                .into_iter()
+                .filter(|action| action.action.starts_with("mouse:halo:"))
+                .collect();
+        }
+        if query.eq_ignore_ascii_case("mouse zoom") {
+            return Self::inventory()
+                .into_iter()
+                .filter(|action| action.action.starts_with("mouse:zoom:"))
+                .collect();
+        }
+        if query.eq_ignore_ascii_case("mouse effects") {
+            return Self::inventory()
+                .into_iter()
+                .filter(|action| action.action.starts_with("mouse:effects:"))
+                .collect();
+        }
         Self::command_action(query).into_iter().collect()
     }
 
@@ -83,7 +107,7 @@ impl Plugin for MousePlugin {
     }
 
     fn description(&self) -> &str {
-        "Mouse coordinate HUD, click-to-copy picking, and independent crosshair (prefix: `mouse`)"
+        "Mouse coordinate tools, actual desktop inversion halo, and live screen magnifier. Appearance is saved in Mouse Settings; enablement is session-only; halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline (prefix: `mouse`)."
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -123,6 +147,15 @@ mod tests {
             ),
             ("MOUSE CROSSHAIR GAP 128", "mouse:crosshair:gap:128"),
             ("MOUSE CROSSHAIR GUIDES OFF", "mouse:crosshair:guides:off"),
+            ("MOUSE HALO TOGGLE", "mouse:halo:toggle"),
+            ("Mouse Halo On", "mouse:halo:on"),
+            ("mouse HALO off", "mouse:halo:off"),
+            ("MOUSE ZOOM TOGGLE", "mouse:zoom:toggle"),
+            ("Mouse Zoom On", "mouse:zoom:on"),
+            ("mouse zoom OFF", "mouse:zoom:off"),
+            ("MOUSE EFFECTS OFF", "mouse:effects:off"),
+            ("mouse halo help", "mouse:halo:help"),
+            ("mouse zoom help", "mouse:zoom:help"),
         ] {
             let results = plugin.search(query);
             assert_eq!(results.len(), 1, "{query:?}");
@@ -148,6 +181,15 @@ mod tests {
             "mouse crosshair color red",
             "mouse crosshair guides maybe",
             "mouse crosshair help trailing",
+            "mouse halo toggle extra",
+            "mouse halo radius 60",
+            "mouse halo strength 0.4",
+            "mouse zoom on extra",
+            "mouse zoom factor 2",
+            "mouse effects on",
+            "mouse effects off extra",
+            "mouse halo help trailing",
+            "mouse zoom help trailing",
             "coord pick",
             "crosshair opacity 1.1",
         ] {
@@ -162,9 +204,15 @@ mod tests {
         assert_eq!(plugin.query_prefixes(), ["mouse"]);
 
         let results = plugin.search("MOUSE");
-        assert_eq!(results.len(), 13);
+        assert_eq!(results.len(), 20);
+        assert!(plugin.description().contains("desktop inversion halo"));
+        assert!(plugin.description().contains("live screen magnifier"));
         assert_eq!(results[0].label, "mouse settings");
         assert_eq!(results[0].action, "mouse:settings");
+        assert!(results[0].desc.contains("session-only"));
+        assert!(results[0].desc.contains("Mouse Settings"));
+        assert!(results[0].desc.contains("composited Windows"));
+        assert!(results[0].desc.contains("non-inverting outline"));
         assert_eq!(results, plugin.commands());
         for required in [
             "mouse:coords:toggle",
@@ -178,6 +226,13 @@ mod tests {
             "mouse:crosshair:toggle",
             "mouse:crosshair:on",
             "mouse:crosshair:off",
+            "mouse:halo:toggle",
+            "mouse:halo:on",
+            "mouse:halo:off",
+            "mouse:zoom:toggle",
+            "mouse:zoom:on",
+            "mouse:zoom:off",
+            "mouse:effects:off",
             "mouse:help",
         ] {
             assert!(results.iter().any(|action| action.action == required));
@@ -191,6 +246,23 @@ mod tests {
         assert!(plugin.search("mouse coords offset 16 24").len() == 1);
         assert!(plugin.search("mouse crosshair color #ff0000").len() == 1);
         assert!(plugin.search("mouse crosshair gap 0").len() == 1);
+        let halo = plugin.search("MOUSE HALO");
+        assert_eq!(halo.len(), 3);
+        assert!(
+            halo.iter()
+                .all(|action| action.action.starts_with("mouse:halo:"))
+        );
+        let zoom = plugin.search("mouse zoom");
+        assert_eq!(zoom.len(), 3);
+        assert!(
+            zoom.iter()
+                .all(|action| action.action.starts_with("mouse:zoom:"))
+        );
+        let effects = plugin.search("mouse effects");
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].action, "mouse:effects:off");
+        assert!(plugin.search("mouse halo help").len() == 1);
+        assert!(plugin.search("mouse zoom help").len() == 1);
         let coords = plugin.search("mouse coords");
         assert_eq!(coords.len(), 8);
         assert!(

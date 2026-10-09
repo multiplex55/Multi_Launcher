@@ -90,7 +90,7 @@ impl MouseSettingsDialog {
                     .max_height(ui.available_height().max(1.0))
                     .show(ui, |ui| {
                         ui.label("Configure coordinate overlays. Session switches take effect immediately; appearance changes stay in draft until Apply.");
-                        ui.small("Commands: mouse coords …, mouse crosshair gap N, and mouse help.");
+                        ui.small("Commands: mouse coords …, mouse crosshair gap N, mouse halo/zoom toggle|on|off, mouse effects off, and mouse help.");
                         ui.separator();
 
                         if let Some(error) = &self.last_error {

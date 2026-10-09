@@ -211,6 +211,13 @@ pub enum CoordinateToolCommand {
     SetGuides(bool),
     SetContrast(bool),
     CrosshairHelp,
+    ToggleHalo,
+    SetHaloEnabled(bool),
+    HaloHelp,
+    ToggleZoom,
+    SetZoomEnabled(bool),
+    ZoomHelp,
+    EffectsOff,
     Invalid { raw: String, error: String },
 }
 
@@ -225,6 +232,9 @@ kinds!(CoordinateToolCommand,
     Self::SetCrosshairThickness(_) => "set_crosshair_thickness", Self::SetCrosshairLength(_) => "set_crosshair_length",
     Self::SetCrosshairGap(_) => "set_crosshair_gap", Self::SetCrosshairOpacity(_) => "set_crosshair_opacity", Self::SetGuides(_) => "set_guides",
     Self::SetContrast(_) => "set_contrast", Self::CrosshairHelp => "crosshair_help",
+    Self::ToggleHalo => "toggle_halo", Self::SetHaloEnabled(_) => "set_halo_enabled", Self::HaloHelp => "halo_help",
+    Self::ToggleZoom => "toggle_zoom", Self::SetZoomEnabled(_) => "set_zoom_enabled", Self::ZoomHelp => "zoom_help",
+    Self::EffectsOff => "effects_off",
     Self::Invalid { .. } => "invalid"
 );
 

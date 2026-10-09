@@ -158,6 +158,9 @@ impl CoordinateToolGui {
             Command::HudHelp | Command::CrosshairHelp => {
                 return Err("help is handled by the mouse command handler".into());
             }
+            Command::HaloHelp | Command::ZoomHelp => {
+                return Err("help is handled by the mouse command handler".into());
+            }
             Command::ToggleCrosshair => {
                 let enabled = !self.controller.runtime_state().crosshair_enabled();
                 self.controller.set_crosshair_enabled(enabled)?;
@@ -165,6 +168,17 @@ impl CoordinateToolGui {
             Command::SetCrosshairEnabled(enabled) => {
                 self.controller.set_crosshair_enabled(*enabled)?;
             }
+            Command::ToggleHalo => {
+                let enabled = !self.controller.runtime_state().halo_enabled();
+                self.set_halo_enabled(enabled)?;
+            }
+            Command::SetHaloEnabled(enabled) => self.set_halo_enabled(*enabled)?,
+            Command::ToggleZoom => {
+                let enabled = !self.controller.runtime_state().zoom_enabled();
+                self.set_zoom_enabled(enabled)?;
+            }
+            Command::SetZoomEnabled(enabled) => self.set_zoom_enabled(*enabled)?,
+            Command::EffectsOff => self.controller.disable_effects()?,
             Command::SetCrosshairColor(color) => {
                 let color = *color;
                 self.update_preferences(|preferences| preferences.crosshair.color = color)?;
@@ -1244,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn hud_and_crosshair_enablement_remain_independent_through_the_adapter() {
+    fn all_session_modes_remain_independent_through_typed_mouse_commands() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory
             .path()
@@ -1257,11 +1271,90 @@ mod tests {
         receive_frame(&frames);
         gui.execute(&CoordinateToolCommand::SetCrosshairEnabled(true))
             .unwrap();
+        gui.execute(&CoordinateToolCommand::ToggleHalo).unwrap();
+        gui.execute(&CoordinateToolCommand::SetZoomEnabled(true))
+            .unwrap();
+        gui.execute(&CoordinateToolCommand::SetHaloEnabled(false))
+            .unwrap();
+        gui.execute(&CoordinateToolCommand::ToggleZoom).unwrap();
+        gui.execute(&CoordinateToolCommand::SetZoomEnabled(true))
+            .unwrap();
         gui.execute(&CoordinateToolCommand::SetHudEnabled(false))
             .unwrap();
         let state = gui.runtime_state();
         assert!(!state.hud_enabled());
         assert!(state.crosshair_enabled());
+        assert!(!state.halo_enabled());
+        assert!(state.zoom_enabled());
+        gui.shutdown().unwrap();
+    }
+
+    #[test]
+    fn effects_off_preserves_hud_pick_freeze_copy_preferences_and_clipboard() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .to_string();
+        let (mut gui, frames, started, outcomes, clipboard) = capture_adapter(path.clone());
+        gui.update_preferences(|preferences| {
+            preferences.space = CoordinateSpace::Monitor;
+            preferences.halo.radius = 88;
+            preferences.zoom.zoom_factor = 3.0;
+        })
+        .unwrap();
+        gui.execute(&CoordinateToolCommand::SetHudEnabled(true))
+            .unwrap();
+        receive_frame(&frames);
+        gui.execute(&CoordinateToolCommand::SetCrosshairEnabled(true))
+            .unwrap();
+        gui.execute(&CoordinateToolCommand::SetHaloEnabled(true))
+            .unwrap();
+        gui.execute(&CoordinateToolCommand::SetZoomEnabled(true))
+            .unwrap();
+        gui.execute(&CoordinateToolCommand::Freeze).unwrap();
+        assert_eq!(
+            gui.execute(&CoordinateToolCommand::Copy).unwrap(),
+            Some("120,200".into())
+        );
+        assert!(gui.begin_pick().unwrap());
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let preferences_before = gui.preferences().clone();
+        let saved_before = Settings::load(&path).unwrap().coordinate_tool;
+        let clipboard_before = clipboard.current.lock().unwrap().clone();
+        let writes_before = clipboard.writes.lock().unwrap().clone();
+        let copy_before = gui
+            .runtime_state()
+            .last_successful_copy()
+            .cloned()
+            .expect("successful copy should remain recorded");
+        assert!(gui.runtime_state().is_frozen());
+        assert!(gui.capture_pending());
+
+        assert_eq!(
+            gui.execute(&CoordinateToolCommand::EffectsOff).unwrap(),
+            None
+        );
+
+        let state = gui.runtime_state();
+        assert!(state.hud_enabled());
+        assert!(!state.crosshair_enabled());
+        assert!(!state.halo_enabled());
+        assert!(!state.zoom_enabled());
+        assert!(state.is_frozen());
+        assert_eq!(state.last_successful_copy(), Some(&copy_before));
+        assert!(gui.capture_pending());
+        assert_eq!(gui.preferences(), &preferences_before);
+        assert_eq!(Settings::load(&path).unwrap().coordinate_tool, saved_before);
+        assert_eq!(*clipboard.current.lock().unwrap(), clipboard_before);
+        assert_eq!(*clipboard.writes.lock().unwrap(), writes_before);
+        assert!(gui.take_capture_feedback().is_none());
+
+        assert!(gui.cancel_pick());
+        outcomes.send(CaptureOutcome::Cancelled).unwrap();
+        wait_for_capture_join(&mut gui);
         gui.shutdown().unwrap();
     }
 
