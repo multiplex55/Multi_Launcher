@@ -21,8 +21,8 @@
 | M1-C | Notes regression and comparison | complete | PASS: 6 full note scenarios, exact signatures; 30 focused library + 4 notes_plugin + 1 save-on-close tests; rustfmt/diff checks | independent findings resolved; slower draft timing retained with unresolved cause | 0ebd6fbce9d7f5a2418dde9b235275484d80ab55 | LOCAL ONLY |
 | M2-A | Shared command resolution context | complete | PASS: 7 focused library + 2 routing tests + 1 small owner; 4 signatures match baseline, one catalog/prepare; rustfmt/diff | independent scoped review clear | 34d85982b83f83328e53a272a7efb9dd16991ba5 | LOCAL ONLY |
 | M2-B | Bounded matching history candidates | complete | PASS: 13 focused library + 1 small owner; zero full-record copies, common8 resolutions/prepare, exact signatures; rustfmt/diff | independent review clear; parent allocation/benchmark assertions corrected | c396ef3f0b45c7f2354ab5657984378931336866 | LOCAL ONLY |
-| M2-C | History parity and comparison | complete | PASS: 12 full scenarios, exact signatures/counters; 2 parity + 5 history integration tests; rustfmt/diff | independent scoped test review clear | this checkpoint | LOCAL ONLY |
-| M3-A | Visible launcher list rows | pending | — | — | — | — |
+| M2-C | History parity and comparison | complete | PASS: 12 full scenarios, exact signatures/counters; 2 parity + 5 history integration tests; rustfmt/diff | independent scoped test review clear | 9b7447fdf48f6aec6cde61d23512b1f3c36b5f6f | LOCAL ONLY |
+| M3-A | Visible launcher list rows | complete | PASS: 9 focused library + 1 small owner; 28/100 list widgets, zero warm geometry measurements; rustfmt/diff | independent geometry/font/isolation/menu findings resolved | pending local commit | LOCAL ONLY |
 | M3-B | Complete visible grid rows | pending | — | — | — | — |
 | M3-C | Lightweight Quick Notes projection | pending | — | — | — | — |
 | M3-D | Variable-height Quick Notes virtualization | pending | — | — | — | — |

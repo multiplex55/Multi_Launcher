@@ -687,6 +687,7 @@ pub struct LauncherApp {
     pub query: String,
     query_history: QueryHistoryNavigator,
     pub results: Vec<Action>,
+    root_list_geometry: render::RootListGeometryCache,
     pub matcher: SkimMatcherV2,
     pub error: Option<String>,
     error_time: Option<Instant>,
@@ -802,6 +803,12 @@ pub struct LauncherApp {
     pub(crate) test_skip_history_persistence: bool,
     #[cfg(test)]
     pub(crate) test_root_rendered_rows: Vec<(usize, String)>,
+    #[cfg(test)]
+    pub(crate) test_root_rendered_row_ids: Vec<(usize, egui::Id)>,
+    #[cfg(test)]
+    pub(crate) test_root_rendered_row_rects: Vec<(usize, egui::Rect)>,
+    #[cfg(test)]
+    pub(crate) test_root_scroll_area_id: Option<egui::Id>,
     #[cfg(test)]
     pub(crate) test_defer_virtual_desktop_completion: bool,
     pub enable_toasts: bool,
@@ -2078,6 +2085,7 @@ impl LauncherApp {
             query: String::new(),
             query_history: QueryHistoryNavigator::default(),
             results: (*actions).clone(),
+            root_list_geometry: render::RootListGeometryCache::default(),
             matcher: SkimMatcherV2::default(),
             error: None,
             error_time: None,
@@ -2194,6 +2202,12 @@ impl LauncherApp {
             test_skip_history_persistence: false,
             #[cfg(test)]
             test_root_rendered_rows: Vec::new(),
+            #[cfg(test)]
+            test_root_rendered_row_ids: Vec::new(),
+            #[cfg(test)]
+            test_root_rendered_row_rects: Vec::new(),
+            #[cfg(test)]
+            test_root_scroll_area_id: None,
             #[cfg(test)]
             test_defer_virtual_desktop_completion: false,
             enable_toasts,

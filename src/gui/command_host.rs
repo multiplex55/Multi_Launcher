@@ -1062,6 +1062,7 @@ impl LauncherApp {
         }
         if let ResultsPolicy::Replace(results) = outcome.results {
             self.results = results;
+            self.invalidate_root_list_results();
             self.selected = None;
             self.last_search_query = self.query.clone();
             self.last_results_valid = true;

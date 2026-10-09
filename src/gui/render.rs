@@ -4,6 +4,316 @@ use crate::radial::acceptance_trace::{
     self, Correlation, RestoreEdge, RootMenuControl, RootResultKind, VisibilitySource,
 };
 
+const ROOT_LIST_OVERSCAN_ROWS: usize = 2;
+
+#[derive(Clone, Debug, PartialEq)]
+struct RootListGeometryKey {
+    result_generation: u64,
+    result_count: usize,
+    width_bits: u32,
+    pixels_per_point_bits: u32,
+    button_font: egui::FontId,
+    wrap: bool,
+    button_padding_x_bits: u32,
+    button_padding_y_bits: u32,
+    interaction_height_bits: u32,
+    item_spacing_y_bits: u32,
+    show_full_paths: bool,
+    is_grid: bool,
+}
+
+/// Cached actual SelectableLabel row geometry for the root list.
+///
+/// Result contents are intentionally not retained here: a generation bump is
+/// the invalidation contract for action replacement, and display-setting
+/// changes invalidate the geometry key separately.
+pub(super) struct RootListGeometryCache {
+    key: Option<RootListGeometryKey>,
+    row_tops: Vec<f32>,
+    row_heights: Vec<f32>,
+    row_x_offsets: Vec<f32>,
+    row_response_x_offsets: Vec<f32>,
+    row_widths: Vec<f32>,
+    row_response_widths: Vec<f32>,
+    total_height: f32,
+    content_x_offset: f32,
+    content_width: f32,
+    result_generation: u64,
+    last_grid_mode: Option<bool>,
+    popup_owner: Option<(u64, usize)>,
+    popup_response: Option<egui::Response>,
+    pending_popup_cleanup: Option<egui::Response>,
+    font_atlas: Option<Arc<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
+    #[cfg(test)]
+    rebuild_count: u64,
+    #[cfg(test)]
+    measured_rows: u64,
+    #[cfg(test)]
+    last_rebuild_nanos: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RootListGeometryObservation {
+    pub(crate) rebuild_count: u64,
+    pub(crate) measured_rows: u64,
+    pub(crate) last_rebuild_nanos: u64,
+}
+
+impl Default for RootListGeometryCache {
+    fn default() -> Self {
+        Self {
+            key: None,
+            row_tops: Vec::new(),
+            row_heights: Vec::new(),
+            row_x_offsets: Vec::new(),
+            row_response_x_offsets: Vec::new(),
+            row_widths: Vec::new(),
+            row_response_widths: Vec::new(),
+            total_height: 0.0,
+            content_x_offset: 0.0,
+            content_width: 0.0,
+            result_generation: 0,
+            last_grid_mode: None,
+            popup_owner: None,
+            popup_response: None,
+            pending_popup_cleanup: None,
+            font_atlas: None,
+            #[cfg(test)]
+            rebuild_count: 0,
+            #[cfg(test)]
+            measured_rows: 0,
+            #[cfg(test)]
+            last_rebuild_nanos: 0,
+        }
+    }
+}
+
+impl RootListGeometryCache {
+    fn invalidate_geometry(&mut self) {
+        self.key = None;
+        self.row_tops.clear();
+        self.row_heights.clear();
+        self.row_x_offsets.clear();
+        self.row_response_x_offsets.clear();
+        self.row_widths.clear();
+        self.row_response_widths.clear();
+        self.total_height = 0.0;
+        self.content_x_offset = 0.0;
+        self.content_width = 0.0;
+    }
+
+    fn invalidate_results(&mut self) {
+        self.result_generation = self.result_generation.wrapping_add(1);
+        self.queue_popup_cleanup();
+        self.invalidate_geometry();
+    }
+
+    fn observe_grid_mode(&mut self, is_grid: bool) {
+        if self
+            .last_grid_mode
+            .replace(is_grid)
+            .is_some_and(|old| old != is_grid)
+        {
+            self.queue_popup_cleanup();
+            self.invalidate_geometry();
+        }
+    }
+
+    fn queue_popup_cleanup(&mut self) {
+        let pending_is_open = self
+            .pending_popup_cleanup
+            .as_ref()
+            .is_some_and(egui::Response::context_menu_opened);
+        if !pending_is_open {
+            self.pending_popup_cleanup = self
+                .popup_response
+                .take()
+                .filter(egui::Response::context_menu_opened);
+        } else {
+            self.popup_response = None;
+        }
+        self.popup_owner = None;
+    }
+
+    fn close_pending_popup(&mut self) {
+        if let Some(response) = self.pending_popup_cleanup.take()
+            && response.context_menu_opened()
+        {
+            let _ = response.context_menu(|ui| ui.close_menu());
+        }
+    }
+
+    #[cfg(test)]
+    fn test_observation(&self) -> RootListGeometryObservation {
+        RootListGeometryObservation {
+            rebuild_count: self.rebuild_count,
+            measured_rows: self.measured_rows,
+            last_rebuild_nanos: self.last_rebuild_nanos,
+        }
+    }
+
+    fn ensure(
+        &mut self,
+        ui: &egui::Ui,
+        results: &[Action],
+        folder_aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+        is_grid: bool,
+    ) {
+        let spacing = ui.spacing();
+        let effective_text_style = ui
+            .style()
+            .override_text_style
+            .as_ref()
+            .unwrap_or(&egui::TextStyle::Button);
+        let button_font = effective_text_style.resolve(ui.style());
+        let font_atlas = ui.fonts(|fonts| fonts.texture_atlas());
+        let key = RootListGeometryKey {
+            result_generation: self.result_generation,
+            result_count: results.len(),
+            width_bits: ui.available_width().to_bits(),
+            pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
+            button_font,
+            wrap: ui.wrap_text(),
+            button_padding_x_bits: spacing.button_padding.x.to_bits(),
+            button_padding_y_bits: spacing.button_padding.y.to_bits(),
+            interaction_height_bits: spacing.interact_size.y.to_bits(),
+            item_spacing_y_bits: spacing.item_spacing.y.to_bits(),
+            show_full_paths,
+            is_grid,
+        };
+        if self.key.as_ref() == Some(&key)
+            && self
+                .font_atlas
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
+        {
+            return;
+        }
+
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        let width = f32::from_bits(key.width_bits);
+        let spacing_y = f32::from_bits(key.item_spacing_y_bits);
+        let padding = spacing.button_padding;
+        let interaction_height = spacing.interact_size.y;
+        let wrap = key.wrap;
+        let mut row_tops = Vec::with_capacity(results.len());
+        let mut row_heights = Vec::with_capacity(results.len());
+        let mut row_x_offsets = Vec::with_capacity(results.len());
+        let mut row_response_x_offsets = Vec::with_capacity(results.len());
+        let mut row_widths = Vec::with_capacity(results.len());
+        let mut row_response_widths = Vec::with_capacity(results.len());
+        let mut cursor_y = 0.0_f32;
+        let mut content_x_offset = 0.0_f32;
+        let mut content_width = width;
+
+        for (index, action) in results.iter().enumerate() {
+            if index != 0 {
+                cursor_y += spacing_y;
+            }
+            row_tops.push(cursor_y);
+            row_x_offsets.push(content_x_offset);
+            row_widths.push(content_width);
+
+            let text = root_list_display_text(action, folder_aliases, show_full_paths);
+            let galley = egui::WidgetText::from(text).into_galley_impl(
+                ui.ctx(),
+                ui.style(),
+                wrap,
+                (content_width - 2.0 * padding.x).max(0.0),
+                egui::FontSelection::Style(egui::TextStyle::Button),
+                egui::Align::Center,
+            );
+            let row_height = (galley.size().y + 2.0 * padding.y).max(interaction_height);
+            let response_width = content_width.max(galley.size().x + 2.0 * padding.x);
+            row_response_x_offsets.push(content_x_offset - (response_width - content_width) * 0.5);
+            row_response_widths.push(response_width);
+            content_x_offset -= (response_width - content_width) * 0.5;
+            content_width = response_width;
+            row_heights.push(row_height);
+            cursor_y += row_height;
+        }
+
+        self.row_tops = row_tops;
+        self.row_heights = row_heights;
+        self.row_x_offsets = row_x_offsets;
+        self.row_response_x_offsets = row_response_x_offsets;
+        self.row_widths = row_widths;
+        self.row_response_widths = row_response_widths;
+        self.total_height = cursor_y;
+        self.content_x_offset = content_x_offset;
+        self.content_width = content_width;
+        self.key = Some(key);
+        self.font_atlas = Some(font_atlas);
+        #[cfg(test)]
+        {
+            self.rebuild_count = self.rebuild_count.saturating_add(1);
+            self.measured_rows = self
+                .measured_rows
+                .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
+            self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        }
+    }
+
+    fn visible_range(&self, viewport: egui::Rect) -> std::ops::Range<usize> {
+        let mut low = 0;
+        let mut high = self.row_tops.len();
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if self.row_tops[middle] + self.row_heights[middle] <= viewport.min.y {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        let end = self
+            .row_tops
+            .partition_point(|top| *top < viewport.max.y)
+            .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+            .min(self.row_tops.len());
+        low.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)..end
+    }
+
+    fn set_popup_owner(&mut self, index: usize, response: &egui::Response) {
+        self.popup_owner = Some((self.result_generation, index));
+        self.popup_response = Some(response.clone());
+    }
+
+    fn popup_owner(&self) -> Option<usize> {
+        self.popup_owner
+            .filter(|(generation, index)| {
+                *generation == self.result_generation && *index < self.row_tops.len()
+            })
+            .map(|(_, index)| index)
+    }
+
+    fn row_widget_id(&self, parent: egui::Id, index: usize) -> egui::Id {
+        parent.with(("launcher-root-list-row", self.result_generation, index))
+    }
+
+    fn clear_popup_owner(&mut self) {
+        self.popup_owner = None;
+        self.popup_response = None;
+    }
+}
+
+fn root_list_display_text<'a>(
+    action: &'a Action,
+    folder_aliases: &HashMap<String, Option<String>>,
+    show_full_paths: bool,
+) -> std::borrow::Cow<'a, str> {
+    let aliased = folder_aliases
+        .get(&action.action)
+        .and_then(|alias| alias.as_ref());
+    if show_full_paths || aliased.is_none() {
+        std::borrow::Cow::Owned(format!("{} : {}", action.label, action.desc))
+    } else {
+        std::borrow::Cow::Borrowed(action.label.as_str())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DeferredActivation {
     pub(crate) action: Action,
@@ -1142,11 +1452,27 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
+    pub(super) fn invalidate_root_list_results(&mut self) {
+        self.root_list_geometry.invalidate_results();
+    }
+
+    pub(super) fn invalidate_root_list_display_geometry(&mut self) {
+        self.root_list_geometry.invalidate_geometry();
+    }
+
     pub(super) fn render_root_frame(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use egui::*;
 
         #[cfg(test)]
         self.test_root_rendered_rows.clear();
+        #[cfg(test)]
+        self.test_root_rendered_row_ids.clear();
+        #[cfg(test)]
+        self.test_root_rendered_row_rects.clear();
+
+        self.root_list_geometry
+            .observe_grid_mode(self.resolved_grid_layout);
+        self.root_list_geometry.close_pending_popup();
 
         if acceptance_trace::enabled()
             && ctx.input(|input| {
@@ -1915,9 +2241,9 @@ impl LauncherApp {
                 }
             } else {
                 let area_height = ui.available_height();
-                ScrollArea::vertical()
+                let _root_scroll_output = ScrollArea::vertical()
                     .max_height(area_height)
-                    .show(ui, |ui| {
+                    .show_viewport(ui, |ui, viewport| {
                         scale_ui(ui, self.list_scale, |ui| {
                             let mut refresh = false;
                             let mut set_focus = false;
@@ -1955,6 +2281,11 @@ impl LauncherApp {
                                             #[cfg(test)]
                                             self.test_root_rendered_rows
                                                 .push((idx, action.action.clone()));
+                                            #[cfg(test)]
+                                            self.test_root_rendered_row_ids.push((idx, resp.id));
+                                            #[cfg(test)]
+                                            self.test_root_rendered_row_rects
+                                                .push((idx, resp.rect));
                                             rows_built = rows_built.saturating_add(1);
                                             let menu_resp = self.attach_result_context_menu(
                                                 &action,
@@ -1988,25 +2319,92 @@ impl LauncherApp {
                                         }
                                     });
                             } else {
-                                for idx in 0..self.results.len() {
-                                    let a = self.results[idx].clone();
-                                    let aliased =
-                                        self.folder_aliases.get(&a.action).and_then(|v| v.as_ref());
-                                    let show_path = show_full || aliased.is_none();
-                                    let text = if show_path {
-                                        format!("{} : {}", a.label, a.desc)
-                                    } else {
-                                        a.label.clone()
-                                    };
-                                    let resp = ui.add_sized(
-                                        [ui.available_width(), 0.0],
-                                        egui::SelectableLabel::new(
-                                            self.selected == Some(idx),
-                                            text,
+                                self.root_list_geometry.ensure(
+                                    ui,
+                                    &self.results,
+                                    &self.folder_aliases,
+                                    show_full,
+                                    false,
+                                );
+                                let total_height = self.root_list_geometry.total_height;
+                                let content_width = self.root_list_geometry.content_width;
+                                let content_origin = ui.max_rect().min;
+
+                                if !ui.ctx().is_context_menu_open() {
+                                    self.root_list_geometry.clear_popup_owner();
+                                }
+                                if let Some(selected) = self
+                                    .selected
+                                    .filter(|index| *index < self.root_list_geometry.row_tops.len())
+                                {
+                                    let selected_rect = egui::Rect::from_min_size(
+                                        content_origin
+                                            + egui::vec2(
+                                                self.root_list_geometry.row_response_x_offsets
+                                                    [selected],
+                                                self.root_list_geometry.row_tops[selected],
+                                            ),
+                                        egui::vec2(
+                                            self.root_list_geometry.row_response_widths[selected],
+                                            self.root_list_geometry.row_heights[selected],
                                         ),
                                     );
+                                    ui.scroll_to_rect(selected_rect, Some(egui::Align::Center));
+                                }
+
+                                let mut visible_rows = self
+                                    .root_list_geometry
+                                    .visible_range(viewport)
+                                    .collect::<Vec<_>>();
+                                if let Some(owner) = self.root_list_geometry.popup_owner() {
+                                    visible_rows.push(owner);
+                                    visible_rows.sort_unstable();
+                                    visible_rows.dedup();
+                                }
+
+                                for idx in visible_rows {
+                                    let a = self.results[idx].clone();
+                                    let text =
+                                        root_list_display_text(&a, &self.folder_aliases, show_full);
+                                    let row_rect = egui::Rect::from_min_size(
+                                        content_origin
+                                            + egui::vec2(
+                                                self.root_list_geometry.row_x_offsets[idx],
+                                                self.root_list_geometry.row_tops[idx],
+                                            ),
+                                        egui::vec2(
+                                            self.root_list_geometry.row_widths[idx],
+                                            self.root_list_geometry.row_heights[idx],
+                                        ),
+                                    );
+                                    let mut row_ui = egui::Ui::new(
+                                        ui.ctx().clone(),
+                                        ui.layer_id(),
+                                        self.root_list_geometry.row_widget_id(ui.id(), idx),
+                                        row_rect,
+                                        ui.clip_rect(),
+                                    );
+                                    row_ui.set_style(ui.style().clone());
+                                    row_ui.set_enabled(ui.is_enabled());
+                                    let resp = row_ui
+                                        .with_layout(
+                                            egui::Layout::centered_and_justified(
+                                                ui.layout().main_dir(),
+                                            ),
+                                            |row_ui| {
+                                                row_ui.add(egui::SelectableLabel::new(
+                                                    self.selected == Some(idx),
+                                                    text,
+                                                ))
+                                            },
+                                        )
+                                        .inner;
                                     #[cfg(test)]
                                     self.test_root_rendered_rows.push((idx, a.action.clone()));
+                                    #[cfg(test)]
+                                    self.test_root_rendered_row_ids.push((idx, resp.id));
+                                    #[cfg(test)]
+                                    self.test_root_rendered_row_rects.push((idx, resp.rect));
                                     rows_built = rows_built.saturating_add(1);
                                     let tooltip = if a.desc == "Timer"
                                         && a.action.starts_with("timer:show:")
@@ -2036,6 +2434,11 @@ impl LauncherApp {
                                         &mut deferred_universal_action,
                                         &mut deferred_radial_authoring_add,
                                     );
+                                    if menu_resp.context_menu_opened() {
+                                        self.root_list_geometry.set_popup_owner(idx, &menu_resp);
+                                    } else if self.root_list_geometry.popup_owner() == Some(idx) {
+                                        self.root_list_geometry.clear_popup_owner();
+                                    }
                                     trace_root_result_pointer(
                                         ui,
                                         &menu_resp,
@@ -2043,18 +2446,20 @@ impl LauncherApp {
                                         idx,
                                         menu_resp.clicked(),
                                     );
-                                    if self.selected == Some(idx) {
-                                        menu_resp.scroll_to_me(Some(egui::Align::Center));
-                                    }
                                     if menu_resp.clicked() {
                                         self.selected = Some(idx);
                                         deferred_activation = Some(DeferredActivation {
-                                            action: a.clone(),
+                                            action: a,
                                             query_override: None,
                                             source: ActivationSource::Click,
                                         });
                                     }
                                 }
+                                ui.expand_to_include_rect(egui::Rect::from_min_size(
+                                    content_origin
+                                        + egui::vec2(self.root_list_geometry.content_x_offset, 0.0),
+                                    egui::vec2(content_width, total_height),
+                                ));
                             }
                             rows_timer.set_work_units(rows_built);
                             drop(rows_timer);
@@ -2071,6 +2476,10 @@ impl LauncherApp {
                             }
                         });
                     });
+                #[cfg(test)]
+                {
+                    self.test_root_scroll_area_id = Some(_root_scroll_output.id);
+                }
             }
             if let Some(deferred) = deferred_activation_unless_radial_add(
                 deferred_activation.take(),
@@ -3374,6 +3783,553 @@ mod tests {
     }
 
     #[test]
+    fn root_list_geometry_matches_eager_selectable_label_layout() {
+        let cases = [
+            (220.0, false, 1.0, false),
+            (220.0, true, 1.0, false),
+            (420.0, true, 1.25, false),
+            (760.0, false, 1.0, true),
+        ];
+        let actions = vec![
+            Action {
+                label: format!("Unwrapped {}", "wide-path-segment/".repeat(18)),
+                desc: "first overflow row".into(),
+                action: "folder:wide".into(),
+                args: None,
+            },
+            Action {
+                label: "Short result".into(),
+                desc: "second row follows the expanded region".into(),
+                action: "test:short".into(),
+                args: None,
+            },
+            Action {
+                label: "Explicit lines\nsecond line".into(),
+                desc: "Unicode λ🙂 and a moderately long wrapped description".into(),
+                action: "test:multiline".into(),
+                args: None,
+            },
+            Action {
+                label: "Folder Alias".into(),
+                desc: "C:\\synthetic\\folder\\with\\a\\long\\path".into(),
+                action: "folder:alias".into(),
+                args: None,
+            },
+        ];
+        let aliases = HashMap::from([("folder:alias".into(), Some("Alias".into()))]);
+
+        for (case_index, (width, wrap, scale, heading_override)) in cases.into_iter().enumerate() {
+            let ctx = egui::Context::default();
+            if heading_override {
+                let mut style = (*ctx.style()).clone();
+                style.override_text_style = Some(egui::TextStyle::Heading);
+                ctx.set_style(style);
+            }
+            let outer =
+                egui::Rect::from_min_size(egui::pos2(31.0, 17.0), egui::vec2(width, 1_400.0));
+            let layer = egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new(("root-list-geometry-oracle", case_index)),
+            );
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_200.0, 1_500.0),
+                )),
+                ..Default::default()
+            };
+            let mut cache = RootListGeometryCache::default();
+            let mut eager_rows = Vec::new();
+            let mut virtual_rows = Vec::new();
+            let mut eager_available_widths = Vec::new();
+            let mut eager_bounds = outer;
+
+            let _ = ctx.run(input, |ctx| {
+                let mut eager = egui::Ui::new(
+                    ctx.clone(),
+                    layer,
+                    egui::Id::new("root-list-eager-oracle"),
+                    outer,
+                    outer,
+                );
+                eager.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    let mut style = ui.style().as_ref().clone();
+                    style.wrap = Some(wrap);
+                    ui.set_style(style);
+                    scale_ui(ui, scale, |ui| {
+                        for action in &actions {
+                            let text = root_list_display_text(action, &aliases, false).into_owned();
+                            let available_width = ui.available_width();
+                            eager_available_widths.push(available_width);
+                            let response = ui.add_sized(
+                                [available_width, 0.0],
+                                egui::SelectableLabel::new(false, text),
+                            );
+                            eager_bounds = eager_bounds.union(response.rect);
+                            eager_rows.push(response.rect);
+                        }
+                    });
+                });
+
+                let mut measured = egui::Ui::new(
+                    ctx.clone(),
+                    layer,
+                    egui::Id::new("root-list-geometry-cache"),
+                    outer,
+                    outer,
+                );
+                measured.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    let mut style = ui.style().as_ref().clone();
+                    style.wrap = Some(wrap);
+                    ui.set_style(style);
+                    scale_ui(ui, scale, |ui| {
+                        cache.ensure(ui, &actions, &aliases, false, false);
+                        for (index, action) in actions.iter().enumerate() {
+                            let row_rect = egui::Rect::from_min_size(
+                                outer.min
+                                    + egui::vec2(cache.row_x_offsets[index], cache.row_tops[index]),
+                                egui::vec2(cache.row_widths[index], cache.row_heights[index]),
+                            );
+                            let mut row_ui = egui::Ui::new(
+                                ctx.clone(),
+                                layer,
+                                cache.row_widget_id(ui.id(), index),
+                                row_rect,
+                                outer,
+                            );
+                            row_ui.set_style(ui.style().clone());
+                            let text = root_list_display_text(action, &aliases, false).into_owned();
+                            let response = row_ui
+                                .with_layout(
+                                    egui::Layout::centered_and_justified(ui.layout().main_dir()),
+                                    |row_ui| row_ui.add(egui::SelectableLabel::new(false, text)),
+                                )
+                                .inner;
+                            virtual_rows.push(response.rect);
+                        }
+                    });
+                });
+            });
+
+            assert_eq!(cache.row_tops.len(), eager_rows.len());
+            for (index, response) in eager_rows.iter().enumerate() {
+                let expected_top = response.top() - outer.top();
+                assert!(
+                    (cache.row_tops[index] - expected_top).abs() <= 1.0,
+                    "case {case_index} row {index} top: cache={} eager={expected_top}",
+                    cache.row_tops[index]
+                );
+                assert!(
+                    (cache.row_heights[index] - response.height()).abs() <= 1.0,
+                    "case {case_index} row {index} height: cache={} eager={}",
+                    cache.row_heights[index],
+                    response.height()
+                );
+                assert!(
+                    (cache.row_widths[index] - eager_available_widths[index]).abs() <= 1.0,
+                    "case {case_index} row {index} available width: cache={} eager={}",
+                    cache.row_widths[index],
+                    eager_available_widths[index]
+                );
+                let expected_left = response.left() - outer.left();
+                assert!(
+                    (cache.row_response_x_offsets[index] - expected_left).abs() <= 1.0,
+                    "case {case_index} row {index} response left: cache={} eager={expected_left}",
+                    cache.row_response_x_offsets[index]
+                );
+                assert!(
+                    (cache.row_response_widths[index] - response.width()).abs() <= 1.0,
+                    "case {case_index} row {index} response width: cache={} eager={}",
+                    cache.row_response_widths[index],
+                    response.width()
+                );
+                assert!(
+                    virtual_rows[index].min.distance(response.min) <= 1.0
+                        && virtual_rows[index].max.distance(response.max) <= 1.0,
+                    "case {case_index} row {index} constructed response differs: virtual={:?} eager={response:?}",
+                    virtual_rows[index]
+                );
+            }
+            assert!(
+                (cache.content_x_offset - (eager_bounds.left() - outer.left())).abs() <= 1.0,
+                "case {case_index} content left: cache={} eager={}",
+                cache.content_x_offset,
+                eager_bounds.left() - outer.left()
+            );
+            assert!(
+                (cache.content_width - eager_bounds.width()).abs() <= 1.0,
+                "case {case_index} content width: cache={} eager={}",
+                cache.content_width,
+                eager_bounds.width()
+            );
+            assert!(
+                (cache.total_height - (eager_rows.last().unwrap().bottom() - outer.top())).abs()
+                    <= 1.0,
+                "case {case_index} total height: cache={} eager={}",
+                cache.total_height,
+                eager_rows.last().unwrap().bottom() - outer.top()
+            );
+        }
+    }
+
+    fn root_list_test_app(
+        ctx: &egui::Context,
+        results: Vec<Action>,
+    ) -> (
+        crate::performance::workloads::IsolatedWorkspace,
+        LauncherApp,
+    ) {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.pinned_panels.clear();
+        let mut app = LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            workspace
+                .root()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            workspace
+                .root()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.actions = Arc::new(results.clone());
+        app.results = results;
+        app.invalidate_root_list_results();
+        app.query = "root list fixture".into();
+        app.last_search_query = app.query.clone();
+        app.last_results_valid = true;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+        app.last_plugin_search_generation = app.plugins.search_generation();
+        app.query_results_layout.enabled = false;
+        app.recompute_query_results_layout();
+        app.list_scale = 1.0;
+        app.selected = None;
+        (workspace, app)
+    }
+
+    fn root_list_action(index: usize) -> Action {
+        Action {
+            label: format!("Launcher result {index}"),
+            desc: if index % 7 == 0 {
+                format!("A longer description for row {index} with some wrapped words")
+            } else {
+                "Synthetic root row".into()
+            },
+            action: format!("app:root-list-{index}"),
+            args: Some(format!("argument-{index}")),
+        }
+    }
+
+    fn run_root_list_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        frame_index: usize,
+        width: f32,
+        height: f32,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, height),
+            )),
+            time: Some(1.0 + frame_index as f64 / 60.0),
+            events,
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| app.render_root_frame(ctx, None))
+    }
+
+    fn settle_root_selection(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        next_frame: &mut usize,
+        selected: usize,
+    ) {
+        app.selected = Some(selected);
+        for _ in 0..30 {
+            let frame = *next_frame;
+            *next_frame += 1;
+            let _ = run_root_list_frame(ctx, app, frame, 960.0, 640.0, Vec::new());
+        }
+        assert_eq!(app.selected, Some(selected));
+    }
+
+    #[test]
+    fn root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let mut frame = 0;
+
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        assert!(app.test_root_rendered_rows.is_empty());
+
+        app.actions = Arc::new(vec![root_list_action(0)]);
+        app.results = (*app.actions).clone();
+        app.invalidate_root_list_results();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert_eq!(app.test_root_rendered_rows.len(), 1);
+        assert_eq!(app.test_root_rendered_rows[0].0, 0);
+
+        let results = (0..10_000).map(root_list_action).collect::<Vec<_>>();
+        let expected_ids = results
+            .iter()
+            .map(|action| action.action.clone())
+            .collect::<Vec<_>>();
+        app.actions = Arc::new(results.clone());
+        app.results = results;
+        app.invalidate_root_list_results();
+
+        let mut first_id = None;
+        for selected in [0, 5_000, 9_999, 0] {
+            settle_root_selection(&ctx, &mut app, &mut frame, selected);
+            let rows = &app.test_root_rendered_rows;
+            let ids = &app.test_root_rendered_row_ids;
+            assert!(!rows.is_empty());
+            assert!(rows.len() <= 64, "built {} rows", rows.len());
+            assert_eq!(ids.len(), rows.len());
+            assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+            for (index, action_id) in rows {
+                assert_eq!(app.results[*index].action, *action_id);
+                assert_eq!(app.results[*index].action, expected_ids[*index]);
+            }
+            assert_eq!(
+                rows.iter().filter(|(index, _)| *index == selected).count(),
+                1
+            );
+            let selected_id = ids
+                .iter()
+                .find_map(|(index, id)| (*index == selected).then_some(*id))
+                .expect("the settled selected row is constructed");
+            if selected == 0 {
+                if let Some(previous) = first_id {
+                    assert_eq!(selected_id, previous, "absolute row identity is stable");
+                }
+                first_id = Some(selected_id);
+            }
+        }
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn root_list_geometry_rebuilds_only_when_layout_or_display_inputs_change() {
+        let ctx = egui::Context::default();
+        let mut actions = (0..32).map(root_list_action).collect::<Vec<_>>();
+        actions[0].action = "folder:root-list-alias".into();
+        let (workspace, mut app) = root_list_test_app(&ctx, actions);
+        let mut frame = 0;
+
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        let mut rebuilds = app.root_list_geometry.test_observation().rebuild_count;
+        assert_eq!(rebuilds, 1);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert_eq!(
+            app.root_list_geometry.test_observation().rebuild_count,
+            rebuilds
+        );
+
+        let mut expect_rebuild = |app: &LauncherApp| {
+            rebuilds += 1;
+            assert_eq!(
+                app.root_list_geometry.test_observation().rebuild_count,
+                rebuilds
+            );
+        };
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        app.list_scale = 1.2;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        let mut style = (*ctx.style()).clone();
+        style.override_text_style = Some(egui::TextStyle::Heading);
+        ctx.set_style(style);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        let mut style = (*ctx.style()).clone();
+        style.wrap = Some(false);
+        ctx.set_style(style);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        ctx.set_pixels_per_point(1.25);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        app.folder_aliases.insert(
+            "folder:root-list-alias".into(),
+            Some("Fixture folder".into()),
+        );
+        app.invalidate_root_list_display_geometry();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        app.enabled_capabilities = Some(HashMap::from([(
+            "folders".into(),
+            vec!["show_full_path".into()],
+        )]));
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+
+        let prior_id = app.test_root_rendered_row_ids[0].1;
+        app.results[0].label = "Same-length replacement action label".into();
+        app.invalidate_root_list_results();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        expect_rebuild(&app);
+        assert_ne!(app.test_root_rendered_row_ids[0].1, prior_id);
+
+        app.query_results_layout.enabled = true;
+        app.recompute_query_results_layout();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        frame += 1;
+        app.query_results_layout.enabled = false;
+        app.recompute_query_results_layout();
+        let prior_rebuilds = app.root_list_geometry.test_observation().rebuild_count;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        assert_eq!(
+            app.root_list_geometry.test_observation().rebuild_count,
+            prior_rebuilds + 1,
+            "returning from grid mode rebuilds list geometry"
+        );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn root_list_context_menu_owner_stays_with_its_absolute_row_offscreen() {
+        let ctx = egui::Context::default();
+        let results = (0..120).map(root_list_action).collect::<Vec<_>>();
+        let (workspace, mut app) = root_list_test_app(&ctx, results);
+        let mut frame = 0;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        let row_zero = app
+            .test_root_rendered_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 0).then_some(*rect))
+            .expect("the initial viewport contains the first result");
+        let pointer = row_zero.center();
+        let pressed = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+        frame += 1;
+        let released = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+        frame += 1;
+        assert!(
+            ctx.is_context_menu_open(),
+            "the secondary click opened a menu"
+        );
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+        let old_row_id = app
+            .test_root_rendered_row_ids
+            .iter()
+            .find_map(|(index, id)| (*index == 0).then_some(*id))
+            .expect("the popup owner remains constructed");
+        let scroll_id = app.test_root_scroll_area_id.unwrap();
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
+        scroll_state.offset.y = app.root_list_geometry.row_tops[80];
+        scroll_state.store(&ctx, scroll_id);
+
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+        assert!(ctx.is_context_menu_open());
+        assert!(
+            app.test_root_rendered_rows
+                .iter()
+                .any(|(index, _)| *index == 0)
+        );
+        assert!(app.test_root_rendered_rows.len() <= 64);
+        assert_eq!(
+            app.test_root_rendered_row_ids
+                .iter()
+                .find_map(|(index, id)| (*index == 0).then_some(*id)),
+            Some(old_row_id)
+        );
+
+        let replacement = (0..120)
+            .map(|index| Action {
+                label: format!("Replacement {index}"),
+                desc: "replacement result".into(),
+                action: format!("app:replacement-{index}"),
+                args: None,
+            })
+            .collect::<Vec<_>>();
+        app.results = replacement.clone();
+        app.actions = Arc::new(replacement);
+        app.invalidate_root_list_results();
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        assert_eq!(app.root_list_geometry.popup_owner(), None);
+        assert!(
+            !ctx.is_context_menu_open(),
+            "the obsolete root popup is closed"
+        );
+        assert!(
+            app.test_root_rendered_row_ids
+                .iter()
+                .all(|(_, id)| *id != old_row_id)
+        );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
     #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
     fn track_a_benchmark_launcher_root_rows() {
         use crate::performance::{Metric, workloads};
@@ -3411,6 +4367,7 @@ mod tests {
             );
             app.actions = Arc::new(fixture.values.clone());
             app.results = fixture.values.clone();
+            app.invalidate_root_list_results();
             app.query = "synthetic launcher fixture".into();
             app.last_search_query = app.query.clone();
             app.last_results_valid = true;
@@ -3429,7 +4386,7 @@ mod tests {
             let frame_index = Cell::new(0_usize);
             for (selection_index, selected) in [0, count / 2, count - 1].into_iter().enumerate() {
                 app.selected = Some(selected);
-                for settle_frame in 0..2 {
+                for settle_frame in 0..30 {
                     let frame = frame_index.get();
                     frame_index.set(frame + 1);
                     let input = egui::RawInput {
@@ -3473,6 +4430,9 @@ mod tests {
                     "selection scroll should build the selected result exactly once"
                 );
             }
+            let cold_geometry = app.root_list_geometry.test_observation();
+            assert!(cold_geometry.rebuild_count > 0);
+            assert!(cold_geometry.measured_rows >= count as u64);
             app.dashboard_data_cache.wait_for_refresh();
 
             for (scenario, grid) in [("list", false), ("grid-3-column", true)] {
@@ -3483,7 +4443,7 @@ mod tests {
                 assert_eq!(app.resolved_grid_layout, grid);
                 for selected in [0, count / 2, count - 1] {
                     app.selected = Some(selected);
-                    for _ in 0..2 {
+                    for _ in 0..30 {
                         let frame = frame_index.get();
                         frame_index.set(frame + 1);
                         let input = egui::RawInput {
@@ -3524,6 +4484,20 @@ mod tests {
                     );
                 }
                 app.selected = Some(count / 2);
+                for _ in 0..30 {
+                    let frame = frame_index.get();
+                    frame_index.set(frame + 1);
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 640.0),
+                        )),
+                        time: Some(1.0 + frame as f64 / 60.0),
+                        ..Default::default()
+                    };
+                    let _ = context.run(input, |ctx| app.render_root_frame(ctx, None));
+                }
+                let geometry_before = app.root_list_geometry.test_observation();
 
                 let input_slot = RefCell::new(None);
                 let (timing, _frame_output) = workloads::measure(
@@ -3549,6 +4523,7 @@ mod tests {
                     },
                 );
                 let metrics = workloads::metrics_for(&[Metric::LauncherRowsBuilt]);
+                let geometry_after = app.root_list_geometry.test_observation();
                 assert_eq!(metrics.len(), 1);
                 assert_eq!(metrics[0].calls, workloads::SAMPLE_COUNT as u64);
                 assert!(!app.test_root_rendered_rows.is_empty());
@@ -3603,12 +4578,32 @@ mod tests {
                     Some(membership_signature.finish()),
                     Some(signature.finish()),
                 );
-                workloads::emit_summary(
+                let root_list_geometry = if grid {
+                    None
+                } else {
+                    let warm_rebuild_count = geometry_after
+                        .rebuild_count
+                        .saturating_sub(geometry_before.rebuild_count);
+                    let warm_rows_measured = geometry_after
+                        .measured_rows
+                        .saturating_sub(geometry_before.measured_rows);
+                    assert_eq!(warm_rebuild_count, 0, "warm list frames reuse row geometry");
+                    assert_eq!(warm_rows_measured, 0, "warm list frames measure no rows");
+                    Some(workloads::RootListGeometrySummary {
+                        cold_rebuild_count: cold_geometry.rebuild_count,
+                        cold_rows_measured: cold_geometry.measured_rows,
+                        last_cold_rebuild_nanos: cold_geometry.last_rebuild_nanos,
+                        warm_rebuild_count,
+                        warm_rows_measured,
+                    })
+                };
+                workloads::emit_summary_with_root_list_geometry(
                     &format!("launcher-{count}-{scenario}"),
                     "production render_root_frame(None); headless egui debug-test CPU",
                     summary,
                     timing,
                     &metrics,
+                    root_list_geometry,
                 );
             }
             drop(app);
@@ -8275,6 +9270,7 @@ mod tests {
             0
         );
         app.results = two_results();
+        app.invalidate_root_list_results();
         assert!(app.open_action_sheet_for_index(0));
         let _ = ctx.run(actual_query_input(true), |root| {
             app.render_root_frame(root, None)
@@ -9519,7 +10515,7 @@ mod tests {
                 Action {
                     label: "sig".into(),
                     desc: "Snippet".into(),
-                    action: "clipboard:Regards".into(),
+                    action: crate::plugins::snippets::snippet_run_action("sig"),
                     args: None,
                 },
                 "snippet.edit",

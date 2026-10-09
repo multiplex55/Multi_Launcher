@@ -584,6 +584,17 @@ pub struct TimingSummary {
     pub max_nanos: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RootListGeometrySummary {
+    pub cold_rebuild_count: u64,
+    pub cold_rows_measured: u64,
+    /// Duration of the last cold geometry rebuild; this is one observation,
+    /// not a percentile distribution.
+    pub last_cold_rebuild_nanos: u64,
+    pub warm_rebuild_count: u64,
+    pub warm_rows_measured: u64,
+}
+
 fn nearest_rank(sorted: &[u64; SAMPLE_COUNT], percentile: usize) -> u64 {
     let rank = (sorted.len() * percentile).div_ceil(100).max(1);
     sorted[rank - 1]
@@ -688,6 +699,17 @@ pub fn emit_summary(
     timing: TimingSummary,
     metrics: &[MetricSnapshot],
 ) {
+    emit_summary_with_root_list_geometry(scenario, scope, fixture, timing, metrics, None);
+}
+
+pub fn emit_summary_with_root_list_geometry(
+    scenario: &str,
+    scope: &str,
+    fixture: FixtureSummary,
+    timing: TimingSummary,
+    metrics: &[MetricSnapshot],
+    root_list_geometry: Option<RootListGeometrySummary>,
+) {
     let metrics = metrics
         .iter()
         .map(|snapshot| {
@@ -728,6 +750,13 @@ pub fn emit_summary(
             "fixture_signature": format!("{:016x}", fixture.signature),
             "output_signature": fixture.output_signature.map(|value| format!("{value:016x}")),
             "output_order_signature": fixture.output_order_signature.map(|value| format!("{value:016x}")),
+            "root_list_geometry": root_list_geometry.map(|geometry| serde_json::json!({
+                "cold_rebuild_count": geometry.cold_rebuild_count,
+                "cold_rows_measured": geometry.cold_rows_measured,
+                "last_cold_rebuild_nanos": geometry.last_cold_rebuild_nanos,
+                "warm_rebuild_count": geometry.warm_rebuild_count,
+                "warm_rows_measured": geometry.warm_rows_measured,
+            })),
             "metrics": metrics,
         })
     );

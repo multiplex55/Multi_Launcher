@@ -800,6 +800,7 @@ impl RadialRootState {
         app.query = self.query;
         app.pending_query = self.pending_query;
         app.results = self.results;
+        app.invalidate_root_list_results();
         app.selected = self.selected;
         app.resolved_grid_layout = self.resolved_grid_layout;
         let _ = app.visibility_revision.with_current(

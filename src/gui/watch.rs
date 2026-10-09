@@ -229,6 +229,7 @@ impl LauncherApp {
                     Ok((aliases, aliases_lc)) => {
                         self.folder_aliases = aliases;
                         self.folder_aliases_lc = aliases_lc;
+                        self.invalidate_root_list_display_geometry();
                         self.request_background_query_refresh();
                     }
                     Err(error) => self.report_error_message(

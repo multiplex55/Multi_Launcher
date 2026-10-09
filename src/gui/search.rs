@@ -293,6 +293,7 @@ impl LauncherApp {
             self.autocomplete_index = 0;
             self.suggestions.clear();
             self.results = self.search_read_only_outcome(&self.query).actions;
+            self.invalidate_root_list_results();
             self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
             crate::performance::log_elapsed("search.normalize", normalization_started);
@@ -307,6 +308,7 @@ impl LauncherApp {
         };
         self.last_search_provider_deferral = outcome.provider_deferral;
         self.results = outcome.actions;
+        self.invalidate_root_list_results();
         self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
         self.last_results_valid = outcome.provider_deferral == ProviderSearchDeferral::None;
