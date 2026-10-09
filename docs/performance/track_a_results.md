@@ -1,6 +1,6 @@
 # Track A runtime results
 
-Status: implementation in progress. M1-A/B/C and M2-A/B are verified; M2-C parity/comparison follows. The full note comparison below establishes the idle fast path and retains the slower large-draft result.
+Status: implementation in progress. M1-A/B/C and M2-A/B/C are verified; M3 launcher virtualization follows. The full note comparison below establishes the idle fast path and retains the slower large-draft result.
 
 See `track_a_baseline.md` for the authoritative source and host, and `track_a_checkpoints.md` for checkpoint state, test evidence, review, commit and push outcomes.
 
@@ -101,7 +101,7 @@ History preparation now captures one shallow dashboard snapshot and one current 
 
 Independent scoped review found no concrete issue. PASS: `cargo nextest run --lib -E 'test(history_resolution_) | test(history_pins_keep_opaque_clipboard_literals_and_resolve_snippets_by_alias) | test(failed_pin_reload_retains_last_good_then_recovers)'` (7 passed, 5,053 skipped), covering catalog/enablement changes, duplicate argument identity, precedence and captured snapshot consistency. PASS: `cargo nextest run --test plugin_routing -E 'test(data_prefix_routes_only_when_the_builtin_plugin_is_enabled) | test(ocr_prefix_and_inventory_respect_plugin_and_search_capability_enablement)'` (2 passed, 15 skipped).
 
-PASS: small serial opt-in `track_a_benchmark_history_prepare_owner` (1 passed, 5,059 skipped). All four 100-entry fixture/output signatures match the frozen baseline: fixture `fa44f92296bc978a`; outputs mixed8 `ba0b7576ea7d372a`, pins-only `4b77c403d753452a`, rare filter `992bfbcf088924e3`, renamed/missing count50 `30cf9432c6fcaba2`. Each scenario recorded20 prepares and20 catalog builds (one command enumerated per preparation in this fixture). Small p50/p95/max timings in microseconds were222.2/392.6/554.2,142.4/145.9/148.8,257.5/351.6/398.3,195.8/207.8/214.2 respectively; smoke evidence only. Full comparison follows M2-B/C. Changed-file rustfmt and diff checks pass. Local checkpoint commit follows; no push will be attempted.
+PASS: small serial opt-in `track_a_benchmark_history_prepare_owner` (1 passed, 5,059 skipped). All four 100-entry fixture/output signatures match the frozen baseline: fixture `fa44f92296bc978a`; outputs mixed8 `ba0b7576ea7d372a`, pins-only `4b77c403d753452a`, rare filter `992bfbcf088924e3`, renamed/missing count50 `30cf9432c6fcaba2`. Each scenario recorded 20 prepares and20 catalog builds (one command enumerated per preparation in this fixture). Small p50/p95/max timings in microseconds were 222.2/392.6/554.2,142.4/145.9/148.8,257.5/351.6/398.3,195.8/207.8/214.2 respectively; smoke evidence only. Full comparison follows M2-B/C. Changed-file rustfmt and diff checks pass. Local checkpoint commit follows; no push will be attempted.
 
 M2-A local commit: `34d85982b83f83328e53a272a7efb9dd16991ba5`. No push attempted.
 
@@ -111,6 +111,33 @@ Preparation now retains only matching requested output, skips ordinary history e
 
 PASS: `cargo nextest run --lib -E 'test(history_prepare_) | test(history_resolution_) | test(history_pins_keep_opaque_clipboard_literals_and_resolve_snippets_by_alias) | test(failed_pin_reload_retains_last_good_then_recovers)'` (13 passed, 5,053 skipped). PASS: final small serial opt-in history owner (1 passed, 5,065 skipped). The library run preceded a benchmark-assertion-only correction; the final owner compiled and verified that correction. Changed-file rustfmt/diff checks pass. Independent source review is clear. Parent review corrected direct allocation from an unclamped configured count (now tested with usize::MAX/small input) and a benchmark expectation that missed mixed pin-filled output's zero-read path.
 
-Small owner outputs match all four baseline signatures. Each scenario records20 prepares, zero full input records copied and20 catalog builds. Resolutions per20 measured preparations: mixed8=160, pins-only8=160, rare=1,540, renamed/missing count50=1,000. Actual test-only boundary observations include five warmups: mixed cases needing ordinary rows use25 reads, pins-only zero; separate unit cases prove count0/pin-filled zero and mixed underfilled one. Remaining output Action/string construction is not claimed eliminated.
+Small owner outputs match all four baseline signatures. Each scenario records20 prepares, zero full input records copied and20 catalog builds. Resolutions per 20 measured preparations: mixed8=160, pins-only8=160, rare=1,540, renamed/missing count50=1,000. Actual test-only boundary observations include five warmups: mixed cases needing ordinary rows use 25 reads, pins-only zero; separate unit cases prove count 0/pin-filled zero and mixed underfilled one. Remaining output Action/string construction is not claimed eliminated.
 
-Small p50/p95/max microseconds were16.9/24.8/25.3,10.3/10.9/22.1,198.5/203.9/206.2,76.6/99.0/106.3 for mixed8, pins-only, rare, renamed/missing respectively. These are headless debug-test smoke timings; full exact-source comparison follows C. Local checkpoint commit follows; no push will be attempted.
+Small p50/p95/max microseconds were 16.9/24.8/25.3,10.3/10.9/22.1,198.5/203.9/206.2,76.6/99.0/106.3 for mixed8, pins-only, rare, renamed/missing respectively. These are headless debug-test smoke timings; full exact-source comparison follows C. Local checkpoint commit follows; no push will be attempted.
+
+M2-B local commit: `c396ef3f0b45c7f2354ab5657984378931336866`. No push attempted.
+
+### M2-C — history comparison and parity gate
+
+Full serial history owner PASS on exact B commit `c396ef3f0b45c7f2354ab5657984378931336866`: 1 test, 5,065 skipped, 0.62s test duration (Nextest summary 0.648s, run `394ef417-7c70-4804-87f6-23897527a847`). All 12 summaries have 20 samples/5 warmups and fixture/output signatures identical to the frozen baseline. Exact p50/p95/max and counters are retained in `track_a_history_g1.json`; ignored raw log is `target/performance/track-a-m2c-history.log`. Command uses `MULTI_LAUNCHER_PERF=1`, `ML_TRACK_A_BENCH_MODE=full`, serial `--lib --run-ignored ignored-only -E 'test(track_a_benchmark_history_prepare_owner)' --success-output immediate-final --no-output-indent`. Duplicate immediate/final lines were deduplicated; power scheme rechecked Balanced.
+
+| Entries / mode | Baseline p50 / p95 (ms) | G1 p50 / p95 (ms) |
+| --- | --- | --- |
+| 100 mixed8 | 0.2563 / 0.2680 | 0.0164 / 0.0181 |
+| 100 pins-only8 | 0.0652 / 0.0660 | 0.0106 / 0.0125 |
+| 100 rare filter8 | 0.2989 / 0.3754 | 0.1650 / 0.1670 |
+| 100 renamed/missing50 | 0.2452 / 0.2751 | 0.0820 / 0.1126 |
+| 1,000 mixed8 | 3.2043 / 5.4554 | 0.0160 / 0.0162 |
+| 1,000 pins-only8 | 0.7097 / 1.8548 | 0.0106 / 0.0115 |
+| 1,000 rare filter8 | 3.5957 / 4.1005 | 1.6777 / 2.2287 |
+| 1,000 renamed/missing50 | 3.1665 / 6.5005 | 0.1231 / 0.1328 |
+| 10,000 mixed8 | 28.3778 / 39.3082 | 0.0173 / 0.0181 |
+| 10,000 pins-only8 | 7.6683 / 12.2372 | 0.0102 / 0.0108 |
+| 10,000 rare filter8 | 122.0601 / 143.3292 | 19.1359 / 23.2510 |
+| 10,000 renamed/missing50 | 112.5275 / 131.4196 | 0.0942 / 0.1699 |
+
+At 10,000 entries, each measured scenario previously copied 200,000 full input records across 20 preparations; now zero. Catalog builds fall from 100,020/11,540/103,860/103,860 to 20 each. Candidate resolutions fall from 150,020→160 mixed8, 15,400→160 pins-only8, remain 153,860 for the rare filter, and 153,860→1,000 renamed/missing50. The large rare case still scans many in-memory candidates under the read guard; it does not acquire a plugin catalog per candidate, but is not constant time. Large count50 is pin-filled and correctly avoids ordinary-history reads. These are debug-test headless CPU timings, with remaining output Action/string construction and one fresh catalog per preparation explicitly retained. All sizes improved p50/p95 in this capture; no claim about release input/GPU latency is made.
+
+PASS: `cargo nextest run --lib -E 'test(history_prepare_matches_eager_reference) | test(history_prepare_observes_note_snippet_changes_and_pin_reload)'` (2 passed, 5,066 skipped, 0.072s). A test-helper reference lifetime compiler error was corrected before this final pass. The oracle is test-only and compares ordered full Action/optional args/query/timestamp/pin/missing fields against former eager preparation; it never runs in production or timed workloads. Reused-widget transitions cover note alias rename/deletion, snippet deletion, persisted pin/unpin publication and opaque clipboard compatibility. Independent scoped review has no unresolved findings.
+
+PASS: `cargo nextest run --test history` (5 passed, 0 skipped, 0.223s test duration; build3m03s). Changed-file rustfmt and diff checks pass. C source changes are test-only; measured production source remains the exact B commit above. No push will be attempted.

@@ -605,6 +605,49 @@ mod tests {
         }
     }
 
+    fn history_entry_at(action: Action, query: &str, timestamp: i64, index: usize) -> HistoryEntry {
+        let mut entry = history_entry(action, index);
+        entry.query = query.into();
+        entry.query_lc = query.to_lowercase();
+        entry.timestamp = timestamp;
+        entry
+    }
+
+    fn note_with_alias(slug: &str, title: &str, alias: &str) -> crate::plugins::note::Note {
+        crate::plugins::note::Note {
+            title: title.into(),
+            path: Default::default(),
+            content: format!("# {title}\nAlias: {alias}"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: slug.into(),
+            alias: Some(alias.into()),
+            aliases: vec![alias.into()],
+            entity_refs: Vec::new(),
+        }
+    }
+
+    fn snippet_fixture(alias: &str) -> crate::plugins::snippets::SnippetEntry {
+        crate::plugins::snippets::SnippetEntry {
+            alias: alias.into(),
+            text: format!("{alias} body"),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        }
+    }
+
+    fn set_note_snippet_snapshot(
+        cache: &DashboardDataCache,
+        notes: Vec<crate::plugins::note::Note>,
+        snippets: Vec<crate::plugins::snippets::SnippetEntry>,
+    ) {
+        let mut snapshot = DashboardDataSnapshot::default();
+        snapshot.notes = Arc::new(notes);
+        snapshot.snippets = Arc::new(snippets);
+        cache.set_snapshot_for_test(snapshot);
+    }
+
     struct CatalogFixturePlugin(Action);
 
     impl Plugin for CatalogFixturePlugin {
@@ -753,6 +796,93 @@ mod tests {
             signature.number(u64::from(entry.missing));
         }
         signature.finish()
+    }
+
+    fn eager_prepare_reference(
+        widget: &CommandHistoryWidget,
+        resolution: &HistoryResolutionContext<'_>,
+        history: &VecDeque<HistoryEntry>,
+    ) -> Vec<DisplayEntry> {
+        let mut entries = Vec::new();
+        if widget.cfg.show_pinned_only {
+            entries.extend(
+                widget
+                    .cached_pins
+                    .iter()
+                    .map(|pin| CommandHistoryWidget::entry_from_pin(resolution, pin)),
+            );
+        } else {
+            let mut pinned = widget
+                .cached_pins
+                .iter()
+                .map(|pin| CommandHistoryWidget::entry_from_pin(resolution, pin))
+                .collect::<Vec<_>>();
+            pinned.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
+            entries.extend(pinned);
+
+            for history_entry in history {
+                let identity = HistoryPin::from_history(history_entry);
+                if widget.cached_pins.iter().any(|pin| pin == &identity) {
+                    continue;
+                }
+                entries.push(CommandHistoryWidget::entry_from_history(
+                    resolution,
+                    history_entry,
+                ));
+            }
+        }
+
+        let filter = widget.filter.to_lowercase();
+        entries
+            .into_iter()
+            .filter(|entry| {
+                filter.is_empty()
+                    || entry.action.label.to_lowercase().contains(&filter)
+                    || entry.query.to_lowercase().contains(&filter)
+            })
+            .take(widget.cfg.count)
+            .collect()
+    }
+
+    fn assert_display_entries_equal(
+        scenario: &str,
+        actual: &[DisplayEntry],
+        expected: &[DisplayEntry],
+    ) {
+        assert_eq!(actual.len(), expected.len(), "{scenario}: row count");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.action_id, expected.action_id,
+                "{scenario}: action identity at row {index}"
+            );
+            assert_eq!(
+                actual.action, expected.action,
+                "{scenario}: full Action including exact optional args at row {index}"
+            );
+            assert_eq!(
+                actual.query, expected.query,
+                "{scenario}: query at row {index}"
+            );
+            assert_eq!(
+                actual.timestamp, expected.timestamp,
+                "{scenario}: timestamp at row {index}"
+            );
+            assert_eq!(
+                actual.pinned, expected.pinned,
+                "{scenario}: pin at row {index}"
+            );
+            assert_eq!(
+                actual.missing, expected.missing,
+                "{scenario}: missing at row {index}"
+            );
+        }
+    }
+
+    fn display_entry<'a>(entries: &'a [DisplayEntry], action_id: &str) -> &'a DisplayEntry {
+        entries
+            .iter()
+            .find(|entry| entry.action_id == action_id)
+            .expect("fixture action is present")
     }
 
     #[test]
@@ -1822,5 +1952,529 @@ mod tests {
         drop(plugins);
         drop(_history_guard);
         drop(workspace);
+    }
+
+    #[test]
+    fn history_prepare_matches_eager_reference() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        let cache = DashboardDataCache::new();
+        let mut snapshot = DashboardDataSnapshot::default();
+        snapshot.snippets = Arc::new(vec![crate::plugins::snippets::SnippetEntry {
+            alias: "current".into(),
+            text: "current snippet body".into(),
+            hide_contents: false,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        }]);
+        cache.set_snapshot_for_test(snapshot);
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::from([
+            (
+                "renamed:action".into(),
+                action(
+                    "Current renamed presentation",
+                    "renamed:action",
+                    Some("new args"),
+                ),
+            ),
+            (
+                "rare:label".into(),
+                action("Resolved Needle presentation", "rare:label", None),
+            ),
+        ]);
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+
+        let history = VecDeque::from([
+            history_entry_at(
+                action("Saved renamed label", "renamed:action", None),
+                "renamed stored query",
+                1_700_000_100,
+                0,
+            ),
+            history_entry_at(
+                action("First duplicate", "duplicate:history", None),
+                "first duplicate query",
+                1_700_000_099,
+                1,
+            ),
+            history_entry_at(
+                action("Second duplicate", "duplicate:history", None),
+                "second duplicate query",
+                1_700_000_098,
+                2,
+            ),
+            history_entry_at(
+                action("No args identity", "optional:identity", None),
+                "none args query",
+                1_700_000_097,
+                3,
+            ),
+            history_entry_at(
+                action("Empty args identity", "optional:identity", Some("")),
+                "empty args query",
+                1_700_000_096,
+                4,
+            ),
+            history_entry_at(
+                action(
+                    "Missing saved presentation",
+                    "missing:history",
+                    Some("old args"),
+                ),
+                "missing ordinary query",
+                1_700_000_095,
+                5,
+            ),
+            history_entry_at(
+                action("Saved rare query label", "rare:query", None),
+                "needle appears only in query",
+                1_700_000_094,
+                6,
+            ),
+            history_entry_at(
+                action("Saved rare action label", "rare:label", None),
+                "ordinary label query",
+                1_700_000_093,
+                7,
+            ),
+            history_entry_at(
+                action(
+                    "Saved current snippet label",
+                    &crate::plugins::snippets::snippet_run_action("current"),
+                    None,
+                ),
+                "current snippet query",
+                1_700_000_092,
+                8,
+            ),
+            history_entry_at(
+                action(
+                    "Saved missing snippet label",
+                    &crate::plugins::snippets::snippet_run_action("missing"),
+                    None,
+                ),
+                "missing snippet query",
+                1_700_000_091,
+                9,
+            ),
+        ]);
+
+        let eight_pins = vec![
+            history_pin(
+                "duplicate:history",
+                None,
+                "First pinned duplicate",
+                "pin one",
+                30,
+            ),
+            history_pin(
+                "duplicate:history",
+                None,
+                "Second pinned duplicate",
+                "pin two",
+                30,
+            ),
+            history_pin("optional:identity", None, "Pinned no-args", "pin three", 29),
+            history_pin("renamed:action", None, "Saved renamed pin", "pin four", 28),
+            history_pin(
+                "pin:missing",
+                Some("arg"),
+                "Missing pinned action",
+                "pin five",
+                27,
+            ),
+            history_pin("rare:label", None, "Saved rare pin", "pin six", 26),
+            history_pin(
+                "missing:history",
+                Some("old args"),
+                "Missing saved pin",
+                "pin seven",
+                25,
+            ),
+            history_pin(
+                &crate::plugins::snippets::snippet_run_action("current"),
+                None,
+                "Saved snippet pin",
+                "pin eight",
+                24,
+            ),
+        ];
+        let mut many_pins = eight_pins.clone();
+        many_pins.push(history_pin(
+            "extra:one",
+            None,
+            "Extra pin one",
+            "extra query 1",
+            23,
+        ));
+        many_pins.push(history_pin(
+            "extra:two",
+            None,
+            "Extra pin two",
+            "extra query 2",
+            22,
+        ));
+        many_pins.push(history_pin(
+            "duplicate:history",
+            None,
+            "Third pinned duplicate",
+            "pin duplicate three",
+            21,
+        ));
+        let cached_order_pins = vec![
+            history_pin(
+                "order:older",
+                None,
+                "Cached first",
+                "cached first query",
+                10,
+            ),
+            history_pin(
+                "order:newest",
+                None,
+                "Cached second",
+                "cached second query",
+                30,
+            ),
+            history_pin(
+                "order:middle",
+                None,
+                "Cached third",
+                "cached third query",
+                20,
+            ),
+        ];
+
+        let scenarios: Vec<(
+            &str,
+            VecDeque<HistoryEntry>,
+            Vec<HistoryPin>,
+            usize,
+            bool,
+            &str,
+        )> = vec![
+            (
+                "zero-pins-count-8",
+                history.clone(),
+                Vec::new(),
+                8,
+                false,
+                "",
+            ),
+            (
+                "eight-pins-count-8",
+                history.clone(),
+                eight_pins.clone(),
+                8,
+                false,
+                "",
+            ),
+            (
+                "eight-pins-count-50",
+                history.clone(),
+                eight_pins.clone(),
+                50,
+                false,
+                "",
+            ),
+            (
+                "many-pins-count-50",
+                history.clone(),
+                many_pins,
+                50,
+                false,
+                "",
+            ),
+            (
+                "rare-filter-count-8",
+                history.clone(),
+                Vec::new(),
+                8,
+                false,
+                "NEEDLE",
+            ),
+            (
+                "pins-only-cached-order",
+                history.clone(),
+                cached_order_pins,
+                8,
+                true,
+                "",
+            ),
+            ("empty-history", VecDeque::new(), Vec::new(), 8, false, ""),
+        ];
+
+        for (scenario, history, pins, count, show_pinned_only, filter) in scenarios {
+            let _history_guard = crate::history::replace_history_for_test(history.clone());
+            let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
+                count,
+                show_pinned_only,
+                show_filter: true,
+            });
+            widget.cached_pins = pins;
+            widget.filter = filter.into();
+
+            let actual = widget.prepare_entries(&ctx);
+            let snapshot = cache.snapshot();
+            let commands = plugins.commands_filtered(ctx.enabled_plugins);
+            let resolution = resolution_context(&snapshot, &commands, ctx.actions_by_id);
+            let expected = eager_prepare_reference(&widget, &resolution, &history);
+            assert_display_entries_equal(scenario, &actual, &expected);
+            drop(_history_guard);
+        }
+        drop(plugins);
+        drop(workspace);
+    }
+
+    #[test]
+    fn history_prepare_observes_note_snippet_changes_and_pin_reload() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        std::fs::write(workspace.root().join(HISTORY_PINS_FILE), b"[]")
+            .expect("create isolated pins file");
+
+        let target_id = "note:open:target-note";
+        let ordinary_note_id = "note:open:ordinary-note";
+        let draft_snippet_id = crate::plugins::snippets::snippet_run_action("draft-snippet");
+        let loose_snippet_id = crate::plugins::snippets::snippet_run_action("loose-snippet");
+        let legacy_action = action(
+            "Opaque legacy clipboard label",
+            "clipboard:legacy saved body",
+            Some("opaque payload args"),
+        );
+        let target_history_action = action("Saved target history label", target_id, None);
+        let draft_history_action = action("Saved draft history label", &draft_snippet_id, None);
+        let ordinary_note_action = action("Saved ordinary note label", ordinary_note_id, None);
+        let loose_snippet_action = action("Saved loose snippet label", &loose_snippet_id, None);
+        let history = VecDeque::from([
+            history_entry_at(target_history_action.clone(), "target stored query", 400, 0),
+            history_entry_at(draft_history_action.clone(), "draft stored query", 300, 1),
+            history_entry_at(ordinary_note_action.clone(), "ordinary note query", 200, 2),
+            history_entry_at(loose_snippet_action.clone(), "loose snippet query", 100, 3),
+            history_entry_at(legacy_action.clone(), "legacy query", 50, 4),
+        ]);
+        let _history_guard = crate::history::replace_history_for_test(history);
+        let cache = DashboardDataCache::new();
+        set_note_snippet_snapshot(
+            &cache,
+            vec![
+                note_with_alias("target-note", "Target note", "Primary target alias v1"),
+                note_with_alias("ordinary-note", "Ordinary note", "Ordinary alias v1"),
+            ],
+            vec![
+                snippet_fixture("draft-snippet"),
+                snippet_fixture("loose-snippet"),
+            ],
+        );
+        let plugins = PluginManager::new_inert_for_test();
+        let actions = Vec::new();
+        let actions_by_id = HashMap::new();
+        let usage = HashMap::new();
+        let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
+        let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
+            count: 10,
+            show_pinned_only: false,
+            show_filter: true,
+        });
+        let initial = widget.prepare_entries(&ctx);
+        assert_eq!(initial.len(), 5);
+        assert_eq!(
+            display_entry(&initial, target_id).action.label,
+            "Primary target alias v1"
+        );
+        assert_eq!(
+            display_entry(&initial, ordinary_note_id).action.label,
+            "Ordinary alias v1"
+        );
+        assert_eq!(
+            display_entry(&initial, &draft_snippet_id).action.label,
+            "draft-snippet"
+        );
+        assert_eq!(
+            display_entry(&initial, &loose_snippet_id).action.label,
+            "loose-snippet"
+        );
+        assert!(!initial.iter().any(|entry| entry.pinned || entry.missing));
+        assert_eq!(
+            display_entry(&initial, &legacy_action.action).action,
+            legacy_action
+        );
+
+        let target_pin = history_pin(
+            target_id,
+            None,
+            "Saved target pin label",
+            "pinned target query",
+            500,
+        );
+        let draft_pin = history_pin(
+            &draft_snippet_id,
+            None,
+            "Saved draft pin label",
+            "pinned draft query",
+            450,
+        );
+        assert!(
+            crate::history::toggle_pin(HISTORY_PINS_FILE, &target_pin).expect("persist target pin")
+        );
+        assert!(
+            crate::history::toggle_pin(HISTORY_PINS_FILE, &draft_pin).expect("persist draft pin")
+        );
+        let loaded = crate::history::load_pins(HISTORY_PINS_FILE).expect("load persisted pins");
+        assert_eq!(
+            loaded
+                .iter()
+                .map(|pin| pin.action_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![target_id, draft_snippet_id.as_str()]
+        );
+        publish_pins_or_retain(&mut widget.cached_pins, Ok(loaded));
+        let pinned = widget.prepare_entries(&ctx);
+        assert_eq!(pinned[0].action_id, target_id);
+        assert_eq!(pinned[1].action_id, draft_snippet_id);
+        assert!(pinned[0].pinned && pinned[1].pinned);
+        assert_eq!(
+            display_entry(&pinned, target_id).action.label,
+            "Primary target alias v1"
+        );
+        assert_eq!(
+            display_entry(&pinned, &draft_snippet_id).action.label,
+            "draft-snippet"
+        );
+        assert!(
+            !pinned
+                .iter()
+                .find(|entry| entry.action_id == target_id)
+                .unwrap()
+                .missing
+        );
+
+        set_note_snippet_snapshot(
+            &cache,
+            vec![
+                note_with_alias("target-note", "Target note", "Primary target alias v2"),
+                note_with_alias("ordinary-note", "Ordinary note", "Ordinary alias v2"),
+            ],
+            vec![
+                snippet_fixture("draft-snippet"),
+                snippet_fixture("loose-snippet"),
+            ],
+        );
+        let renamed = widget.prepare_entries(&ctx);
+        assert_eq!(
+            display_entry(&renamed, target_id).action.label,
+            "Primary target alias v2"
+        );
+        assert_eq!(
+            display_entry(&renamed, ordinary_note_id).action.label,
+            "Ordinary alias v2"
+        );
+        assert_eq!(
+            display_entry(&renamed, &draft_snippet_id).action.label,
+            "draft-snippet"
+        );
+
+        set_note_snippet_snapshot(&cache, Vec::new(), Vec::new());
+        let deleted = widget.prepare_entries(&ctx);
+        let missing_target_pin = display_entry(&deleted, target_id);
+        assert!(missing_target_pin.pinned && missing_target_pin.missing);
+        assert_eq!(
+            missing_target_pin.action,
+            Action {
+                label: target_pin.label.clone(),
+                desc: target_pin.desc.clone(),
+                action: target_pin.action_id.clone(),
+                args: target_pin.args.clone(),
+            }
+        );
+        assert_eq!(missing_target_pin.query, target_pin.query);
+        assert_eq!(missing_target_pin.timestamp, target_pin.timestamp);
+        let missing_draft_pin = display_entry(&deleted, &draft_snippet_id);
+        assert!(missing_draft_pin.pinned && missing_draft_pin.missing);
+        assert_eq!(missing_draft_pin.action.label, draft_pin.label);
+        assert_eq!(missing_draft_pin.action.desc, draft_pin.desc);
+        assert_eq!(missing_draft_pin.action.args, draft_pin.args);
+        assert_eq!(missing_draft_pin.query, draft_pin.query);
+        for (action_id, saved_action, query, timestamp) in [
+            (
+                ordinary_note_id,
+                &ordinary_note_action,
+                "ordinary note query",
+                200,
+            ),
+            (
+                &loose_snippet_id,
+                &loose_snippet_action,
+                "loose snippet query",
+                100,
+            ),
+        ] {
+            let ordinary = display_entry(&deleted, action_id);
+            assert!(!ordinary.pinned && !ordinary.missing);
+            assert_eq!(&ordinary.action, saved_action);
+            assert_eq!(ordinary.query, query);
+            assert_eq!(ordinary.timestamp, timestamp);
+        }
+        let legacy = display_entry(&deleted, &legacy_action.action);
+        assert!(!legacy.pinned && !legacy.missing);
+        assert_eq!(legacy.action, legacy_action);
+        assert_eq!(legacy.action.args.as_deref(), Some("opaque payload args"));
+        assert_eq!(legacy.query, "legacy query");
+        assert_eq!(legacy.timestamp, 50);
+
+        assert!(
+            !crate::history::toggle_pin(HISTORY_PINS_FILE, &target_pin)
+                .expect("persist target unpin")
+        );
+        let loaded =
+            crate::history::load_pins(HISTORY_PINS_FILE).expect("reload after target unpin");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].action_id, draft_snippet_id);
+        publish_pins_or_retain(&mut widget.cached_pins, Ok(loaded));
+        let target_unpinned = widget.prepare_entries(&ctx);
+        let restored_target = display_entry(&target_unpinned, target_id);
+        assert!(!restored_target.pinned && !restored_target.missing);
+        assert_eq!(restored_target.action, target_history_action);
+        assert_eq!(restored_target.query, "target stored query");
+        assert_eq!(restored_target.timestamp, 400);
+        let retained_draft_pin = display_entry(&target_unpinned, &draft_snippet_id);
+        assert!(retained_draft_pin.pinned && retained_draft_pin.missing);
+
+        assert!(
+            !crate::history::toggle_pin(HISTORY_PINS_FILE, &draft_pin)
+                .expect("persist draft unpin")
+        );
+        let loaded =
+            crate::history::load_pins(HISTORY_PINS_FILE).expect("reload after draft unpin");
+        assert!(loaded.is_empty());
+        publish_pins_or_retain(&mut widget.cached_pins, Ok(loaded));
+        let unpinned = widget.prepare_entries(&ctx);
+        assert_eq!(
+            unpinned
+                .iter()
+                .map(|entry| entry.action_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                target_id,
+                draft_snippet_id.as_str(),
+                ordinary_note_id,
+                loose_snippet_id.as_str(),
+                legacy_action.action.as_str(),
+            ]
+        );
+        assert!(unpinned.iter().all(|entry| !entry.pinned && !entry.missing));
+        assert_eq!(
+            display_entry(&unpinned, target_id).action,
+            target_history_action
+        );
+        assert_eq!(
+            display_entry(&unpinned, &draft_snippet_id).action,
+            draft_history_action
+        );
+        assert_eq!(
+            display_entry(&unpinned, &legacy_action.action).action,
+            legacy_action
+        );
     }
 }
