@@ -553,6 +553,22 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store(Arc::clone(&store));
+        Self::from_macro_store(store)
+    }
+
+    /// Construct the empty manager used by isolated headless tests without
+    /// installing process-global macro runtimes or native hotkey pollers.
+    #[cfg(test)]
+    pub(crate) fn new_inert_for_test() -> Self {
+        let store = Arc::new(
+            crate::mkmacro::MkMacroStore::open(".")
+                .expect("open isolated test mkmacro store")
+                .0,
+        );
+        Self::from_macro_store(store)
+    }
+
+    fn from_macro_store(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
         let search_updates = Arc::new(PluginSearchUpdates::default());
         let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
         Self {
@@ -581,24 +597,7 @@ impl PluginManager {
                 .0,
         );
         crate::mkmacro::runtime::set_shared_store_with_reserved(Arc::clone(&store), reserved);
-        let search_updates = Arc::new(PluginSearchUpdates::default());
-        let window_catalog = WindowCatalog::production(Arc::clone(&search_updates));
-        Self {
-            plugins: Vec::new(),
-            runtime_enablement: None,
-            services: PluginInternalServices {
-                clipboard_modifier_catalog: shared_default_catalog(),
-                mkmacro_store: store,
-                search_updates,
-                window_catalog,
-                workspace_catalog: Arc::new(
-                    crate::multi_manager::workspace_catalog::WorkspaceCatalog::default(),
-                ),
-                system_data_runtime: None,
-            },
-            next_plugin_epoch: 0,
-            deferred_dynamic_reloads: Vec::new(),
-        }
+        Self::from_macro_store(store)
     }
 
     pub fn internal_services(&self) -> &PluginInternalServices {

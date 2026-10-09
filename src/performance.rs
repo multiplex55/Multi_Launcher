@@ -9,6 +9,9 @@ static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 static FRAME_STATE: OnceLock<Mutex<FrameState>> = OnceLock::new();
 static METRICS: MetricCollector = MetricCollector::new();
 
+#[cfg(test)]
+pub(crate) mod workloads;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Metric {

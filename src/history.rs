@@ -156,6 +156,34 @@ pub fn get_history() -> VecDeque<HistoryEntry> {
     with_history(|h| h.iter().cloned().collect()).unwrap_or_default()
 }
 
+/// Replace only the in-memory history snapshot for an isolated workload test.
+/// This avoids quadratic persistence through repeated per-entry appends.
+#[cfg(test)]
+pub(crate) fn replace_history_for_test(entries: VecDeque<HistoryEntry>) -> HistoryReplacementGuard {
+    let original = {
+        let mut history = HISTORY
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::replace(&mut *history, entries)
+    };
+    HistoryReplacementGuard(Some(original))
+}
+
+#[cfg(test)]
+pub(crate) struct HistoryReplacementGuard(Option<VecDeque<HistoryEntry>>);
+
+#[cfg(test)]
+impl Drop for HistoryReplacementGuard {
+    fn drop(&mut self) {
+        if let Some(original) = self.0.take() {
+            let mut history = HISTORY
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *history = original;
+        }
+    }
+}
+
 /// Clear all history entries and persist the empty list to `history.json`.
 pub fn clear_history() -> anyhow::Result<()> {
     let _transaction = history_transaction_guard();

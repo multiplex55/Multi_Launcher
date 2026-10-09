@@ -11,7 +11,8 @@ Status: M0 setup in progress. No speedup claims. Timing rows below are NOT MEASU
 - `rustc 1.97.1 (8bab26f4f 2026-07-14)`, LLVM 22.1.6.
 - `cargo-nextest 0.9.135 (610eefb88 2026-05-14)`.
 - Profile: pending harness selection; debug/test timings must not be described as release GUI latency.
-- Monitor layout/DPI/refresh, power state, CPU model name: NOT MEASURED. CIM queries were denied in the restricted execution context.
+- Power scheme: Balanced (`powercfg /GETACTIVESCHEME`, October 9, 2026).
+- Monitor layout/DPI/refresh and CPU model name: NOT MEASURED. CIM queries were denied in the restricted execution context.
 - Telemetry: existing `MULTI_LAUNCHER_PERF=1` process opt-in; synthetic data only.
 
 ## Baseline source behavior

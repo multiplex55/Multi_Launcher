@@ -801,6 +801,8 @@ pub struct LauncherApp {
     #[cfg(test)]
     pub(crate) test_skip_history_persistence: bool,
     #[cfg(test)]
+    pub(crate) test_root_rendered_rows: Vec<(usize, String)>,
+    #[cfg(test)]
     pub(crate) test_defer_virtual_desktop_completion: bool,
     pub enable_toasts: bool,
     pub show_inline_errors: bool,
@@ -2190,6 +2192,8 @@ impl LauncherApp {
             test_recorded_history_queries: Vec::new(),
             #[cfg(test)]
             test_skip_history_persistence: false,
+            #[cfg(test)]
+            test_root_rendered_rows: Vec::new(),
             #[cfg(test)]
             test_defer_virtual_desktop_completion: false,
             enable_toasts,

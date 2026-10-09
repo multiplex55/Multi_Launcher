@@ -216,3 +216,107 @@ pub fn index_paths(paths: &[String]) -> anyhow::Result<Vec<Action>> {
     }
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{IndexOptions, index_paths_batched};
+    use crate::performance::{Metric, workloads};
+    use std::cell::RefCell;
+
+    fn exhaust(paths: &[String], options: IndexOptions) -> Vec<crate::actions::Action> {
+        let mut actions = Vec::new();
+        for batch in index_paths_batched(paths, options) {
+            actions.extend(batch.expect("synthetic index tree traversal succeeds"));
+        }
+        actions
+    }
+
+    #[test]
+    #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
+    fn track_a_benchmark_index_lazy_traversal() {
+        let workspace = workloads::IsolatedWorkspace::new();
+
+        for count in workloads::selected_sizes(&[16, 1_000, 10_000]) {
+            let root = workspace.root().join(format!("index-root-{count}"));
+            let fixture = workloads::create_index_tree(&root, 0x494e_4445_585f_41, count);
+            let root_string = root.to_string_lossy().into_owned();
+            let roots = vec![root_string.clone()];
+            let options = IndexOptions::default();
+            let iterator_slot = RefCell::new(None);
+
+            let (timing, measured_count) = workloads::measure(
+                workloads::INDEX_WARMUPS,
+                |_, _| {
+                    *iterator_slot.borrow_mut() = Some(index_paths_batched(&roots, options));
+                },
+                || {
+                    let iterator = iterator_slot
+                        .borrow_mut()
+                        .take()
+                        .expect("setup creates a fresh lazy traversal");
+                    let mut visited = 0_usize;
+                    for batch in iterator {
+                        let batch = batch.expect("synthetic index traversal has no errors");
+                        visited += batch.len();
+                        std::hint::black_box(batch);
+                    }
+                    visited
+                },
+            );
+            assert_eq!(
+                measured_count, count,
+                "each measured scan exhausts the tree"
+            );
+            let metrics = workloads::metrics_for(&[Metric::IndexScan]);
+            assert_eq!(metrics.len(), 1);
+            assert_eq!(
+                metrics[0].work_units,
+                (count * workloads::SAMPLE_COUNT) as u64
+            );
+            assert_eq!(metrics[0].completed, workloads::SAMPLE_COUNT as u64);
+            assert_eq!(metrics[0].errors, 0);
+            assert_eq!(metrics[0].abandoned, 0);
+
+            let actions = exhaust(&roots, options);
+            assert_eq!(actions.len(), count);
+            let membership_signature = workloads::index_actions_signature(&root, &actions);
+            let order_signature = workloads::index_actions_order_signature(&root, &actions);
+
+            let duplicate_roots = vec![root_string.clone(), root_string.clone()];
+            let duplicate_actions = exhaust(&duplicate_roots, options);
+            assert_eq!(
+                duplicate_actions.len(),
+                count,
+                "duplicate roots are deduplicated"
+            );
+            assert_eq!(
+                workloads::index_actions_signature(&root, &duplicate_actions),
+                membership_signature
+            );
+
+            let max_items = (count / 2).max(1);
+            let capped_actions = exhaust(
+                &roots,
+                IndexOptions {
+                    batch_size: 127,
+                    max_items,
+                },
+            );
+            assert_eq!(capped_actions.len(), max_items);
+            let capped_ids = capped_actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(capped_ids.len(), capped_actions.len());
+
+            workloads::emit_summary(
+                &format!("index-{count}-fresh-exhaustion"),
+                "actual lazy iterator traversal; debug-test warm-cache filesystem; iterator construction excluded",
+                fixture.with_output_signatures(Some(membership_signature), Some(order_signature)),
+                timing,
+                &metrics,
+            );
+        }
+        drop(workspace);
+    }
+}

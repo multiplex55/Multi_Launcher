@@ -99,6 +99,8 @@ pub struct NotesDialog {
     text: String,
     search: String,
     template_manager: TemplateManagerState,
+    #[cfg(test)]
+    last_rendered_indices: Vec<usize>,
 }
 
 enum PendingNoteSave {
@@ -362,6 +364,8 @@ impl NotesDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        #[cfg(test)]
+        self.last_rendered_indices.clear();
         if !self.open {
             return;
         }
@@ -627,6 +631,8 @@ impl NotesDialog {
                                     });
                                 });
                                 rows_timer.add_work_units(1);
+                                #[cfg(test)]
+                                self.last_rendered_indices.push(idx);
                                 ui.separator();
                             }
                         });
@@ -732,6 +738,166 @@ mod tests {
         let ctx = egui::Context::default();
         let app = new_app(&ctx);
         (dir, notes_dir, ctx, app)
+    }
+
+    #[test]
+    #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
+    fn track_a_benchmark_quick_notes_production_rows() {
+        use crate::performance::{Metric, workloads};
+        use std::cell::{Cell, RefCell};
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        std::fs::write(crate::plugins::todo::TODO_FILE, b"[]")
+            .expect("write isolated todo snapshot");
+        let root = workspace.root();
+        let mut settings = Settings::default();
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+
+        for count in workloads::selected_sizes(&[100, 1_000, 5_000]) {
+            let fixture = workloads::note_fixture(0x5155_4943_4b4e_4f54, count);
+            let context = egui::Context::default();
+            let mut app = LauncherApp::new(
+                &context,
+                Arc::new(Vec::new()),
+                0,
+                PluginManager::new_inert_for_test(),
+                root.join("actions.json").to_string_lossy().into_owned(),
+                root.join("settings.json").to_string_lossy().into_owned(),
+                settings.clone(),
+                None,
+                None,
+                Some(std::collections::HashSet::new()),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            // Launcher construction initializes the isolated on-disk note cache.
+            // Publish after construction so the dialog's real open/edit path sees
+            // the deterministic in-memory fixture rather than that empty startup
+            // snapshot.
+            let cache_guard =
+                crate::plugins::note::publish_note_cache_for_test(fixture.values.clone());
+            let mut dialog = NotesDialog::default();
+            assert_eq!(
+                crate::plugins::note::note_cache_snapshot().len(),
+                count,
+                "launcher construction preserves the fixture note snapshot"
+            );
+            dialog.entries = fixture.values.clone();
+            dialog.rebuild_index();
+            dialog.open = true;
+
+            let edit_index = count / 2;
+            dialog.open_edit(edit_index);
+            assert_eq!(dialog.edit_idx, Some(edit_index));
+            assert!(
+                dialog.text == fixture.values[edit_index].content,
+                "editing resolves to the stable source note identity"
+            );
+            dialog.entries = fixture.values.clone();
+            dialog.rebuild_index();
+            dialog.open = true;
+            dialog.edit_idx = None;
+            dialog.text.clear();
+
+            for (scenario, filter, expected_indices) in [
+                (
+                    "empty-filter",
+                    String::new(),
+                    (0..count).collect::<Vec<_>>(),
+                ),
+                (
+                    "sparse-filter",
+                    format!("track-a-note-{edit_index:05}"),
+                    vec![edit_index],
+                ),
+            ] {
+                dialog.search = filter.clone();
+                let input_slot = RefCell::new(None);
+                let frame_index = Cell::new(0_usize);
+                let (timing, _frame_output) = workloads::measure(
+                    workloads::UI_WARMUPS,
+                    |_, _| {
+                        let frame = frame_index.get();
+                        frame_index.set(frame + 1);
+                        *input_slot.borrow_mut() = Some(egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(960.0, 640.0),
+                            )),
+                            time: Some(1.0 + frame as f64 / 60.0),
+                            ..Default::default()
+                        });
+                    },
+                    || {
+                        let input = input_slot
+                            .borrow_mut()
+                            .take()
+                            .expect("setup creates deterministic raw input");
+                        context.run(input, |ctx| dialog.ui(ctx, &mut app))
+                    },
+                );
+                let metrics = workloads::metrics_for(&[Metric::QuickNotesRowsBuilt]);
+                assert_eq!(metrics.len(), 1);
+                assert_eq!(metrics[0].calls, workloads::SAMPLE_COUNT as u64);
+                assert!(!dialog.last_rendered_indices.is_empty());
+                assert!(
+                    metrics[0].work_units
+                        == (dialog.last_rendered_indices.len() * workloads::SAMPLE_COUNT) as u64,
+                    "row counter tracks actual Quick Notes widget construction"
+                );
+                assert!(
+                    dialog
+                        .last_rendered_indices
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1])
+                );
+                assert!(
+                    dialog
+                        .last_rendered_indices
+                        .iter()
+                        .all(|index| expected_indices.binary_search(index).is_ok())
+                );
+                assert_eq!(dialog.edit_idx, None);
+                assert_eq!(
+                    dialog.entries[edit_index].slug,
+                    fixture.values[edit_index].slug
+                );
+
+                let mut signature = workloads::StableSignature::new(
+                    0,
+                    "quick-notes-projection",
+                    dialog.last_rendered_indices.len(),
+                );
+                for index in &dialog.last_rendered_indices {
+                    let note = &dialog.entries[*index];
+                    signature.number(*index as u64);
+                    signature.bytes(note.slug.as_bytes());
+                    signature.bytes(note.title.as_bytes());
+                    signature.bytes(note.alias.as_deref().unwrap_or_default().as_bytes());
+                }
+                workloads::emit_summary(
+                    &format!("quick-notes-{count}-{scenario}"),
+                    "production NotesDialog::ui; headless egui debug-test CPU; in-memory notes",
+                    fixture
+                        .summary
+                        .with_output_signatures(Some(signature.finish()), None),
+                    timing,
+                    &metrics,
+                );
+            }
+            drop(dialog);
+            drop(app);
+            drop(cache_guard);
+        }
+        drop(workspace);
     }
 
     #[test]

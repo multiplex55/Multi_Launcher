@@ -322,32 +322,8 @@ impl CommandHistoryWidget {
         let pin = HistoryPin::from_history(entry);
         pins.iter().any(|p| p == &pin)
     }
-}
 
-impl Default for CommandHistoryWidget {
-    fn default() -> Self {
-        Self::new(CommandHistoryConfig::default())
-    }
-}
-
-impl Widget for CommandHistoryWidget {
-    fn render(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &DashboardContext<'_>,
-        _activation: WidgetActivation,
-    ) -> Option<WidgetAction> {
-        self.refresh_pins(ui.ctx());
-        let mut clicked = None;
-        ui.label("Command history");
-
-        if self.cfg.show_filter {
-            ui.horizontal(|ui| {
-                ui.label("Filter");
-                ui.text_edit_singleline(&mut self.filter);
-            });
-        }
-
+    fn prepare_entries(&self, ctx: &DashboardContext<'_>) -> Vec<DisplayEntry> {
         let mut prepare_timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::HistoryPrepare);
         prepare_timer.set_work_units(0);
@@ -386,6 +362,35 @@ impl Widget for CommandHistoryWidget {
             .take(self.cfg.count)
             .collect::<Vec<_>>();
         drop(prepare_timer);
+        filtered
+    }
+}
+
+impl Default for CommandHistoryWidget {
+    fn default() -> Self {
+        Self::new(CommandHistoryConfig::default())
+    }
+}
+
+impl Widget for CommandHistoryWidget {
+    fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &DashboardContext<'_>,
+        _activation: WidgetActivation,
+    ) -> Option<WidgetAction> {
+        self.refresh_pins(ui.ctx());
+        let mut clicked = None;
+        ui.label("Command history");
+
+        if self.cfg.show_filter {
+            ui.horizontal(|ui| {
+                ui.label("Filter");
+                ui.text_edit_singleline(&mut self.filter);
+            });
+        }
+
+        let filtered = self.prepare_entries(ctx);
 
         if filtered.is_empty() {
             ui.label("No history entries.");
@@ -459,7 +464,8 @@ fn publish_pins_or_retain(current: &mut Vec<HistoryPin>, result: anyhow::Result<
 mod tests {
     use super::*;
     use crate::dashboard::data_cache::{DashboardDataCache, DashboardDataSnapshot};
-    use crate::plugin::PluginManager;
+    use crate::performance::{Metric, workloads};
+    use crate::plugin::{Plugin, PluginManager};
     use std::collections::HashMap;
 
     fn context<'a>(
@@ -490,6 +496,206 @@ mod tests {
             diagnostics: None,
             show_diagnostics_widget: false,
         }
+    }
+
+    struct CatalogFixturePlugin(Action);
+
+    impl Plugin for CatalogFixturePlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            Vec::new()
+        }
+
+        fn name(&self) -> &str {
+            "track_a_history_fixture"
+        }
+
+        fn description(&self) -> &str {
+            "Synthetic history benchmark command catalog"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn commands(&self) -> Vec<Action> {
+            vec![self.0.clone()]
+        }
+    }
+
+    fn assert_history_scenario(
+        scenario: &str,
+        entries: &[DisplayEntry],
+        fixture: &workloads::HistoryFixture,
+    ) {
+        match scenario {
+            "mixed-count-8-no-filter" => {
+                let pin_count = entries.iter().take_while(|entry| entry.pinned).count();
+                assert_eq!(pin_count, 5);
+                assert_eq!(entries.len(), 8);
+                assert!(entries[pin_count..].iter().all(|entry| !entry.pinned));
+                assert_eq!(
+                    entries[..pin_count]
+                        .iter()
+                        .map(|entry| entry.action_id.as_str())
+                        .collect::<Vec<_>>(),
+                    fixture.pins[..pin_count]
+                        .iter()
+                        .map(|pin| pin.action_id.as_str())
+                        .collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    entries[pin_count].action_id, fixture.entries[2].action.action,
+                    "entry 1 shares the (action ID, args) identity of the later catalog pin"
+                );
+                let catalog_pin = entries
+                    .iter()
+                    .find(|entry| entry.action_id == fixture.catalog_action.action)
+                    .expect("the pinned catalog command is retained");
+                assert!(catalog_pin.pinned);
+                assert_eq!(catalog_pin.action.label, fixture.catalog_action.label);
+            }
+            "pins-only-8" => {
+                assert_eq!(entries.len(), 8);
+                assert!(entries.iter().all(|entry| entry.pinned));
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|entry| entry.action_id.as_str())
+                        .collect::<Vec<_>>(),
+                    fixture
+                        .pins
+                        .iter()
+                        .take(8)
+                        .map(|pin| pin.action_id.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+            "mixed-count-8-rare-filter" => {
+                assert_eq!(entries.len(), 1);
+                let expected = &fixture.entries[fixture.rare_entry_index];
+                assert_eq!(entries[0].action_id, expected.action.action);
+                assert_eq!(entries[0].query, "rare-query-synthetic");
+                assert_eq!(entries[0].timestamp, expected.timestamp);
+                assert!(!entries[0].pinned);
+            }
+            "mixed-count-50-renamed-missing" => {
+                assert_eq!(entries.len(), 50);
+                let renamed = entries
+                    .iter()
+                    .find(|entry| fixture.actions_by_id.contains_key(&entry.action_id))
+                    .expect("a direct target is visible");
+                assert_eq!(
+                    renamed.action.label,
+                    fixture.actions_by_id[&renamed.action_id].label
+                );
+                let missing = entries
+                    .iter()
+                    .find(|entry| entry.pinned && entry.missing)
+                    .expect("a missing pinned target is represented");
+                assert!(
+                    fixture.actions_by_id.get(&missing.action_id).is_none()
+                        && missing.action.action == missing.action_id
+                );
+            }
+            _ => unreachable!("unknown Track A history scenario"),
+        }
+    }
+
+    fn history_output_signature(entries: &[DisplayEntry]) -> u64 {
+        let mut signature = workloads::StableSignature::new(0, "history-output", entries.len());
+        for entry in entries {
+            signature.bytes(entry.action_id.as_bytes());
+            signature.bytes(entry.action.args.as_deref().unwrap_or_default().as_bytes());
+            signature.bytes(entry.action.label.as_bytes());
+            signature.bytes(entry.action.desc.as_bytes());
+            signature.bytes(entry.query.as_bytes());
+            signature.number(entry.timestamp as u64);
+            signature.number(u64::from(entry.pinned));
+            signature.number(u64::from(entry.missing));
+        }
+        signature.finish()
+    }
+
+    #[test]
+    #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
+    fn track_a_benchmark_history_prepare_owner() {
+        let workspace = workloads::IsolatedWorkspace::new();
+        std::fs::write(workspace.root().join("history_pins.json"), b"[]")
+            .expect("write isolated pin state");
+        let cache = DashboardDataCache::new();
+        cache.set_snapshot_for_test(DashboardDataSnapshot::default());
+        let usage = HashMap::new();
+
+        for count in workloads::selected_sizes(&[100, 1_000, 10_000]) {
+            let fixture = workloads::history_fixture(0x4849_5354_4f52_59, count);
+            let _history_guard = crate::history::replace_history_for_test(fixture.entries.clone());
+            let mut plugins = PluginManager::new_inert_for_test();
+            plugins.register(Box::new(CatalogFixturePlugin(
+                fixture.catalog_action.clone(),
+            )));
+            let actions = Vec::new();
+            let ctx = context(&cache, &plugins, &actions, &fixture.actions_by_id, &usage);
+
+            for scenario in [
+                "mixed-count-8-no-filter",
+                "pins-only-8",
+                "mixed-count-8-rare-filter",
+                "mixed-count-50-renamed-missing",
+            ] {
+                let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
+                    count: if scenario == "mixed-count-50-renamed-missing" {
+                        50
+                    } else {
+                        8
+                    },
+                    show_pinned_only: scenario == "pins-only-8",
+                    show_filter: true,
+                });
+                widget.cached_pins = if scenario == "mixed-count-8-no-filter" {
+                    fixture.pins.iter().take(5).cloned().collect()
+                } else {
+                    fixture.pins.clone()
+                };
+                widget.filter = if scenario == "mixed-count-8-rare-filter" {
+                    "rare-query-synthetic".into()
+                } else {
+                    String::new()
+                };
+                let initial = widget.prepare_entries(&ctx);
+                assert_history_scenario(scenario, &initial, &fixture);
+
+                let (timing, final_entries) = workloads::measure(
+                    workloads::UI_WARMUPS,
+                    |_, _| {},
+                    || widget.prepare_entries(&ctx),
+                );
+                let metrics = workloads::metrics_for(&[
+                    Metric::HistoryPrepare,
+                    Metric::HistoryResolve,
+                    Metric::HistoryCatalogBuild,
+                ]);
+                let catalog_metric = metrics
+                    .iter()
+                    .find(|metric| metric.metric == Metric::HistoryCatalogBuild)
+                    .expect("history command catalog metric is reported");
+                assert!(catalog_metric.calls > 0);
+                assert!(catalog_metric.work_units > 0);
+                assert_history_scenario(scenario, &final_entries, &fixture);
+                let summary = fixture
+                    .summary
+                    .with_output_signatures(Some(history_output_signature(&final_entries)), None);
+                workloads::emit_summary(
+                    &format!("history-{count}-{scenario}"),
+                    "headless production history preparation; debug-test CPU, no UI",
+                    summary,
+                    timing,
+                    &metrics,
+                );
+            }
+            drop(plugins);
+        }
+        drop(cache);
+        drop(workspace);
     }
 
     fn pin(action_id: &str) -> HistoryPin {

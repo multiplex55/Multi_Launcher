@@ -1025,6 +1025,37 @@ pub fn note_version() -> u64 {
     NOTE_VERSION.load(Ordering::SeqCst)
 }
 
+/// Publish a deterministic in-memory cache through the real owner path while
+/// retaining the original cache for isolated workload-test cleanup.
+#[cfg(test)]
+pub(crate) fn publish_note_cache_for_test(notes: Vec<Note>) -> NoteCachePublicationGuard {
+    let original = {
+        let mut guard = CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::replace(&mut *guard, NoteCache::default())
+    };
+    publish_note_cache(notes);
+    NoteCachePublicationGuard(Some(original))
+}
+
+#[cfg(test)]
+pub(crate) struct NoteCachePublicationGuard(Option<NoteCache>);
+
+#[cfg(test)]
+impl Drop for NoteCachePublicationGuard {
+    fn drop(&mut self) {
+        if let Some(original) = self.0.take() {
+            let mut guard = CACHE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = original;
+            drop(guard);
+            bump_note_version();
+        }
+    }
+}
+
 /// Return a snapshot of notes from the in-memory cache without hitting disk.
 pub fn note_cache_snapshot() -> Vec<Note> {
     let perf_enabled = crate::performance::enabled();

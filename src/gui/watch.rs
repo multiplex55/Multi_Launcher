@@ -387,6 +387,90 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    fn action_reload_payload(
+        seed: u64,
+        count: usize,
+        variant: &str,
+    ) -> (
+        crate::performance::workloads::Fixture<crate::actions::Action>,
+        Vec<u8>,
+    ) {
+        let mut fixture = crate::performance::workloads::action_fixture(seed, count);
+        fixture.values[0].desc.push_str(variant);
+        fixture.summary.estimated_bytes += variant.len() as u64;
+        let mut signature = crate::performance::workloads::StableSignature::new(
+            seed,
+            "actions-reload-payload",
+            count,
+        );
+        signature.number(fixture.summary.signature);
+        signature.bytes(variant.as_bytes());
+        fixture.summary.signature = signature.finish();
+        let serialized = serde_json::to_vec(&fixture.values)
+            .expect("serialize synthetic action reload payload outside timed work");
+        (fixture, serialized)
+    }
+
+    fn indexed_actions(root: &Path, max_items: usize) -> Vec<crate::actions::Action> {
+        let roots = vec![root.to_string_lossy().into_owned()];
+        let mut actions = Vec::new();
+        for batch in crate::indexer::index_paths_batched(
+            &roots,
+            crate::indexer::IndexOptions {
+                batch_size: 128,
+                max_items,
+            },
+        ) {
+            actions.extend(batch.expect("synthetic indexed tree traversal succeeds"));
+        }
+        actions
+    }
+
+    fn action_reload_output_signatures(
+        root: &Path,
+        actions: &[crate::actions::Action],
+        custom_len: usize,
+    ) -> (u64, u64) {
+        let tail = &actions[custom_len.min(actions.len())..];
+        let mut prefix_membership = crate::performance::workloads::StableSignature::new(
+            0,
+            "actions-reload-custom-prefix",
+            custom_len,
+        );
+        let mut prefix_order = crate::performance::workloads::StableSignature::new(
+            0,
+            "actions-reload-custom-order",
+            custom_len,
+        );
+        for action in actions.iter().take(custom_len) {
+            prefix_membership.bytes(action.action.as_bytes());
+            prefix_membership.bytes(action.args.as_deref().unwrap_or_default().as_bytes());
+            prefix_membership.bytes(action.label.as_bytes());
+            prefix_membership.bytes(action.desc.as_bytes());
+            prefix_order.bytes(action.action.as_bytes());
+            prefix_order.bytes(action.args.as_deref().unwrap_or_default().as_bytes());
+            prefix_order.bytes(action.label.as_bytes());
+            prefix_order.bytes(action.desc.as_bytes());
+        }
+        let mut membership = crate::performance::workloads::StableSignature::new(
+            0,
+            "actions-reload-output-membership",
+            custom_len + tail.len(),
+        );
+        membership.number(prefix_membership.finish());
+        membership.number(crate::performance::workloads::index_actions_signature(
+            root, tail,
+        ));
+        let mut order = crate::performance::workloads::StableSignature::new(
+            0,
+            "actions-reload-output-order",
+            custom_len + tail.len(),
+        );
+        order.number(prefix_order.finish());
+        order.number(crate::performance::workloads::index_actions_order_signature(root, tail));
+        (membership.finish(), order.finish())
+    }
+
     #[test]
     fn watcher_enqueues_then_requests_repaint_for_external_change() {
         let directory = tempdir().unwrap();
@@ -428,6 +512,213 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
+    fn track_a_benchmark_actions_reload_event_owner() {
+        use crate::performance::{Metric, workloads};
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        for indexed_count in workloads::selected_sizes(&[16, 1_000, 10_000]) {
+            let custom_count = if indexed_count == 16 {
+                100
+            } else {
+                indexed_count
+            };
+            let root = workspace
+                .root()
+                .join(format!("actions-reload-{indexed_count}"));
+            let index_root = root.join("indexed");
+            let index_fixture =
+                workloads::create_index_tree(&index_root, 0x4143_5449_4f4e_535f, indexed_count);
+            let (variant_a, bytes_a) =
+                action_reload_payload(0x4143_5449_4f4e_5341, custom_count, " synthetic variant A");
+            let (variant_b, bytes_b) =
+                action_reload_payload(0x4143_5449_4f4e_5342, custom_count, " synthetic variant B");
+            let (initial_variant, initial_bytes) = action_reload_payload(
+                0x4143_5449_4f4e_5343,
+                custom_count,
+                " synthetic initial variant",
+            );
+            let actions_path = root.join("actions.json");
+            let settings_path = root.join("settings.json");
+            let index_root_string = index_root.to_string_lossy().into_owned();
+            let index_paths = vec![index_root_string];
+            let initial_tail = indexed_actions(&index_root, indexed_count);
+            assert_eq!(initial_tail.len(), indexed_count);
+            std::fs::write(&actions_path, &initial_bytes)
+                .expect("write prepared initial action payload");
+
+            let mut initial_actions = initial_variant.values.clone();
+            initial_actions.extend(initial_tail.iter().cloned());
+            let context = egui::Context::default();
+            let mut settings = Settings::default();
+            settings.enable_toasts = false;
+            settings.show_inline_errors = false;
+            settings.show_error_toasts = false;
+            settings.dashboard.enabled = false;
+            settings.hotkey = None;
+            settings.quit_hotkey = None;
+            settings.help_hotkey = None;
+            settings.enabled_plugins = Some(std::collections::HashSet::new());
+            settings.max_indexed_items = Some(indexed_count);
+            let mut app = LauncherApp::new(
+                &context,
+                Arc::new(initial_actions),
+                custom_count,
+                PluginManager::new_inert_for_test(),
+                actions_path.to_string_lossy().into_owned(),
+                settings_path.to_string_lossy().into_owned(),
+                settings,
+                None,
+                Some(index_paths),
+                Some(std::collections::HashSet::new()),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            // File events are enqueued explicitly below; no watcher may observe
+            // setup writes or outlive the isolated workspace.
+            app.watchers.clear();
+            app.process_watch_events();
+            assert!(app.rx.try_recv().is_err(), "initial events were drained");
+            assert_eq!(app.custom_len, custom_count);
+            assert_eq!(app.actions.len(), custom_count + indexed_count);
+            let initial_tail_signature =
+                workloads::index_actions_signature(&index_root, &app.actions[custom_count..]);
+            assert_eq!(
+                initial_tail_signature,
+                workloads::index_actions_signature(&index_root, &initial_tail)
+            );
+
+            let summary = workloads::FixtureSummary {
+                count: custom_count + indexed_count,
+                estimated_bytes: variant_a
+                    .summary
+                    .estimated_bytes
+                    .saturating_add(index_fixture.estimated_bytes),
+                signature: {
+                    let mut signature = workloads::StableSignature::new(
+                        0x4143_5449_4f4e_535f,
+                        "actions-reload-workload",
+                        custom_count + indexed_count,
+                    );
+                    signature.number(variant_a.summary.signature);
+                    signature.number(variant_b.summary.signature);
+                    signature.number(initial_variant.summary.signature);
+                    signature.number(index_fixture.signature);
+                    signature.finish()
+                },
+                output_signature: None,
+                output_order_signature: None,
+            };
+
+            let changed_payloads = [bytes_a.clone(), bytes_b.clone()];
+            let (changed_timing, ()) = workloads::measure_with_state(
+                &mut app,
+                workloads::UI_WARMUPS,
+                |app, warmup, iteration| {
+                    let payload_index = if warmup {
+                        iteration % changed_payloads.len()
+                    } else {
+                        (iteration + 1) % changed_payloads.len()
+                    };
+                    std::fs::write(&actions_path, &changed_payloads[payload_index])
+                        .expect("write prepared changed payload outside timer");
+                    app.event_tx
+                        .send(WatchEvent::Actions)
+                        .expect("enqueue one synthetic actions event");
+                },
+                |app| {
+                    app.process_watch_events();
+                },
+            );
+            let changed_metrics =
+                workloads::metrics_for(&[Metric::ActionsReload, Metric::IndexScan]);
+            assert_eq!(changed_metrics.len(), 2);
+            let reload = &changed_metrics[0];
+            let scan = &changed_metrics[1];
+            assert_eq!(reload.metric, Metric::ActionsReload);
+            assert_eq!(reload.calls, workloads::SAMPLE_COUNT as u64);
+            assert_eq!(scan.metric, Metric::IndexScan);
+            // Keep the measured index work visible without pinning this
+            // harness to eager rescanning; later production paths may publish
+            // the unchanged indexed tail directly.
+            assert_eq!(scan.errors, 0);
+            assert_eq!(scan.abandoned, 0);
+            assert_eq!(app.custom_len, custom_count);
+            assert_eq!(&app.actions[..custom_count], variant_a.values.as_slice());
+            assert_eq!(app.actions.len(), custom_count + indexed_count);
+            let changed_output =
+                action_reload_output_signatures(&index_root, app.actions.as_slice(), custom_count);
+            assert_eq!(
+                app.actions[custom_count..].len(),
+                initial_tail.len(),
+                "changed actions are published with the actual indexed tail"
+            );
+            assert_eq!(
+                changed_output.0,
+                action_reload_output_signatures(
+                    &index_root,
+                    &variant_a
+                        .values
+                        .iter()
+                        .cloned()
+                        .chain(initial_tail.iter().cloned())
+                        .collect::<Vec<_>>(),
+                    custom_count,
+                )
+                .0,
+                "custom prefix and indexed tail membership remain stable"
+            );
+            workloads::emit_summary(
+                &format!("actions-reload-{custom_count}-indexed-{indexed_count}-changed"),
+                "synthetic WatchEvent::Actions process_watch_events event-drain; timed phase includes typed file read, actual index traversal, cache publication and synchronous query refresh",
+                summary.with_output_signatures(Some(changed_output.0), Some(changed_output.1)),
+                changed_timing,
+                &changed_metrics,
+            );
+
+            let retained_actions = Arc::clone(&app.actions);
+            let retained_version = crate::actions::actions_version();
+            let unchanged_payload = bytes_a.clone();
+            let (unchanged_timing, ()) = workloads::measure_with_state(
+                &mut app,
+                workloads::UI_WARMUPS,
+                |app, _, _| {
+                    std::fs::write(&actions_path, &unchanged_payload)
+                        .expect("write prepared unchanged payload outside timer");
+                    app.event_tx
+                        .send(WatchEvent::Actions)
+                        .expect("enqueue one unchanged synthetic actions event");
+                },
+                |app| {
+                    app.process_watch_events();
+                },
+            );
+            let unchanged_metrics =
+                workloads::metrics_for(&[Metric::ActionsReload, Metric::IndexScan]);
+            assert_eq!(unchanged_metrics.len(), 2);
+            assert_eq!(unchanged_metrics[0].metric, Metric::ActionsReload);
+            assert_eq!(unchanged_metrics[0].calls, workloads::SAMPLE_COUNT as u64);
+            assert_eq!(unchanged_metrics[1].metric, Metric::IndexScan);
+            assert_eq!(unchanged_metrics[1].calls, 0);
+            assert!(Arc::ptr_eq(&app.actions, &retained_actions));
+            assert_eq!(crate::actions::actions_version(), retained_version);
+            let unchanged_output =
+                action_reload_output_signatures(&index_root, app.actions.as_slice(), custom_count);
+            workloads::emit_summary(
+                &format!("actions-reload-{custom_count}-indexed-{indexed_count}-unchanged"),
+                "synthetic unchanged WatchEvent::Actions process_watch_events event-drain; typed file read timed; no indexing/publication",
+                summary.with_output_signatures(Some(unchanged_output.0), Some(unchanged_output.1)),
+                unchanged_timing,
+                &unchanged_metrics,
+            );
+            drop(app);
+        }
+        drop(workspace);
     }
 
     fn placement_notice() -> RadialPlacementFailureNotice {

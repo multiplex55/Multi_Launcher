@@ -1145,6 +1145,9 @@ impl LauncherApp {
     pub(super) fn render_root_frame(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use egui::*;
 
+        #[cfg(test)]
+        self.test_root_rendered_rows.clear();
+
         if acceptance_trace::enabled()
             && ctx.input(|input| {
                 input.events.iter().any(|event| {
@@ -1949,6 +1952,9 @@ impl LauncherApp {
                                                     text,
                                                 ),
                                             );
+                                            #[cfg(test)]
+                                            self.test_root_rendered_rows
+                                                .push((idx, action.action.clone()));
                                             rows_built = rows_built.saturating_add(1);
                                             let menu_resp = self.attach_result_context_menu(
                                                 &action,
@@ -1999,6 +2005,8 @@ impl LauncherApp {
                                             text,
                                         ),
                                     );
+                                    #[cfg(test)]
+                                    self.test_root_rendered_rows.push((idx, a.action.clone()));
                                     rows_built = rows_built.saturating_add(1);
                                     let tooltip = if a.desc == "Timer"
                                         && a.action.starts_with("timer:show:")
@@ -3363,6 +3371,249 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
+    fn track_a_benchmark_launcher_root_rows() {
+        use crate::performance::{Metric, workloads};
+        use std::cell::{Cell, RefCell};
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let context = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        let root = workspace.root();
+
+        for count in workloads::selected_sizes(&[100, 1_000, 10_000]) {
+            let fixture = workloads::action_fixture(0x4c41_554e_4348_4552, count);
+            let mut app = LauncherApp::new(
+                &context,
+                Arc::new(Vec::new()),
+                0,
+                PluginManager::new_inert_for_test(),
+                root.join("actions.json").to_string_lossy().into_owned(),
+                root.join("settings.json").to_string_lossy().into_owned(),
+                settings.clone(),
+                None,
+                None,
+                Some(std::collections::HashSet::new()),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            app.actions = Arc::new(fixture.values.clone());
+            app.results = fixture.values.clone();
+            app.query = "synthetic launcher fixture".into();
+            app.last_search_query = app.query.clone();
+            app.last_results_valid = true;
+            app.pending_query = None;
+            app.background_query_refresh_pending = false;
+            app.last_plugin_search_generation = app.plugins.search_generation();
+            app.list_scale = 1.0;
+            app.query_results_layout.enabled = false;
+            app.recompute_query_results_layout();
+
+            let expected_ids = fixture
+                .values
+                .iter()
+                .map(|action| action.action.clone())
+                .collect::<Vec<_>>();
+            let frame_index = Cell::new(0_usize);
+            for (selection_index, selected) in [0, count / 2, count - 1].into_iter().enumerate() {
+                app.selected = Some(selected);
+                for settle_frame in 0..2 {
+                    let frame = frame_index.get();
+                    frame_index.set(frame + 1);
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 640.0),
+                        )),
+                        time: Some(1.0 + frame as f64 / 60.0),
+                        ..Default::default()
+                    };
+                    let _ = context.run(input, |ctx| app.render_root_frame(ctx, None));
+                    if selection_index == 0 && settle_frame == 0 {
+                        app.dashboard_data_cache.wait_for_refresh();
+                    }
+                }
+                assert_eq!(app.selected, Some(selected));
+                assert_eq!(app.results[selected].action, expected_ids[selected]);
+                assert_eq!(app.results.len(), count);
+                assert!(
+                    app.test_root_rendered_rows
+                        .windows(2)
+                        .all(|pair| pair[0].0 < pair[1].0)
+                );
+                assert!(
+                    app.test_root_rendered_rows
+                        .iter()
+                        .all(|(index, action_id)| {
+                            app.results
+                                .get(*index)
+                                .is_some_and(|action| action.action == *action_id)
+                        })
+                );
+                assert_eq!(
+                    app.test_root_rendered_rows
+                        .iter()
+                        .filter(|(index, action_id)| {
+                            *index == selected && action_id == &expected_ids[selected]
+                        })
+                        .count(),
+                    1,
+                    "selection scroll should build the selected result exactly once"
+                );
+            }
+            app.dashboard_data_cache.wait_for_refresh();
+
+            for (scenario, grid) in [("list", false), ("grid-3-column", true)] {
+                app.query_results_layout.enabled = grid;
+                app.query_results_layout.cols = 3;
+                app.query_results_layout.respect_plugin_capability = false;
+                app.recompute_query_results_layout();
+                assert_eq!(app.resolved_grid_layout, grid);
+                for selected in [0, count / 2, count - 1] {
+                    app.selected = Some(selected);
+                    for _ in 0..2 {
+                        let frame = frame_index.get();
+                        frame_index.set(frame + 1);
+                        let input = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(960.0, 640.0),
+                            )),
+                            time: Some(1.0 + frame as f64 / 60.0),
+                            ..Default::default()
+                        };
+                        let _ = context.run(input, |ctx| app.render_root_frame(ctx, None));
+                    }
+                    assert_eq!(app.selected, Some(selected));
+                    assert_eq!(app.results[selected].action, expected_ids[selected]);
+                    assert!(
+                        app.test_root_rendered_rows
+                            .windows(2)
+                            .all(|pair| pair[0].0 < pair[1].0)
+                    );
+                    assert!(
+                        app.test_root_rendered_rows
+                            .iter()
+                            .all(|(index, action_id)| {
+                                app.results
+                                    .get(*index)
+                                    .is_some_and(|action| action.action == *action_id)
+                            })
+                    );
+                    assert_eq!(
+                        app.test_root_rendered_rows
+                            .iter()
+                            .filter(|(index, action_id)| {
+                                *index == selected && action_id == &expected_ids[selected]
+                            })
+                            .count(),
+                        1,
+                        "selection scroll should build the selected result exactly once"
+                    );
+                }
+                app.selected = Some(count / 2);
+
+                let input_slot = RefCell::new(None);
+                let (timing, _frame_output) = workloads::measure(
+                    workloads::UI_WARMUPS,
+                    |_, _| {
+                        let frame = frame_index.get();
+                        frame_index.set(frame + 1);
+                        *input_slot.borrow_mut() = Some(egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(960.0, 640.0),
+                            )),
+                            time: Some(1.0 + frame as f64 / 60.0),
+                            ..Default::default()
+                        });
+                    },
+                    || {
+                        let input = input_slot
+                            .borrow_mut()
+                            .take()
+                            .expect("setup creates deterministic raw input");
+                        context.run(input, |ctx| app.render_root_frame(ctx, None))
+                    },
+                );
+                let metrics = workloads::metrics_for(&[Metric::LauncherRowsBuilt]);
+                assert_eq!(metrics.len(), 1);
+                assert_eq!(metrics[0].calls, workloads::SAMPLE_COUNT as u64);
+                assert!(!app.test_root_rendered_rows.is_empty());
+                assert_eq!(
+                    metrics[0].work_units,
+                    (app.test_root_rendered_rows.len() * workloads::SAMPLE_COUNT) as u64,
+                    "row counter tracks actual list/grid widget constructions"
+                );
+                assert_eq!(
+                    app.results.len(),
+                    count,
+                    "rendering cannot replace fixture results"
+                );
+                assert_eq!(app.selected, Some(count / 2));
+                assert_eq!(app.results[count / 2].action, expected_ids[count / 2]);
+
+                let mut signature = workloads::StableSignature::new(
+                    0,
+                    "launcher-output-order",
+                    app.test_root_rendered_rows.len(),
+                );
+                let mut membership = app
+                    .test_root_rendered_rows
+                    .iter()
+                    .map(|(index, action_id)| (*index, action_id.as_str()))
+                    .collect::<Vec<_>>();
+                membership.sort_unstable_by(|a, b| a.1.cmp(b.1));
+                let mut membership_signature = workloads::StableSignature::new(
+                    0,
+                    "launcher-output-membership",
+                    membership.len(),
+                );
+                for (index, action_id) in &app.test_root_rendered_rows {
+                    let action = &app.results[*index];
+                    signature.number(*index as u64);
+                    signature.bytes(action_id.as_bytes());
+                    signature.bytes(action.action.as_bytes());
+                    signature.bytes(action.label.as_bytes());
+                    signature.bytes(action.desc.as_bytes());
+                    signature.bytes(action.args.as_deref().unwrap_or_default().as_bytes());
+                }
+                for (index, action_id) in membership {
+                    let action = &app.results[index];
+                    membership_signature.number(index as u64);
+                    membership_signature.bytes(action_id.as_bytes());
+                    membership_signature
+                        .bytes(action.args.as_deref().unwrap_or_default().as_bytes());
+                    membership_signature.bytes(action.label.as_bytes());
+                    membership_signature.bytes(action.desc.as_bytes());
+                }
+                let summary = fixture.summary.with_output_signatures(
+                    Some(membership_signature.finish()),
+                    Some(signature.finish()),
+                );
+                workloads::emit_summary(
+                    &format!("launcher-{count}-{scenario}"),
+                    "production render_root_frame(None); headless egui debug-test CPU",
+                    summary,
+                    timing,
+                    &metrics,
+                );
+            }
+            drop(app);
+        }
+        drop(workspace);
     }
 
     #[test]

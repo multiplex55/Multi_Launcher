@@ -4566,6 +4566,48 @@ mod tests {
 
     static NOTES_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+    fn derived_workload_signature(panel: &NotePanel) -> u64 {
+        let mut signature = crate::performance::workloads::StableSignature::new(
+            0,
+            "note-derived-output",
+            panel.derived.backlink_rows_linked_todos.len()
+                + panel.derived.backlink_rows_related_notes.len()
+                + panel.derived.backlink_rows_mentions.len(),
+        );
+        for value in &panel.derived.tags {
+            signature.bytes(value.as_bytes());
+        }
+        for value in &panel.derived.wiki_links {
+            signature.bytes(value.as_bytes());
+        }
+        for (url, label) in &panel.derived.external_links {
+            signature.bytes(url.as_bytes());
+            signature.bytes(label.as_bytes());
+        }
+        for rows in [
+            &panel.derived.backlink_rows_linked_todos,
+            &panel.derived.backlink_rows_related_notes,
+            &panel.derived.backlink_rows_mentions,
+        ] {
+            for row in rows {
+                signature.bytes(row.title.as_bytes());
+                signature.bytes(row.type_badge.as_bytes());
+                signature.bytes(row.updated.as_bytes());
+                signature.bytes(row.snippet.as_bytes());
+                signature.bytes(row.reason.as_bytes());
+                signature.bytes(row.note_slug.as_deref().unwrap_or_default().as_bytes());
+                signature.bytes(row.todo_id.as_deref().unwrap_or_default().as_bytes());
+            }
+        }
+        let mut todos = panel.derived.todo_label_map.iter().collect::<Vec<_>>();
+        todos.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        for (id, label) in todos {
+            signature.bytes(id.as_bytes());
+            signature.bytes(label.as_bytes());
+        }
+        signature.finish()
+    }
+
     #[test]
     fn note_editor_timestamp_formats_milliseconds_exactly() {
         let offset = FixedOffset::east_opt(5 * 60 * 60 + 30 * 60).expect("valid fixed offset");
@@ -4631,6 +4673,99 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
+    fn track_a_benchmark_note_refresh_check_owner() {
+        use crate::performance::{Metric, workloads};
+        use std::cell::Cell;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        std::fs::write(crate::plugins::todo::TODO_FILE, b"[]").expect("write isolated todo state");
+
+        for count in workloads::selected_sizes(&[100, 1_000, 5_000]) {
+            let fixture = workloads::note_fixture(0x4e4f_5445_5f4d_3042, count);
+            let _cache_guard =
+                crate::plugins::note::publish_note_cache_for_test(fixture.values.clone());
+            let context = egui::Context::default();
+            let mut panel = NotePanel::from_note(fixture.values[0].clone());
+            let initial_derived = derived_workload_signature(&panel);
+            let initial_recomputes = panel.heavy_recompute_count;
+
+            let (idle_timing, _idle_output) = workloads::measure(
+                workloads::UI_WARMUPS,
+                |_, _| {},
+                || panel.maybe_refresh_heavy_derived(&context, true),
+            );
+            let idle_metrics = workloads::metrics_for(&[
+                Metric::NoteRefreshCheck,
+                Metric::NoteSnapshot,
+                Metric::NoteAliasHash,
+                Metric::NoteHeavyRecompute,
+            ]);
+            assert_eq!(derived_workload_signature(&panel), initial_derived);
+            assert_eq!(panel.heavy_recompute_count, initial_recomputes);
+            assert_eq!(idle_metrics[0].work_units, 0);
+            assert_eq!(idle_metrics[3].calls, 0);
+            workloads::emit_summary(
+                &format!("note-{count}-idle-refresh-check"),
+                "production NotePanel::maybe_refresh_heavy_derived; headless derived-only CPU",
+                fixture
+                    .summary
+                    .with_output_signatures(Some(initial_derived), None),
+                idle_timing,
+                &idle_metrics,
+            );
+
+            let frame_index = Cell::new(0_usize);
+            let (draft_timing, _draft_output) = workloads::measure_with_state(
+                &mut panel,
+                workloads::UI_WARMUPS,
+                |panel, _, _| {
+                    let frame = frame_index.get();
+                    frame_index.set(frame + 1);
+                    let now = 10.0 + frame as f64;
+                    panel
+                        .note
+                        .content
+                        .push_str(&format!("\nDraft marker {frame:02}"));
+                    panel.mark_content_changed(now);
+                    let _ = context.run(
+                        egui::RawInput {
+                            time: Some(now + 1.0),
+                            ..Default::default()
+                        },
+                        |_| {},
+                    );
+                },
+                |panel| panel.maybe_refresh_heavy_derived(&context, true),
+            );
+            let draft_metrics = workloads::metrics_for(&[
+                Metric::NoteRefreshCheck,
+                Metric::NoteSnapshot,
+                Metric::NoteAliasHash,
+                Metric::NoteHeavyRecompute,
+            ]);
+            let draft_derived = derived_workload_signature(&panel);
+            assert_eq!(draft_derived, initial_derived);
+            assert_eq!(
+                panel.heavy_recompute_count,
+                initial_recomputes + workloads::UI_WARMUPS + workloads::SAMPLE_COUNT
+            );
+            assert_eq!(draft_metrics[0].work_units, workloads::SAMPLE_COUNT as u64);
+            assert_eq!(draft_metrics[3].calls, workloads::SAMPLE_COUNT as u64);
+            workloads::emit_summary(
+                &format!("note-{count}-draft-after-debounce"),
+                "production NotePanel::maybe_refresh_heavy_derived; synthetic draft rearmed outside timed interval",
+                fixture
+                    .summary
+                    .with_output_signatures(Some(draft_derived), None),
+                draft_timing,
+                &draft_metrics,
+            );
+        }
+        drop(workspace);
     }
 
     fn empty_note(content: &str) -> Note {
