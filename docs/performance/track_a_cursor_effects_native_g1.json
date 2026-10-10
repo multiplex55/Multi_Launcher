@@ -1,0 +1,437 @@
+{
+  "schema_version": 1,
+  "phase": "M5-C native API and lifecycle smoke",
+  "source_commit": "ab3eace9723280cbe0a00f625b1d0b3949035aac",
+  "profile": "dev unoptimized with debuginfo",
+  "os": "Windows NT10.0.19045.0 x86_64 MSVC",
+  "command": "coordinate_tool_smoke --cursor-effects-auto",
+  "execution": "Sandbox GetCursorPos denied0x80070005; authorized desktop escalation succeeded",
+  "exit_code": 0,
+  "stage_count": 16,
+  "last_write_utc": "2026-10-10T03:11:19.3377918Z",
+  "sampler_creations": 1,
+  "backend_creations": 1,
+  "samples": 851,
+  "renders": 15,
+  "backend_shutdowns": 1,
+  "remaining_owned_windows": 0,
+  "native_errors": 0,
+  "limits": "No native pre-change count distribution, CPU/GPU or display-latency measurement. Scripted stationary scene/API diagnostics are not visible composition or real mixed-DPI/moving-pointer acceptance. Desktop readbacks and raw HWND/path logs remain ignored.",
+  "stages": [
+    {
+      "name": "hud-only",
+      "requested_modes": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "halo_status": "Disabled",
+      "zoom_status": "Disabled",
+      "magnifiers": []
+    },
+    {
+      "name": "halo-0-percent",
+      "requested_modes": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Disabled",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 5
+        }
+      ]
+    },
+    {
+      "name": "halo-40-percent",
+      "requested_modes": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Disabled",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 5
+        }
+      ]
+    },
+    {
+      "name": "halo-100-percent",
+      "requested_modes": [
+        false,
+        false,
+        true,
+        false
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Disabled",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 5
+        }
+      ]
+    },
+    {
+      "name": "zoom-2x-offset",
+      "requested_modes": [
+        false,
+        false,
+        false,
+        true
+      ],
+      "halo_status": "Disabled",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1240,
+            680,
+            1320,
+            760
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 6
+        }
+      ]
+    },
+    {
+      "name": "zoom-2x-centered",
+      "requested_modes": [
+        false,
+        false,
+        false,
+        true
+      ],
+      "halo_status": "Disabled",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1240,
+            680,
+            1320,
+            760
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 6
+        }
+      ]
+    },
+    {
+      "name": "all-four-default-guides",
+      "requested_modes": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1240,
+            680,
+            1320,
+            760
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        },
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        }
+      ]
+    },
+    {
+      "name": "all-four-stationary-repeat",
+      "requested_modes": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1240,
+            680,
+            1320,
+            760
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        },
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        }
+      ]
+    },
+    {
+      "name": "all-four-1_7x-163px-offset",
+      "requested_modes": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1232,
+            672,
+            1329,
+            769
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        },
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        }
+      ]
+    },
+    {
+      "name": "effects-off-hud-retained",
+      "requested_modes": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "halo_status": "Disabled",
+      "zoom_status": "Disabled",
+      "magnifiers": []
+    },
+    {
+      "name": "repeat-halo-zoom-enable",
+      "requested_modes": [
+        true,
+        false,
+        true,
+        true
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1240,
+            680,
+            1320,
+            760
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        },
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        }
+      ]
+    },
+    {
+      "name": "repeat-halo-zoom-disable",
+      "requested_modes": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "halo_status": "Disabled",
+      "zoom_status": "Disabled",
+      "magnifiers": []
+    },
+    {
+      "name": "guides-visible-effects-off",
+      "requested_modes": [
+        true,
+        true,
+        false,
+        false
+      ],
+      "halo_status": "Disabled",
+      "zoom_status": "Disabled",
+      "magnifiers": []
+    },
+    {
+      "name": "recreated-effects-after-guides",
+      "requested_modes": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1240,
+            680,
+            1320,
+            760
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        },
+        {
+          "source_ok": true,
+          "source_rect": [
+            1220,
+            660,
+            1340,
+            780
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 7
+        }
+      ]
+    },
+    {
+      "name": "all-four-magenta-halo-ring",
+      "requested_modes": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "halo_status": "Active",
+      "zoom_status": "Active",
+      "magnifiers": [
+        {
+          "source_ok": true,
+          "source_rect": [
+            1240,
+            680,
+            1320,
+            760
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 8
+        },
+        {
+          "source_ok": true,
+          "source_rect": [
+            1260,
+            700,
+            1300,
+            740
+          ],
+          "transform_ok": true,
+          "color_ok": true,
+          "filter_count": 8
+        }
+      ]
+    },
+    {
+      "name": "effects-off-after-ring",
+      "requested_modes": [
+        true,
+        false,
+        false,
+        false
+      ],
+      "halo_status": "Disabled",
+      "zoom_status": "Disabled",
+      "magnifiers": []
+    }
+  ],
+  "independent_review": "Clear:16 requested phases/state matches; exact returned exclusions cover enumerated owned surfaces/hosts/outlines; geometry/transforms consistent; disable/recreation/cleanup consistent.",
+  "stationary_repeat": {
+    "samples_before": 416,
+    "samples_after": 460,
+    "full_renders_before": 7,
+    "full_renders_after": 7,
+    "source_and_filters_unchanged": true
+  }
+}
