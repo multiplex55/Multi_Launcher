@@ -2,7 +2,11 @@ use crate::actions::Action;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use walkdir::{IntoIter as WalkDirIter, WalkDir};
+
+pub mod coordinator;
 
 #[cfg(test)]
 std::thread_local! {
@@ -47,6 +51,9 @@ pub struct IndexBatchIter {
     seen: HashSet<PathBuf>,
     options: IndexOptions,
     produced: usize,
+    cancellation: Option<Arc<AtomicBool>>,
+    #[cfg(test)]
+    checkpoint_hook: Option<Arc<dyn Fn(IndexCheckpoint) + Send + Sync>>,
     metric_scan_started: bool,
     metric_scan_failed: bool,
     metric_scan_finished: bool,
@@ -54,6 +61,14 @@ pub struct IndexBatchIter {
 
 impl IndexBatchIter {
     fn new(paths: &[String], options: IndexOptions) -> Self {
+        Self::new_cancellable(paths, options, None)
+    }
+
+    fn new_cancellable(
+        paths: &[String],
+        options: IndexOptions,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Self {
         let options = IndexOptions {
             batch_size: options.batch_size.max(1),
             max_items: options.max_items.max(1),
@@ -65,6 +80,9 @@ impl IndexBatchIter {
             seen: HashSet::new(),
             options,
             produced: 0,
+            cancellation,
+            #[cfg(test)]
+            checkpoint_hook: None,
             metric_scan_started: false,
             metric_scan_failed: false,
             metric_scan_finished: false,
@@ -78,12 +96,27 @@ impl IndexBatchIter {
         }
         root
     }
-}
 
-impl Iterator for IndexBatchIter {
-    type Item = anyhow::Result<Vec<Action>>;
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::Acquire))
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
+    #[cfg(test)]
+    fn checkpoint(&self, checkpoint: IndexCheckpoint) {
+        if let Some(hook) = self.checkpoint_hook.as_ref() {
+            hook(checkpoint);
+        }
+    }
+
+    #[cfg(test)]
+    fn with_checkpoint_hook(mut self, hook: Arc<dyn Fn(IndexCheckpoint) + Send + Sync>) -> Self {
+        self.checkpoint_hook = Some(hook);
+        self
+    }
+
+    fn next_step(&mut self) -> anyhow::Result<IndexBatchStep> {
         // Each sample covers this traversal call only, not time between batches.
         let mut timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::IndexScan);
@@ -92,29 +125,70 @@ impl Iterator for IndexBatchIter {
             self.metric_scan_started = true;
         }
 
+        if self.is_cancelled() {
+            return Ok(IndexBatchStep::Cancelled);
+        }
         if self.produced >= self.options.max_items {
+            if self.is_cancelled() {
+                return Ok(IndexBatchStep::Cancelled);
+            }
             self.finish_metric_scan();
-            return None;
+            return Ok(IndexBatchStep::Complete);
         }
 
         let mut batch = Vec::with_capacity(self.options.batch_size);
         while self.produced < self.options.max_items && batch.len() < self.options.batch_size {
+            if self.is_cancelled() {
+                return Ok(IndexBatchStep::Cancelled);
+            }
             if self.current.is_none() {
+                if self.is_cancelled() {
+                    return Ok(IndexBatchStep::Cancelled);
+                }
                 if let Some(root) = self.next_root() {
+                    if self.is_cancelled() {
+                        return Ok(IndexBatchStep::Cancelled);
+                    }
                     self.current = Some(WalkDir::new(root).into_iter());
                 } else {
                     break;
                 }
             }
 
+            if self.is_cancelled() {
+                return Ok(IndexBatchStep::Cancelled);
+            }
+            #[cfg(test)]
+            self.checkpoint(IndexCheckpoint::BeforeEntry);
+            if self.is_cancelled() {
+                return Ok(IndexBatchStep::Cancelled);
+            }
+
             let Some(iter) = self.current.as_mut() else {
                 continue;
             };
+            let next_entry = iter.next();
 
-            match iter.next() {
+            match next_entry {
                 Some(Ok(entry)) => {
+                    if self.is_cancelled() {
+                        return Ok(IndexBatchStep::Cancelled);
+                    }
                     if !entry.file_type().is_file() {
+                        #[cfg(test)]
+                        self.checkpoint(IndexCheckpoint::SkippedEntry);
+                        if self.is_cancelled() {
+                            return Ok(IndexBatchStep::Cancelled);
+                        }
                         continue;
+                    }
+                    if self.is_cancelled() {
+                        return Ok(IndexBatchStep::Cancelled);
+                    }
+                    #[cfg(test)]
+                    self.checkpoint(IndexCheckpoint::BeforeCanonicalize);
+                    if self.is_cancelled() {
+                        return Ok(IndexBatchStep::Cancelled);
                     }
                     let canonical = match fs::canonicalize(entry.path()) {
                         Ok(path) => path,
@@ -126,15 +200,33 @@ impl Iterator for IndexBatchIter {
                                 error = %err,
                                 "failed to canonicalize indexed path"
                             );
-                            return Some(Err(err.into()));
+                            return Err(err.into());
                         }
                     };
+                    #[cfg(test)]
+                    self.checkpoint(IndexCheckpoint::AfterCanonicalize);
+                    if self.is_cancelled() {
+                        return Ok(IndexBatchStep::Cancelled);
+                    }
                     if !self.seen.insert(canonical.clone()) {
+                        #[cfg(test)]
+                        self.checkpoint(IndexCheckpoint::SkippedEntry);
+                        if self.is_cancelled() {
+                            return Ok(IndexBatchStep::Cancelled);
+                        }
                         continue;
                     }
                     let Some(name) = canonical.file_name().and_then(|n| n.to_str()) else {
+                        #[cfg(test)]
+                        self.checkpoint(IndexCheckpoint::SkippedEntry);
+                        if self.is_cancelled() {
+                            return Ok(IndexBatchStep::Cancelled);
+                        }
                         continue;
                     };
+                    if self.is_cancelled() {
+                        return Ok(IndexBatchStep::Cancelled);
+                    }
                     let display = canonical.display().to_string();
                     batch.push(Action {
                         label: name.to_string(),
@@ -148,7 +240,7 @@ impl Iterator for IndexBatchIter {
                     timer.set_work_units(batch.len() as u64);
                     self.fail_metric_scan();
                     tracing::error!(error = %err, "failed to read directory entry");
-                    return Some(Err(err.into()));
+                    return Err(err.into());
                 }
                 None => {
                     self.current = None;
@@ -156,30 +248,71 @@ impl Iterator for IndexBatchIter {
             }
         }
 
+        if self.is_cancelled() {
+            return Ok(IndexBatchStep::Cancelled);
+        }
         timer.set_work_units(batch.len() as u64);
         if batch.is_empty() {
+            if self.is_cancelled() {
+                return Ok(IndexBatchStep::Cancelled);
+            }
             self.finish_metric_scan();
-            None
+            Ok(IndexBatchStep::Complete)
         } else {
-            if self.produced >= self.options.max_items {
+            if self.is_cancelled() {
+                return Ok(IndexBatchStep::Cancelled);
+            }
+            // The legacy iterator considers its final yielded batch complete.
+            // A coordinator scan must wait for the next terminal step so a
+            // cancellation between that batch and exhaustion is not reported
+            // as a completed scan.
+            if self.produced >= self.options.max_items && self.cancellation.is_none() {
                 self.finish_metric_scan();
             }
-            Some(Ok(batch))
+            Ok(IndexBatchStep::Batch(batch))
+        }
+    }
+}
+
+enum IndexBatchStep {
+    Batch(Vec<Action>),
+    Complete,
+    Cancelled,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexCheckpoint {
+    BeforeEntry,
+    SkippedEntry,
+    BeforeCanonicalize,
+    AfterCanonicalize,
+}
+
+impl Iterator for IndexBatchIter {
+    type Item = anyhow::Result<Vec<Action>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_step() {
+            Ok(IndexBatchStep::Batch(batch)) => Some(Ok(batch)),
+            Ok(IndexBatchStep::Complete | IndexBatchStep::Cancelled) => None,
+            Err(error) => Some(Err(error)),
         }
     }
 }
 
 impl IndexBatchIter {
     fn finish_metric_scan(&mut self) {
-        if self.metric_scan_started && !self.metric_scan_finished {
-            if !self.metric_scan_failed {
-                crate::performance::record_metric_outcome(
-                    crate::performance::Metric::IndexScan,
-                    crate::performance::MetricOutcome::Completed,
-                );
-            }
-            self.metric_scan_finished = true;
+        if self.metric_scan_finished {
+            return;
         }
+        if self.metric_scan_started && !self.metric_scan_failed {
+            crate::performance::record_metric_outcome(
+                crate::performance::Metric::IndexScan,
+                crate::performance::MetricOutcome::Completed,
+            );
+        }
+        self.metric_scan_finished = true;
     }
 
     fn fail_metric_scan(&mut self) {

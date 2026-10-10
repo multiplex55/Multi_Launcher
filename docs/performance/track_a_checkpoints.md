@@ -26,8 +26,8 @@
 | M3-B | Complete visible grid rows | complete | PASS: 14 focused library + 1 small owner + 6 full scenarios; 10k grid warm p95 1.5626ms/48 widgets, cold588.15ms; rustfmt/diff | independent geometry/extent/spill/click findings resolved | ed106cd6626240f3cc998bf3191ffafc9c3f837c | LOCAL ONLY |
 | M3-C | Lightweight Quick Notes projection | complete | PASS:22 focused +1 lifecycle +1 small owner +6 full scenarios; exact signatures/zero warm snapshots; rustfmt/diff | independent atomic publication/draft/preview findings resolved | 369744ef9c697ea2cfddca3077ce61407b46b6b8 | LOCAL ONLY |
 | M3-D | Variable-height Quick Notes virtualization | complete | PASS:25 module +1 small owner +9 full scenarios;5k warm p95 .6256ms/6widgets,cold small627ms;zero warm geometry/snapshots;rustfmt/diff | independent scoped review clear | 5068bfec9f304496613d5291d1fcafc42aeaf09d | LOCAL ONLY |
-| M4-A | Actions reload reuses indexed tail | complete | PASS:2 focused +1 strengthened +2 integration +1 small owner;zero scan/exacttail/IDs/version;rustfmt/diff | independent production review clear | recorded after commit | LOCAL ONLY |
-| M4-B | Bounded scan worker | pending | — | — | — | — |
+| M4-A | Actions reload reuses indexed tail | complete | PASS:2 focused+1 strengthened+2 integration+1 small+6 full scenarios;zero scan/exactsignatures;10k changed p95 110.5174ms;rustfmt/diff | independent production review clear | 6257e81795a2c50a0d8d39b128ce1f186f1816e3 | LOCAL ONLY |
+| M4-B | Bounded scan worker | complete | PASS:11 coordinator +3 domain indexer;bounded queues/cancel/nonblocking lifecycle;rustfmt/diff | independent lifecycle/metric/wake findings resolved | recorded after commit | LOCAL ONLY |
 | M4-C | Generation/config guarded publication | pending | — | — | — | — |
 | M4-D | Watcher race and stall evidence | pending | — | — | — | — |
 | M5-A | Tick contract characterization | pending | — | — | — | — |
