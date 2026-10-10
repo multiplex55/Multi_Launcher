@@ -1226,6 +1226,11 @@ mod tests {
             topology_invalidated: bool,
             calls: Vec<WorkerNativeCall>,
         },
+        Stationary {
+            tick: usize,
+            frame: CoordinateRenderFrame,
+            calls: Vec<WorkerNativeCall>,
+        },
         Render {
             tick: usize,
             topology_invalidated: bool,
@@ -1783,7 +1788,7 @@ mod tests {
 
     struct WorkerBackendControls {
         topology: mpsc::Receiver<()>,
-        poll_failures: mpsc::Receiver<FailurePoint>,
+        stationary_failures: mpsc::Receiver<FailurePoint>,
         render_failures: mpsc::Receiver<FailurePoint>,
     }
 
@@ -1844,13 +1849,6 @@ mod tests {
             while self.controls.topology.try_recv().is_ok() {
                 topology_invalidated = true;
             }
-            while let Ok(failure) = self.controls.poll_failures.try_recv() {
-                self.effects.operations.fail_next(failure);
-            }
-            if !topology_invalidated {
-                self.effects.poll_visible_sources(&WORKER_CHEAP_WINDOW_IDS);
-                let _ = self.effects.raise_visible_effect_stack();
-            }
             let calls = self.take_calls();
             worker_lock(&self.observations).push(WorkerObservation::Poll {
                 tick: self.tick,
@@ -1859,6 +1857,25 @@ mod tests {
             });
             self.topology_for_render = topology_invalidated;
             Ok(topology_invalidated)
+        }
+
+        fn refresh_stationary_sources(
+            &mut self,
+            frame: &CoordinateRenderFrame,
+        ) -> Result<(), String> {
+            debug_assert!(frame.current_sample.is_some());
+            while let Ok(failure) = self.controls.stationary_failures.try_recv() {
+                self.effects.operations.fail_next(failure);
+            }
+            self.effects.poll_visible_sources(&WORKER_CHEAP_WINDOW_IDS);
+            let _ = self.effects.raise_visible_effect_stack();
+            let calls = self.take_calls();
+            worker_lock(&self.observations).push(WorkerObservation::Stationary {
+                tick: self.tick,
+                frame: frame.clone(),
+                calls,
+            });
+            Ok(())
         }
 
         fn effects_status(&self) -> CoordinateEffectsStatus {
@@ -1899,7 +1916,7 @@ mod tests {
         sample_gates: Option<mpsc::Receiver<WorkerSampleGate>>,
         pending_gate: Option<WorkerSampleGate>,
         topology: mpsc::Sender<()>,
-        poll_failures: mpsc::Sender<FailurePoint>,
+        stationary_failures: mpsc::Sender<FailurePoint>,
         render_failures: mpsc::Sender<FailurePoint>,
         observations: Arc<Mutex<Vec<WorkerObservation>>>,
     }
@@ -1908,7 +1925,7 @@ mod tests {
         fn new() -> Self {
             let (sample_sender, sample_gates) = mpsc::channel();
             let (topology_sender, topology) = mpsc::channel();
-            let (poll_failure_sender, poll_failures) = mpsc::channel();
+            let (stationary_failure_sender, stationary_failures) = mpsc::channel();
             let (render_failure_sender, render_failures) = mpsc::channel();
             let observations = Arc::new(Mutex::new(Vec::new()));
             let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1916,7 +1933,7 @@ mod tests {
                 sample_requests: sample_sender,
                 backend_controls: Mutex::new(Some(WorkerBackendControls {
                     topology,
-                    poll_failures,
+                    stationary_failures,
                     render_failures,
                 })),
                 calls,
@@ -1929,7 +1946,7 @@ mod tests {
                 sample_gates: Some(sample_gates),
                 pending_gate: None,
                 topology: topology_sender,
-                poll_failures: poll_failure_sender,
+                stationary_failures: stationary_failure_sender,
                 render_failures: render_failure_sender,
                 observations,
             }
@@ -1971,8 +1988,8 @@ mod tests {
                 .expect("coordinate worker is still alive");
         }
 
-        fn fail_poll(&self, failure: FailurePoint) {
-            self.poll_failures
+        fn fail_stationary(&self, failure: FailurePoint) {
+            self.stationary_failures
                 .send(failure)
                 .expect("coordinate worker is still alive");
         }
@@ -2075,11 +2092,31 @@ mod tests {
                 calls,
                 ..
             }) => (*topology_invalidated, frame.clone(), calls.clone()),
+            Some(WorkerObservation::Stationary { .. }) => {
+                panic!("stationary receipts use worker_stationary_for_tick")
+            }
             None => panic!(
                 "missing {} receipt for tick {tick}",
                 if render { "render" } else { "poll" }
             ),
         }
+    }
+
+    fn worker_stationary_for_tick(
+        observations: &[WorkerObservation],
+        tick: usize,
+    ) -> (CoordinateRenderFrame, Vec<WorkerNativeCall>) {
+        observations
+            .iter()
+            .find_map(|event| match event {
+                WorkerObservation::Stationary {
+                    tick: found,
+                    frame,
+                    calls,
+                } if *found == tick => Some((frame.clone(), calls.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing stationary receipt for tick {tick}"))
     }
 
     fn empty_worker_frame() -> CoordinateRenderFrame {
@@ -2141,6 +2178,24 @@ mod tests {
                 assert_eq!(sources[0], expected_zoom_source(point));
             }
         }
+    }
+
+    fn assert_no_refresh_calls(calls: &[WorkerNativeCall]) {
+        assert!(
+            calls
+                .iter()
+                .all(|call| !matches!(call, WorkerNativeCall::Refresh { .. })),
+            "this phase must not submit cached-source refreshes"
+        );
+    }
+
+    fn assert_no_present_calls(calls: &[WorkerNativeCall]) {
+        assert!(
+            calls
+                .iter()
+                .all(|call| !matches!(call, WorkerNativeCall::Present { .. })),
+            "this phase must not submit source presentations"
+        );
     }
 
     fn expected_zoom_source(point: PhysicalPoint) -> EffectLiveSource {
@@ -2252,9 +2307,9 @@ mod tests {
             return;
         }
         let calls = observations.iter().flat_map(|event| match event {
-            WorkerObservation::Poll { calls, .. } | WorkerObservation::Render { calls, .. } => {
-                calls
-            }
+            WorkerObservation::Poll { calls, .. }
+            | WorkerObservation::Stationary { calls, .. }
+            | WorkerObservation::Render { calls, .. } => calls,
         });
         let (refreshes, presents) =
             calls.fold((0_u64, 0_u64), |(refreshes, presents), call| match call {
@@ -2298,14 +2353,17 @@ mod tests {
         worker.controller.freeze();
         worker.respond(Ok(worker_sample(point_b)));
         assert_eq!(worker.next_gate(), 3);
+        worker.respond(Ok(worker_sample(point_b)));
+        assert_eq!(worker.next_gate(), 4);
 
         let observations = worker.observations();
         let (poll_topology, _, poll_2) = worker_calls_for_tick(&observations, 2, false);
         let (render_topology, frame_2, render_2) = worker_calls_for_tick(&observations, 2, true);
         let (_, _, poll_3) = worker_calls_for_tick(&observations, 3, false);
         assert!(!poll_topology && !render_topology);
-        assert_both_sources(&poll_2, true, point_a);
+        assert!(poll_2.is_empty(), "polling never submits an effect source");
         assert_both_sources(&render_2, false, point_b);
+        assert_no_refresh_calls(&render_2);
         assert_eq!(
             frame_2.current_sample.as_ref().unwrap().desktop_point,
             point_b
@@ -2322,7 +2380,18 @@ mod tests {
             &worker_calls_for_tick(&observations, 1, true).2,
             point_a,
         );
-        assert_both_sources(&poll_3, true, point_b);
+        assert!(poll_3.is_empty(), "polling never submits an effect source");
+        let (stationary_frame, stationary_calls) = worker_stationary_for_tick(&observations, 3);
+        assert_eq!(
+            stationary_frame
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_b
+        );
+        assert_both_sources(&stationary_calls, true, point_b);
+        assert_no_present_calls(&stationary_calls);
 
         worker.shutdown();
         let observations = worker.observations();
@@ -2343,6 +2412,8 @@ mod tests {
         assert_eq!(worker.next_gate(), 3);
         worker.respond(Ok(worker_sample(point)));
         assert_eq!(worker.next_gate(), 4);
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 5);
 
         let observations = worker.observations();
         assert_eq!(
@@ -2354,8 +2425,12 @@ mod tests {
             "identical successful samples do not request full renders"
         );
         for tick in 2..=4 {
-            let (_, _, calls) = worker_calls_for_tick(&observations, tick, false);
+            let (_, _, poll_calls) = worker_calls_for_tick(&observations, tick, false);
+            assert!(poll_calls.is_empty());
+            let (frame, calls) = worker_stationary_for_tick(&observations, tick);
+            assert_eq!(frame.current_sample.as_ref().unwrap().desktop_point, point);
             assert_both_sources(&calls, true, point);
+            assert_no_present_calls(&calls);
         }
 
         worker.shutdown();
@@ -2371,6 +2446,8 @@ mod tests {
         worker.enable_hud_and_effects();
 
         assert_eq!(worker.next_gate(), 1);
+        // The worker is blocked sampling tick 1. Queue topology now so tick
+        // 2's pre-sample pump observes it after tick 1 has established sources.
         worker.inject_topology();
         worker.respond(Ok(worker_sample(point_a)));
         assert_eq!(worker.next_gate(), 2);
@@ -2384,6 +2461,8 @@ mod tests {
 
         worker.respond(Ok(worker_sample(point_b)));
         assert_eq!(worker.next_gate(), 3);
+        worker.respond(Ok(worker_sample(point_b)));
+        assert_eq!(worker.next_gate(), 4);
         let observations = worker.observations();
         let (render_topology, frame, calls) = worker_calls_for_tick(&observations, 2, true);
         assert!(render_topology);
@@ -2392,8 +2471,20 @@ mod tests {
             point_b
         );
         assert_filter_lists_before_sources(&calls, point_b);
+        assert_no_refresh_calls(&calls);
         let (_, _, poll_3) = worker_calls_for_tick(&observations, 3, false);
-        assert_both_sources(&poll_3, true, point_b);
+        assert!(poll_3.is_empty());
+        let (stationary_frame, stationary_calls) = worker_stationary_for_tick(&observations, 3);
+        assert_eq!(
+            stationary_frame
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_b
+        );
+        assert_both_sources(&stationary_calls, true, point_b);
+        assert_no_present_calls(&stationary_calls);
         worker.shutdown();
     }
 
@@ -2409,7 +2500,7 @@ mod tests {
         assert_eq!(worker.next_gate(), 2);
         let before_failure = worker.observations();
         let (_, _, poll_2) = worker_calls_for_tick(&before_failure, 2, false);
-        assert_both_sources(&poll_2, true, point_a);
+        assert!(poll_2.is_empty());
         worker.respond(Err("injected sample failure".into()));
         assert_eq!(worker.next_gate(), 3);
 
@@ -2428,14 +2519,32 @@ mod tests {
         );
         assert!(calls_for_source_kind(&failed_calls, EffectKind::Halo, false).is_empty());
         assert!(calls_for_source_kind(&failed_calls, EffectKind::Zoom, false).is_empty());
-        assert!(calls_for_source_kind(&hidden_poll, EffectKind::Halo, true).is_empty());
-        assert!(calls_for_source_kind(&hidden_poll, EffectKind::Zoom, true).is_empty());
+        assert_no_refresh_calls(&failed_calls);
+        assert_no_present_calls(&failed_calls);
+        assert!(hidden_poll.is_empty());
+
+        // A repeated invalid sample matching the already-hidden failure
+        // frame must neither reconcile stale sources nor enter stationary work.
+        worker.respond(Err("injected sample failure".into()));
+        assert_eq!(worker.next_gate(), 4);
+        let repeated_failure = worker.observations();
+        assert!(repeated_failure.iter().any(|event| matches!(
+            event,
+            WorkerObservation::Poll { tick: 4, calls, .. } if calls.is_empty()
+        )));
+        assert!(!repeated_failure.iter().any(|event| matches!(
+            event,
+            WorkerObservation::Render { tick: 3, .. }
+                | WorkerObservation::Stationary { tick: 3, .. }
+        )));
 
         worker.respond(Ok(worker_sample(point_b)));
-        assert_eq!(worker.next_gate(), 4);
+        assert_eq!(worker.next_gate(), 5);
+        worker.respond(Ok(worker_sample(point_b)));
+        assert_eq!(worker.next_gate(), 6);
         let recovered = worker.observations();
-        let (_, recovered_frame, recovered_calls) = worker_calls_for_tick(&recovered, 3, true);
-        let (_, _, recovery_poll) = worker_calls_for_tick(&recovered, 4, false);
+        let (_, recovered_frame, recovered_calls) = worker_calls_for_tick(&recovered, 4, true);
+        let (_, _, recovery_poll) = worker_calls_for_tick(&recovered, 5, false);
         assert_eq!(
             recovered_frame
                 .current_sample
@@ -2445,7 +2554,19 @@ mod tests {
             point_b
         );
         assert_both_sources(&recovered_calls, false, point_b);
-        assert_both_sources(&recovery_poll, true, point_b);
+        assert_no_refresh_calls(&recovered_calls);
+        assert!(recovery_poll.is_empty());
+        let (stationary_frame, recovery_calls) = worker_stationary_for_tick(&recovered, 5);
+        assert_eq!(
+            stationary_frame
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_b
+        );
+        assert_both_sources(&recovery_calls, true, point_b);
+        assert_no_present_calls(&recovery_calls);
         assert_eq!(
             *worker.controller.effects_status().halo(),
             CursorEffectStatus::Active
@@ -2458,7 +2579,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_effect_tick_disable_refreshes_old_state_once_and_keeps_hud_worker() {
+    fn worker_effect_tick_disable_does_not_refresh_old_state_and_keeps_hud_worker() {
         let point = PhysicalPoint::new(-1440, 360);
         let mut worker = WorkerEffectHarness::new();
         worker.enable_hud_and_effects();
@@ -2472,26 +2593,21 @@ mod tests {
         worker.controller.set_zoom_enabled(false).unwrap();
         worker.respond(Ok(worker_sample(point)));
         assert_eq!(worker.next_gate(), 4);
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 5);
 
         let observations = worker.observations();
         let (_, _, first_poll) = worker_calls_for_tick(&observations, 2, false);
         let (_, _, halo_disabled_poll) = worker_calls_for_tick(&observations, 3, false);
         let (_, _, all_effects_disabled_poll) = worker_calls_for_tick(&observations, 4, false);
-        assert_both_sources(&first_poll, true, point);
-        assert!(calls_for_source_kind(&halo_disabled_poll, EffectKind::Halo, true).is_empty());
-        assert_eq!(
-            calls_for_source_kind(&halo_disabled_poll, EffectKind::Zoom, true)
-                .iter()
-                .map(source_point)
-                .collect::<Vec<_>>(),
-            vec![point]
-        );
-        assert!(
-            calls_for_source_kind(&all_effects_disabled_poll, EffectKind::Halo, true).is_empty()
-        );
-        assert!(
-            calls_for_source_kind(&all_effects_disabled_poll, EffectKind::Zoom, true).is_empty()
-        );
+        assert!(first_poll.is_empty());
+        assert!(halo_disabled_poll.is_empty());
+        assert!(all_effects_disabled_poll.is_empty());
+        let (_, _, disabled_render) = worker_calls_for_tick(&observations, 3, true);
+        assert_no_refresh_calls(&disabled_render);
+        assert_no_present_calls(&disabled_render);
+        let (_, disabled_stationary_calls) = worker_stationary_for_tick(&observations, 4);
+        assert!(disabled_stationary_calls.is_empty());
         let runtime = worker.controller.runtime_state();
         assert!(runtime.hud_enabled());
         assert!(!runtime.halo_enabled() && !runtime.zoom_enabled());
@@ -2508,99 +2624,104 @@ mod tests {
         let point_a = PhysicalPoint::new(-1740, -180);
         let point_b = PhysicalPoint::new(-680, 460);
         let point_c = PhysicalPoint::new(-420, 700);
-        let point_d = PhysicalPoint::new(-130, 880);
         let mut worker = WorkerEffectHarness::new();
         worker.enable_hud_and_effects();
 
         assert_eq!(worker.next_gate(), 1);
-        worker.fail_poll(FailurePoint::Refresh(EffectKind::Halo));
         worker.respond(Ok(worker_sample(point_a)));
         assert_eq!(worker.next_gate(), 2);
+
+        // A stationary-source failure uses the validated source from the last
+        // successful render and releases only Halo to its fallback.
+        worker.fail_stationary(FailurePoint::Refresh(EffectKind::Halo));
+        worker.respond(Ok(worker_sample(point_a)));
+        assert_eq!(worker.next_gate(), 3);
         let observations = worker.observations();
-        let (_, _, failed_poll) = worker_calls_for_tick(&observations, 2, false);
-        assert_both_sources(&failed_poll, true, point_a);
+        let (_, _, poll_2) = worker_calls_for_tick(&observations, 2, false);
+        assert!(poll_2.is_empty());
+        let (stationary_frame, failed_stationary) = worker_stationary_for_tick(&observations, 2);
+        assert_eq!(
+            stationary_frame
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_a
+        );
+        assert_both_sources(&failed_stationary, true, point_a);
         assert!(matches!(
             worker.controller.effects_status().halo(),
             CursorEffectStatus::Fallback(_)
         ));
+        assert_eq!(
+            *worker.controller.effects_status().zoom(),
+            CursorEffectStatus::Active
+        );
 
+        // Queue topology for tick 4 while tick 3's sample is gated. Tick 3 is
+        // an ordinary moving render at B; the zoom presentation then fails.
         worker.inject_topology();
+        worker.fail_render(FailurePoint::Present(EffectKind::Zoom));
         worker.respond(Ok(worker_sample(point_b)));
-        assert_eq!(worker.next_gate(), 3);
+        assert_eq!(worker.next_gate(), 4);
         let observations = worker.observations();
-        let (_, _, sibling_render) = worker_calls_for_tick(&observations, 2, true);
+        let (_, sibling_render_frame, sibling_render) =
+            worker_calls_for_tick(&observations, 3, true);
+        assert_eq!(
+            sibling_render_frame
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_b
+        );
         assert_both_sources(&sibling_render, false, point_b);
         assert!(matches!(
             worker.controller.effects_status().halo(),
             CursorEffectStatus::Fallback(_)
         ));
-        let (topology, _, suppressed_poll) = worker_calls_for_tick(&observations, 3, false);
+        assert!(matches!(
+            worker.controller.effects_status().zoom(),
+            CursorEffectStatus::Unavailable(_)
+        ));
+        let (topology, _, suppressed_poll) = worker_calls_for_tick(&observations, 4, false);
         assert!(topology && suppressed_poll.is_empty());
 
-        worker.fail_render(FailurePoint::Present(EffectKind::Zoom));
         worker.respond(Ok(worker_sample(point_c)));
-        assert_eq!(worker.next_gate(), 4);
+        assert_eq!(worker.next_gate(), 5);
         let observations = worker.observations();
-        let (topology, frame, retried_render) = worker_calls_for_tick(&observations, 3, true);
+        let (topology, frame, recovered_render) = worker_calls_for_tick(&observations, 4, true);
         assert!(topology);
         assert_eq!(
             frame.current_sample.as_ref().unwrap().desktop_point,
             point_c
         );
-        assert_eq!(
-            calls_for_source_kind(&retried_render, EffectKind::Halo, false)
-                .iter()
-                .map(source_point)
-                .collect::<Vec<_>>(),
-            vec![point_c]
-        );
-        assert_eq!(
-            calls_for_source_kind(&retried_render, EffectKind::Zoom, false)
-                .iter()
-                .map(source_point)
-                .collect::<Vec<_>>(),
-            vec![point_c],
-            "failed presentation is still an actual attempted API dispatch"
-        );
-        assert_filter_lists_before_sources(&retried_render, point_c);
-        let (_, _, halo_only_poll) = worker_calls_for_tick(&observations, 4, false);
-        assert_eq!(
-            calls_for_source_kind(&halo_only_poll, EffectKind::Halo, true)
-                .iter()
-                .map(source_point)
-                .collect::<Vec<_>>(),
-            vec![point_c]
-        );
-        assert!(calls_for_source_kind(&halo_only_poll, EffectKind::Zoom, true).is_empty());
+        assert_both_sources(&recovered_render, false, point_c);
+        assert_filter_lists_before_sources(&recovered_render, point_c);
         assert_eq!(
             *worker.controller.effects_status().halo(),
             CursorEffectStatus::Active
         );
-        assert!(matches!(
-            worker.controller.effects_status().zoom(),
-            CursorEffectStatus::Unavailable(_)
-        ));
+        assert_eq!(
+            *worker.controller.effects_status().zoom(),
+            CursorEffectStatus::Active
+        );
 
-        worker.inject_topology();
         worker.respond(Ok(worker_sample(point_c)));
-        assert_eq!(worker.next_gate(), 5);
-        let observations = worker.observations();
-        let (topology, _, suppressed_poll) = worker_calls_for_tick(&observations, 5, false);
-        assert!(topology && suppressed_poll.is_empty());
-        worker.respond(Ok(worker_sample(point_d)));
         assert_eq!(worker.next_gate(), 6);
         let observations = worker.observations();
-        let (topology, frame, recovered_render) = worker_calls_for_tick(&observations, 5, true);
-        assert!(topology);
+        let (_, _, recovered_poll) = worker_calls_for_tick(&observations, 5, false);
+        assert!(recovered_poll.is_empty());
+        let (stationary_frame, recovered_stationary) = worker_stationary_for_tick(&observations, 5);
         assert_eq!(
-            frame.current_sample.as_ref().unwrap().desktop_point,
-            point_d
+            stationary_frame
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_c
         );
-        assert_both_sources(&recovered_render, false, point_d);
-        assert_filter_lists_before_sources(&recovered_render, point_d);
-        let observations = worker.observations();
-        let (_, _, recovered_poll) = worker_calls_for_tick(&observations, 6, false);
-        assert_both_sources(&recovered_poll, true, point_d);
+        assert_both_sources(&recovered_stationary, true, point_c);
 
         worker.shutdown();
         let observations = worker.observations();

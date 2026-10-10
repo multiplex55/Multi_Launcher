@@ -20,6 +20,17 @@ pub trait CoordinateSurfaceBackend {
         Ok(false)
     }
 
+    /// Refresh current native effect sources for an unchanged successful
+    /// frame, without redrawing the HUD or other cheap overlays.
+    ///
+    /// The worker calls this only after a successful sample when the frame is
+    /// equal to the last successfully rendered frame and no forced refresh or
+    /// backend retry is pending. Backends without independently animated
+    /// sources may keep the default no-op implementation.
+    fn refresh_stationary_sources(&mut self, _frame: &CoordinateRenderFrame) -> Result<(), String> {
+        Ok(())
+    }
+
     fn effects_status(&self) -> CoordinateEffectsStatus {
         CoordinateEffectsStatus::default()
     }
@@ -368,8 +379,6 @@ fn run_worker(
                 false
             }
         };
-        lock(&shared).effects_status = backend.effects_status();
-
         let sample_result = sampler.sample();
         let current_sample = sample_result.as_ref().ok().cloned();
         let sample_error = sample_result.err();
@@ -414,8 +423,12 @@ fn run_worker(
                 }
                 Err(error) => lock(&shared).backend_error = Some(error),
             }
-            lock(&shared).effects_status = backend.effects_status();
+        } else if frame.current_sample.is_some() {
+            if let Err(error) = backend.refresh_stationary_sources(&frame) {
+                lock(&shared).backend_error = Some(error);
+            }
         }
+        lock(&shared).effects_status = backend.effects_status();
     }
 
     let shutdown = backend.shutdown();
@@ -457,6 +470,7 @@ mod tests {
         fallback: Result<CoordinateSample, String>,
         backend_failure: Option<String>,
         effects_status: Arc<Mutex<CoordinateEffectsStatus>>,
+        stationary_frames: Arc<Mutex<Vec<CoordinateRenderFrame>>>,
         sample_gate: Option<mpsc::Sender<mpsc::SyncSender<()>>>,
         rendered: mpsc::Sender<CoordinateRenderFrame>,
     }
@@ -477,6 +491,7 @@ mod tests {
                     fallback,
                     backend_failure: None,
                     effects_status: Arc::new(Mutex::new(CoordinateEffectsStatus::default())),
+                    stationary_frames: Arc::new(Mutex::new(Vec::new())),
                     sample_gate: None,
                     rendered,
                 },
@@ -533,6 +548,7 @@ mod tests {
         rendered: mpsc::Sender<CoordinateRenderFrame>,
         shutdowns: Arc<AtomicUsize>,
         effects_status: Arc<Mutex<CoordinateEffectsStatus>>,
+        stationary_frames: Arc<Mutex<Vec<CoordinateRenderFrame>>>,
     }
 
     impl CoordinateSurfaceBackend for FakeSurfaceBackend {
@@ -544,6 +560,14 @@ mod tests {
 
         fn effects_status(&self) -> CoordinateEffectsStatus {
             self.effects_status.lock().unwrap().clone()
+        }
+
+        fn refresh_stationary_sources(
+            &mut self,
+            frame: &CoordinateRenderFrame,
+        ) -> Result<(), String> {
+            self.stationary_frames.lock().unwrap().push(frame.clone());
+            Ok(())
         }
 
         fn shutdown(&mut self) -> Result<(), String> {
@@ -573,6 +597,7 @@ mod tests {
                 rendered: self.rendered.clone(),
                 shutdowns: Arc::clone(&self.shutdowns),
                 effects_status: Arc::clone(&self.effects_status),
+                stationary_frames: Arc::clone(&self.stationary_frames),
             }))
         }
     }
@@ -614,6 +639,24 @@ mod tests {
             if predicate(&frame) {
                 return frame;
             }
+        }
+    }
+
+    fn wait_for_stationary_frames(
+        factory: &FakeFactory,
+        minimum: usize,
+    ) -> Vec<CoordinateRenderFrame> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let frames = factory.stationary_frames.lock().unwrap().clone();
+            if frames.len() >= minimum {
+                return frames;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker should refresh unchanged successful frames"
+            );
+            std::thread::yield_now();
         }
     }
 
@@ -733,7 +776,7 @@ mod tests {
             ],
             Ok(sample(-1600, 300, "DISPLAY2")),
         );
-        let mut controller = CoordinateToolController::new(Arc::new(factory));
+        let mut controller = CoordinateToolController::new(Arc::new(factory.clone()));
         controller.set_hud_enabled(true).unwrap();
         controller.set_crosshair_enabled(true).unwrap();
         controller.set_halo_enabled(true).unwrap();
@@ -772,7 +815,7 @@ mod tests {
     #[test]
     fn sampling_failure_is_explicit_and_does_not_reuse_current_coordinates() {
         let (factory, rendered) = FakeFactory::new([], Err("cursor query failed".into()));
-        let mut controller = CoordinateToolController::new(Arc::new(factory));
+        let mut controller = CoordinateToolController::new(Arc::new(factory.clone()));
         controller.set_crosshair_enabled(true).unwrap();
         let frame = receive(&rendered);
         assert!(frame.current_sample.is_none());
@@ -792,7 +835,7 @@ mod tests {
             [Ok(first_sample.clone()), Err("cursor query failed".into())],
             Err("cursor query failed".into()),
         );
-        let mut controller = CoordinateToolController::new(Arc::new(factory));
+        let mut controller = CoordinateToolController::new(Arc::new(factory.clone()));
         controller.set_hud_enabled(true).unwrap();
         let first = receive(&rendered);
         assert_eq!(first.current_sample, Some(first_sample.clone()));
@@ -811,6 +854,7 @@ mod tests {
         assert!(unavailable.runtime_state.zoom_enabled());
         controller.freeze();
         assert!(!controller.runtime_state().is_frozen());
+        assert!(factory.stationary_frames.lock().unwrap().is_empty());
         controller.shutdown().unwrap();
     }
 
@@ -884,6 +928,21 @@ mod tests {
             controller.effects_status().halo(),
             &CursorEffectStatus::Disabled
         );
+    }
+
+    #[test]
+    fn stationary_refresh_uses_last_successful_frame_without_redrawing() {
+        let stable = sample(-1800, 200, "DISPLAY1");
+        let (factory, rendered) = FakeFactory::new([], Ok(stable));
+        let mut controller = CoordinateToolController::new(Arc::new(factory.clone()));
+        controller.set_hud_enabled(true).unwrap();
+
+        let first_render = receive(&rendered);
+        let stationary_frames = wait_for_stationary_frames(&factory, 2);
+        assert!(stationary_frames.iter().all(|frame| frame == &first_render));
+        assert!(rendered.recv_timeout(Duration::from_millis(100)).is_err());
+
+        controller.shutdown().unwrap();
     }
 
     #[test]

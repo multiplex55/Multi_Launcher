@@ -110,6 +110,12 @@ mod smoke {
         fn poll_events(&mut self) -> Result<bool, String> {
             self.0.poll_events()
         }
+        fn refresh_stationary_sources(
+            &mut self,
+            frame: &CoordinateRenderFrame,
+        ) -> Result<(), String> {
+            self.0.refresh_stationary_sources(frame)
+        }
         fn render(&mut self, frame: &CoordinateRenderFrame) -> Result<(), String> {
             self.1.renders.fetch_add(1, Ordering::AcqRel);
             self.0.render(frame)

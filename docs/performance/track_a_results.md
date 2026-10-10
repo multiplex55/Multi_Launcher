@@ -318,3 +318,19 @@ Initial worker run241a69d4-2a68-4b6f-8f44-8315a6eed37d passed2/6. Review correct
 Exact final gate: `cargo nextest run --lib --test-threads 1 --no-fail-fast -E 'test(coordinate_tool::controller::tests::) | test(worker_effect_tick_) | test(native_effects::tests::stationary_) | test(native_effects::tests::resumed_outlines_) | test(native_effects::tests::topology_refresh_) | test(native_effects::tests::halo_fallback_coexists_) | test(native_effects::tests::halo_missing_live_sample_) | test(native_effects::tests::filter_input_invalidation_)'`, with MULTI_LAUNCHER_PERF=1.
 
 An earlier overly broad filter, run287f0b1a-140e-42a0-8bde-91447fba7ecb, included unrelated screen_draw::controller::tests::new_capture_timeout_fails_safe_without_capturing_under_the_old_surface; that test failed and10 were cancelled. No screen-draw code changed, no cause attribution is made, and the correctly narrowed required gate passed. Counts above are deterministic runtime API-dispatch evidence with fake native operations, not measured Windows magnification GPU work or display latency. Native visual/mixed-DPI checks remain NOT RUN at this checkpoint. All commits are local.
+
+M5-A local commit: `7696f0dc9faf99adfb4c7a74ab56169bcced8c00`. No push. M5-B sole writer dispatched with the explicit post-sample full-render/stationary/invalid branch contract and smoke CountingBackend forwarding. Parent has no compiler jobs. Native smoke remains for C.
+
+### M5-B — one post-sample source phase
+
+The controller now chooses full render for changed/forced/retry frames, stationary source refresh for equal successful frames, or no source work for equal invalid frames. Effects status is published after that phase. Windows polling only pumps messages/topology; stationary refresh delegates existing validated-source polling and stacking. Full render retains existing cheap-surface, outline, complete-filter and current-sample reconciliation ownership. The real smoke wrapper forwards the new trait phase. No sampler/cadence/session/fallback/resource ownership changed.
+
+| Ordinary worker tick, per active effect | M5-A cached refresh / current presentation | M5-B cached refresh / current presentation |
+| --- | --- | --- |
+|Moving A to B|1 /1 (old A then current B)|0 /1 (current B)|
+|Stationary valid frame|1 /0|1 /0|
+|First invalid sample or disabling that effect|Old pre-sample refresh possible|No old-source refresh|
+
+These are actual controller/runtime dispatch receipts with fake native operations, not GPU work or display latency. Exceptional native failure/fallback recovery retains its established semantics and is not claimed universally single-call. Full zoom geometry, topology/resume exclusion order, frozen HUD/live sources, sibling failures and all-off lifetime remain covered.
+
+Final serial opt-in scoped gate PASS25/25,5,089 skipped, runb335f9f6-827a-4d3a-9403-e2078930e9ba; same precise controller/native filters as A plus new stationary controller coverage. Aggregate refresh/present metrics match typed receipts. cargo check --bin coordinate_tool_smoke, changed-file rustfmt and diff checks PASS. Independent scoped review clear and execution conditions satisfied. A moved fake-factory compile error and an overbroad lifetime assertion were corrected in tests; isolated disabled-owner rerun139414e7-bc8a-4660-901d-5df7b8337eba PASS, followed by the final full focused25-case pass. Parent cumulative diff contains only intended four Rust files and documentation. Native Windows smoke is next; all commits local.

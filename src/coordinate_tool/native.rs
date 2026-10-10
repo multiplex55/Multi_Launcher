@@ -2321,18 +2321,29 @@ mod windows_runtime {
                     DispatchMessageW(&message);
                 }
             }
-            if !self.topology_invalidated {
-                let cheap_window_ids = [
-                    self.hud.hwnd.0 as usize,
-                    self.crosshair.hwnd.0 as usize,
-                    self.horizontal_guide.hwnd.0 as usize,
-                    self.vertical_guide.hwnd.0 as usize,
-                ];
-                self.effects.poll_visible_sources(&cheap_window_ids);
-                self.sync_effect_stack_order();
-            }
             self.refresh_requested |= refresh;
             Ok(refresh)
+        }
+
+        fn refresh_stationary_sources(
+            &mut self,
+            frame: &CoordinateRenderFrame,
+        ) -> Result<(), String> {
+            if self.shutdown {
+                return Err("Coordinate surfaces are already shut down".into());
+            }
+            if frame.current_sample.is_none() {
+                return Ok(());
+            }
+            let cheap_window_ids = [
+                self.hud.hwnd.0 as usize,
+                self.crosshair.hwnd.0 as usize,
+                self.horizontal_guide.hwnd.0 as usize,
+                self.vertical_guide.hwnd.0 as usize,
+            ];
+            self.effects.poll_visible_sources(&cheap_window_ids);
+            self.sync_effect_stack_order();
+            Ok(())
         }
 
         fn render(&mut self, frame: &CoordinateRenderFrame) -> Result<(), String> {
