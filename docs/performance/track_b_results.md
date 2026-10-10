@@ -2,25 +2,25 @@
 
 Baseline: cargo-build-perf at `6a6be519685652a282f7d0a411008601f158d075`. Implementation: build-optimization; local commits only, no push/merge.
 
-B0 is frozen. B1 resource changes and the opt-in fast-dev/iteration profiles are verified below; final B5 comparisons remain pending. Full protocol and cache caveats are in track_b_baseline.md.
+B0 is frozen. B1–B4 are complete; validated B5 values are filling the table below. Branch transitions, warm checks and the final active-checkout native gate remain pending. Full protocol and cache caveats are in track_b_baseline.md.
 
 | Scenario | Baseline seconds | Final | Comparison constraint |
 | --- | --- | --- | --- |
-| No-op release launcher | median1.017300; range0.997221–1.058698; n=3 | NOT MEASURED | Fresh, identical command |
-| Small edited release launcher | median244.682906; range239.562765–249.803047; n=2 | NOT MEASURED | Same original-to-color-edit workload |
-| Large edited release launcher | median240.309998; range237.433298–243.186698; n=2 | NOT MEASURED | Same original-to-GUI-edit workload |
-| Default all-bin edited release | median323.159398; range317.662238–328.656558; n=2 | NOT MEASURED | Same small edit; four binaries |
+| No-op release launcher | median1.017300; range0.997221–1.058698; n=3 | median0.885758; range0.868423–0.969772; n=3 | Reused5819774e/equivalentF; small absolute difference, no strong gain claim |
+| Small edited release launcher | median244.682906; range239.562765–249.803047; n=2 | median239.982265; range235.617816–244.346714; n=2 | Same color fixture; observed1.92%lower/ranges overlap; no substantial canonical gain |
+| Large edited release launcher | median240.309998; range237.433298–243.186698; n=2 | median236.646632; range234.966570–238.326693; n=2 | Same GUI fixture; validated5819774e first/F second; ranges overlap |
+| Default all-bin edited release | median323.159398; range317.662238–328.656558; n=2 | median316.836231; range315.332734–318.339727; n=2 | Observed1.96%lower; ranges overlap; final restoration gate pending |
 | Branch-switch release A→B / B→A | medians243.453353 / 240.954734; n=2 each | NOT MEASURED | Owned refs, exact same color change |
-| Library Nextest preparation / cached invocation | 210.186021 / 2.009562 | NOT MEASURED | First target preparation; 8 passed |
-| History preparation / cached invocation | 215.092202 / 2.077256 | NOT MEASURED | 5 passed; normal Cargo prerequisites |
-| Domain preparation / cached invocation | 20.862317 / 2.796195 | NOT MEASURED | 102 passed; prior prerequisites reused |
-| Broad Nextest compile/discovery | 943.248524; declared6389cases | NOT MEASURED | Inventory only; no full-suite execution |
+| Library Nextest preparation / cached invocation | 210.186021 / 2.009562 | See separate B5-B phase table | Preparation, no-run and eight-test execution are distinct |
+| History preparation / cached invocation | 215.092202 / 2.077256 | See separate B5-B phase table | Five passed; normal Cargo prerequisites and differing histories |
+| Domain preparation / cached invocation | 20.862317 / 2.796195 | See separate B5-B phase table | 102 passed; prior prerequisites differ |
+| Broad Nextest compile/discovery | 943.248524;6389cases | default938.288174/fast-dev265.721831; n=1each | Unequal cache histories; no isolated speedup; inventory not full execution |
 | Check target population / warm checks | 76.682837 / 1.078176,0.918521 | NOT MEASURED | Keep first population separate |
-| Named iteration profile | NOT MEASURED | NOT MEASURED | Population/edit/no-op separate |
+| Named iteration profile | No prior profile; matched release controls below | Small median27.062325; large31.349379; no-op1.389327 | Opt-in combined-profile comparison; population/preparations separate; no canonical equivalence claim |
 
 The all-bin median was78.476492s slower under the same edit; extra targets are the intended workload difference. Sequential trials and differing library durations prevent attributing every second solely to target selection. The all-bin baseline is closest to the approximate six-minute report; original user command is not established. Named-profile results below do not represent canonical release improvements.
 
-Conditional gates: broad test linker/memory observations justify reassessing one jobs4 experiment after reduced symbols; alternative linker only if material residual cost persists. sccache unavailable; dependency pruning lacks demonstrated expensive-dependency evidence; broad crate extraction remains deferred. These decisions will be finalized at B4, not presumed accepted now.
+Conditional B4 decisions are final: retain default jobs after reverse confirmation showed no repeatable jobs4 benefit; retain MSVC because canonical linker cost is not sufficiently established to justify a trial. sccache unavailable; dependency-feature gate unmet; crate extraction deferred after analysis. No global tooling, dependency or workspace change.
 
 B0 PE/icon verification passed against original ICO after branch restoration. Inventory:72suites,6389cases,17ignored,2empty; zero duplicate logical cases. Native startup was NOT RUN at B0; the later B1 smoke is recorded below. Independent baseline/support review approved after causal-attribution wording and fresh-output collision fixes.
 
@@ -62,7 +62,7 @@ Accepted source `73fce728c91e47d2b7e122bf91aab7b5e72dfbac`; same owned scratch p
 | Original restoration preparation, n=2 | excluded |239.838158,244.770315 | Excluded from edited samples |
 | Accepted-source transition | excluded |17.966304 | AllFresh/no compile observed; cause unassigned |
 
-Both edited B1 builds kept the resource script fresh, whereas B0 reran it. Cargo timing aggregates: library236.84/240.97s, frontend73.70/64.86s, codegen163.14/176.11s; launcher19.53/17.55s. Exact linker duration remains NOT MEASURED. The observed slowdown's cause is unresolved; neither causal regression nor random variability is established. No performance claim is made for the two resource watches. Independent review verified unchanged opt-level3/embed-bitcode=no/strip=debuginfo, metadata/link arguments, fixture hash, command and production content outside the two watches; no correctness findings. Four-bin check/metadata from B1-B and icon/resource gates from B1-A are reused. Final B5 matched comparison remains pending.
+Both edited B1 builds kept the resource script fresh, whereas B0 reran it. Cargo timing aggregates: library236.84/240.97s, frontend73.70/64.86s, codegen163.14/176.11s; launcher19.53/17.55s. Exact linker duration remains NOT MEASURED. The observed slowdown's cause is unresolved; neither causal regression nor random variability is established. No performance claim is made for the two resource watches. Independent review verified unchanged opt-level3/embed-bitcode=no/strip=debuginfo, metadata/link arguments, fixture hash, command and production content outside the two watches; no correctness findings. Four-bin check/metadata from B1-B and icon/resource gates from B1-A are reused. The final matched comparison is recorded in B5-B below.
 
 The restored B1 production binary passed the bounded native startup smoke (target/track-b/b1-release-native-1, runner14274 exit0): expected visible launcher window, responsive WM_NULL, one posted WM_CLOSE, normal application exit0, root absent and all recorded owned cleanup clear. Source73fce728; executableSHA4164f1856d9967d074e7ebcfd53f6e96c8e27165d389c106a29d713a9448a70b. The14.790s total includes helper/polling/cleanup and is not application startup latency. This isolated startup gate does not establish full plugin/hotkey/render equivalence or final-source B5 validation.
 
@@ -220,3 +220,58 @@ The G: HDD shows sampled queues/paging, but a stable faster user-owned storage p
 Canonical release edits remain library-codegen dominated: main compile-and-link mean16.735s bounds all work in that unit, about7%of239.982s wall time; actual linker-only cost is smaller or equal and unisolated. Broad test compilation exposes concurrent link/I/O activity, including the first-screen survival lower bound, but its first/replay cache asymmetry does not establish a worthwhile canonical-release linker change. The controlled warmed cohort completes in61.057936s under default scheduling; no measured alternative-linker gain or causal linker attribution exists.
 
 Retain verified MSVC14.44.35207. Bundled rust-lld availability is not compatibility proof. No linker trial, shell override, global config, PDB/ABI experiment or alternative-native smoke was run. This is an evidence-led gate skip, not a failed LLD experiment or a claim that test linking cannot improve. A future trial should isolate material residual link time on the actual frequent workload before paying cache-population and native-validation costs.
+## B5-A final compatibility and provenance (PASS)
+
+Final production inputs are frozen at `4221c349acc34beb07d57852b70bfddbed0931ad` (F). The active `build-optimization` branch and owned scratch contain those inputs. The source audit from initial `6a6be519685652a282f7d0a411008601f158d075` confirms unchanged runtime sources, tests, resources, dependencies, lockfile and Cargo configuration. The only production changes are the two resource watches and the two named profile tables. Independent cumulative source/helper review approved that scope.
+
+The final-input audit in `target/track-b/b5-frozen-input-audit.json` confirms that F differs from measured B2-B/B3 source `5819774e28491fead6d4634488969f60dc0115d7` only in an iteration-profile comment. B2-A source `7b6fab5e994be80875d18a09b0bc9ee80cc0b376` additionally lacks the later iteration table; its default/fast-dev settings and compiled source inputs are unchanged. The B5 runner revalidates prior large-edit success records, exact commands, source/target paths, fixture hashes, raw log hashes and effective manifest contracts before reusing either sample. Original measured SHAs remain attached to those observations.
+
+Active and scratch checkouts have LF/CRLF differences, verified identical after normalization. Scratch fixture bytes retain their recorded hashes throughout comparisons; a final build from the active checkout is a separate path/cache transition. Toolchain recheck remains rustc 1.97.1, Cargo 1.97.1 and Nextest 0.9.135 on x86_64-pc-windows-msvc. No conflicting wrapper, Rust flag, profile, target or jobs overrides were found. Environment overrides remain possible for ordinary user commands; equivalent effective settings are required to reproduce these measurements.
+
+Reuse the unchanged tracked-helper verification rather than run it again for documentation commits: B0-B tested exit 7, native arguments and paths with spaces, CWD/environment restoration and fresh timing capture; B1-B tested target/profile-selector guards, help, invocation outside the repository and native nonzero propagation. Helpers require PowerShell 7 and the relevant installed tools, remain optional, and do not require sccache, an alternative linker or editor configuration. Ignored campaign runners and raw artifacts are local evidence, not a portable committed automation framework.
+
+B3 retains the exact 72-suite / 6,389-case / 17-ignored / two-empty-suite Windows roster under default and fast-dev, with identity mapping for every case. Its 108 scoped passes and B2 assertion/history evidence remain valid under the audited inputs. Ignored cases were listed, not executed. Full-suite execution, non-Windows validation, manual debugger inspection and full runtime-performance equivalence were NOT RUN.
+
+Final active-checkout `cargo build --release --bin multi_launcher --timings -vv` passed at F in 1.042136 seconds, with the application Fresh and no compilation. This validates the documented canonical command and accepted original-source artifact after the completed scratch builds; it is excluded from edited benchmarks. Executable: 48,880,128 bytes, SHA256 `9d78d3893fea30addc0221685d8675e2b52144319eb28be7faf1e50d8b3fc5e5`. The first invocation was rejected before Cargo by the unchanged helper's outside-source evidence guard; the corrected run stores its manifest/logs under `C:/Users/Jay/.codex/visualizations/2026/10/10/01a1258c-086e-7d63-8e42-bdf503ac79a1/track-b-b5-active-release-1`. No source change or duplicate build was needed.
+
+Original ICO/PE byte comparison passed in `target/track-b/b5-active-validation-1/icon-resource.json`. The identical executable SHA passed the bounded native smoke in `target/track-b/b5-release-native-1`: expected window observed, responsive WM_NULL, one posted WM_CLOSE, normal application exit 0, root gone, all recorded owned cleanup clear, no timeout. The smoke uses isolated owned settings/data and the existing inert hotkey setting; it does not prove full hotkey/plugin behavior or runtime-performance equivalence. Other three binaries retain B1's explicit compile evidence and B5's successful all-bin compilation, with unchanged source/targets. Named-profile PE/native and full-debug/assertion evidence are reused under the independently audited equivalent inputs.
+## B5-B final comparison (IN PROGRESS)
+
+The canonical release comparison uses the original-to-edited fixture, not an unchanged second command. Frozen F is `4221c349acc34beb07d57852b70bfddbed0931ad`; reused observations retain measured SHAs `5819774e` (B2-B/B3) and `7b6fab5e` (B2-A). Remaining all-bin, large-edit and branch-switch results will be filled only after the final runner succeeds. Initial populations, original-source preparations and source-path transitions are excluded from edited samples. The controlled branch workload uses create-only owned A/B commit refs and git switch --detach in the scratch worktree: A is exactly F; B changes only the recorded color fixture. It measures Cargo after each transition, not Git checkout latency, and leaves the active user branch untouched.
+
+Nextest phases remain separate. Preparation values below have different cache/prerequisite histories and support no isolated speedup percentage. Cached invocations include command/runner overhead; they are not pure test execution.
+
+| Nextest phase | B0 default seconds | Final default seconds | Final fast-dev seconds |
+| --- | --- | --- | --- |
+| Library original-source preparation, no-run | 210.186021 | 70.009479 | 167.773999 |
+| Library cached execution, 8 passed | 2.009562 | Not remeasured in B3 | B2-A passing evidence reused; no B3 execution timing substituted |
+| History preparation, no-run | 215.092202 | 226.245197 | 180.596997 |
+| History cached invocation, 5 passed | 2.077256 | Not run in B3 | 3.326820 |
+| Domain preparation, no-run | 20.862317 | 22.483401 | 8.785424 |
+| Domain cached invocation, 102 passed | 2.796195 | Not run in B3 | 4.354443 |
+| Broad compile/discovery, n=1 | 943.248524 | 938.288174 | 265.721831 |
+| Already-built full roster listing | Not measured separately | 3.155210 | 2.963865 |
+
+The separate B3 target-selection comparison measured cached no-run orchestration: unrestricted median 3.004230 seconds versus explicit-library 1.873911 seconds, three observations each, with no compilation. It does not replace B0's cached eight-test execution. Explicit target selection remains the architectural recommendation because a case-name filter alone does not constrain the Cargo build targets.
+
+Matched B2-A compilation retains first/replay distinctions: launcher default/fast-dev 144.058486/93.992278 seconds first and 43.251080/30.412154 replay; library-test compilation 196.956480/175.760159 first and 40.201463/36.489082 replay. These are opt-in development-profile results, not canonical release improvements. Named-profile no-op overhead and extra cache population/storage remain documented above. Gains across different workloads must not be added.
+
+Final all-bin edited observations at F: 315.332734 and 318.339727 seconds (median 316.836231), both exit 0. Baseline median 323.159398 seconds: observed 1.96% lower, with overlapping ranges and only two observations. This closest measured six-minute workload remains about 5.28 minutes; it is not proof of a substantial canonical release improvement. The original user command is unknown. Preparations 361.083072 and 311.385043 seconds are excluded; final original restoration and the remaining B5 gates are still running.
+
+The first final all-bin sample's retained Cargo timing/verbose evidence confirms canonical flags on all five compiled application units: opt-level 3, strip=debuginfo and embed-bitcode=no, with no iteration/incremental/LTO override. The library took 221.6 seconds (frontend 60.0, codegen 161.6); binary units were radial_acceptance 92.7, launcher 19.6, coordinate smoke 6.4 and passive overlay 2.5 seconds. Units overlap, so their durations are not additive wall time or exact linker measurements. Root resource build-script/run units were 0.0 seconds, no build-script invocation appeared, and embed-resource was Fresh. The resource-watch path worked as intended for this unrelated source edit. Compact audit: target/track-b/b5-gaps-1/first-allbin-unit-audit.json.
+
+Final canonical large-GUI repeat at F passed in 234.966570 seconds, after an excluded 0.979049-second fresh preparation. Combined with validated B2-B 238.326693 seconds, median 236.646632 seconds, range 234.966570–238.326693, n=2. Baseline median 240.309998 seconds: observed 1.52% lower, with overlapping ranges; no substantial canonical speedup is established. The identical GUI fixture and prior-input/raw-log revalidation support this combined final result, while retaining each actual source SHA.
+
+The final iteration large-GUI repeat passed in 34.209382 seconds, after an excluded 98.381481-second original preparation. Combined with validated B2-B 28.489376 seconds: median 31.349379, range 28.489376–34.209382, n=2. The corresponding canonical large-edit median is 236.646632 seconds, so the observed named-profile comparison is 86.75% lower for this exact GUI fixture. This combined-profile result is distinct from canonical before/after performance and includes differing retained incremental histories; the preparation cost remains visible. Iteration branch switching was not separately benchmarked.
+
+| Conditional opportunity | Final decision | Evidence / limitation |
+| --- | --- | --- |
+| Integration grouping | SKIPPED | No safe pilot with demonstrated payoff; retain all 67 targets and native/global-state isolation |
+| Alternative linker | SKIPPED | Canonical main compile/link upper bound about 7%; linker-only time unisolated; MSVC retained |
+| sccache | SKIPPED | Unavailable; no installation, hits/misses or branch-cache gain measured |
+| Build jobs 4 | Tested; not retained | Reverse replay default 61.057936s versus jobs4 63.220442s; no repeatable benefit |
+| Faster storage | NOT TESTED | G: HDD queues observed; no matched relocation or numeric SSD gain |
+| Dependency features | SKIPPED | Warm dependencies Fresh; no identified expensive safe removal |
+| Crate extraction | Analysis complete; DEFERRED | No stable costed boundary with demonstrated additional avoided recompilation |
+
+The remaining canonical bottleneck is application-library codegen. Prioritize the explicit launcher target and opt-in iteration profile for daily work. Any later compiler, storage, linker or crate-boundary experiment should use a representative edit and matched cache histories; the present measurements do not justify a numerical forecast for those changes.
