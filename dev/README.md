@@ -44,6 +44,9 @@ does not launch Multi Launcher.
 # Cargo workflows
 
 Run `track_b/cargo.ps1` from any directory to use one of its fixed presets.
+The optional Track B PowerShell helpers require PowerShell 7; test commands also
+require Cargo Nextest. They do not require sccache, an alternative linker, or
+editor configuration.
 The helper resolves this repository and `Cargo.toml` relative to its own path,
 passes native arguments as an array, and leaves the caller's location and
 environment unchanged.
@@ -176,3 +179,30 @@ settings and retained actual compiler invocations; the manifest and workflow
 helper do not prevent intentional user overrides. Reproduce measurements in an
 equivalent environment. `lto = "off"` differs from default `false`, which can
 permit local ThinLTO; no canonical release setting was changed.
+
+## Targeted Nextest recipes
+
+Start with `cargo check --lib` when type checking is sufficient. Then select the
+affected Cargo target before filtering cases; broaden to related integration
+targets when the change crosses those boundaries.
+
+~~~powershell
+cargo nextest run --lib -E 'test(history_prepare_)'
+cargo nextest run --test history
+cargo nextest run --test domain -E 'test(indexer_)'
+cargo nextest run --test plugin_queries -E 'test(/^help_plugin::search_returns_help_action$/)'
+cargo nextest run --test multi_manager_plugin
+~~~
+
+The current Windows roster selects respectively 8, 5, 4, 1 and 8 cases.
+These are explicit selections, not a whole-application acceptance suite. Add
+`--cargo-profile fast-dev` when its reduced-symbol tradeoff suits the work.
+The existing helper supports the same target boundary via `lib-test` or
+`integration-test -TestTarget <name>`; filters are native argument-array values.
+
+`--lib` and `--test` choose Cargo targets; `-E` chooses cases within the built
+targets. A bare case filter can still compile unrelated executables. Integration
+targets may retain normal binary prerequisites. Use unrestricted `cargo nextest
+run` deliberately for broad coverage, and `cargo build --bin
+coordinate_tool_smoke` when that auxiliary binary is relevant. No targets or
+logical cases were removed to provide these recipes.
