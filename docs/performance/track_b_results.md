@@ -184,3 +184,17 @@ Broad Nextest fanout remains a separate material workload: default938.288174s/fa
 Actual Windows linker remains MSVC14.44.35207 HostX64/x64/link.exe; LLVM22.1.6 in rustc does not mean LLD is selected. Bundled rust-lld exists but has not been compatibility-tested. No global toolchain/configuration changes. Exact link duration and peak memory remain NOT MEASURED.
 
 Decisions: run one bounded default-versus-build-jobs4 fast-dev screen on the fixed seven-suite5368-case cohort, confirm reverse order only if promising; no parameter sweep or automatic default change. Defer alternative-linker decision until that result because current residual evidence does not isolate sufficient linking cost. sccache unavailable: skip without installation or hit claims. Feature pruning gate unmet: no costly warm dependency rebuild with an identified removable feature. Crate extraction remains analysis-only/deferred: shared-library invalidation is real but no stable costed boundary or quantified additional avoidance is established. Independent planner/reviewer fact check and final documentation review approved this ranking.
+
+## B4-C compiler cache availability (SKIPPED)
+
+sccache was absent from the verified Windows host/tool search. No installation, PATH change, wrapper, private cache or cache-clearing operation was performed. Hit/miss/unsupported counts and branch-cache gains are NOT MEASURED. This availability skip is not evidence that sccache cannot help a later explicitly configured nonincremental workload; no incremental-compilation speedup is attributed to it. Existing Cargo caches and standard commands remain usable without an external cache dependency.
+
+## B4-E dependency features (SKIPPED)
+
+The actual warmed source-edit timing records keep dependency units Fresh and identify application-library frontend/codegen cost. No expensive rebuilt dependency with a plausibly removable feature was established. The conditional audit/pruning gate is unmet, so no cargo-tree campaign, feature experiment, package upgrade or Windows binding removal was performed. Cargo.lock and the entire dependency/feature graph remain unchanged, including the pinned rdev source. Required native/plugin functionality is not traded for speculative cold-build savings. Downstream monomorphization may still contribute to application codegen; that does not establish a safe unused feature.
+
+## B4-F crate extraction decision (DEFER; analysis complete)
+
+Both exact color and GUI fixtures invalidate the shared library and dependent selected binaries; broad test fanout is also measured. This establishes shared invalidation, not a costed extraction boundary. No inspected small stable domain boundary comes with quantified avoided recompilation, limited API/cycle/Windows coupling and a demonstrated payoff beyond the accepted iteration profile. A new crate would add API visibility decisions, cache/target population and test migration while preserving an expensive parent when edits still touch it. No credible numerical extraction saving is claimed.
+
+Keep the present crate architecture. No proof of concept, workspace split or source/test migration was performed. A later extraction proposal should identify one pure owner, concrete callers, representative edits that avoid the parent rebuild and actual API/cache/maintenance costs before seeking separate implementation scope. The planner and independent architecture reviewer agreed that deferred extraction is appropriate for the evidence available here.

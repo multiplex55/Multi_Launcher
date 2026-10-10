@@ -19,12 +19,12 @@ Branch: build-optimization. No push/merge.
 | B3-B | PASS | Target-first recipes; all6warm commands no compile; unrestricted3.004230s/lib1.873911s medians; scoped passes | final docs/empirical review approved | 392d9f90 |
 | B3-C | SKIPPED | No audited pilot with demonstrated payoff; all67integrationtargets/test sources retained | source classification approved | 392d9f90 |
 | B3-D | PASS | Runner51101 exit0; strict72suites/6389cases/17ignored/2empty parity and108scoped passes; scratch clean | final empirical/docs review approved | b5b594a3 |
-| B4-A | PASS; commit pending | Application library codegen dominates release edits; broad fanout separate; jobs4 screen justified, linker gate deferred | planner/final reviewer approved | — |
+| B4-A | PASS | Application library codegen dominates release edits; broad fanout separate; jobs4 screen justified, linker gate deferred | planner/final reviewer approved | 75eaa8d7 |
 | B4-B | pending |  |  | — |
-| B4-C | pending |  |  | — |
-| B4-D | pending |  |  | — |
-| B4-E | pending |  |  | — |
-| B4-F | pending |  |  | — |
+| B4-C | SKIPPED; commit pending | sccache unavailable; no installation/wrapper/hit claims | planner/final docs review approved | — |
+| B4-D | in_progress | Reviewed bounded seven-suite5368-case default/jobs4 screen23350 running; no setting accepted | three helper findings fixed; static approved | — |
+| B4-E | SKIPPED; commit pending | No expensive warm dependency rebuild/removable feature established; graph unchanged | planner/final docs review approved | — |
+| B4-F | DEFER; commit pending | Shared invalidation proven, no stable costed extraction boundary; no source migration | architecture/final docs review approved | — |
 | B5-A | pending |  |  | — |
 | B5-B | pending |  |  | — |
 | B5-C | pending |  |  | — |
