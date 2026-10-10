@@ -29,8 +29,8 @@
 | M4-A | Actions reload reuses indexed tail | complete | PASS:2 focused+1 strengthened+2 integration+1 small+6 full scenarios;zero scan/exactsignatures;10k changed p95 110.5174ms;rustfmt/diff | independent production review clear | 6257e81795a2c50a0d8d39b128ce1f186f1816e3 | LOCAL ONLY |
 | M4-B | Bounded scan worker | complete | PASS:11 coordinator +3 domain indexer;bounded queues/cancel/nonblocking lifecycle;rustfmt/diff | independent lifecycle/metric/wake findings resolved | 3468a51dec84c78298de28722aa1317a72b70992 | LOCAL ONLY |
 | M4-C | Generation/config guarded publication | complete | PASS:11 GUI+2 startup+3 domain+1 settings;bincheck/fmt/diff | independent retry/startup/isolation/lifecycle findings resolved | 3c0446e88747820a6a32321df10f734a73f85f93 | LOCAL ONLY |
-| M4-D | Watcher race and stall evidence | in_progress | PASS:10 lib+4 domain+2 watcher+2 small owners;fmt/diff;full capture pending | independent scoped review clear | commit pending | LOCAL ONLY |
-| M5-A | Tick contract characterization | pending | — | — | — | — |
+| M4-D | Watcher race and stall evidence | complete | PASS:10 lib+4 domain+2 watcher+2 small+2 full owners/12scenarios;zero reload scans;10k request p95 .0193ms;fmt/diff | independent scoped review clear | f5560cc3660b8187478623ff65fbe1e87c665166 | LOCAL ONLY |
+| M5-A | Tick contract characterization | complete | PASS:6 opt-in serial worker +24 scoped compatibility;API receipts match metrics;fmt/diff | independent scoped review clear | commit pending | LOCAL ONLY |
 | M5-B | Current-source presentation ordering | pending | — | — | — | — |
 | M5-C | Native reliability/review/comparison | pending | — | — | — | — |
 | M6-A | Sampling/HUD measurement decision | pending | — | — | — | — |

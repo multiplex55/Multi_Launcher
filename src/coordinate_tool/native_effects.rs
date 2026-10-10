@@ -1175,19 +1175,64 @@ impl<O: EffectNativeOperations> Drop for CursorEffectsRuntime<O> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
 
     use super::{
         CursorEffectsRuntime, EffectConfiguration, EffectKind, EffectLiveSource,
         EffectNativeOperations, EffectRequests,
     };
+    use crate::coordinate_tool::controller::{
+        CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSampler,
+        CoordinateSurfaceBackend, CoordinateToolController,
+    };
     use crate::coordinate_tool::model::{
         CoordinateEffectsStatus, CoordinateSample, CoordinateToolRuntimeState, CursorEffectStatus,
-        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect,
+        ForegroundClientGeometry, MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect,
     };
-    use crate::coordinate_tool::render::ZoomPresentationGeometry;
+    use crate::coordinate_tool::render::{
+        ZoomPresentationGeometry, zoom_lens_geometry, zoom_presentation_geometry,
+    };
     use crate::coordinate_tool::settings::{
         CoordinateToolPreferences, HaloPreferences, ZoomPreferences,
     };
+
+    const WORKER_CHEAP_WINDOW_IDS: [usize; 4] = [1, 2, 3, 4];
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum WorkerNativeCall {
+        FilterInput {
+            kind: EffectKind,
+            source: EffectLiveSource,
+        },
+        FilterList {
+            kind: EffectKind,
+            excluded: Vec<usize>,
+        },
+        Refresh {
+            kind: EffectKind,
+            source: EffectLiveSource,
+        },
+        Present {
+            kind: EffectKind,
+            source: EffectLiveSource,
+        },
+    }
+
+    #[derive(Clone, Debug)]
+    enum WorkerObservation {
+        Poll {
+            tick: usize,
+            topology_invalidated: bool,
+            calls: Vec<WorkerNativeCall>,
+        },
+        Render {
+            tick: usize,
+            topology_invalidated: bool,
+            frame: CoordinateRenderFrame,
+            calls: Vec<WorkerNativeCall>,
+        },
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum FailurePoint {
@@ -1244,6 +1289,7 @@ mod tests {
         presented_zoom: Vec<ZoomPresentationGeometry>,
         partial_resources: usize,
         filter_lists: [Vec<usize>; 2],
+        worker_calls: Option<Arc<Mutex<Vec<WorkerNativeCall>>>>,
     }
 
     impl FakeOperations {
@@ -1273,6 +1319,12 @@ mod tests {
 
         const fn zoom_outline_id() -> usize {
             103
+        }
+
+        fn record_worker_call(&self, call: WorkerNativeCall) {
+            if let Some(calls) = &self.worker_calls {
+                worker_lock(calls).push(call);
+            }
         }
     }
 
@@ -1411,6 +1463,10 @@ mod tests {
             kind: EffectKind,
             excluded_windows: &[usize],
         ) -> Result<(), String> {
+            self.record_worker_call(WorkerNativeCall::FilterList {
+                kind,
+                excluded: excluded_windows.to_vec(),
+            });
             self.filter_calls += 1;
             self.events.push(format!("filter:{}", kind.label()));
             self.filter_saw_visible_outline[kind.index()] = match kind {
@@ -1443,6 +1499,10 @@ mod tests {
             kind: EffectKind,
             source: &EffectLiveSource,
         ) -> Result<(), String> {
+            self.record_worker_call(WorkerNativeCall::FilterInput {
+                kind,
+                source: source.clone(),
+            });
             self.events
                 .push(format!("present-filter-input:{}", kind.label()));
             if self.fails(FailurePoint::PrepareFilterInput(kind)) {
@@ -1498,6 +1558,10 @@ mod tests {
             kind: EffectKind,
             source: &EffectLiveSource,
         ) -> Result<(), String> {
+            self.record_worker_call(WorkerNativeCall::Refresh {
+                kind,
+                source: source.clone(),
+            });
             self.events.push(format!("refresh:{}", kind.label()));
             self.refresh_calls += 1;
             if kind == EffectKind::Halo && self.outline_fallback {
@@ -1529,6 +1593,10 @@ mod tests {
             kind: EffectKind,
             source: &EffectLiveSource,
         ) -> Result<(), String> {
+            self.record_worker_call(WorkerNativeCall::Present {
+                kind,
+                source: source.clone(),
+            });
             self.events.push(format!("present:{}", kind.label()));
             self.present_calls += 1;
             if kind == EffectKind::Halo && self.outline_fallback {
@@ -1685,6 +1753,858 @@ mod tests {
 
     fn poll(runtime: &mut CursorEffectsRuntime<FakeOperations>) {
         runtime.poll_visible_sources(&[1, 2, 3, 4]);
+    }
+
+    struct WorkerSampleGate {
+        tick: usize,
+        response: mpsc::SyncSender<Result<CoordinateSample, String>>,
+    }
+
+    struct GatedWorkerSampler {
+        next_tick: usize,
+        requests: mpsc::Sender<WorkerSampleGate>,
+    }
+
+    impl CoordinateSampler for GatedWorkerSampler {
+        fn sample(&mut self) -> Result<CoordinateSample, String> {
+            self.next_tick += 1;
+            let (response, receive) = mpsc::sync_channel(1);
+            self.requests
+                .send(WorkerSampleGate {
+                    tick: self.next_tick,
+                    response,
+                })
+                .map_err(|_| "worker sample gate was disconnected".to_string())?;
+            receive
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| "worker sample gate timed out".to_string())?
+        }
+    }
+
+    struct WorkerBackendControls {
+        topology: mpsc::Receiver<()>,
+        poll_failures: mpsc::Receiver<FailurePoint>,
+        render_failures: mpsc::Receiver<FailurePoint>,
+    }
+
+    struct WorkerEffectFactory {
+        sample_requests: mpsc::Sender<WorkerSampleGate>,
+        backend_controls: Mutex<Option<WorkerBackendControls>>,
+        calls: Arc<Mutex<Vec<WorkerNativeCall>>>,
+        observations: Arc<Mutex<Vec<WorkerObservation>>>,
+    }
+
+    impl CoordinateRuntimeFactory for WorkerEffectFactory {
+        fn create_sampler(&self) -> Result<Box<dyn CoordinateSampler>, String> {
+            Ok(Box::new(GatedWorkerSampler {
+                next_tick: 0,
+                requests: self.sample_requests.clone(),
+            }))
+        }
+
+        fn create_backend(&self) -> Result<Box<dyn CoordinateSurfaceBackend>, String> {
+            let controls = worker_lock(&self.backend_controls)
+                .take()
+                .ok_or_else(|| "worker backend controls were already consumed".to_string())?;
+            let operations = FakeOperations {
+                worker_calls: Some(Arc::clone(&self.calls)),
+                ..FakeOperations::default()
+            };
+            Ok(Box::new(WorkerEffectBackend {
+                effects: CursorEffectsRuntime::new(operations),
+                controls,
+                observations: Arc::clone(&self.observations),
+                tick: 0,
+                topology_for_render: false,
+            }))
+        }
+    }
+
+    struct WorkerEffectBackend {
+        effects: CursorEffectsRuntime<FakeOperations>,
+        controls: WorkerBackendControls,
+        observations: Arc<Mutex<Vec<WorkerObservation>>>,
+        tick: usize,
+        topology_for_render: bool,
+    }
+
+    impl WorkerEffectBackend {
+        fn take_calls(&mut self) -> Vec<WorkerNativeCall> {
+            let Some(calls) = &self.effects.operations.worker_calls else {
+                return Vec::new();
+            };
+            std::mem::take(&mut *worker_lock(calls))
+        }
+    }
+
+    impl CoordinateSurfaceBackend for WorkerEffectBackend {
+        fn poll_events(&mut self) -> Result<bool, String> {
+            self.tick += 1;
+            let mut topology_invalidated = false;
+            while self.controls.topology.try_recv().is_ok() {
+                topology_invalidated = true;
+            }
+            while let Ok(failure) = self.controls.poll_failures.try_recv() {
+                self.effects.operations.fail_next(failure);
+            }
+            if !topology_invalidated {
+                self.effects.poll_visible_sources(&WORKER_CHEAP_WINDOW_IDS);
+                let _ = self.effects.raise_visible_effect_stack();
+            }
+            let calls = self.take_calls();
+            worker_lock(&self.observations).push(WorkerObservation::Poll {
+                tick: self.tick,
+                topology_invalidated,
+                calls,
+            });
+            self.topology_for_render = topology_invalidated;
+            Ok(topology_invalidated)
+        }
+
+        fn effects_status(&self) -> CoordinateEffectsStatus {
+            self.effects.status()
+        }
+
+        fn render(&mut self, frame: &CoordinateRenderFrame) -> Result<(), String> {
+            while let Ok(failure) = self.controls.render_failures.try_recv() {
+                self.effects.operations.fail_next(failure);
+            }
+            let topology_invalidated = self.topology_for_render;
+            self.effects.reconcile(
+                EffectRequests::from_runtime(&frame.runtime_state),
+                &frame.preferences,
+                frame.current_sample.as_ref(),
+                &WORKER_CHEAP_WINDOW_IDS,
+                topology_invalidated,
+            );
+            let _ = self.effects.raise_visible_effect_stack();
+            let calls = self.take_calls();
+            worker_lock(&self.observations).push(WorkerObservation::Render {
+                tick: self.tick,
+                topology_invalidated,
+                frame: frame.clone(),
+                calls,
+            });
+            self.topology_for_render = false;
+            Ok(())
+        }
+
+        fn shutdown(&mut self) -> Result<(), String> {
+            self.effects.shutdown()
+        }
+    }
+
+    struct WorkerEffectHarness {
+        controller: CoordinateToolController,
+        sample_gates: Option<mpsc::Receiver<WorkerSampleGate>>,
+        pending_gate: Option<WorkerSampleGate>,
+        topology: mpsc::Sender<()>,
+        poll_failures: mpsc::Sender<FailurePoint>,
+        render_failures: mpsc::Sender<FailurePoint>,
+        observations: Arc<Mutex<Vec<WorkerObservation>>>,
+    }
+
+    impl WorkerEffectHarness {
+        fn new() -> Self {
+            let (sample_sender, sample_gates) = mpsc::channel();
+            let (topology_sender, topology) = mpsc::channel();
+            let (poll_failure_sender, poll_failures) = mpsc::channel();
+            let (render_failure_sender, render_failures) = mpsc::channel();
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let factory = Arc::new(WorkerEffectFactory {
+                sample_requests: sample_sender,
+                backend_controls: Mutex::new(Some(WorkerBackendControls {
+                    topology,
+                    poll_failures,
+                    render_failures,
+                })),
+                calls,
+                observations: Arc::clone(&observations),
+            });
+            let mut preferences = CoordinateToolPreferences::default();
+            preferences.halo.outline_enabled = true;
+            Self {
+                controller: CoordinateToolController::new_with_preferences(factory, preferences),
+                sample_gates: Some(sample_gates),
+                pending_gate: None,
+                topology: topology_sender,
+                poll_failures: poll_failure_sender,
+                render_failures: render_failure_sender,
+                observations,
+            }
+        }
+
+        fn enable_hud_and_effects(&mut self) {
+            self.controller.set_hud_enabled(true).unwrap();
+            self.controller.set_halo_enabled(true).unwrap();
+            self.controller.set_zoom_enabled(true).unwrap();
+        }
+
+        /// Receiving a gate proves the preceding sample and any changed,
+        /// forced, or retry render have completed. The poll receipt for this
+        /// gate's tick is already recorded, just as it is before sampling on
+        /// the real worker.
+        fn next_gate(&mut self) -> usize {
+            assert!(self.pending_gate.is_none(), "previous sample is unreplied");
+            let gate = self
+                .sample_gates
+                .as_ref()
+                .expect("sample gate receiver is live")
+                .recv_timeout(Duration::from_secs(3))
+                .expect("coordinate worker should request the next gated sample");
+            let tick = gate.tick;
+            self.pending_gate = Some(gate);
+            tick
+        }
+
+        fn respond(&mut self, sample: Result<CoordinateSample, String>) {
+            let gate = self.pending_gate.take().expect("a sample gate is pending");
+            gate.response
+                .send(sample)
+                .expect("coordinate worker is waiting on the sample gate");
+        }
+
+        fn inject_topology(&self) {
+            self.topology
+                .send(())
+                .expect("coordinate worker is still alive");
+        }
+
+        fn fail_poll(&self, failure: FailurePoint) {
+            self.poll_failures
+                .send(failure)
+                .expect("coordinate worker is still alive");
+        }
+
+        fn fail_render(&self, failure: FailurePoint) {
+            self.render_failures
+                .send(failure)
+                .expect("coordinate worker is still alive");
+        }
+
+        fn observations(&self) -> Vec<WorkerObservation> {
+            worker_lock(&self.observations).clone()
+        }
+
+        fn shutdown(&mut self) {
+            if !self.controller.is_running() {
+                return;
+            }
+            if self.pending_gate.is_none() {
+                self.pending_gate = self
+                    .sample_gates
+                    .as_ref()
+                    .and_then(|gates| gates.recv_timeout(Duration::from_secs(3)).ok());
+            }
+            if let Some(gate) = self.pending_gate.take() {
+                let _ = gate.response.send(Err("test cleanup".into()));
+            }
+            // Disconnect future requests too: the worker cannot enqueue a new
+            // blocked gate between the release above and its shutdown join.
+            self.sample_gates.take();
+            self.controller
+                .shutdown()
+                .expect("coordinate worker should release its fake runtime");
+        }
+    }
+
+    impl Drop for WorkerEffectHarness {
+        fn drop(&mut self) {
+            // Always release a blocked sampler before joining, including while
+            // unwinding an assertion failure.
+            if self.controller.is_running() {
+                if self.pending_gate.is_none() {
+                    self.pending_gate = self
+                        .sample_gates
+                        .as_ref()
+                        .and_then(|gates| gates.recv_timeout(Duration::from_secs(3)).ok());
+                }
+                if let Some(gate) = self.pending_gate.take() {
+                    let _ = gate.response.send(Err("test teardown".into()));
+                }
+                self.sample_gates.take();
+                let _ = self.controller.shutdown();
+            }
+        }
+    }
+
+    fn worker_lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn worker_sample(point: PhysicalPoint) -> CoordinateSample {
+        let bounds = PhysicalRect::new(-1920, -1080, 1920, 1080).unwrap();
+        CoordinateSample::new(
+            point,
+            Some(PhysicalRect::new(-3840, -1080, 3840, 2160).unwrap()),
+            Some(MonitorGeometry {
+                id: MonitorId::new("WORKER-DISPLAY"),
+                bounds,
+                work_area: bounds,
+                effective_dpi: Some((144, 144)),
+            }),
+            Some(ForegroundClientGeometry::new(
+                PhysicalPoint::new(-1900, -1060),
+                Some(PhysicalRect::new(-1900, -1060, 1910, 1060).unwrap()),
+            )),
+        )
+    }
+
+    fn worker_calls_for_tick(
+        observations: &[WorkerObservation],
+        tick: usize,
+        render: bool,
+    ) -> (bool, CoordinateRenderFrame, Vec<WorkerNativeCall>) {
+        let event = observations.iter().find(|event| match (render, event) {
+            (false, WorkerObservation::Poll { tick: found, .. }) => *found == tick,
+            (true, WorkerObservation::Render { tick: found, .. }) => *found == tick,
+            _ => false,
+        });
+        match event {
+            Some(WorkerObservation::Poll {
+                topology_invalidated,
+                calls,
+                ..
+            }) => (*topology_invalidated, empty_worker_frame(), calls.clone()),
+            Some(WorkerObservation::Render {
+                topology_invalidated,
+                frame,
+                calls,
+                ..
+            }) => (*topology_invalidated, frame.clone(), calls.clone()),
+            None => panic!(
+                "missing {} receipt for tick {tick}",
+                if render { "render" } else { "poll" }
+            ),
+        }
+    }
+
+    fn empty_worker_frame() -> CoordinateRenderFrame {
+        CoordinateRenderFrame {
+            preferences: CoordinateToolPreferences::default(),
+            runtime_state: CoordinateToolRuntimeState::default(),
+            current_sample: None,
+            displayed_sample: None,
+            placement_sample: None,
+            sample_error: None,
+        }
+    }
+
+    fn source_point(source: &EffectLiveSource) -> PhysicalPoint {
+        match source {
+            EffectLiveSource::Halo(point) => *point,
+            EffectLiveSource::Zoom(geometry) => geometry.lens.hotspot,
+        }
+    }
+
+    fn calls_for_source_kind(
+        calls: &[WorkerNativeCall],
+        kind: EffectKind,
+        refresh: bool,
+    ) -> Vec<EffectLiveSource> {
+        calls
+            .iter()
+            .filter_map(|call| match (refresh, call) {
+                (
+                    true,
+                    WorkerNativeCall::Refresh {
+                        kind: found,
+                        source,
+                    },
+                )
+                | (
+                    false,
+                    WorkerNativeCall::Present {
+                        kind: found,
+                        source,
+                    },
+                ) if *found == kind => Some(source.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_both_sources(calls: &[WorkerNativeCall], refresh: bool, point: PhysicalPoint) {
+        for kind in [EffectKind::Halo, EffectKind::Zoom] {
+            let sources = calls_for_source_kind(calls, kind, refresh);
+            assert_eq!(
+                sources.len(),
+                1,
+                "{} source call for {kind:?}",
+                if refresh { "refresh" } else { "present" }
+            );
+            assert_eq!(source_point(&sources[0]), point);
+            if kind == EffectKind::Zoom {
+                assert_eq!(sources[0], expected_zoom_source(point));
+            }
+        }
+    }
+
+    fn expected_zoom_source(point: PhysicalPoint) -> EffectLiveSource {
+        let sample = worker_sample(point);
+        let preferences = CoordinateToolPreferences::default();
+        let lens = zoom_lens_geometry(&sample, preferences.zoom).unwrap();
+        EffectLiveSource::Zoom(zoom_presentation_geometry(lens).unwrap())
+    }
+
+    fn assert_filter_lists_before_sources(calls: &[WorkerNativeCall], point: PhysicalPoint) {
+        let filter_inputs: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                matches!(call, WorkerNativeCall::FilterInput { .. }).then_some(index)
+            })
+            .collect();
+        let filter_lists: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                matches!(call, WorkerNativeCall::FilterList { .. }).then_some(index)
+            })
+            .collect();
+        let presentations: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                matches!(call, WorkerNativeCall::Present { .. }).then_some(index)
+            })
+            .collect();
+        assert!(
+            !filter_lists.is_empty(),
+            "forced refresh reinstalls filters"
+        );
+        assert_eq!(filter_lists.len(), 2);
+        assert_eq!(presentations.len(), 2);
+        if !filter_inputs.is_empty() {
+            assert!(filter_inputs.iter().max() < filter_lists.iter().min());
+            for call in calls {
+                if let WorkerNativeCall::FilterInput { source, .. } = call {
+                    assert_eq!(source_point(source), point);
+                }
+            }
+        }
+        assert!(filter_lists.iter().max() < presentations.iter().min());
+        for (index, call) in calls.iter().enumerate() {
+            if let WorkerNativeCall::FilterList { excluded, .. } = call {
+                assert_eq!(
+                    excluded,
+                    &[1, 2, 3, 4, 100, 102, 101, 103],
+                    "complete cheap-window, host and outline exclusions at call {index}"
+                );
+            }
+        }
+        assert_both_sources(calls, false, point);
+    }
+
+    fn assert_initial_filter_and_source_order(calls: &[WorkerNativeCall], point: PhysicalPoint) {
+        let filter_inputs: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                matches!(call, WorkerNativeCall::FilterInput { .. }).then_some(index)
+            })
+            .collect();
+        let filter_lists: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                matches!(call, WorkerNativeCall::FilterList { .. }).then_some(index)
+            })
+            .collect();
+        let source_presentations: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .filter_map(|(index, call)| {
+                matches!(call, WorkerNativeCall::Present { .. }).then_some(index)
+            })
+            .collect();
+        assert_eq!(filter_inputs.len(), 2);
+        assert_eq!(filter_lists.len(), 2);
+        assert_eq!(source_presentations.len(), 2);
+        assert!(filter_inputs.iter().max() < filter_lists.iter().min());
+        assert!(filter_lists.iter().max() < source_presentations.iter().min());
+        for call in calls {
+            match call {
+                WorkerNativeCall::FilterInput { kind, source }
+                | WorkerNativeCall::Present { kind, source } => {
+                    assert_eq!(source_point(source), point, "source for {kind:?}");
+                    if *kind == EffectKind::Zoom {
+                        assert_eq!(source, &expected_zoom_source(point));
+                    }
+                }
+                WorkerNativeCall::FilterList { excluded, .. } => {
+                    assert_eq!(excluded, &[1, 2, 3, 4, 100, 102, 101, 103])
+                }
+                WorkerNativeCall::Refresh { .. } => {
+                    panic!("initial frame has no prior live source to refresh")
+                }
+            }
+        }
+    }
+
+    fn assert_worker_metrics_match_receipts(observations: &[WorkerObservation]) {
+        use crate::performance::{Metric, enabled, snapshot_metrics};
+
+        if !enabled() {
+            return;
+        }
+        let calls = observations.iter().flat_map(|event| match event {
+            WorkerObservation::Poll { calls, .. } | WorkerObservation::Render { calls, .. } => {
+                calls
+            }
+        });
+        let (refreshes, presents) =
+            calls.fold((0_u64, 0_u64), |(refreshes, presents), call| match call {
+                WorkerNativeCall::Refresh { .. } => (refreshes + 1, presents),
+                WorkerNativeCall::Present { .. } => (refreshes, presents + 1),
+                _ => (refreshes, presents),
+            });
+        let snapshots = snapshot_metrics();
+        for (metric, expected) in [
+            (Metric::EffectsRefreshSource, refreshes),
+            (Metric::EffectsPresentSource, presents),
+        ] {
+            let snapshot = snapshots[metric as usize];
+            assert_eq!(snapshot.calls, expected, "{} API receipts", metric.name());
+            assert_eq!(
+                snapshot.work_units,
+                expected,
+                "{} API receipts",
+                metric.name()
+            );
+        }
+    }
+
+    fn reset_worker_metrics_if_enabled() {
+        if crate::performance::enabled() {
+            crate::performance::reset_metrics();
+        }
+    }
+
+    #[test]
+    fn worker_effect_tick_presents_current_movement_while_hud_stays_frozen() {
+        reset_worker_metrics_if_enabled();
+        let point_a = PhysicalPoint::new(-1800, -420);
+        let point_b = PhysicalPoint::new(-1360, 280);
+        let mut worker = WorkerEffectHarness::new();
+        worker.enable_hud_and_effects();
+
+        assert_eq!(worker.next_gate(), 1);
+        worker.respond(Ok(worker_sample(point_a)));
+        assert_eq!(worker.next_gate(), 2);
+        worker.controller.freeze();
+        worker.respond(Ok(worker_sample(point_b)));
+        assert_eq!(worker.next_gate(), 3);
+
+        let observations = worker.observations();
+        let (poll_topology, _, poll_2) = worker_calls_for_tick(&observations, 2, false);
+        let (render_topology, frame_2, render_2) = worker_calls_for_tick(&observations, 2, true);
+        let (_, _, poll_3) = worker_calls_for_tick(&observations, 3, false);
+        assert!(!poll_topology && !render_topology);
+        assert_both_sources(&poll_2, true, point_a);
+        assert_both_sources(&render_2, false, point_b);
+        assert_eq!(
+            frame_2.current_sample.as_ref().unwrap().desktop_point,
+            point_b
+        );
+        assert_eq!(
+            frame_2.displayed_sample.as_ref().unwrap().desktop_point,
+            point_a
+        );
+        assert_eq!(
+            frame_2.placement_sample.as_ref().unwrap().desktop_point,
+            point_b
+        );
+        assert_initial_filter_and_source_order(
+            &worker_calls_for_tick(&observations, 1, true).2,
+            point_a,
+        );
+        assert_both_sources(&poll_3, true, point_b);
+
+        worker.shutdown();
+        let observations = worker.observations();
+        assert_worker_metrics_match_receipts(&observations);
+    }
+
+    #[test]
+    fn worker_effect_tick_stationary_samples_refresh_sources_without_redrawing() {
+        reset_worker_metrics_if_enabled();
+        let point = PhysicalPoint::new(-1760, 140);
+        let mut worker = WorkerEffectHarness::new();
+        worker.enable_hud_and_effects();
+
+        assert_eq!(worker.next_gate(), 1);
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 2);
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 3);
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 4);
+
+        let observations = worker.observations();
+        assert_eq!(
+            observations
+                .iter()
+                .filter(|event| matches!(event, WorkerObservation::Render { .. }))
+                .count(),
+            1,
+            "identical successful samples do not request full renders"
+        );
+        for tick in 2..=4 {
+            let (_, _, calls) = worker_calls_for_tick(&observations, tick, false);
+            assert_both_sources(&calls, true, point);
+        }
+
+        worker.shutdown();
+        let observations = worker.observations();
+        assert_worker_metrics_match_receipts(&observations);
+    }
+
+    #[test]
+    fn worker_effect_tick_topology_suppresses_cached_refresh_and_forces_live_sources() {
+        let point_a = PhysicalPoint::new(-1810, -300);
+        let point_b = PhysicalPoint::new(-920, 420);
+        let mut worker = WorkerEffectHarness::new();
+        worker.enable_hud_and_effects();
+
+        assert_eq!(worker.next_gate(), 1);
+        worker.inject_topology();
+        worker.respond(Ok(worker_sample(point_a)));
+        assert_eq!(worker.next_gate(), 2);
+        let observations = worker.observations();
+        let (topology, _, calls) = worker_calls_for_tick(&observations, 2, false);
+        assert!(topology);
+        assert!(
+            calls.is_empty(),
+            "topology polling suppresses cached refresh"
+        );
+
+        worker.respond(Ok(worker_sample(point_b)));
+        assert_eq!(worker.next_gate(), 3);
+        let observations = worker.observations();
+        let (render_topology, frame, calls) = worker_calls_for_tick(&observations, 2, true);
+        assert!(render_topology);
+        assert_eq!(
+            frame.current_sample.as_ref().unwrap().desktop_point,
+            point_b
+        );
+        assert_filter_lists_before_sources(&calls, point_b);
+        let (_, _, poll_3) = worker_calls_for_tick(&observations, 3, false);
+        assert_both_sources(&poll_3, true, point_b);
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_effect_tick_failed_sample_hides_cached_sources_then_recovers_live() {
+        let point_a = PhysicalPoint::new(-1700, -240);
+        let point_b = PhysicalPoint::new(-820, 510);
+        let mut worker = WorkerEffectHarness::new();
+        worker.enable_hud_and_effects();
+
+        assert_eq!(worker.next_gate(), 1);
+        worker.respond(Ok(worker_sample(point_a)));
+        assert_eq!(worker.next_gate(), 2);
+        let before_failure = worker.observations();
+        let (_, _, poll_2) = worker_calls_for_tick(&before_failure, 2, false);
+        assert_both_sources(&poll_2, true, point_a);
+        worker.respond(Err("injected sample failure".into()));
+        assert_eq!(worker.next_gate(), 3);
+
+        let failed = worker.observations();
+        let (_, failed_frame, failed_calls) = worker_calls_for_tick(&failed, 2, true);
+        let (_, _, hidden_poll) = worker_calls_for_tick(&failed, 3, false);
+        assert!(failed_frame.current_sample.is_none());
+        assert_eq!(
+            failed_frame
+                .placement_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_a,
+            "the prior point remains available for HUD placement only"
+        );
+        assert!(calls_for_source_kind(&failed_calls, EffectKind::Halo, false).is_empty());
+        assert!(calls_for_source_kind(&failed_calls, EffectKind::Zoom, false).is_empty());
+        assert!(calls_for_source_kind(&hidden_poll, EffectKind::Halo, true).is_empty());
+        assert!(calls_for_source_kind(&hidden_poll, EffectKind::Zoom, true).is_empty());
+
+        worker.respond(Ok(worker_sample(point_b)));
+        assert_eq!(worker.next_gate(), 4);
+        let recovered = worker.observations();
+        let (_, recovered_frame, recovered_calls) = worker_calls_for_tick(&recovered, 3, true);
+        let (_, _, recovery_poll) = worker_calls_for_tick(&recovered, 4, false);
+        assert_eq!(
+            recovered_frame
+                .current_sample
+                .as_ref()
+                .unwrap()
+                .desktop_point,
+            point_b
+        );
+        assert_both_sources(&recovered_calls, false, point_b);
+        assert_both_sources(&recovery_poll, true, point_b);
+        assert_eq!(
+            *worker.controller.effects_status().halo(),
+            CursorEffectStatus::Active
+        );
+        assert_eq!(
+            *worker.controller.effects_status().zoom(),
+            CursorEffectStatus::Active
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_effect_tick_disable_refreshes_old_state_once_and_keeps_hud_worker() {
+        let point = PhysicalPoint::new(-1440, 360);
+        let mut worker = WorkerEffectHarness::new();
+        worker.enable_hud_and_effects();
+
+        assert_eq!(worker.next_gate(), 1);
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 2);
+        worker.controller.set_halo_enabled(false).unwrap();
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 3);
+        worker.controller.set_zoom_enabled(false).unwrap();
+        worker.respond(Ok(worker_sample(point)));
+        assert_eq!(worker.next_gate(), 4);
+
+        let observations = worker.observations();
+        let (_, _, first_poll) = worker_calls_for_tick(&observations, 2, false);
+        let (_, _, halo_disabled_poll) = worker_calls_for_tick(&observations, 3, false);
+        let (_, _, all_effects_disabled_poll) = worker_calls_for_tick(&observations, 4, false);
+        assert_both_sources(&first_poll, true, point);
+        assert!(calls_for_source_kind(&halo_disabled_poll, EffectKind::Halo, true).is_empty());
+        assert_eq!(
+            calls_for_source_kind(&halo_disabled_poll, EffectKind::Zoom, true)
+                .iter()
+                .map(source_point)
+                .collect::<Vec<_>>(),
+            vec![point]
+        );
+        assert!(
+            calls_for_source_kind(&all_effects_disabled_poll, EffectKind::Halo, true).is_empty()
+        );
+        assert!(
+            calls_for_source_kind(&all_effects_disabled_poll, EffectKind::Zoom, true).is_empty()
+        );
+        let runtime = worker.controller.runtime_state();
+        assert!(runtime.hud_enabled());
+        assert!(!runtime.halo_enabled() && !runtime.zoom_enabled());
+        assert!(
+            worker.controller.is_running(),
+            "HUD keeps the shared worker alive"
+        );
+        worker.shutdown();
+    }
+
+    #[test]
+    fn worker_effect_tick_native_failures_keep_sibling_and_topology_retry_independent() {
+        reset_worker_metrics_if_enabled();
+        let point_a = PhysicalPoint::new(-1740, -180);
+        let point_b = PhysicalPoint::new(-680, 460);
+        let point_c = PhysicalPoint::new(-420, 700);
+        let point_d = PhysicalPoint::new(-130, 880);
+        let mut worker = WorkerEffectHarness::new();
+        worker.enable_hud_and_effects();
+
+        assert_eq!(worker.next_gate(), 1);
+        worker.fail_poll(FailurePoint::Refresh(EffectKind::Halo));
+        worker.respond(Ok(worker_sample(point_a)));
+        assert_eq!(worker.next_gate(), 2);
+        let observations = worker.observations();
+        let (_, _, failed_poll) = worker_calls_for_tick(&observations, 2, false);
+        assert_both_sources(&failed_poll, true, point_a);
+        assert!(matches!(
+            worker.controller.effects_status().halo(),
+            CursorEffectStatus::Fallback(_)
+        ));
+
+        worker.inject_topology();
+        worker.respond(Ok(worker_sample(point_b)));
+        assert_eq!(worker.next_gate(), 3);
+        let observations = worker.observations();
+        let (_, _, sibling_render) = worker_calls_for_tick(&observations, 2, true);
+        assert_both_sources(&sibling_render, false, point_b);
+        assert!(matches!(
+            worker.controller.effects_status().halo(),
+            CursorEffectStatus::Fallback(_)
+        ));
+        let (topology, _, suppressed_poll) = worker_calls_for_tick(&observations, 3, false);
+        assert!(topology && suppressed_poll.is_empty());
+
+        worker.fail_render(FailurePoint::Present(EffectKind::Zoom));
+        worker.respond(Ok(worker_sample(point_c)));
+        assert_eq!(worker.next_gate(), 4);
+        let observations = worker.observations();
+        let (topology, frame, retried_render) = worker_calls_for_tick(&observations, 3, true);
+        assert!(topology);
+        assert_eq!(
+            frame.current_sample.as_ref().unwrap().desktop_point,
+            point_c
+        );
+        assert_eq!(
+            calls_for_source_kind(&retried_render, EffectKind::Halo, false)
+                .iter()
+                .map(source_point)
+                .collect::<Vec<_>>(),
+            vec![point_c]
+        );
+        assert_eq!(
+            calls_for_source_kind(&retried_render, EffectKind::Zoom, false)
+                .iter()
+                .map(source_point)
+                .collect::<Vec<_>>(),
+            vec![point_c],
+            "failed presentation is still an actual attempted API dispatch"
+        );
+        assert_filter_lists_before_sources(&retried_render, point_c);
+        let (_, _, halo_only_poll) = worker_calls_for_tick(&observations, 4, false);
+        assert_eq!(
+            calls_for_source_kind(&halo_only_poll, EffectKind::Halo, true)
+                .iter()
+                .map(source_point)
+                .collect::<Vec<_>>(),
+            vec![point_c]
+        );
+        assert!(calls_for_source_kind(&halo_only_poll, EffectKind::Zoom, true).is_empty());
+        assert_eq!(
+            *worker.controller.effects_status().halo(),
+            CursorEffectStatus::Active
+        );
+        assert!(matches!(
+            worker.controller.effects_status().zoom(),
+            CursorEffectStatus::Unavailable(_)
+        ));
+
+        worker.inject_topology();
+        worker.respond(Ok(worker_sample(point_c)));
+        assert_eq!(worker.next_gate(), 5);
+        let observations = worker.observations();
+        let (topology, _, suppressed_poll) = worker_calls_for_tick(&observations, 5, false);
+        assert!(topology && suppressed_poll.is_empty());
+        worker.respond(Ok(worker_sample(point_d)));
+        assert_eq!(worker.next_gate(), 6);
+        let observations = worker.observations();
+        let (topology, frame, recovered_render) = worker_calls_for_tick(&observations, 5, true);
+        assert!(topology);
+        assert_eq!(
+            frame.current_sample.as_ref().unwrap().desktop_point,
+            point_d
+        );
+        assert_both_sources(&recovered_render, false, point_d);
+        assert_filter_lists_before_sources(&recovered_render, point_d);
+        let observations = worker.observations();
+        let (_, _, recovered_poll) = worker_calls_for_tick(&observations, 6, false);
+        assert_both_sources(&recovered_poll, true, point_d);
+
+        worker.shutdown();
+        let observations = worker.observations();
+        assert_worker_metrics_match_receipts(&observations);
     }
 
     #[test]
