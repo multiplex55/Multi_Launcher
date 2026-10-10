@@ -46,3 +46,21 @@ Owned detached benchmark worktree: target/track-b/baseline at initial HEAD. Raw 
 Selected real edit fixtures (restore exact bytes in finally): src/color.rs RGB formatting expression; src/gui/mod.rs RADIAL_DESIGNER_WINDOW_TITLE string. They alter generated behavior only in isolated benchmarks; native acceptance runs only with originals restored. Two comparable edited samples where feasible; three cheap no-op samples. Resource fixtures separately track RC/icon/build.rs invalidation. Timing HTML measures combined compile/codegen/link unless independent process evidence supports attribution.
 
 Git metadata and ignored target writes need sandbox escalation on this host. Initial non-escalated branch creation and log writes failed before a build ran; the successfully escalated branch/worktree operations preserved the initial HEAD. Read-only host CIM queries also needed escalation. These are permission/environment facts, not benchmark failures.
+
+## Preliminary B0 measurements (not yet frozen)
+
+Cache transition: `cargo build --release --bin multi_launcher --timings -vv`, scratch source at initial SHA, warm existing dependency target, first use of scratch path: **279.014845 s**, exit 0. This is NOT a real edited-build comparison.
+
+Cargo timing artifact: `target/cargo-timings/cargo-timing-20261010T112458841Z-1b77695a7ba411db.html` (ignored). Application library duration 253.78 s; report frontend 68.97 s and codegen section 184.81 s; launcher binary 21.94 s; build-script compilation 2.03 s and execution 0.22 s. Sections are Cargo/rustc attribution, not separately measured exact linker time. Dependency cache was already populated; no cold-build inference.
+
+BL-01 truly unchanged release: 1.0586979, 1.0173001, 0.9972210 s; median 1.0173001 s, range 0.9972210–1.0586979. All exit 0, verbose log reports Fresh multi_launcher. Source, flags, cwd and target path unchanged. Raw manifests/logs: target/track-b/baseline-noop-{1,2,3}.{json,log}.
+
+Actual linker observed during the owned launcher compilation: Microsoft Visual Studio 2022 Community MSVC **14.44.35207**, HostX64/x64/link.exe. Rust LLVM version is unrelated to this selection. The 2-second process sampler observed this linker at one sample only; exact link duration is NOT MEASURED. Full private executable/command evidence: target/track-b/baseline-processes.json. Sampler started after library compilation began, so it does not measure complete compiler lifetime or peak memory.
+
+Initial profile invocation confirmed opt-level=3, embed-bitcode=no, strip=debuginfo; no explicit iteration profile or canonical release override introduced. All additional CARGO_PROFILE_*, CARGO_TARGET_*, CARGO_BUILD_*, CARGO_INCREMENTAL and RUSTC_WORKSPACE_WRAPPER overrides absent at host inventory.
+
+## B0-B harness
+
+`dev/track_b/measure.ps1` runs native executable/argument arrays without shell evaluation, returns Succeeded/ExitCode, restores scoped environment/location, streams stdout/stderr to unique external evidence directories, and snapshots only changed/new timing HTML. Caller must explicitly reject unsuccessful results; script does not exit its caller. The target path is checked against CLI/environment overrides, including removal of CARGO_TARGET_DIR. Reviewer identified and implementer corrected that null-override edge case. Parent parsed both scripts and the transient batch successfully; harness-only self-tests passed (implementer report).
+
+Full-debug default dev/test remain untouched. Profile planning corrected an advisory-plan error: Cargo lto=false permits thin local LTO; lto="off" disables it. Any iteration experiment must disclose this difference and cannot claim equivalence to default release.

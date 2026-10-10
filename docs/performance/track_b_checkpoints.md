@@ -5,9 +5,9 @@ Branch: build-optimization. No push/merge.
 
 | Checkpoint | State | Evidence / findings | Reviewer | Local commit SHA |
 | --- | --- | --- | --- | --- |
-| B0-A | PASS | Clean initial HEAD; metadata and host inventory; linker pending attribution | planner/parent | — |
-| B0-B | in_progress |  |  | — |
-| B0-C | pending |  |  | — |
+| B0-A | PASS | Clean initial HEAD; metadata and host inventory; linker pending attribution | planner/parent | dfc325f0 |
+| B0-B | PASS | Harness self-tests; exit 7, arguments, env/cwd, timing freshness; null target override fixed | independent review | pending commit |
+| B0-C | in_progress | Transition 279.015s; no-op median 1.017s; MSVC linker verified; edit/Nextest batch next | pending | — |
 | B1-A | pending |  |  | — |
 | B1-B | pending |  |  | — |
 | B1-C | pending |  |  | — |
