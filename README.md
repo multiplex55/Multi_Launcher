@@ -1120,24 +1120,49 @@ Restore and reset are explicit, confirmed, staged operations. They do not replac
 * Rust stable toolchain
 * Windows (recommended; several features use Win32/UI Automation)
 
-### Build
+### Build and run the launcher
 
-```bash
-cargo build --release
+For the normal application workflow, select the launcher explicitly:
+
+```powershell
+cargo build --release --bin multi_launcher
+cargo run --bin multi_launcher
 ```
 
-### Run from source
+The package also contains auxiliary smoke and acceptance executables. An
+unqualified `cargo build --release` intentionally builds every binary target;
+use it when you want those tools as well. Selecting `multi_launcher` still
+compiles the shared library that the application needs.
 
-```bash
-cargo run
+### Development checks and tests
+
+Use the default debug profile for an iterative launcher build and `check` for a
+quick library type check:
+
+```powershell
+cargo build --bin multi_launcher
+cargo check --lib
+cargo nextest run --lib -E 'test(history_prepare_)'
+cargo nextest run --test history
 ```
 
-### Notes
+`dev/track_b/cargo.ps1` provides fixed launcher and test-target presets. For
+example, pass Nextest filters as an explicit PowerShell array:
 
-* The project uses `rdev` and may require the `unstable_grab` feature for global input capture in some environments.
-* Some plugins depend on Windows-specific APIs (window management, browser tab activation, etc.).
+```powershell
+& .\dev\track_b\cargo.ps1 -Preset release
+& .\dev\track_b\cargo.ps1 -Preset debug
+& .\dev\track_b\cargo.ps1 -Preset lib-test -CargoArguments @('-E', 'test(history_prepare_)')
+& .\dev\track_b\cargo.ps1 -Preset integration-test -TestTarget history
+& .\dev\track_b\cargo.ps1 -Preset release -PrintCommand
+```
 
----
+`-PrintCommand` shows the native executable, argument array, and repository
+working directory without running Cargo. Use Cargo directly for other package,
+target, or Cargo compiler-profile selections. The project uses `rdev` and may require the
+`unstable_grab` feature for global input capture in some environments. Some
+plugins depend on Windows-specific APIs such as window management and browser
+tab activation.
 
 ## Troubleshooting
 

@@ -40,3 +40,32 @@ Run `& .\dev\test_owned_process.ps1` to check a controlled sleeping parent/child
 timeout, exit 7, and inventory-query failure with handle-based cleanup. It creates
 only temporary fixture scripts/processes and retains each run's evidence; it
 does not launch Multi Launcher.
+
+# Cargo workflows
+
+Run `track_b/cargo.ps1` from any directory to use one of its fixed presets.
+The helper resolves this repository and `Cargo.toml` relative to its own path,
+passes native arguments as an array, and leaves the caller's location and
+environment unchanged.
+
+```powershell
+& .\dev\track_b\cargo.ps1 -Preset release
+& .\dev\track_b\cargo.ps1 -Preset debug
+& .\dev\track_b\cargo.ps1 -Preset lib-test -CargoArguments @('-E', 'test(history_prepare_)')
+& .\dev\track_b\cargo.ps1 -Preset integration-test -TestTarget history
+& .\dev\track_b\cargo.ps1 -Preset release -PrintCommand
+```
+
+The library-test preset runs the selected `--lib` suite; the integration-test
+preset requires a target such as `history`. Forward Nextest filters and other
+ordinary options through `-CargoArguments` as a string array, so a filter with
+spaces stays one native argument. `-PrintCommand` reports the executable,
+argument array, and fixed working directory without execution. The helper
+rejects forwarded package, target, workspace, manifest, and Cargo compiler-
+profile selectors; use Cargo directly for those advanced workflows. Nextest
+runner profiles remain available through `-CargoArguments @('-P', 'default')`;
+`--cargo-profile` is blocked because it changes the compiler profile.
+
+For a quick library check, run `cargo check --lib`. To deliberately build all
+package binaries, use `cargo build --release` directly; the release preset
+selects only `multi_launcher`.
