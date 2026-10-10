@@ -14,8 +14,8 @@ Branch: build-optimization. No push/merge.
 | B2-A | PASS | fast-dev first/replay launcher34.75%/29.69% faster; tests10.76%/9.23%;32history observations/2restored color passes; icon/native passed | approved; phase/cache caveats | ac21724a |
 | B2-B | PASS | Candidate5819774e; all20commands/restores/clean; small239.982265→27.062325s; both original PE/native passed | final four-file gate approved | d72c2703 |
 | B2-C | PASS | Retain two measured optional profiles; no extra grid/cache; full-debug/default release unchanged | selection approved | 6620448d |
-| B2-D | PASS; local commit below | Document commands/cache paths/env override boundary; reuse actual flags/full-debug/assertions/original PE/native | final four-file docs approved | — |
-| B3-A | pending |  |  | — |
+| B2-D | PASS | Document commands/cache paths/env override boundary; reuse actual flags/full-debug/assertions/original PE/native | final four-file docs approved | 58699bed |
+| B3-A | PASS; local commit below | Live78targets/67integrations; baseline72suites/6389cases/17ignored; bounded isolation audit/unknown-retain | source audit and report approved | — |
 | B3-B | pending |  |  | — |
 | B3-C | pending |  |  | — |
 | B3-D | pending |  |  | — |

@@ -123,3 +123,22 @@ The README decision table and dev workflow now distinguish quick check, fast-dev
 Reuse B2-A's actual default/fast-dev builds, assertions/source-line failures and passing restored-source tests at measured7b6fab5e, and B2-B's separate original release/iteration artifacts, actual flags and passing PE/native checks at5819774e. Documentation checkpoint6620448d contains no additional production changes. The canonical compiler flags still match B0/B1; named profile output separation is observed, not a claim of binary identity or full runtime-performance equivalence. iteration inherits release safety-check defaults; dev/test remain appropriate when development assertions are required.
 
 Environment overrides are an explicit boundary: Cargo permits CARGO_PROFILE_*, CARGO_INCREMENTAL, Rust flags and configuration to change effective settings. Neither manifest nor helper prevents intentional user overrides. Measurement guards reject conflicting overrides and retain actual invocations; documentation explains equivalent-environment reproduction rather than falsely promising immunity. No override experiment or redundant build is needed to establish this configuration boundary. Git production-input comparison, scoped documentation review and diff check substantiate evidence reuse; final active-checkout production build remains a separate B5 gate.
+
+## B3-A test fanout and isolation audit (PASS)
+
+Live metadata at measured5819774e passed0.082478s (b3-a-inventory-1), confirming78targets/67integrationtargets:65top-level auto-discovered files and existing domain/plugin_queries aggregators. Rust/test sources and target declarations are unchanged from frozen B0. The normalized baseline roster records72suites,6389logical cases,17ignored,2empty and zero logical duplicates (baseline-nextest-roster-final.json and summary). It preserves binary ID, qualified case name, kind, ignored status and filter match; metadata-only cache entries are not logical cases. B3-D will compare both accepted compiler profiles and explicitly list ignored cases; no non-Windows execution is claimed.
+
+Broad B0 compile/discovery took943.248524s, with observed multi-minute link-process lifetimes and paging/HDD pressure. Exact link durations and per-binary peak memory were NOT MEASURED. The library/launcher warm edit workload and broad test fanout are separate bottlenecks. Existing domain102cases and plugin_queries131cases already amortize executable boundaries. All67integrationtargets are retained; the default classification of every target not explicitly audited below is unknown-retain, not an assertion of purity.
+
+| Inspected target / area | Classification and decision |
+| --- | --- |
+| query_autocomplete (1 case) | Potential small pilot; Settings::default reads the cwd screenshot directory, so construction is not strictly pure. At most one executable removed; no measured payoff establishes a migration. Retain. |
+| multi_manager_plugin (8 cases) | Six parser cases appear pure, but two construct PluginManager with MkMacroStore/shared runtime/native catalog services. Moving six still leaves the executable. Retain. |
+| history (5 cases) | cwd/persistence/application construction; retain fixture boundary. |
+| watchers (3 cases) | cwd/filesystem/GUI dependencies; retain. |
+| clipboard_persistence (2 cases) | cwd/environment/native clipboard dependencies; retain. |
+| windows_plugin (1 case) | Native catalog enumeration/refresh; preserve Windows reachability. |
+| window_manager (2 cases) | Shared MOCK_MOUSE_LOCK/position overrides with resets; mocks are not proof of native input behavior. Retain. |
+| plugin_queries::help_plugin::search_returns_help_action | Pure case already grouped; no additional executable avoidance. |
+
+Nextest isolates individual cases in processes: environment mutation alone does not prove grouping is unsafe. Conventional Cargo test concurrency, shared fixture ownership and native lifecycle still require a concrete audit before migration. The scoped planner/reviewer audit found no pilot with sufficient demonstrated benefit. No test code, identifiers, cfg/ignored attributes or fixtures are changed; unknowns retain their existing boundaries. Full roster parity remains the explicit B3-D gate, rather than assuming source module counts equal tests.
