@@ -191,6 +191,292 @@ struct ProjectionKey {
     filter: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct NotesGeometryKey {
+    entries_generation: u64,
+    metadata_generation: u64,
+    projection_generation: u64,
+    viewport_width: u32,
+    pixels_per_point: u32,
+    title_font: egui::FontId,
+    small_font: egui::FontId,
+    wrap: Option<bool>,
+    spacing_x: u32,
+    spacing_y: u32,
+    interact_width: u32,
+    interact_height: u32,
+}
+
+#[derive(Clone, Debug)]
+struct NoteRowGeometry {
+    original_index: usize,
+    identity: String,
+    top: f32,
+    header_height: f32,
+    header_width: f32,
+    body_width: f32,
+    preview_height: Option<f32>,
+    body_height: f32,
+    separator_top: f32,
+    visual_bottom: f32,
+    width_before: f32,
+    width_after: f32,
+}
+
+struct NotesGeometry {
+    key: NotesGeometryKey,
+    rows: Vec<NoteRowGeometry>,
+    row_by_identity: std::collections::HashMap<String, usize>,
+    content_size: egui::Vec2,
+    font_atlas: std::sync::Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>,
+    #[cfg(test)]
+    measured_rows: usize,
+    #[cfg(test)]
+    rebuild_nanos: u128,
+}
+
+impl NotesGeometry {
+    fn matches(
+        &self,
+        key: &NotesGeometryKey,
+        font_atlas: &std::sync::Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>,
+    ) -> bool {
+        self.key == *key && std::sync::Arc::ptr_eq(&self.font_atlas, font_atlas)
+    }
+
+    fn anchor_at(&self, offset_y: f32) -> Option<(&str, f32)> {
+        let row = self
+            .rows
+            .iter()
+            .find(|row| row.visual_bottom > offset_y)
+            .or_else(|| self.rows.last())?;
+        Some((&row.identity, (offset_y - row.top).max(0.0)))
+    }
+}
+
+#[derive(Clone)]
+struct NoteMenuOwner {
+    identity: String,
+    original_index: usize,
+    response: egui::Response,
+}
+
+fn geometry_key(
+    entries_generation: u64,
+    metadata_generation: u64,
+    projection_generation: u64,
+    viewport_width: f32,
+    pixels_per_point: f32,
+    style: &egui::Style,
+) -> NotesGeometryKey {
+    let spacing = &style.spacing;
+    NotesGeometryKey {
+        entries_generation,
+        metadata_generation,
+        projection_generation,
+        viewport_width: viewport_width.to_bits(),
+        pixels_per_point: pixels_per_point.to_bits(),
+        title_font: style.override_text_style.as_ref().map_or_else(
+            || egui::FontSelection::Default.resolve(style),
+            |text_style| text_style.resolve(style),
+        ),
+        small_font: egui::TextStyle::Small.resolve(style),
+        wrap: style.wrap,
+        spacing_x: spacing.item_spacing.x.to_bits(),
+        spacing_y: spacing.item_spacing.y.to_bits(),
+        interact_width: spacing.interact_size.x.to_bits(),
+        interact_height: spacing.interact_size.y.to_bits(),
+    }
+}
+
+fn galley_size(
+    ctx: &egui::Context,
+    style: &egui::Style,
+    text: egui::WidgetText,
+    wrap: bool,
+    width: f32,
+    valign: egui::Align,
+) -> egui::Vec2 {
+    text.into_galley_impl(
+        ctx,
+        style,
+        wrap,
+        width,
+        egui::FontSelection::Default,
+        valign,
+    )
+    .size()
+}
+
+fn measure_notes_geometry(
+    ctx: &egui::Context,
+    style: &egui::Style,
+    viewport_width: f32,
+    entries: &[Note],
+    metadata: &[NoteRowMetadata],
+    filtered_indices: &[usize],
+    entries_generation: u64,
+    metadata_generation: u64,
+    projection_generation: u64,
+) -> NotesGeometry {
+    #[cfg(test)]
+    let started = std::time::Instant::now();
+    let font_atlas = ctx.fonts(|fonts| fonts.texture_atlas());
+    let key = geometry_key(
+        entries_generation,
+        metadata_generation,
+        projection_generation,
+        viewport_width,
+        ctx.pixels_per_point(),
+        style,
+    );
+    let spacing_x = style.spacing.item_spacing.x;
+    let spacing_y = style.spacing.item_spacing.y;
+    let header_wrap = style.wrap.unwrap_or(false);
+    let preview_wrap = style.wrap.unwrap_or(true);
+    let mut prefix_width = viewport_width.max(0.0);
+    let mut top = 0.0;
+    let mut content_height = 0.0;
+    let mut rows = Vec::with_capacity(filtered_indices.len());
+    let mut row_by_identity = std::collections::HashMap::with_capacity(filtered_indices.len());
+
+    for &original_index in filtered_indices {
+        let (Some(entry), Some(metadata)) = (
+            entries.get(original_index),
+            metadata
+                .get(original_index)
+                .filter(|metadata| metadata.original_index == original_index),
+        ) else {
+            continue;
+        };
+
+        let width_before = prefix_width;
+        let title_size = galley_size(
+            ctx,
+            style,
+            egui::RichText::new(&metadata.display_title).strong().into(),
+            header_wrap,
+            width_before,
+            egui::Align::Center,
+        );
+        let meta_width = (width_before - title_size.x - spacing_x).max(0.0);
+        let meta_size = galley_size(
+            ctx,
+            style,
+            egui::RichText::new(&metadata.meta).small().into(),
+            header_wrap,
+            meta_width,
+            egui::Align::Center,
+        );
+        let header_width = title_size.x + spacing_x + meta_size.x;
+        let header_height = style
+            .spacing
+            .interact_size
+            .y
+            .max(title_size.y)
+            .max(meta_size.y);
+        prefix_width = prefix_width.max(header_width);
+
+        let preview_size = if metadata.preview.is_empty() {
+            None
+        } else {
+            Some(galley_size(
+                ctx,
+                style,
+                egui::RichText::new(&metadata.preview).small().into(),
+                preview_wrap,
+                prefix_width,
+                egui::Align::Min,
+            ))
+        };
+        let body_height = if let Some(preview_size) = preview_size {
+            header_height + spacing_y + preview_size.y
+        } else {
+            header_height
+        };
+        let body_width = preview_size.map_or(header_width, |preview_size| {
+            header_width.max(preview_size.x)
+        });
+        if let Some(preview_size) = preview_size {
+            prefix_width = prefix_width.max(preview_size.x);
+        }
+        let separator_top = top + body_height + spacing_y;
+        content_height = separator_top + 6.0;
+        let identity = if entry.slug.is_empty() {
+            format!("#unsaved:{original_index}")
+        } else {
+            entry.slug.clone()
+        };
+        row_by_identity.insert(identity.clone(), rows.len());
+        rows.push(NoteRowGeometry {
+            original_index,
+            identity,
+            top,
+            header_height,
+            header_width,
+            body_width,
+            preview_height: preview_size.map(|size| size.y),
+            body_height,
+            separator_top,
+            visual_bottom: content_height,
+            width_before,
+            width_after: prefix_width,
+        });
+        top = content_height + spacing_y;
+    }
+
+    #[cfg(test)]
+    let rebuild_nanos = started.elapsed().as_nanos();
+    NotesGeometry {
+        key,
+        rows,
+        row_by_identity,
+        content_size: if filtered_indices.is_empty() {
+            egui::Vec2::ZERO
+        } else {
+            egui::vec2(prefix_width, content_height)
+        },
+        font_atlas,
+        #[cfg(test)]
+        measured_rows: filtered_indices.len(),
+        #[cfg(test)]
+        rebuild_nanos,
+    }
+}
+
+fn remap_scroll_anchor(
+    old: &NotesGeometry,
+    new: &NotesGeometry,
+    offset_y: f32,
+) -> Option<(f32, f32)> {
+    let (anchor_identity, intra_row_offset) = old.anchor_at(offset_y)?;
+    let anchor_position = old.row_by_identity.get(anchor_identity).copied()?;
+
+    for distance in 0..old.rows.len() {
+        let candidates = [
+            (anchor_position.checked_add(distance), distance == 0),
+            (anchor_position.checked_sub(distance), false),
+        ];
+        for (candidate, is_anchor) in candidates {
+            let Some(candidate) = candidate.filter(|index| *index < old.rows.len()) else {
+                continue;
+            };
+            let old_row = &old.rows[candidate];
+            let Some(&new_position) = new.row_by_identity.get(&old_row.identity) else {
+                continue;
+            };
+            let new_row = &new.rows[new_position];
+            let offset = if is_anchor {
+                intra_row_offset.min(new_row.visual_bottom - new_row.top)
+            } else {
+                0.0
+            };
+            return Some((new_row.top, offset));
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug)]
 struct RefreshRetry {
     note_revision: u64,
@@ -252,10 +538,14 @@ pub struct NotesDialog {
     entries_revision: Option<u64>,
     refresh_requested: bool,
     entries_generation: u64,
+    projection_generation: u64,
+    metadata_generation: u64,
     row_metadata: Vec<NoteRowMetadata>,
     metadata_key: Option<MetadataKey>,
     filtered_indices: Vec<usize>,
     projection_key: Option<ProjectionKey>,
+    notes_geometry: Option<NotesGeometry>,
+    menu_owner: Option<NoteMenuOwner>,
     refresh_retry: Option<RefreshRetry>,
     edit_idx: Option<usize>,
     text: String,
@@ -263,6 +553,8 @@ pub struct NotesDialog {
     template_manager: TemplateManagerState,
     #[cfg(test)]
     last_rendered_indices: Vec<usize>,
+    #[cfg(test)]
+    last_rendered_row_rects: Vec<(usize, RenderedNoteRowRects)>,
     #[cfg(test)]
     test_note_snapshot_calls: u64,
     #[cfg(test)]
@@ -275,6 +567,37 @@ pub struct NotesDialog {
     test_fail_next_snapshot: bool,
     #[cfg(test)]
     test_race_after_candidate: bool,
+    #[cfg(test)]
+    test_geometry_rebuilds: u64,
+    #[cfg(test)]
+    test_geometry_rows_measured: u64,
+    #[cfg(test)]
+    test_last_geometry_rebuild_nanos: u128,
+    #[cfg(test)]
+    test_scroll_area_id: Option<egui::Id>,
+    #[cfg(test)]
+    test_scroll_area_offset: egui::Vec2,
+    #[cfg(test)]
+    test_scroll_area_inner_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_scroll_area_content_size: egui::Vec2,
+    #[cfg(test)]
+    test_content_origin: egui::Pos2,
+    #[cfg(test)]
+    test_menu_edit_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_menu_remove_rect: Option<egui::Rect>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct RenderedNoteRowRects {
+    outer: egui::Rect,
+    header: egui::Rect,
+    title: egui::Rect,
+    meta: egui::Rect,
+    preview: Option<egui::Rect>,
+    separator: egui::Rect,
 }
 
 enum PendingNoteSave {
@@ -478,6 +801,7 @@ impl NotesDialog {
         self.entries_revision = Some(revision);
         self.refresh_requested = false;
         self.entries_generation = self.entries_generation.wrapping_add(1).max(1);
+        self.metadata_generation = self.metadata_generation.wrapping_add(1).max(1);
         self.row_metadata = metadata;
         self.metadata_key = settings.map(|(backlinks_enabled, task_lists_enabled)| MetadataKey {
             entries_generation: self.entries_generation,
@@ -638,6 +962,7 @@ impl NotesDialog {
                 backlinks_enabled,
                 task_lists_enabled,
             });
+            self.metadata_generation = self.metadata_generation.wrapping_add(1).max(1);
             self.refresh_retry = None;
             #[cfg(test)]
             {
@@ -652,18 +977,26 @@ impl NotesDialog {
     }
 
     fn rebuild_projection_if_needed(&mut self) {
-        if update_filtered_projection(
-            &self.search,
-            &self.index,
-            self.entries_generation,
-            &mut self.filtered_indices,
-            &mut self.projection_key,
-        ) {
+        if self.refresh_projection() {
             #[cfg(test)]
             {
                 self.test_projection_rebuilds = self.test_projection_rebuilds.saturating_add(1);
             }
         }
+    }
+
+    fn refresh_projection(&mut self) -> bool {
+        let changed = update_filtered_projection(
+            &self.search,
+            &self.index,
+            self.entries_generation,
+            &mut self.filtered_indices,
+            &mut self.projection_key,
+        );
+        if changed {
+            self.projection_generation = self.projection_generation.wrapping_add(1).max(1);
+        }
+        changed
     }
 
     fn rebuild_index(&mut self) {
@@ -673,6 +1006,81 @@ impl NotesDialog {
         self.metadata_key = None;
         self.filtered_indices.clear();
         self.projection_key = None;
+    }
+
+    fn ensure_notes_geometry(
+        &mut self,
+        ctx: &egui::Context,
+        style: &egui::Style,
+        viewport_width: f32,
+    ) -> Option<NotesGeometry> {
+        let key = geometry_key(
+            self.entries_generation,
+            self.metadata_generation,
+            self.projection_generation,
+            viewport_width,
+            ctx.pixels_per_point(),
+            style,
+        );
+        let font_atlas = ctx.fonts(|fonts| fonts.texture_atlas());
+        if self
+            .notes_geometry
+            .as_ref()
+            .is_some_and(|geometry| geometry.matches(&key, &font_atlas))
+        {
+            return None;
+        }
+        let geometry = measure_notes_geometry(
+            ctx,
+            style,
+            viewport_width,
+            &self.entries,
+            &self.row_metadata,
+            &self.filtered_indices,
+            self.entries_generation,
+            self.metadata_generation,
+            self.projection_generation,
+        );
+        #[cfg(test)]
+        {
+            self.test_geometry_rebuilds = self.test_geometry_rebuilds.saturating_add(1);
+            self.test_geometry_rows_measured = self
+                .test_geometry_rows_measured
+                .saturating_add(geometry.measured_rows.try_into().unwrap_or(u64::MAX));
+            self.test_last_geometry_rebuild_nanos = geometry.rebuild_nanos;
+        }
+        self.notes_geometry.replace(geometry)
+    }
+
+    fn close_menu_owner(&mut self) {
+        if let Some(owner) = self.menu_owner.take()
+            && owner.response.context_menu_opened()
+        {
+            owner.response.context_menu(|ui| ui.close_menu());
+        }
+    }
+
+    fn reconcile_menu_owner(&mut self) {
+        let Some(owner) = self.menu_owner.as_ref() else {
+            return;
+        };
+        if !owner.response.context_menu_opened() {
+            self.menu_owner = None;
+            return;
+        }
+        let row = self.notes_geometry.as_ref().and_then(|geometry| {
+            geometry
+                .row_by_identity
+                .get(&owner.identity)
+                .and_then(|position| geometry.rows.get(*position))
+        });
+        if let Some(row) = row {
+            if let Some(owner) = self.menu_owner.as_mut() {
+                owner.original_index = row.original_index;
+            }
+        } else {
+            self.close_menu_owner();
+        }
     }
 
     fn ensure_entries_for_edit(&mut self) {
@@ -748,8 +1156,19 @@ impl NotesDialog {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         #[cfg(test)]
         self.last_rendered_indices.clear();
+        #[cfg(test)]
+        self.last_rendered_row_rects.clear();
+        #[cfg(test)]
+        {
+            self.test_menu_edit_rect = None;
+            self.test_menu_remove_rect = None;
+        }
         if !self.open {
+            self.close_menu_owner();
             return;
+        }
+        if self.edit_idx.is_some() {
+            self.close_menu_owner();
         }
         self.maybe_refresh_derived(ctx, &app.note_settings);
         let mut close = false;
@@ -758,8 +1177,9 @@ impl NotesDialog {
         let mut rebuild_idx = false;
         let mut refresh_entries = false;
         let mut wrap_links_slug: Option<String> = None;
+        let mut window_open = self.open;
         egui::Window::new("Quick Notes")
-            .open(&mut self.open)
+            .open(&mut window_open)
             .resizable(true)
             .default_size((360.0, 240.0))
             .min_width(200.0)
@@ -858,6 +1278,8 @@ impl NotesDialog {
                         &mut self.filtered_indices,
                         &mut self.projection_key,
                     ) {
+                        self.projection_generation =
+                            self.projection_generation.wrapping_add(1).max(1);
                         #[cfg(test)]
                         {
                             self.test_projection_rebuilds =
@@ -870,11 +1292,75 @@ impl NotesDialog {
                         crate::performance::Metric::QuickNotesRowsBuilt,
                     );
                     rows_timer.set_work_units(0);
-                    egui::ScrollArea::both()
+                    let output = egui::ScrollArea::both()
                         .max_height(area_height)
-                        .show(ui, |ui| {
-                            for projection_index in 0..self.filtered_indices.len() {
-                                let idx = self.filtered_indices[projection_index];
+                        .show_viewport(ui, |ui, viewport| {
+                            let old_geometry = self.ensure_notes_geometry(
+                                ctx,
+                                ui.style(),
+                                viewport.width(),
+                            );
+                            self.reconcile_menu_owner();
+                            let content_origin = ui.min_rect().min;
+                            let Some(geometry) = self.notes_geometry.as_ref() else {
+                                return;
+                            };
+                            #[cfg(test)]
+                            {
+                                self.test_content_origin = content_origin;
+                            }
+
+                            if let Some(old_geometry) = old_geometry.as_ref()
+                                && let Some((top, intra_row_offset)) = remap_scroll_anchor(
+                                    old_geometry,
+                                    geometry,
+                                    viewport.min.y,
+                                )
+                            {
+                                let spacing = ui.spacing().item_spacing;
+                                let target = egui::Rect::from_min_size(
+                                    content_origin
+                                        + egui::vec2(
+                                            viewport.min.x + spacing.x,
+                                            top + intra_row_offset + spacing.y,
+                                        ),
+                                    egui::Vec2::splat(1.0),
+                                );
+                                ui.scroll_to_rect(target, Some(egui::Align::Min));
+                            }
+
+                            let first_visible = geometry
+                                .rows
+                                .partition_point(|row| row.visual_bottom <= viewport.min.y)
+                                .saturating_sub(2);
+                            let after_visible = geometry
+                                .rows
+                                .partition_point(|row| row.top <= viewport.max.y)
+                                .saturating_add(2)
+                                .min(geometry.rows.len());
+                            let mut render_positions =
+                                (first_visible..after_visible).collect::<Vec<_>>();
+                            if let Some(owner) = self
+                                .menu_owner
+                                .as_ref()
+                                .filter(|owner| owner.response.context_menu_opened())
+                                && let Some(&position) =
+                                    geometry.row_by_identity.get(&owner.identity)
+                                && !render_positions.contains(&position)
+                            {
+                                render_positions.push(position);
+                            }
+                            render_positions.sort_unstable();
+                            render_positions.dedup();
+                            let content_size = geometry.content_size;
+                            let render_rows = render_positions
+                                .into_iter()
+                                .filter_map(|position| geometry.rows.get(position).cloned())
+                                .collect::<Vec<_>>();
+
+                            for row_geometry in render_rows {
+                                let idx = row_geometry.original_index;
+                                let identity = row_geometry.identity.as_str();
                                 let Some(entry) = self.entries.get(idx) else {
                                     continue;
                                 };
@@ -885,138 +1371,237 @@ impl NotesDialog {
                                 else {
                                     continue;
                                 };
-                                ui.vertical(|ui| {
-                                    let preview = row.preview.as_str();
-                                    let resp = ui
-                                        .horizontal(|ui| {
-                                            ui.strong(&row.display_title);
-                                            ui.small(&row.meta);
-                                        })
-                                        .response
-                                        .on_hover_ui(|ui| {
-                                            if preview.is_empty() {
-                                                ui.label(&entry.content);
-                                            } else {
-                                                ui.label(preview);
-                                            }
-                                        });
-                                    if !preview.is_empty() {
-                                        ui.small(preview);
-                                    }
-                                    let idx_copy = idx;
-                                    resp.clone().context_menu(|ui| {
-                                        if ui.button("Open").clicked() {
-                                            app.open_note_panel(&entry.slug, None);
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Edit").clicked() {
-                                            self.edit_idx = Some(idx_copy);
-                                            self.text = entry.content.clone();
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Open externally").clicked() {
-                                            if let Err(e) = open::that(&entry.path) {
-                                                app.report_error_message(
-                                                    "ui operation",
-                                                    format!("Failed to open note externally: {e}"),
-                                                );
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Copy link").clicked() {
-                                            let link = format!("[[{}]]", entry.slug);
-                                            if let Err(e) =
-                                                crate::actions::clipboard::set_text(&link)
-                                            {
-                                                app.report_error_message(
-                                                    "ui operation",
-                                                    format!("Failed to copy note link: {e}"),
-                                                );
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if ui.button("Copy slug").clicked() {
-                                            if let Err(e) =
-                                                crate::actions::clipboard::set_text(&entry.slug)
-                                            {
-                                                app.report_error_message(
-                                                    "ui operation",
-                                                    format!("Failed to copy note slug: {e}"),
-                                                );
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        if app.note_settings.aliases_enabled
-                                            && ui.button("Manage aliases").clicked()
-                                        {
-                                            app.open_note_panel(&entry.slug, None);
-                                            ui.close_menu();
-                                        }
-                                        if app.note_settings.templates_enabled
-                                            && ui.button("Create note from template").clicked()
-                                        {
-                                            app.activate_action(
-                                                note_action("New note", "query:note templates"),
-                                                None,
-                                                ActivationSource::Click,
-                                            );
-                                            ui.close_menu();
-                                        }
-                                        ui.menu_button("Meta", |ui| {
-                                            if ui.button("Wrap links in note").clicked() {
-                                                wrap_links_slug = Some(entry.slug.clone());
-                                                ui.close_menu();
-                                            }
-                                        });
-                                        if ui.button("Remove Note").clicked() {
-                                            if entry.slug.is_empty() {
-                                                remove = Some(idx_copy);
-                                            } else {
-                                                app.activate_action(
-                                                    note_action(
-                                                        "Remove note",
-                                                        format!("note:remove:{}", entry.slug),
-                                                    ),
-                                                    None,
-                                                    ActivationSource::Click,
-                                                );
-                                                if !app.require_confirm_destructive {
-                                                    refresh_entries = true;
+                                let row_rect = egui::Rect::from_min_size(
+                                    content_origin + egui::vec2(0.0, row_geometry.top),
+                                    egui::vec2(
+                                        row_geometry.width_before,
+                                        row_geometry.body_height,
+                                    ),
+                                );
+                                let separator_rect = egui::Rect::from_min_size(
+                                    content_origin
+                                        + egui::vec2(0.0, row_geometry.separator_top),
+                                    egui::vec2(row_geometry.width_after, 6.0),
+                                );
+                                let mut open_menu_response = None;
+                                let _allocated_row = ui.push_id(("quick-notes-row", identity), |ui| {
+                                    ui.allocate_ui_at_rect(row_rect, |ui| {
+                                        ui.vertical(|ui| {
+                                            let preview = row.preview.as_str();
+                                            let header = ui.horizontal(|ui| {
+                                                let title = ui.strong(&row.display_title);
+                                                let meta = ui.small(&row.meta);
+                                                (title.rect, meta.rect)
+                                            });
+                                            let header_response = header.response;
+                                            let (title_rect, meta_rect) = header.inner;
+                                            let response = header_response.clone().on_hover_ui(|ui| {
+                                                if preview.is_empty() {
+                                                    ui.label(&entry.content);
+                                                } else {
+                                                    ui.label(preview);
                                                 }
-                                            }
-                                            ui.close_menu();
-                                        }
-                                        ui.separator();
-                                        ui.label("Link to todo");
-                                        for todo in
-                                            load_todos_or_last_good(TODO_FILE).into_iter().take(8)
-                                        {
-                                            let todo_id = if todo.id.is_empty() {
-                                                todo.text.clone()
+                                            });
+                                            let preview_rect = if preview.is_empty() {
+                                                None
                                             } else {
-                                                todo.id.clone()
+                                                Some(ui.small(preview).rect)
                                             };
-                                            if ui
-                                                .button(format!("@todo:{todo_id} {}", todo.text))
-                                                .clicked()
-                                            {
-                                                if let Some(target) = self.entries.get(idx_copy) {
-                                                    note_to_save = Some(PendingNoteSave::Append {
-                                                        identity: target.slug.clone(),
-                                                        suffix: format!("\n@todo:{todo_id}"),
+                                            let idx_copy = idx;
+                                            response.clone().context_menu(|ui| {
+                                                    if ui.button("Open").clicked() {
+                                                        app.open_note_panel(&entry.slug, None);
+                                                        ui.close_menu();
+                                                    }
+                                                    let edit_button = ui.button("Edit");
+                                                    #[cfg(test)]
+                                                    {
+                                                        self.test_menu_edit_rect =
+                                                            Some(edit_button.rect);
+                                                    }
+                                                    if edit_button.clicked() {
+                                                        self.edit_idx = Some(idx_copy);
+                                                        self.text = entry.content.clone();
+                                                        ui.close_menu();
+                                                    }
+                                                    if ui.button("Open externally").clicked() {
+                                                        if let Err(e) = open::that(&entry.path) {
+                                                            app.report_error_message(
+                                                                "ui operation",
+                                                                format!(
+                                                                    "Failed to open note externally: {e}"
+                                                                ),
+                                                            );
+                                                        }
+                                                        ui.close_menu();
+                                                    }
+                                                    if ui.button("Copy link").clicked() {
+                                                        let link = format!("[[{}]]", entry.slug);
+                                                        if let Err(e) =
+                                                            crate::actions::clipboard::set_text(&link)
+                                                        {
+                                                            app.report_error_message(
+                                                                "ui operation",
+                                                                format!("Failed to copy note link: {e}"),
+                                                            );
+                                                        }
+                                                        ui.close_menu();
+                                                    }
+                                                    if ui.button("Copy slug").clicked() {
+                                                        if let Err(e) = crate::actions::clipboard::set_text(&entry.slug) {
+                                                            app.report_error_message(
+                                                                "ui operation",
+                                                                format!("Failed to copy note slug: {e}"),
+                                                            );
+                                                        }
+                                                        ui.close_menu();
+                                                    }
+                                                    if app.note_settings.aliases_enabled
+                                                        && ui.button("Manage aliases").clicked()
+                                                    {
+                                                        app.open_note_panel(&entry.slug, None);
+                                                        ui.close_menu();
+                                                    }
+                                                    if app.note_settings.templates_enabled
+                                                        && ui.button("Create note from template").clicked()
+                                                    {
+                                                        app.activate_action(
+                                                            note_action("New note", "query:note templates"),
+                                                            None,
+                                                            ActivationSource::Click,
+                                                        );
+                                                        ui.close_menu();
+                                                    }
+                                                    ui.menu_button("Meta", |ui| {
+                                                        if ui.button("Wrap links in note").clicked() {
+                                                            wrap_links_slug = Some(entry.slug.clone());
+                                                            ui.close_menu();
+                                                        }
                                                     });
-                                                }
-                                                ui.close_menu();
+                                                    let remove_button = ui.button("Remove Note");
+                                                    #[cfg(test)]
+                                                    {
+                                                        self.test_menu_remove_rect =
+                                                            Some(remove_button.rect);
+                                                    }
+                                                    if remove_button.clicked() {
+                                                        if entry.slug.is_empty() {
+                                                            remove = Some(idx_copy);
+                                                        } else {
+                                                            app.activate_action(
+                                                                note_action(
+                                                                    "Remove note",
+                                                                    format!("note:remove:{}", entry.slug),
+                                                                ),
+                                                                None,
+                                                                ActivationSource::Click,
+                                                            );
+                                                            if !app.require_confirm_destructive {
+                                                                refresh_entries = true;
+                                                            }
+                                                        }
+                                                        ui.close_menu();
+                                                    }
+                                                    ui.separator();
+                                                    ui.label("Link to todo");
+                                                    for todo in load_todos_or_last_good(TODO_FILE)
+                                                        .into_iter()
+                                                        .take(8)
+                                                    {
+                                                        let todo_id = if todo.id.is_empty() {
+                                                            todo.text.clone()
+                                                        } else {
+                                                            todo.id.clone()
+                                                        };
+                                                        if ui
+                                                            .button(format!("@todo:{todo_id} {}", todo.text))
+                                                            .clicked()
+                                                        {
+                                                            if let Some(target) = self.entries.get(idx_copy) {
+                                                                note_to_save = Some(PendingNoteSave::Append {
+                                                                    identity: target.slug.clone(),
+                                                                    suffix: format!("\n@todo:{todo_id}"),
+                                                                });
+                                                            }
+                                                            ui.close_menu();
+                                                        }
+                                                    }
+                                            });
+                                            if response.context_menu_opened() {
+                                                open_menu_response = Some(response.clone());
                                             }
-                                        }
-                                    });
+                                            (
+                                                header_response.rect,
+                                                title_rect,
+                                                meta_rect,
+                                                preview_rect,
+                                            )
+                                        })
+                                    })
                                 });
+                                #[cfg(test)]
+                                let actual_row = _allocated_row.inner.inner;
+                                #[cfg(test)]
+                                let actual_outer_rect = actual_row.response.rect;
+                                #[cfg(test)]
+                                let (
+                                    actual_header_rect,
+                                    actual_title_rect,
+                                    actual_meta_rect,
+                                    actual_preview_rect,
+                                ) = actual_row.inner;
+                                let _separator_response = ui
+                                    .push_id(("quick-notes-separator", identity), |ui| {
+                                        ui.allocate_ui_at_rect(separator_rect, |ui| ui.separator())
+                                    })
+                                    .inner;
+                                #[cfg(test)]
+                                let separator_response = _separator_response.inner;
+                                if let Some(response) = open_menu_response {
+                                    if let Some(owner) = self
+                                        .menu_owner
+                                        .as_mut()
+                                        .filter(|owner| owner.identity == identity)
+                                    {
+                                        owner.original_index = idx;
+                                        owner.response = response;
+                                    } else {
+                                        self.menu_owner = Some(NoteMenuOwner {
+                                            identity: identity.to_owned(),
+                                            original_index: idx,
+                                            response,
+                                        });
+                                    }
+                                }
                                 rows_timer.add_work_units(1);
                                 #[cfg(test)]
-                                self.last_rendered_indices.push(idx);
-                                ui.separator();
+                                {
+                                    self.last_rendered_indices.push(idx);
+                                    self.last_rendered_row_rects.push((
+                                        idx,
+                                        RenderedNoteRowRects {
+                                            outer: actual_outer_rect,
+                                            header: actual_header_rect,
+                                            title: actual_title_rect,
+                                            meta: actual_meta_rect,
+                                            preview: actual_preview_rect,
+                                            separator: separator_response.rect,
+                                        },
+                                    ));
+                                }
                             }
+                            ui.expand_to_include_rect(egui::Rect::from_min_size(
+                                content_origin,
+                                content_size,
+                            ));
                         });
+                    #[cfg(test)]
+                    {
+                        self.test_scroll_area_id = Some(output.id);
+                        self.test_scroll_area_offset = output.state.offset;
+                        self.test_scroll_area_inner_rect = Some(output.inner_rect);
+                        self.test_scroll_area_content_size = output.content_size;
+                    }
                     drop(rows_timer);
                     if let Some(idx) = remove {
                         self.entries.remove(idx);
@@ -1041,8 +1626,12 @@ impl NotesDialog {
             }
         }
         if close {
-            self.open = false;
+            window_open = false;
         }
+        if !window_open {
+            self.close_menu_owner();
+        }
+        self.open = window_open;
         if app.note_settings.templates_enabled {
             self.template_manager.ui(ctx, app);
         } else {
@@ -1054,7 +1643,7 @@ impl NotesDialog {
 #[cfg(test)]
 mod tests {
     use super::{
-        NotesDialog, PendingNoteSave, checkbox_count, format_note_timestamp,
+        NotesDialog, PendingNoteSave, RenderedNoteRowRects, checkbox_count, format_note_timestamp,
         insert_at_char_boundary, note_action, short_preview,
     };
     use crate::gui::{LauncherApp, NotePanel};
@@ -1068,6 +1657,710 @@ mod tests {
     use once_cell::sync::Lazy;
     use std::sync::{Arc, Mutex, atomic::AtomicBool};
     use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct EagerNoteRowRects {
+        outer: egui::Rect,
+        header: egui::Rect,
+        preview: Option<egui::Rect>,
+        separator: egui::Rect,
+    }
+
+    #[derive(Debug)]
+    struct EagerNotesGeometry {
+        rows: Vec<EagerNoteRowRects>,
+        content_size: egui::Vec2,
+        viewport: egui::Rect,
+        content_origin: egui::Pos2,
+        estimated_rows: Vec<super::NoteRowGeometry>,
+        estimated_content_size: egui::Vec2,
+    }
+
+    // Independent copy of the pre-virtualization row composition. Keep this
+    // actual-widget oracle separate from the cached geometry estimator so the
+    // virtualization tests can catch egui layout changes and estimate drift.
+    fn eager_notes_geometry(
+        ctx: &egui::Context,
+        entries: &[Note],
+        screen_width: f32,
+    ) -> EagerNotesGeometry {
+        let metadata = super::build_row_metadata(entries, false, false).unwrap();
+        let mut result = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(screen_width, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let output = egui::ScrollArea::both().max_height(520.0).show_viewport(
+                        ui,
+                        |ui, viewport| {
+                            let content_origin = ui.min_rect().min;
+                            let all_indices = (0..entries.len()).collect::<Vec<_>>();
+                            let estimated = super::measure_notes_geometry(
+                                ctx,
+                                ui.style(),
+                                viewport.width(),
+                                entries,
+                                &metadata,
+                                &all_indices,
+                                1,
+                                1,
+                                1,
+                            );
+                            let mut rows = Vec::with_capacity(entries.len());
+                            for row in &metadata {
+                                let outer = ui.vertical(|ui| {
+                                    let header = ui
+                                        .horizontal(|ui| {
+                                            ui.strong(&row.display_title);
+                                            ui.small(&row.meta);
+                                        })
+                                        .response
+                                        .rect;
+                                    let preview = if row.preview.is_empty() {
+                                        None
+                                    } else {
+                                        Some(ui.small(&row.preview).rect)
+                                    };
+                                    (header, preview)
+                                });
+                                let separator = ui.separator().rect;
+                                rows.push(EagerNoteRowRects {
+                                    outer: outer.response.rect,
+                                    header: outer.inner.0,
+                                    preview: outer.inner.1,
+                                    separator,
+                                });
+                            }
+                            (rows, content_origin, estimated)
+                        },
+                    );
+                    result = Some(EagerNotesGeometry {
+                        rows: output.inner.0,
+                        content_size: output.content_size,
+                        viewport: output.inner_rect,
+                        content_origin: output.inner.1,
+                        estimated_rows: output.inner.2.rows,
+                        estimated_content_size: output.inner.2.content_size,
+                    });
+                });
+            },
+        );
+        result.expect("the eager geometry oracle runs its central panel")
+    }
+
+    #[test]
+    fn quick_notes_eager_geometry_oracle_records_real_variable_rows() {
+        let entries = vec![
+            note("Short title", "short", &"short preview words ".repeat(30)),
+            note(
+                &"W".repeat(120),
+                "wide",
+                &format!("{}\nsecond line", "wide preview words ".repeat(30)),
+            ),
+            note("", "blank", ""),
+            note(&"Wrapped\n".repeat(20), "multiline", ""),
+        ];
+        let ctx = egui::Context::default();
+        let geometry = eager_notes_geometry(&ctx, &entries, 420.0);
+
+        assert_eq!(geometry.rows.len(), entries.len());
+        assert!(geometry.rows[1].outer.width() > geometry.viewport.width());
+        assert!(geometry.rows[0].preview.unwrap().height() > 10.0);
+        assert!(geometry.rows[2].outer.min.y > geometry.rows[1].separator.min.y);
+        assert!(geometry.rows[2].preview.is_none());
+        assert!(geometry.rows[3].outer.height() > geometry.rows[0].outer.height());
+        assert!(
+            geometry.content_size.x >= geometry.rows[1].outer.right() - geometry.content_origin.x
+        );
+        assert!(
+            geometry.content_size.y
+                >= geometry.rows[3].separator.bottom() - geometry.content_origin.y
+        );
+        assert_eq!(geometry.estimated_rows.len(), geometry.rows.len());
+        for (actual, estimate) in geometry.rows.iter().zip(&geometry.estimated_rows) {
+            assert!(
+                (actual.outer.min.y - geometry.content_origin.y - estimate.top).abs() < 0.2,
+                "row top differs from actual egui layout: {actual:?} vs {estimate:?}"
+            );
+            assert!(
+                (actual.outer.height() - estimate.body_height).abs() < 0.2,
+                "row height differs from actual egui layout: {actual:?} vs {estimate:?}"
+            );
+            assert!(
+                (actual.outer.width() - estimate.body_width).abs() < 0.2,
+                "row body width differs from actual egui layout: {actual:?} vs {estimate:?}"
+            );
+            assert!((actual.header.width() - estimate.header_width).abs() < 0.2);
+            assert!(
+                (actual.separator.min.y - geometry.content_origin.y - estimate.separator_top).abs()
+                    < 0.2,
+                "separator differs from actual egui layout: {actual:?} vs {estimate:?}"
+            );
+            assert!((actual.separator.width() - estimate.width_after).abs() < 0.2);
+            match (actual.preview, estimate.preview_height) {
+                (Some(preview), Some(height)) => assert!((preview.height() - height).abs() < 0.2),
+                (None, None) => {}
+                mismatch => panic!("actual and estimated preview presence differ: {mismatch:?}"),
+            }
+        }
+        assert!((geometry.content_size.x - geometry.estimated_content_size.x).abs() < 0.2);
+        assert!((geometry.content_size.y - geometry.estimated_content_size.y).abs() < 0.2);
+
+        let wrapped_ctx = egui::Context::default();
+        let mut style = (*wrapped_ctx.style()).clone();
+        style.wrap = Some(true);
+        wrapped_ctx.set_style(style);
+        let wrapped = eager_notes_geometry(&wrapped_ctx, &entries, 280.0);
+        assert!(wrapped.rows[1].outer.height() > geometry.rows[1].outer.height());
+        assert!(
+            wrapped.rows[1].preview.unwrap().height() > geometry.rows[1].preview.unwrap().height()
+        );
+        for (actual, estimate) in wrapped.rows.iter().zip(&wrapped.estimated_rows) {
+            assert!((actual.outer.min.y - wrapped.content_origin.y - estimate.top).abs() < 0.2);
+            assert!((actual.outer.height() - estimate.body_height).abs() < 0.2);
+            assert!((actual.outer.width() - estimate.body_width).abs() < 0.2);
+            assert!((actual.header.width() - estimate.header_width).abs() < 0.2);
+            assert!(
+                (actual.separator.min.y - wrapped.content_origin.y - estimate.separator_top).abs()
+                    < 0.2
+            );
+            match (actual.preview, estimate.preview_height) {
+                (Some(preview), Some(height)) => assert!((preview.height() - height).abs() < 0.2),
+                (None, None) => {}
+                mismatch => panic!("actual and estimated wrapped preview differ: {mismatch:?}"),
+            }
+        }
+        assert!((wrapped.content_size.x - wrapped.estimated_content_size.x).abs() < 0.2);
+        assert!((wrapped.content_size.y - wrapped.estimated_content_size.y).abs() < 0.2);
+    }
+
+    #[test]
+    fn quick_notes_browsing_virtualizes_rows_and_reuses_geometry() {
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        let notes = (0..240)
+            .map(|index| {
+                let content = if index == 173 {
+                    "# Task\n\n- [ ] keep original index".to_owned()
+                } else if index == 0 {
+                    "A long prefix preview which remains bounded and can wrap when Quick Notes is narrow. ".repeat(8)
+                } else {
+                    "A short body used to exercise bounded viewport rows.".to_owned()
+                };
+                let title = match index {
+                    0 => "W".repeat(120),
+                    1 => "Multiline\n".repeat(8),
+                    _ => format!("Note {index:03}"),
+                };
+                note(
+                    &title,
+                    &format!("browse-{index:03}"),
+                    &content,
+                )
+            })
+            .collect::<Vec<_>>();
+        let _cache = crate::plugins::note::publish_note_cache_for_test(notes.clone());
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+
+        for frame in 0..5 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
+        }
+        assert_eq!(dialog.filtered_indices.len(), 240);
+        assert_eq!(dialog.notes_geometry.as_ref().unwrap().rows.len(), 240);
+        assert!(
+            dialog.notes_geometry.as_ref().unwrap().rows[0].width_after
+                > dialog.test_scroll_area_inner_rect.unwrap().width(),
+            "an offscreen unwrapped title contributes to the full horizontal extent"
+        );
+        assert_eq!(
+            dialog.notes_geometry.as_ref().unwrap().rows[1].width_before,
+            dialog.notes_geometry.as_ref().unwrap().rows[0].width_after,
+            "the wide first header expands later rows in the same ordered layout"
+        );
+        assert!(
+            dialog.last_rendered_indices.len() < dialog.filtered_indices.len(),
+            "only visible rows, overscan, and an open menu owner should build widgets"
+        );
+        assert!(
+            dialog
+                .last_rendered_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        let geometry_rebuilds = dialog.test_geometry_rebuilds;
+        let geometry_rows_measured = dialog.test_geometry_rows_measured;
+        for frame in 5..9 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
+        }
+        assert_eq!(dialog.test_geometry_rebuilds, geometry_rebuilds);
+        assert_eq!(dialog.test_geometry_rows_measured, geometry_rows_measured);
+        assert!(dialog.last_rendered_indices.len() < 32);
+        let geometry = dialog.notes_geometry.as_ref().unwrap();
+        for (index, actual) in &dialog.last_rendered_row_rects {
+            let row = geometry
+                .rows
+                .iter()
+                .find(|row| row.original_index == *index)
+                .expect("every rendered row has cached geometry");
+            let expected_top = dialog.test_content_origin.y + row.top;
+            assert!((actual.outer.min.x - dialog.test_content_origin.x).abs() < 0.5);
+            assert!((actual.outer.min.y - expected_top).abs() < 0.5);
+            assert!((actual.outer.height() - row.body_height).abs() < 0.5);
+            assert!((actual.outer.width() - row.body_width).abs() < 0.5);
+            assert!((actual.header.min.y - expected_top).abs() < 0.5);
+            assert!((actual.header.height() - row.header_height).abs() < 0.5);
+            assert!((actual.header.width() - row.header_width).abs() < 0.5);
+            match (actual.preview, row.preview_height) {
+                (Some(preview), Some(height)) => {
+                    let expected_preview_top =
+                        expected_top + row.header_height + ctx.style().spacing.item_spacing.y;
+                    assert!((preview.min.y - expected_preview_top).abs() < 0.5);
+                    assert!((preview.height() - height).abs() < 0.5);
+                }
+                (None, None) => {}
+                mismatch => panic!("actual and cached preview presence differ: {mismatch:?}"),
+            }
+            assert!(
+                (actual.separator.min.y - (dialog.test_content_origin.y + row.separator_top)).abs()
+                    < 0.5
+            );
+            assert!((actual.separator.width() - row.width_after).abs() < 0.5);
+            assert!((actual.separator.height() - 6.0).abs() < 0.5);
+        }
+        assert!(
+            (dialog.test_scroll_area_content_size.x - geometry.content_size.x).abs() < 1.0,
+            "full horizontal scroll extent includes offscreen wide rows"
+        );
+        assert!(
+            (dialog.test_scroll_area_content_size.y - geometry.content_size.y).abs() < 1.0,
+            "full vertical scroll extent includes unbuilt rows"
+        );
+
+        for (target, time) in [(0, 1.2), (120, 1.22), (239, 1.24)] {
+            let geometry = dialog.notes_geometry.as_ref().unwrap();
+            let inner = dialog.test_scroll_area_inner_rect.unwrap();
+            let max_y = (dialog.test_scroll_area_content_size.y - inner.height()).max(0.0);
+            let y = if target == 239 {
+                max_y
+            } else {
+                geometry.rows[target].top
+            };
+            let max_x = (dialog.test_scroll_area_content_size.x - inner.width()).max(0.0);
+            let x = if target == 120 { max_x.min(24.0) } else { 0.0 };
+            set_notes_scroll_offset(&ctx, &dialog, egui::vec2(x, y));
+            render_notes_frame(&ctx, &mut dialog, &mut app, time);
+            let inner = dialog.test_scroll_area_inner_rect.unwrap();
+            let visible = rendered_note_rect(&dialog, target);
+            assert!(
+                visible.header.intersects(inner),
+                "target {target} header should be visible at first/middle/bottom scroll offsets"
+            );
+            assert!(dialog.last_rendered_indices.contains(&target));
+            if target == 120 {
+                assert!(dialog.test_scroll_area_offset.x > 0.0);
+            }
+            if target == 239 {
+                assert!(
+                    (dialog.test_scroll_area_offset.y - max_y).abs() < 1.0,
+                    "the last row scrolls to the actual vertical maximum"
+                );
+                assert!(
+                    visible.separator.bottom() <= inner.bottom() + 1.0,
+                    "the final separator is reachable at the bottom scroll offset"
+                );
+            }
+        }
+
+        let geometry = dialog.notes_geometry.as_ref().unwrap();
+        let inner = dialog.test_scroll_area_inner_rect.unwrap();
+        let max_x = (dialog.test_scroll_area_content_size.x - inner.width()).max(0.0);
+        assert!(
+            max_x > 24.0,
+            "wide offscreen title creates horizontal scroll extent"
+        );
+        set_notes_scroll_offset(
+            &ctx,
+            &dialog,
+            egui::vec2(24.0, geometry.rows[120].top + 2.0),
+        );
+        for frame in 0..24 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.25 + frame as f64 / 60.0);
+        }
+        assert!(dialog.test_scroll_area_offset.x > 0.0);
+        let saved_anchor_offset = dialog.test_scroll_area_offset.y;
+        let saved_horizontal_offset = dialog.test_scroll_area_offset.x;
+        let (anchor_identity, intra_row) = dialog
+            .notes_geometry
+            .as_ref()
+            .unwrap()
+            .anchor_at(saved_anchor_offset)
+            .expect("middle viewport has an anchor note");
+        let anchor_identity = anchor_identity.to_owned();
+        let old_notes = notes.clone();
+        let mut inserted_notes = old_notes.clone();
+        inserted_notes.insert(0, note("Inserted before", "browse-before", "body"));
+        let _inserted_cache = crate::plugins::note::publish_note_cache_for_test(inserted_notes);
+        for frame in 0..30 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.65 + frame as f64 / 60.0);
+        }
+        let geometry = dialog.notes_geometry.as_ref().unwrap();
+        let new_anchor_index = geometry.row_by_identity[&anchor_identity];
+        let remapped = &geometry.rows[new_anchor_index];
+        assert_eq!(remapped.original_index, 121);
+        assert!((remapped.top - geometry.rows[121].top).abs() < 0.1);
+        assert!(dialog.last_rendered_indices.contains(&121));
+        assert!(
+            (dialog.test_scroll_area_offset.x - saved_horizontal_offset).abs() < 1.0,
+            "horizontal offset is preserved across insertion"
+        );
+        assert!(
+            (dialog.test_scroll_area_offset.y - (remapped.top + intra_row)).abs() < 1.0,
+            "the same note identity and intra-row position survive insertion"
+        );
+        assert!(
+            rendered_note_rect(&dialog, 121)
+                .header
+                .intersects(dialog.test_scroll_area_inner_rect.unwrap())
+        );
+        dialog.search = "browse-173".into();
+        for frame in 0..24 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 2.16 + frame as f64 / 60.0);
+        }
+        assert_eq!(dialog.filtered_indices, vec![174]);
+        assert_eq!(dialog.last_rendered_indices, vec![174]);
+
+        let sparse_row = rendered_note_rect(&dialog, 174);
+        let sparse_inner = dialog.test_scroll_area_inner_rect.unwrap();
+        assert!(
+            sparse_inner.contains_rect(sparse_row.header),
+            "settled sparse header is inside the viewport: header={:?}, inner={sparse_inner:?}",
+            sparse_row.header
+        );
+        let header_pointer = header_gap_point(&sparse_row);
+        assert!(sparse_inner.contains(header_pointer));
+        click_notes_at(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            header_pointer,
+            egui::PointerButton::Secondary,
+            2.56,
+        );
+        assert!(
+            ctx.is_context_menu_open(),
+            "sparse original row opens its real menu"
+        );
+        let edit_rect = dialog.test_menu_edit_rect.expect("Edit button is rendered");
+        click_notes_at(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            edit_rect.center(),
+            egui::PointerButton::Primary,
+            2.62,
+        );
+        assert_eq!(dialog.edit_idx, Some(174));
+        assert_eq!(dialog.text, "# Task\n\n- [ ] keep original index");
+        dialog.edit_idx = None;
+        dialog.text.clear();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.66);
+
+        crate::gui::set_execute_action_hook(Some(Box::new(|_| Ok(()))));
+        app.require_confirm_destructive = false;
+        struct ResetExecuteHook;
+        impl Drop for ResetExecuteHook {
+            fn drop(&mut self) {
+                crate::gui::set_execute_action_hook(None);
+            }
+        }
+        let _reset_execute_hook = ResetExecuteHook;
+        let header_pointer = header_gap_point(&rendered_note_rect(&dialog, 174));
+        click_notes_at(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            header_pointer,
+            egui::PointerButton::Secondary,
+            2.68,
+        );
+        let remove_rect = dialog
+            .test_menu_remove_rect
+            .expect("Remove button is rendered");
+        click_notes_at(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            remove_rect.center(),
+            egui::PointerButton::Primary,
+            2.72,
+        );
+        assert_eq!(
+            app.test_last_activation
+                .as_ref()
+                .map(|(action, source)| (action.action.as_str(), *source)),
+            Some((
+                "note:remove:browse-173",
+                crate::gui::ActivationSource::Click
+            )),
+            "the sparse original row dispatches its own Remove action"
+        );
+
+        let prior_metadata_generation = dialog.metadata_generation;
+        let prior_geometry_rebuilds = dialog.test_geometry_rebuilds;
+        app.note_settings.task_lists_enabled = !app.note_settings.task_lists_enabled;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.78);
+        assert!(dialog.metadata_generation > prior_metadata_generation);
+        assert!(dialog.test_geometry_rebuilds > prior_geometry_rebuilds);
+
+        let mut style = (*ctx.style()).clone();
+        style.override_font_id = Some(egui::FontId::new(18.0, egui::FontFamily::Proportional));
+        style.override_text_style = Some(egui::TextStyle::Heading);
+        ctx.set_style(style.clone());
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.80);
+        let font_style_rebuilds = dialog.test_geometry_rebuilds;
+        style.override_text_style = Some(egui::TextStyle::Monospace);
+        ctx.set_style(style.clone());
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.82);
+        assert!(
+            dialog.test_geometry_rebuilds > font_style_rebuilds,
+            "effective title text style invalidates geometry even with override_font_id"
+        );
+        let wrap_rebuilds = dialog.test_geometry_rebuilds;
+        style.wrap = Some(true);
+        ctx.set_style(style);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.84);
+        assert!(dialog.test_geometry_rebuilds > wrap_rebuilds);
+        let row = dialog
+            .notes_geometry
+            .as_ref()
+            .unwrap()
+            .rows
+            .iter()
+            .find(|row| row.original_index == 174)
+            .unwrap();
+        let actual = rendered_note_rect(&dialog, 174);
+        assert!((actual.outer.height() - row.body_height).abs() < 0.5);
+        assert!((actual.outer.width() - row.body_width).abs() < 0.5);
+        assert!((actual.header.height() - row.header_height).abs() < 0.5);
+        assert!((actual.header.width() - row.header_width).abs() < 0.5);
+
+        let pixels_rebuilds = dialog.test_geometry_rebuilds;
+        ctx.set_pixels_per_point(1.5);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.86);
+        assert!(dialog.test_geometry_rebuilds > pixels_rebuilds);
+
+        let prior_viewport_width = dialog.notes_geometry.as_ref().unwrap().key.viewport_width;
+        let prior_resize_rebuilds = dialog.test_geometry_rebuilds;
+        render_notes_frame_at(&ctx, &mut dialog, &mut app, 2.88, 300.0, 640.0);
+        assert!(dialog.test_geometry_rebuilds > prior_resize_rebuilds);
+        assert_ne!(
+            dialog.notes_geometry.as_ref().unwrap().key.viewport_width,
+            prior_viewport_width,
+            "the changed real window viewport width invalidates measured geometry"
+        );
+
+        dialog.search = "no-result-matches".into();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.90);
+        assert!(dialog.filtered_indices.is_empty());
+        assert!(dialog.last_rendered_indices.is_empty());
+        assert!(dialog.notes_geometry.as_ref().unwrap().rows.is_empty());
+        assert!(dialog.test_scroll_area_offset.x.abs() < 0.5);
+        assert!(dialog.test_scroll_area_offset.y.abs() < 0.5);
+        dialog.search = "browse-001".into();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.92);
+        assert_eq!(dialog.filtered_indices, vec![2]);
+        assert!(dialog.test_scroll_area_offset.x.abs() < 0.5);
+        assert!(dialog.test_scroll_area_offset.y.abs() < 0.5);
+
+        drop(dialog);
+        drop(app);
+        drop(_inserted_cache);
+        drop(_cache);
+        drop(workspace);
+    }
+
+    #[test]
+    fn quick_notes_scroll_anchor_prefers_identity_then_nearby_survivor() {
+        let ctx = egui::Context::default();
+        let original = vec![
+            note("Alpha", "alpha", "short"),
+            note("Beta", "beta", "body"),
+            note("Gamma", "gamma", "body"),
+        ];
+        let metadata = super::build_row_metadata(&original, false, false).unwrap();
+        let indices = vec![0, 1, 2];
+        let inserted = vec![
+            note("Before", "before", "body"),
+            original[0].clone(),
+            original[1].clone(),
+            original[2].clone(),
+        ];
+        let inserted_metadata = super::build_row_metadata(&inserted, false, false).unwrap();
+        let inserted_indices = vec![0, 1, 2, 3];
+        let without_beta = vec![
+            inserted[0].clone(),
+            inserted[1].clone(),
+            inserted[3].clone(),
+        ];
+        let without_beta_metadata = super::build_row_metadata(&without_beta, false, false).unwrap();
+        let without_beta_indices = vec![0, 1, 2];
+        let mut geometries = None;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let old = super::measure_notes_geometry(
+                ctx,
+                &ctx.style(),
+                320.0,
+                &original,
+                &metadata,
+                &indices,
+                1,
+                1,
+                1,
+            );
+            let new = super::measure_notes_geometry(
+                ctx,
+                &ctx.style(),
+                320.0,
+                &inserted,
+                &inserted_metadata,
+                &inserted_indices,
+                2,
+                2,
+                2,
+            );
+            let replacement = super::measure_notes_geometry(
+                ctx,
+                &ctx.style(),
+                320.0,
+                &without_beta,
+                &without_beta_metadata,
+                &without_beta_indices,
+                3,
+                3,
+                3,
+            );
+            geometries = Some((old, new, replacement));
+        });
+        let (old, new, replacement) = geometries.expect("measurements run in an egui frame");
+        let beta_top = old.rows[1].top;
+        let (anchor_top, intra_row) = super::remap_scroll_anchor(&old, &new, beta_top + 4.0)
+            .expect("the same stable note identity survives insertion");
+        assert!((anchor_top - new.rows[2].top).abs() < 0.1);
+        assert!((intra_row - 4.0).abs() < 0.1);
+
+        let (anchor_top, intra_row) =
+            super::remap_scroll_anchor(&old, &replacement, beta_top + 4.0)
+                .expect("a nearby old-order note survives");
+        assert!((anchor_top - replacement.rows[2].top).abs() < 0.1);
+        assert_eq!(intra_row, 0.0);
+    }
+
+    #[test]
+    fn quick_notes_popup_owner_stays_with_identity_offscreen_then_closes_on_removal() {
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        let notes = (0..80)
+            .map(|index| {
+                note(
+                    &format!("Popup note {index:03}"),
+                    &format!("popup-{index:03}"),
+                    "small body",
+                )
+            })
+            .collect::<Vec<_>>();
+        let cache = crate::plugins::note::publish_note_cache_for_test(notes.clone());
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        for frame in 0..5 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
+        }
+
+        let row_rects = rendered_note_rect(&dialog, 0);
+        let header_rect = row_rects.header;
+        let header_pointer = header_gap_point(&row_rects);
+        assert!(
+            header_rect.contains(header_pointer)
+                && dialog
+                    .test_scroll_area_inner_rect
+                    .is_some_and(|inner| inner.contains(header_pointer)),
+            "first popup owner gap is visible: header={header_rect:?}, pointer={header_pointer:?}, inner={:?}",
+            dialog.test_scroll_area_inner_rect
+        );
+        click_notes_at(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            header_pointer,
+            egui::PointerButton::Secondary,
+            1.1,
+        );
+        assert!(
+            dialog
+                .menu_owner
+                .as_ref()
+                .is_some_and(|owner| owner.response.context_menu_opened()),
+            "a real secondary click in header padding opens the row-owned context menu; header={header_rect:?}, pointer={header_pointer:?}, inner={:?}, rendered={:?}",
+            dialog.test_scroll_area_inner_rect,
+            dialog.last_rendered_indices
+        );
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(
+            dialog
+                .menu_owner
+                .as_ref()
+                .map(|owner| owner.identity.as_str()),
+            Some("popup-000")
+        );
+
+        let far_row_top = dialog.notes_geometry.as_ref().unwrap().rows[30].top;
+        set_notes_scroll_offset(&ctx, &dialog, egui::vec2(0.0, far_row_top));
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.14);
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(dialog.menu_owner.as_ref().unwrap().original_index, 0);
+        assert!(dialog.last_rendered_indices.contains(&0));
+        assert!(dialog.last_rendered_indices.len() < 32);
+
+        let mut inserted = notes.clone();
+        inserted.insert(0, note("Before owner", "popup-before", "body"));
+        let inserted_cache = crate::plugins::note::publish_note_cache_for_test(inserted.clone());
+        for frame in 0..4 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.16 + frame as f64 / 60.0);
+        }
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(dialog.menu_owner.as_ref().unwrap().identity, "popup-000");
+        assert_eq!(dialog.menu_owner.as_ref().unwrap().original_index, 1);
+        assert!(dialog.last_rendered_indices.contains(&1));
+        assert!(dialog.last_rendered_indices.len() < 32);
+
+        inserted.remove(1);
+        let removed_cache = crate::plugins::note::publish_note_cache_for_test(inserted);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.24);
+        assert!(dialog.menu_owner.is_none());
+        assert!(
+            !ctx.is_context_menu_open(),
+            "removed owner closes its own menu"
+        );
+
+        drop(dialog);
+        drop(app);
+        drop(removed_cache);
+        drop(inserted_cache);
+        drop(cache);
+        drop(workspace);
+    }
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -1123,16 +2416,122 @@ mod tests {
         app: &mut LauncherApp,
         time: f64,
     ) {
+        render_notes_frame_at(ctx, dialog, app, time, 960.0, 640.0);
+    }
+
+    fn render_notes_frame_at(
+        ctx: &egui::Context,
+        dialog: &mut NotesDialog,
+        app: &mut LauncherApp,
+        time: f64,
+        width: f32,
+        height: f32,
+    ) {
+        render_notes_frame_with_events(ctx, dialog, app, time, width, height, Vec::new());
+    }
+
+    fn render_notes_frame_with_events(
+        ctx: &egui::Context,
+        dialog: &mut NotesDialog,
+        app: &mut LauncherApp,
+        time: f64,
+        width: f32,
+        height: f32,
+        events: Vec<egui::Event>,
+    ) {
         let _ = ctx.run(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
-                    egui::vec2(960.0, 640.0),
+                    egui::vec2(width, height),
                 )),
                 time: Some(time),
+                events,
                 ..Default::default()
             },
             |ctx| dialog.ui(ctx, app),
+        );
+    }
+
+    fn set_notes_scroll_offset(ctx: &egui::Context, dialog: &NotesDialog, offset: egui::Vec2) {
+        let id = dialog
+            .test_scroll_area_id
+            .expect("NotesDialog scroll area rendered");
+        let mut state = egui::scroll_area::State::load(ctx, id).unwrap_or_default();
+        state.offset = offset;
+        state.store(ctx, id);
+    }
+
+    fn rendered_note_rect(dialog: &NotesDialog, original_index: usize) -> RenderedNoteRowRects {
+        dialog
+            .last_rendered_row_rects
+            .iter()
+            .find_map(|(index, rects)| (*index == original_index).then_some(*rects))
+            .expect("requested original note index was built")
+    }
+
+    fn header_gap_point(row: &RenderedNoteRowRects) -> egui::Pos2 {
+        let y = row.header.center().y;
+        [
+            egui::pos2((row.title.right() + row.meta.left()) * 0.5, y),
+            egui::pos2(row.header.max.x - 0.5, y),
+            egui::pos2(row.meta.max.x + 0.5, y),
+            egui::pos2(row.header.min.x + 0.5, y),
+        ]
+        .into_iter()
+        .find(|point| {
+            row.header.contains(*point) && !row.title.contains(*point) && !row.meta.contains(*point)
+        })
+        .expect("header layout has interactive padding or spacing outside its text labels")
+    }
+
+    fn click_notes_at(
+        ctx: &egui::Context,
+        dialog: &mut NotesDialog,
+        app: &mut LauncherApp,
+        point: egui::Pos2,
+        button: egui::PointerButton,
+        time: f64,
+    ) {
+        render_notes_frame_with_events(
+            ctx,
+            dialog,
+            app,
+            time - 0.01,
+            960.0,
+            640.0,
+            vec![egui::Event::PointerMoved(point)],
+        );
+        render_notes_frame_with_events(
+            ctx,
+            dialog,
+            app,
+            time,
+            960.0,
+            640.0,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_notes_frame_with_events(
+            ctx,
+            dialog,
+            app,
+            time + 0.02,
+            960.0,
+            640.0,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
         );
     }
 
@@ -1231,19 +2630,66 @@ mod tests {
             dialog.edit_idx = None;
             dialog.text.clear();
 
-            for (scenario, filter, expected_indices) in [
+            let mut baseline_viewport_height = None;
+            for (scenario_index, (scenario, filter, expected_indices, screen_height)) in [
                 (
                     "empty-filter",
                     String::new(),
                     (0..count).collect::<Vec<_>>(),
+                    640.0,
                 ),
                 (
                     "sparse-filter",
                     format!("track-a-note-{edit_index:05}"),
                     vec![edit_index],
+                    640.0,
                 ),
-            ] {
+                (
+                    "empty-filter-small-viewport",
+                    String::new(),
+                    (0..count).collect::<Vec<_>>(),
+                    180.0,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 dialog.search = filter.clone();
+                let scenario_base_time = 2.0 + scenario_index as f64 * 5.0;
+                let cold_rebuilds_before = dialog.test_geometry_rebuilds;
+                let cold_rows_before = dialog.test_geometry_rows_measured;
+                // Treat this as a cold geometry observation; construction and
+                // settling stay outside the fixed timed workload protocol.
+                dialog.notes_geometry = None;
+                for frame in 0..7 {
+                    render_notes_frame_at(
+                        &context,
+                        &mut dialog,
+                        &mut app,
+                        scenario_base_time + frame as f64 / 60.0,
+                        960.0,
+                        screen_height,
+                    );
+                }
+                assert_eq!(dialog.filtered_indices, expected_indices);
+                let cold_rebuild_count = dialog.test_geometry_rebuilds - cold_rebuilds_before;
+                let cold_rows_measured = dialog.test_geometry_rows_measured - cold_rows_before;
+                let last_cold_rebuild_nanos = dialog.test_last_geometry_rebuild_nanos;
+                assert!(cold_rebuild_count > 0);
+                let viewport_height = dialog
+                    .test_scroll_area_inner_rect
+                    .expect("real Quick Notes scroll area rendered")
+                    .height();
+                if scenario_index == 0 {
+                    baseline_viewport_height = Some(viewport_height);
+                } else if scenario == "empty-filter-small-viewport" {
+                    assert!(
+                        (viewport_height - baseline_viewport_height.unwrap()).abs() > 20.0,
+                        "small viewport scenario must actually change ScrollArea height"
+                    );
+                }
+                let warm_rebuilds_before = dialog.test_geometry_rebuilds;
+                let warm_rows_before = dialog.test_geometry_rows_measured;
                 let input_slot = RefCell::new(None);
                 let frame_index = Cell::new(0_usize);
                 let (timing, _frame_output) = workloads::measure(
@@ -1254,9 +2700,9 @@ mod tests {
                         *input_slot.borrow_mut() = Some(egui::RawInput {
                             screen_rect: Some(egui::Rect::from_min_size(
                                 egui::Pos2::ZERO,
-                                egui::vec2(960.0, 640.0),
+                                egui::vec2(960.0, screen_height),
                             )),
-                            time: Some(1.0 + frame as f64 / 60.0),
+                            time: Some(scenario_base_time + 1.0 + frame as f64 / 60.0),
                             ..Default::default()
                         });
                     },
@@ -1268,6 +2714,13 @@ mod tests {
                         context.run(input, |ctx| dialog.ui(ctx, &mut app))
                     },
                 );
+                let warm_rebuild_count = dialog.test_geometry_rebuilds - warm_rebuilds_before;
+                let warm_rows_measured = dialog.test_geometry_rows_measured - warm_rows_before;
+                assert_eq!(warm_rebuild_count, 0, "warm scrolling reuses row geometry");
+                assert_eq!(
+                    warm_rows_measured, 0,
+                    "warm scrolling does not remeasure rows"
+                );
                 let metrics =
                     workloads::metrics_for(&[Metric::QuickNotesRowsBuilt, Metric::NoteSnapshot]);
                 assert_eq!(metrics.len(), 2);
@@ -1276,6 +2729,7 @@ mod tests {
                 assert_eq!(metrics[1].metric, Metric::QuickNotesRowsBuilt);
                 assert_eq!(metrics[1].calls, workloads::SAMPLE_COUNT as u64);
                 assert!(!dialog.last_rendered_indices.is_empty());
+                assert!(dialog.last_rendered_indices.len() < 64);
                 assert!(
                     metrics[1].work_units
                         == (dialog.last_rendered_indices.len() * workloads::SAMPLE_COUNT) as u64,
@@ -1292,6 +2746,10 @@ mod tests {
                         .last_rendered_indices
                         .iter()
                         .all(|index| expected_indices.binary_search(index).is_ok())
+                );
+                assert_eq!(
+                    dialog.filtered_indices, expected_indices,
+                    "the complete search projection remains available independently of viewport rows"
                 );
                 assert_eq!(dialog.edit_idx, None);
                 assert_eq!(
@@ -1311,14 +2769,39 @@ mod tests {
                     signature.bytes(note.title.as_bytes());
                     signature.bytes(note.alias.as_deref().unwrap_or_default().as_bytes());
                 }
-                workloads::emit_summary(
+                let mut projection_signature = workloads::StableSignature::new(
+                    0,
+                    "quick-notes-complete-projection",
+                    dialog.filtered_indices.len(),
+                );
+                for index in &dialog.filtered_indices {
+                    let note = &dialog.entries[*index];
+                    projection_signature.number(*index as u64);
+                    projection_signature.bytes(note.slug.as_bytes());
+                    projection_signature.bytes(note.title.as_bytes());
+                }
+                workloads::emit_summary_with_notes_geometry(
                     &format!("quick-notes-{count}-{scenario}"),
-                    "production NotesDialog::ui; headless egui debug-test CPU; in-memory notes",
+                    &format!(
+                        "production NotesDialog::ui; headless egui debug-test CPU; in-memory notes; screen height {}pt",
+                        screen_height
+                    ),
                     fixture
                         .summary
                         .with_output_signatures(Some(signature.finish()), None),
                     timing,
                     &metrics,
+                    Some(workloads::NotesGeometrySummary {
+                        cold_rebuild_count,
+                        cold_rows_measured,
+                        last_cold_rebuild_nanos: last_cold_rebuild_nanos.min(u64::MAX as u128)
+                            as u64,
+                        warm_rebuild_count,
+                        warm_rows_measured,
+                        projection_count: dialog.filtered_indices.len(),
+                        projection_signature: projection_signature.finish(),
+                        viewport_height_points: viewport_height,
+                    }),
                 );
             }
             drop(dialog);
