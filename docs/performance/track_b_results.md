@@ -155,4 +155,22 @@ Separate original-source target preparations were default lib70.009479/history22
 
 The B3-A audit did not establish a small independent set with demonstrated executable-avoidance payoff. The query_autocomplete candidate would avoid at most one executable and still reads cwd-dependent settings. The six apparently pure manager parser cases would leave that target's two shared/runtime/native cases and its executable in place. Existing pure help/domain cases are already grouped. Broad fanout alone does not justify moving unknown/native/global-state tests across established fixture boundaries.
 
-Retain all67integrationtargets and every source case/name/cfg/ignored attribute. No pilot, compatibility adapter, test movement or grouping benchmark was performed; this is a gated skip, not a failed migration or measured rejection. The scoped source audit and independent review support this decision. B3-D remains responsible for proving full default/fast-dev discovery parity; no pending parity result is asserted here.
+Retain all67integrationtargets and every source case/name/cfg/ignored attribute. No pilot, compatibility adapter, test movement or grouping benchmark was performed; this is a gated skip, not a failed migration or measured rejection. The scoped source audit and independent review support this decision. B3-D supplies the completed default/fast-dev discovery parity below.
+
+## B3-D full discovery and target-layout parity (PASS)
+
+Serial runner51101 completed all19commands with exit0 at2026-10-10T16:45:47UTC, measured source5819774e28491fead6d4634488969f60dc0115d7. Evidence: target/track-b/b3-parity-1, four normalized default/fast matched/full rosters, baseline-nextest-roster-final.json and per-command manifests/logs. Same installed Nextest/toolchain/features, source path and primary target as prior measurements. Both normally filtered rosters strictly match the frozen baseline:72suites,6389cases,17ignored,2empty,6372matched/17unmatched, zero logical duplicates. Metadata-only executable cache records are excluded from case identities.
+
+Full listings add --run-ignored all --ignore-default-filter --list-type full --message-format json. Both profiles expose6389matched/0unmatched cases. Comparing binary ID, qualified case name, kind and ignored status gives exact identity parity with baseline; only the intentionally changed filter-match facts are excluded from this second comparison. Since no grouping occurred, the old-to-new map is identity for every case and all67integrationtarget names. Windows cfg/ignored attributes remain unchanged. Ignored tests were listed, not executed; non-Windows discovery/execution was NOT RUN.
+
+| Separate phase | Default seconds | fast-dev seconds | Interpretation |
+| --- | --- | --- | --- |
+| Broad compile/discovery, n=1 each | 938.288174 | 265.721831 | Different cache/prerequisite histories; no isolated profile or grouping speedup claim |
+| Already-built full reachability list | 3.155210 | 2.963865 | Listing overhead, not compiler work |
+| Selected history execution | NOT RUN here | 3.326820;5passed | No compilation |
+| Selected domain execution | NOT RUN here | 4.354443;102passed | No compilation |
+| Selected windows_plugin execution | NOT RUN here | 2.166182;1passed | No compilation; legitimate empty-catalog branch remains possible |
+
+The108scoped passes are separate from six target preparations and broad compilation. The known domain-generated clipboard_modifiers.json was hash-verified and preserved into owned evidence; final scratch source hashes and Git cleanliness passed. No full suite was executed. No target hiding, autotests=false, required-features, ignored-test edits, warning suppression or test-source changes were introduced. Native catalog testing does not prove particular windows were enumerated or exercise input hooks.
+
+Sparse owned resource samples during default broad compilation observed8rustc/8link and8rustc/7link, G:queue7/10 and available15361/13537MB. A fast-dev broad sample observed7rustc/3link, summed compiler/link working set5,169,377,280bytes, available17987MB, system page-inputs5077.642/s and G:queue6. These are nonmatched snapshots, not peak memory, sustained pressure, exact linker time or proof of cause. They justify a bounded scheduling hypothesis for B4, not an accepted jobs setting. Independent empirical and documentation review approved preserved identities, execution limits, cache caveats and clean restoration.
