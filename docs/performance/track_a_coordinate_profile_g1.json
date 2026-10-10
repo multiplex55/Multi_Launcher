@@ -1,0 +1,849 @@
+{
+  "source_commit": "3d3dac5df4e78ea08e191e209f646979a57609e3",
+  "captured_local": "2026-10-09T23:54:56.4420704-04:00",
+  "build_profile": "dev unoptimized debuginfo",
+  "host": "Windows NT10.0.19045 x64 MSVC;8 logical CPUs;rustc1.97.1",
+  "power": "Balanced",
+  "exit_code": 0,
+  "raw_log": "ignored target/performance/m6a-native/coordinate-profile-stdout.log",
+  "sanitization": "receiver HWND removed; display identity replaced; no desktop images",
+  "result": {
+    "activation": {
+      "capacity_per_phase": 8192,
+      "command": "coordinate_tool_smoke --coordinate-profile",
+      "required_environment": "MULTI_LAUNCHER_PERF=1 before process start"
+    },
+    "copy_and_lifecycle_checks": {
+      "all_off_rejects_copy": true,
+      "delayed_client_copy": {
+        "x": 104,
+        "y": 78
+      },
+      "frozen_sample_point": {
+        "x": 64,
+        "y": 87
+      },
+      "initial_client_relative_copy": {
+        "x": 24,
+        "y": 24
+      },
+      "live_point_after_unfreeze": {
+        "x": 144,
+        "y": 141
+      },
+      "no_samples_after_worker_shutdown": true,
+      "passive_hwnds_after": [
+        0,
+        0
+      ],
+      "passive_hwnds_before": [
+        0,
+        0
+      ]
+    },
+    "environment": {
+      "arch": "x86_64",
+      "client_after_resize": {
+        "bounds": {
+          "bottom": 504,
+          "left": 40,
+          "right": 664,
+          "top": 63
+        },
+        "origin": {
+          "x": 40,
+          "y": 63
+        }
+      },
+      "client_before_resize": {
+        "bounds": {
+          "bottom": 408,
+          "left": 24,
+          "right": 568,
+          "top": 47
+        },
+        "origin": {
+          "x": 24,
+          "y": 47
+        }
+      },
+      "os": "windows",
+      "same_receiver_moved_and_resized": true,
+      "sampled_monitor": {
+        "bounds": {
+          "bottom": 1440,
+          "left": 0,
+          "right": 2560,
+          "top": 0
+        },
+        "effective_dpi": [
+          96,
+          96
+        ],
+        "id": "sampled-display-1",
+        "work_area": {
+          "bottom": 1440,
+          "left": 0,
+          "right": 2560,
+          "top": 0
+        }
+      }
+    },
+    "existing_opt_in_metrics": {
+      "coordinate_sample_includes_passive_and_click_owners": {
+        "abandoned": 0,
+        "calls": 2684,
+        "completed": 0,
+        "elapsed_nanos_max": 1831100,
+        "elapsed_nanos_total": 424590400,
+        "errors": 0,
+        "name": "coordinate.sample",
+        "work_units": 2684
+      },
+      "hud_gdi_create_attempt_metric_preserved": {
+        "abandoned": 0,
+        "calls": 3834,
+        "completed": 0,
+        "elapsed_nanos_max": 66400,
+        "elapsed_nanos_total": 24118300,
+        "errors": 0,
+        "name": "hud.gdi_create",
+        "work_units": 3834
+      }
+    },
+    "measurement_limits": [
+      "native phase timings measure API work, not visible display latency",
+      "process GDI counts include unrelated objects in this process",
+      "no desktop readback was performed during the resource profile",
+      "mixed-DPI topology and other physical monitors are reported only if encountered"
+    ],
+    "native_profile": {
+      "capacity_per_phase": 8192,
+      "gdi_objects": [
+        {
+          "create_attempts": 1917,
+          "create_successes": 1917,
+          "delete_attempts": 1917,
+          "delete_successes": 1917,
+          "object": "brush"
+        },
+        {
+          "create_attempts": 1917,
+          "create_successes": 1917,
+          "delete_attempts": 1917,
+          "delete_successes": 1917,
+          "object": "font"
+        }
+      ],
+      "hud_redraws": 1917,
+      "hud_repositions": 135,
+      "phases": [
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 1801000,
+          "p50_nanos": 63900,
+          "p95_nanos": 540100,
+          "phase": "sample.passive_total",
+          "recorded": 2684
+        },
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 1023100,
+          "p50_nanos": 38600,
+          "p95_nanos": 328600,
+          "phase": "sample.metadata",
+          "recorded": 2684
+        },
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 1432800,
+          "p50_nanos": 9600,
+          "p95_nanos": 293300,
+          "phase": "sample.cursor_position",
+          "recorded": 2684
+        },
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 64500,
+          "p50_nanos": 10200,
+          "p95_nanos": 17600,
+          "phase": "sample.virtual_desktop_metrics",
+          "recorded": 2684
+        },
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 23500,
+          "p50_nanos": 800,
+          "p95_nanos": 1300,
+          "phase": "sample.monitor_lookup",
+          "recorded": 2684
+        },
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 299200,
+          "p50_nanos": 4300,
+          "p95_nanos": 87700,
+          "phase": "sample.monitor_info",
+          "recorded": 2684
+        },
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 447900,
+          "p50_nanos": 3900,
+          "p95_nanos": 77500,
+          "phase": "sample.monitor_dpi",
+          "recorded": 2684
+        },
+        {
+          "calls": 2684,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 947900,
+          "p50_nanos": 7800,
+          "p95_nanos": 154000,
+          "phase": "sample.foreground_client_geometry",
+          "recorded": 2684
+        },
+        {
+          "calls": 2482,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 18088500,
+          "p50_nanos": 4485300,
+          "p95_nanos": 6761000,
+          "phase": "hud.render",
+          "recorded": 2482
+        },
+        {
+          "calls": 1917,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 17444600,
+          "p50_nanos": 4846400,
+          "p95_nanos": 6555300,
+          "phase": "hud.draw",
+          "recorded": 1917
+        },
+        {
+          "calls": 1917,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 18004000,
+          "p50_nanos": 5041600,
+          "p95_nanos": 6837200,
+          "phase": "hud.present",
+          "recorded": 1917
+        },
+        {
+          "calls": 1917,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 846800,
+          "p50_nanos": 193100,
+          "p95_nanos": 307000,
+          "phase": "hud.upload",
+          "recorded": 1917
+        },
+        {
+          "calls": 2052,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 1342600,
+          "p50_nanos": 200,
+          "p95_nanos": 300,
+          "phase": "hud.show",
+          "recorded": 2052
+        },
+        {
+          "calls": 135,
+          "dropped": 0,
+          "errors": 0,
+          "max_nanos": 1086700,
+          "p50_nanos": 314900,
+          "p95_nanos": 487800,
+          "phase": "hud.reposition",
+          "recorded": 135
+        }
+      ]
+    },
+    "profile": "coordinate_native_sampling_and_hud",
+    "protocol": {
+      "active_configuration_warmup_seconds": 2.0029421,
+      "ordinary_metric_delta_semantics": "per-phase deltas are adjacent boundary snapshots and can straddle an in-flight call; elapsed_nanos_max is cumulative through the interval end, not an interval-only maximum",
+      "ordinary_metrics_collection_scope": "starts before worker creation and includes all-off idle, active warmup, geometry/copy validation, named phases, and shutdown drain; per-phase metric deltas cover only each named run_phase interval",
+      "phases": [
+        {
+          "actual_seconds": 60.0010565,
+          "coordinate_sample_metric": {
+            "calls_delta": 1912,
+            "cumulative_elapsed_nanos_max_at_end": 1831100,
+            "elapsed_nanos_total_delta": 341563900,
+            "work_units_delta": 1912
+          },
+          "full_renders": 1911,
+          "hud_gdi_create_metric": {
+            "calls_delta": 3822,
+            "cumulative_elapsed_nanos_max_at_end": 66400,
+            "elapsed_nanos_total_delta": 24029200,
+            "work_units_delta": 3822
+          },
+          "name": "moving_hud_only",
+          "requested_seconds": 60.0,
+          "samples": 1912,
+          "stationary_source_refreshes": 1
+        },
+        {
+          "actual_seconds": 5.0024323,
+          "coordinate_sample_metric": {
+            "calls_delta": 161,
+            "cumulative_elapsed_nanos_max_at_end": 1831100,
+            "elapsed_nanos_total_delta": 29421500,
+            "work_units_delta": 161
+          },
+          "full_renders": 1,
+          "hud_gdi_create_metric": {
+            "calls_delta": 2,
+            "cumulative_elapsed_nanos_max_at_end": 66400,
+            "elapsed_nanos_total_delta": 11400,
+            "work_units_delta": 2
+          },
+          "name": "stationary_hud",
+          "requested_seconds": 5.0,
+          "samples": 161,
+          "stationary_source_refreshes": 160
+        },
+        {
+          "actual_seconds": 5.0011679,
+          "coordinate_sample_metric": {
+            "calls_delta": 162,
+            "cumulative_elapsed_nanos_max_at_end": 1831100,
+            "elapsed_nanos_total_delta": 29266400,
+            "work_units_delta": 162
+          },
+          "full_renders": 162,
+          "hud_gdi_create_metric": {
+            "calls_delta": 0,
+            "cumulative_elapsed_nanos_max_at_end": 66400,
+            "elapsed_nanos_total_delta": 0,
+            "work_units_delta": 0
+          },
+          "name": "moving_crosshair",
+          "requested_seconds": 5.0,
+          "samples": 162,
+          "stationary_source_refreshes": 0
+        },
+        {
+          "actual_seconds": 5.0002334,
+          "coordinate_sample_metric": {
+            "calls_delta": 134,
+            "cumulative_elapsed_nanos_max_at_end": 1831100,
+            "elapsed_nanos_total_delta": 7707000,
+            "work_units_delta": 134
+          },
+          "full_renders": 134,
+          "hud_gdi_create_metric": {
+            "calls_delta": 0,
+            "cumulative_elapsed_nanos_max_at_end": 66400,
+            "elapsed_nanos_total_delta": 0,
+            "work_units_delta": 0
+          },
+          "name": "moving_halo",
+          "requested_seconds": 5.0,
+          "samples": 134,
+          "stationary_source_refreshes": 0
+        },
+        {
+          "actual_seconds": 5.001219,
+          "coordinate_sample_metric": {
+            "calls_delta": 134,
+            "cumulative_elapsed_nanos_max_at_end": 1831100,
+            "elapsed_nanos_total_delta": 7483100,
+            "work_units_delta": 134
+          },
+          "full_renders": 134,
+          "hud_gdi_create_metric": {
+            "calls_delta": 0,
+            "cumulative_elapsed_nanos_max_at_end": 66400,
+            "elapsed_nanos_total_delta": 0,
+            "work_units_delta": 0
+          },
+          "name": "moving_zoom",
+          "requested_seconds": 5.0,
+          "samples": 134,
+          "stationary_source_refreshes": 0
+        },
+        {
+          "actual_seconds": 5.0001122,
+          "coordinate_sample_metric": {
+            "calls_delta": 136,
+            "cumulative_elapsed_nanos_max_at_end": 1831100,
+            "elapsed_nanos_total_delta": 7252500,
+            "work_units_delta": 136
+          },
+          "full_renders": 136,
+          "hud_gdi_create_metric": {
+            "calls_delta": 2,
+            "cumulative_elapsed_nanos_max_at_end": 66400,
+            "elapsed_nanos_total_delta": 7700,
+            "work_units_delta": 2
+          },
+          "name": "moving_frozen_hud_live_zoom",
+          "requested_seconds": 5.0,
+          "samples": 136,
+          "stationary_source_refreshes": 0
+        }
+      ],
+      "process_gdi_objects": {
+        "after_worker_shutdown": 4,
+        "baseline_before_native_surfaces": 0,
+        "post_warmup": 17,
+        "samples": [
+          {
+            "elapsed_ms": 0,
+            "phase": "profile_start_before_worker",
+            "process_gdi_objects": 0
+          },
+          {
+            "elapsed_ms": 2114,
+            "phase": "post_active_warmup",
+            "process_gdi_objects": 17
+          },
+          {
+            "elapsed_ms": 3127,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 4127,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 5132,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 6135,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 7136,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 8139,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 9139,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 10140,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 11141,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 12144,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 13148,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 14150,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 15154,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 16158,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 17160,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 18160,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 19160,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 20163,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 21167,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 22168,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 23170,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 24173,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 25176,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 26178,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 27180,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 28183,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 29184,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 30188,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 31190,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 32191,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 33191,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 34191,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 35195,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 36196,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 37200,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 38204,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 39207,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 40211,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 41213,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 42213,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 43217,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 44220,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 45221,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 46224,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 47227,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 48229,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 49229,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 50231,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 51234,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 52236,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 53237,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 54239,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 55243,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 56246,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 57249,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 58253,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 59257,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 60259,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 61263,
+            "phase": "moving_hud_only",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 63130,
+            "phase": "stationary_hud",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 64130,
+            "phase": "stationary_hud",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 65132,
+            "phase": "stationary_hud",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 66135,
+            "phase": "stationary_hud",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 68133,
+            "phase": "moving_crosshair",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 69137,
+            "phase": "moving_crosshair",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 70141,
+            "phase": "moving_crosshair",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 71142,
+            "phase": "moving_crosshair",
+            "process_gdi_objects": 8
+          },
+          {
+            "elapsed_ms": 73130,
+            "phase": "moving_halo",
+            "process_gdi_objects": 12
+          },
+          {
+            "elapsed_ms": 74133,
+            "phase": "moving_halo",
+            "process_gdi_objects": 13
+          },
+          {
+            "elapsed_ms": 75137,
+            "phase": "moving_halo",
+            "process_gdi_objects": 13
+          },
+          {
+            "elapsed_ms": 76140,
+            "phase": "moving_halo",
+            "process_gdi_objects": 12
+          },
+          {
+            "elapsed_ms": 78132,
+            "phase": "moving_zoom",
+            "process_gdi_objects": 14
+          },
+          {
+            "elapsed_ms": 79133,
+            "phase": "moving_zoom",
+            "process_gdi_objects": 14
+          },
+          {
+            "elapsed_ms": 80133,
+            "phase": "moving_zoom",
+            "process_gdi_objects": 15
+          },
+          {
+            "elapsed_ms": 81137,
+            "phase": "moving_zoom",
+            "process_gdi_objects": 15
+          },
+          {
+            "elapsed_ms": 83160,
+            "phase": "moving_frozen_hud_live_zoom",
+            "process_gdi_objects": 14
+          },
+          {
+            "elapsed_ms": 84162,
+            "phase": "moving_frozen_hud_live_zoom",
+            "process_gdi_objects": 15
+          },
+          {
+            "elapsed_ms": 85166,
+            "phase": "moving_frozen_hud_live_zoom",
+            "process_gdi_objects": 14
+          },
+          {
+            "elapsed_ms": 86169,
+            "phase": "moving_frozen_hud_live_zoom",
+            "process_gdi_objects": 15
+          },
+          {
+            "elapsed_ms": 87277,
+            "phase": "after_worker_shutdown",
+            "process_gdi_objects": 4
+          }
+        ]
+      },
+      "profiled_seconds": 87.2773179,
+      "resources_are_process_total_gdi_objects": true,
+      "warmup_in_native_distributions": true
+    },
+    "schema_version": 1,
+    "worker": {
+      "backend_creations": 1,
+      "backend_shutdowns": 1,
+      "full_renders": 2482,
+      "profile_end_status": {
+        "halo": "disabled",
+        "zoom": "active"
+      },
+      "sampler_creations": 1,
+      "samples": 2684,
+      "stationary_source_refreshes": 202,
+      "warm_configuration_status": {
+        "halo": "active",
+        "zoom": "active"
+      }
+    }
+  }
+}

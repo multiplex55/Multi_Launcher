@@ -1,6 +1,6 @@
 # Track A runtime results
 
-Status: implementation in progress. M1-A/B/C and M2-A/B/C are verified; M3-A launcher list virtualization is in progress. The full note comparison below establishes the idle fast path and retains the slower large-draft result.
+Status: M0–M6 source and native measurement complete; M7 targeted verification and final benchmark comparison in progress. Historical checkpoint evidence below preserves unfavorable measurements.
 
 See `track_a_baseline.md` for the authoritative source and host, and `track_a_checkpoints.md` for checkpoint state, test evidence, review, commit and push outcomes.
 
@@ -346,3 +346,31 @@ Independent native-log review found all16 requested mode tuples match status, en
 PASS means native API/source/exclusion/lifecycle evidence, supplemented by the A/B actual-worker deterministic moving-call comparison. The native fixture does not export per-tick source-dispatch distributions, movement p95, CPU/GPU cost or visible input-to-display latency; these are NOT MEASURED. Visible magnifier composition/recursion/flicker and actual mixed-DPI/monitor transitions are NOT RUN; BitBlt readbacks can omit magnifier composition and are not promoted to visual proof. Native failure injection remains covered by focused fake-operation runtime tests, not this real run. No blanket GPU/CPU or latency speedup is claimed. Independent critical B source and C native-evidence review have no unresolved findings. Native software execution capability is available outside the desktop-restricted sandbox, enabling the next measurement stage. No source change or push in C.
 
 M5-C local commit: `f7049863d6ebe8968b04d4002441d936fc345a27`. M6-A is now in progress: opt-in bounded native phase/HUD/GDI profiling and an existing-binary CLI route. Real profile recording follows its source checkpoint; neither conditional optimization has been authorized by evidence yet. No cache, GDI retention or cadence change is part of this measurement stage.
+
+### M6-A — measured native sampling and HUD decision
+
+Source checkpoint `3d3dac5df4e78ea08e191e209f646979a57609e3`, dev/unoptimized executable built in3m41s on the same Windows/MSVC host, Balanced power. PASS5 collector tests (Nextest09748278-6143-4766-8ad2-9ebb2c68924c), smoke-bin check, changed-file formatting and independent source review. The authorized guarded `--coordinate-profile` desktop run exited0 after87.277s. [Sanitized native profile](track_a_coordinate_profile_g1.json) retains all phase counts, distributions, mode intervals and resource observations. Warmup and copy validation are included in native distributions; interval aggregate deltas can straddle an in-flight boundary. No buffers overflowed and all14 phases reported zero errors.
+
+| Native phase | Calls | p50 ms | p95 ms | max ms |
+| --- | ---: | ---: | ---: | ---: |
+|Passive sampling|2684|.0639|.5401|1.8010|
+|Sample metadata|2684|.0386|.3286|1.0231|
+|Virtual desktop metrics|2684|.0102|.0176|.0645|
+|Monitor lookup|2684|.0008|.0013|.0235|
+|Monitor information|2684|.0043|.0877|.2992|
+|Monitor DPI|2684|.0039|.0775|.4479|
+|Fresh foreground-client geometry|2684|.0078|.1540|.9479|
+|HUD draw|1917|4.8464|6.5553|17.4446|
+|HUD upload|1917|.1931|.3070|.8468|
+
+Moving HUD60.001s:1912samples/1911full renders (~31.9samples/s). Stationary HUD5.002s:161samples/1render/160stationary refresh phases. Crosshair5.001s:162samples; Halo/Zoom5.000/5.001s:134each; frozen-HUD/live-Zoom5.000s:136samples. These observations include worker scheduling/native work; the16ms timeout is not a guaranteed60Hz rate. No refresh cadence change is justified by this profile.
+
+The1917HUD redraws created and successfully deleted1917brushes and1917fonts. Existing creation-attempt timer totals24.1183ms across3834calls: mean6.29microseconds/create,12.58microseconds/redraw; creation time is about0.040% of the60s moving interval (24.0292ms in that interval), not a CPU utilization percentage. Process GDI objects were0before native surfaces,17after active warmup, stable8during the60sHUD probe,12–15during magnifier probes, and4after worker shutdown. The residual4 are process-wide objects, so this is not proof of process-wide zero resources or a general leak-free claim. The observed HUD count did not grow; measured brush/font ownership was balanced. Passive HWNDs were0before and after; one sampler/backend and one backend shutdown, no further samples after shutdown, and all-off copy rejection passed.
+
+Same receiver HWND moved/resized from client origin(24,47),544x361 to(40,63),624x441; direct geometry/current worker sample and delayed client copy agreed. Freeze held its sample and unfreeze resumed live data. Sampled display2560x1440/96DPI only. Actual mixed-DPI/topology transitions, visible composition/flicker, CPU/GPU usage and input-to-display latency remain NOT RUN/NOT MEASURED; M5 deterministic failure/ordering proofs remain the native error evidence.
+
+M6-B: **SKIPPED (measured)**. Metadata p95 .3286ms is small in absolute terms and includes foreground geometry that must stay fresh; stable display substeps are smaller. Added topology/DPI invalidation complexity has no demonstrated material responsiveness benefit on this host. Preserve live queries and same-HWND freshness.
+
+M6-C: **SKIPPED (measured)**. Creation churn is balanced and mean12.58microseconds/redraw is tiny beside HUD draw p50 4.8464ms. Retained brush/font lifecycle and DPI replacement complexity are not justified by measured allocation cost. No resource retention/cache/cadence change was made. HUD draw itself remains measurable work; this is not a claim that total drawing cost is negligible.
+
+Independent native-evidence review agrees with both measured skips; no contrary findings. GDI deletion duration was not measured, only successful deletion counts. Cumulative source review finds no unresolved architecture issues or Track B changes. M7 execution remains pending.
