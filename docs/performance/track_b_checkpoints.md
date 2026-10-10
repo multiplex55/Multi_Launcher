@@ -18,8 +18,8 @@ Branch: build-optimization. No push/merge.
 | B3-A | PASS | Live78targets/67integrations; baseline72suites/6389cases/17ignored; bounded isolation audit/unknown-retain | source audit and report approved | ba2dc7b3 |
 | B3-B | PASS | Target-first recipes; all6warm commands no compile; unrestricted3.004230s/lib1.873911s medians; scoped passes | final docs/empirical review approved | 392d9f90 |
 | B3-C | SKIPPED | No audited pilot with demonstrated payoff; all67integrationtargets/test sources retained | source classification approved | 392d9f90 |
-| B3-D | PASS; commit pending | Runner51101 exit0; strict72suites/6389cases/17ignored/2empty parity and108scoped passes; scratch clean | final empirical/docs review approved | — |
-| B4-A | pending |  |  | — |
+| B3-D | PASS | Runner51101 exit0; strict72suites/6389cases/17ignored/2empty parity and108scoped passes; scratch clean | final empirical/docs review approved | b5b594a3 |
+| B4-A | PASS; commit pending | Application library codegen dominates release edits; broad fanout separate; jobs4 screen justified, linker gate deferred | planner/final reviewer approved | — |
 | B4-B | pending |  |  | — |
 | B4-C | pending |  |  | — |
 | B4-D | pending |  |  | — |
