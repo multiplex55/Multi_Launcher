@@ -4,6 +4,11 @@ use std::fs;
 use std::path::PathBuf;
 use walkdir::{IntoIter as WalkDirIter, WalkDir};
 
+#[cfg(test)]
+std::thread_local! {
+    static INDEX_BATCH_FACTORY_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 const DEFAULT_BATCH_SIZE: usize = 512;
 const DEFAULT_MAX_ITEMS: usize = 100_000;
 
@@ -202,7 +207,19 @@ impl Drop for IndexBatchIter {
 }
 
 pub fn index_paths_batched(paths: &[String], options: IndexOptions) -> IndexBatchIter {
+    #[cfg(test)]
+    INDEX_BATCH_FACTORY_ENTRIES.with(|entries| entries.set(entries.get().saturating_add(1)));
     IndexBatchIter::new(paths, options)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_index_batch_factory_entries_for_test() {
+    INDEX_BATCH_FACTORY_ENTRIES.with(|entries| entries.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn index_batch_factory_entries_for_test() -> usize {
+    INDEX_BATCH_FACTORY_ENTRIES.with(std::cell::Cell::get)
 }
 
 /// Index the provided filesystem paths and return a list of [`Action`]s.

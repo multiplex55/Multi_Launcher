@@ -194,25 +194,9 @@ impl LauncherApp {
                         continue;
                     }
 
-                    let mut indexed = Vec::new();
-                    if let Some(paths) = &self.index_paths {
-                        let options = indexer::IndexOptions::with_max_items(self.max_indexed_items);
-                        for batch in indexer::index_paths_batched(paths, options) {
-                            match batch {
-                                Ok(actions) => indexed.extend(actions),
-                                Err(e) => {
-                                    tracing::error!(error = %e, "failed to index paths");
-                                    self.report_error_message(
-                                        "launcher",
-                                        format!("Failed to index paths: {e}"),
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    reload_timer.set_work_units(custom.len().saturating_add(indexed.len()) as u64);
-                    self.publish_actions(custom, indexed);
+                    let indexed_len = self.actions.len().saturating_sub(current_custom_len);
+                    reload_timer.set_work_units(custom.len().saturating_add(indexed_len) as u64);
+                    self.publish_custom_actions_with_indexed_tail(custom);
                     self.actions_persistence_diagnostic = None;
                     crate::actions::bump_actions_version();
                     tracing::info!("actions reloaded");
@@ -643,10 +627,14 @@ mod tests {
             let scan = &changed_metrics[1];
             assert_eq!(reload.metric, Metric::ActionsReload);
             assert_eq!(reload.calls, workloads::SAMPLE_COUNT as u64);
+            assert_eq!(
+                reload.work_units,
+                (custom_count + indexed_count) as u64 * workloads::SAMPLE_COUNT as u64
+            );
             assert_eq!(scan.metric, Metric::IndexScan);
-            // Keep the measured index work visible without pinning this
-            // harness to eager rescanning; later production paths may publish
-            // the unchanged indexed tail directly.
+            assert_eq!(scan.calls, 0);
+            assert_eq!(scan.work_units, 0);
+            assert_eq!(scan.completed, 0);
             assert_eq!(scan.errors, 0);
             assert_eq!(scan.abandoned, 0);
             assert_eq!(app.custom_len, custom_count);
@@ -658,6 +646,11 @@ mod tests {
                 app.actions[custom_count..].len(),
                 initial_tail.len(),
                 "changed actions are published with the actual indexed tail"
+            );
+            assert_eq!(
+                &app.actions[custom_count..],
+                initial_tail.as_slice(),
+                "changed custom actions retain the exact indexed tail"
             );
             assert_eq!(
                 changed_output.0,
@@ -676,7 +669,7 @@ mod tests {
             );
             workloads::emit_summary(
                 &format!("actions-reload-{custom_count}-indexed-{indexed_count}-changed"),
-                "synthetic WatchEvent::Actions process_watch_events event-drain; timed phase includes typed file read, actual index traversal, cache publication and synchronous query refresh",
+                "synthetic WatchEvent::Actions process_watch_events event-drain; timed phase includes typed file read, retained indexed-tail publication, cache publication and synchronous query refresh",
                 summary.with_output_signatures(Some(changed_output.0), Some(changed_output.1)),
                 changed_timing,
                 &changed_metrics,
@@ -704,15 +697,23 @@ mod tests {
             assert_eq!(unchanged_metrics.len(), 2);
             assert_eq!(unchanged_metrics[0].metric, Metric::ActionsReload);
             assert_eq!(unchanged_metrics[0].calls, workloads::SAMPLE_COUNT as u64);
+            assert_eq!(
+                unchanged_metrics[0].work_units,
+                custom_count as u64 * workloads::SAMPLE_COUNT as u64
+            );
             assert_eq!(unchanged_metrics[1].metric, Metric::IndexScan);
             assert_eq!(unchanged_metrics[1].calls, 0);
+            assert_eq!(unchanged_metrics[1].work_units, 0);
+            assert_eq!(unchanged_metrics[1].completed, 0);
+            assert_eq!(unchanged_metrics[1].errors, 0);
+            assert_eq!(unchanged_metrics[1].abandoned, 0);
             assert!(Arc::ptr_eq(&app.actions, &retained_actions));
             assert_eq!(crate::actions::actions_version(), retained_version);
             let unchanged_output =
                 action_reload_output_signatures(&index_root, app.actions.as_slice(), custom_count);
             workloads::emit_summary(
                 &format!("actions-reload-{custom_count}-indexed-{indexed_count}-unchanged"),
-                "synthetic unchanged WatchEvent::Actions process_watch_events event-drain; typed file read timed; no indexing/publication",
+                "synthetic unchanged WatchEvent::Actions process_watch_events event-drain; typed file read timed; no indexed traversal or publication",
                 summary.with_output_signatures(Some(unchanged_output.0), Some(unchanged_output.1)),
                 unchanged_timing,
                 &unchanged_metrics,

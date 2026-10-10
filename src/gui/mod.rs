@@ -1042,14 +1042,23 @@ impl LauncherApp {
         mutate: impl FnOnce(&mut Vec<Action>) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let committed = crate::actions::update_actions(&self.actions_path, mutate)?;
+        self.publish_custom_actions_with_indexed_tail(committed);
+        Ok(())
+    }
+
+    /// Publish a new custom prefix while retaining the already-indexed tail.
+    ///
+    /// Local persistence and external watcher reloads share this boundary so
+    /// neither path reconstructs indexed actions from the filesystem. Version
+    /// changes remain owned by the persistence/watcher caller.
+    fn publish_custom_actions_with_indexed_tail(&mut self, custom: Vec<Action>) {
         let indexed = self
             .actions
             .iter()
-            .skip(self.custom_len)
+            .skip(self.custom_len.min(self.actions.len()))
             .cloned()
             .collect::<Vec<_>>();
-        self.publish_actions(committed, indexed);
-        Ok(())
+        self.publish_actions(custom, indexed);
     }
 
     fn publish_actions(
@@ -4461,59 +4470,137 @@ mod tests {
         let _guard = TEST_MUTEX.lock().unwrap();
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        app.actions = Arc::new(vec![custom_action("committed")]);
+        let indexed_tail = vec![
+            custom_action("indexed-first"),
+            custom_action("indexed-second"),
+            custom_action("indexed-third"),
+        ];
+        app.actions = Arc::new(
+            std::iter::once(custom_action("committed"))
+                .chain(indexed_tail.iter().cloned())
+                .collect(),
+        );
         app.custom_len = 1;
+        let missing_index_root = tempdir().unwrap().path().join("not-created");
+        app.index_paths = Some(vec![missing_index_root.to_string_lossy().into_owned()]);
+        app.max_indexed_items = Some(1);
         app.update_action_cache();
         let directory = tempdir().unwrap();
         let path = directory.path().join("actions.json");
         app.actions_path = path.to_string_lossy().into_owned();
+        let initial_actions = Arc::clone(&app.actions);
+        let initial_cache = app.action_cache.clone();
 
         std::fs::write(&path, "not valid actions JSON").unwrap();
         let version_before = crate::actions::actions_version();
-        send_event(WatchEvent::Actions);
+        crate::indexer::reset_index_batch_factory_entries_for_test();
+        app.event_tx.send(WatchEvent::Actions).unwrap();
         app.process_watch_events();
 
-        assert_eq!(app.actions[0], custom_action("committed"));
+        assert!(Arc::ptr_eq(&app.actions, &initial_actions));
+        assert_eq!(app.action_cache, initial_cache);
+        assert_eq!(&app.actions[1..], indexed_tail.as_slice());
         assert_eq!(app.custom_len, 1);
         assert!(matches!(
             app.actions_persistence_diagnostic.as_ref(),
             Some(crate::common::persistence::PersistenceError::MalformedJson { .. })
         ));
         assert_eq!(crate::actions::actions_version(), version_before);
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
 
         std::fs::remove_file(&path).unwrap();
-        send_event(WatchEvent::Actions);
+        crate::indexer::reset_index_batch_factory_entries_for_test();
+        app.event_tx.send(WatchEvent::Actions).unwrap();
         app.process_watch_events();
-        assert_eq!(app.actions[0], custom_action("committed"));
+        assert!(Arc::ptr_eq(&app.actions, &initial_actions));
+        assert_eq!(app.action_cache, initial_cache);
+        assert_eq!(&app.actions[1..], indexed_tail.as_slice());
         assert!(matches!(
             app.actions_persistence_diagnostic.as_ref(),
             Some(crate::common::persistence::PersistenceError::Read { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound
         ));
         assert_eq!(crate::actions::actions_version(), version_before);
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
 
         let external = vec![custom_action("external")];
         std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
-        send_event(WatchEvent::Actions);
+        crate::indexer::reset_index_batch_factory_entries_for_test();
+        app.event_tx.send(WatchEvent::Actions).unwrap();
         app.process_watch_events();
 
         assert_eq!(&app.actions[..app.custom_len], external.as_slice());
-        assert_eq!(app.action_cache[0].label_lc, "external");
+        assert_eq!(&app.actions[app.custom_len..], indexed_tail.as_slice());
+        assert_eq!(app.actions_by_id.get("external:action"), external.first());
+        assert!(!app.actions_by_id.contains_key("committed:action"));
+        assert_eq!(
+            app.actions_by_id.get("indexed-first:action"),
+            indexed_tail.first()
+        );
+        assert!(
+            app.action_cache
+                .iter()
+                .any(|entry| entry.label_lc == "external")
+        );
         assert!(app.actions_persistence_diagnostic.is_none());
         assert_eq!(crate::actions::actions_version(), version_before + 1);
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
 
+        // An empty JSON array removes only the custom prefix, while an empty
+        // file remains a valid no-op reload of the empty custom set.
+        let empty_array = serde_json::to_vec(&Vec::<Action>::new()).unwrap();
+        std::fs::write(&path, &empty_array).unwrap();
+        crate::indexer::reset_index_batch_factory_entries_for_test();
+        app.event_tx.send(WatchEvent::Actions).unwrap();
+        app.process_watch_events();
+        assert_eq!(app.custom_len, 0);
+        assert_eq!(app.actions.as_slice(), indexed_tail.as_slice());
+        assert!(!app.actions_by_id.contains_key("external:action"));
+        assert_eq!(
+            app.actions_by_id.get("indexed-second:action"),
+            indexed_tail.get(1)
+        );
+        assert_eq!(crate::actions::actions_version(), version_before + 2);
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
+
+        let empty_array_actions = Arc::clone(&app.actions);
+        let empty_array_version = crate::actions::actions_version();
+        std::fs::write(&path, "").unwrap();
+        crate::indexer::reset_index_batch_factory_entries_for_test();
+        app.event_tx.send(WatchEvent::Actions).unwrap();
+        app.process_watch_events();
+        assert!(Arc::ptr_eq(&app.actions, &empty_array_actions));
+        assert_eq!(crate::actions::actions_version(), empty_array_version);
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
+
+        crate::indexer::reset_index_batch_factory_entries_for_test();
+        for _ in 0..3 {
+            app.event_tx.send(WatchEvent::Actions).unwrap();
+        }
+        app.process_watch_events();
+        assert!(Arc::ptr_eq(&app.actions, &empty_array_actions));
+        assert_eq!(crate::actions::actions_version(), empty_array_version);
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
+
+        crate::indexer::reset_index_batch_factory_entries_for_test();
         app.update_custom_actions(|actions| {
             actions.push(custom_action("local"));
             Ok(())
         })
         .unwrap();
+        assert_eq!(app.custom_len, 1);
+        assert_eq!(&app.actions[app.custom_len..], indexed_tail.as_slice());
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
         let version_after_local = crate::actions::actions_version();
         let published_after_local = Arc::clone(&app.actions);
-        send_event(WatchEvent::Actions);
+        crate::indexer::reset_index_batch_factory_entries_for_test();
+        app.event_tx.send(WatchEvent::Actions).unwrap();
         app.process_watch_events();
 
-        assert_eq!(app.actions.as_ref(), published_after_local.as_ref());
+        assert!(Arc::ptr_eq(&app.actions, &published_after_local));
+        assert_eq!(&app.actions[app.custom_len..], indexed_tail.as_slice());
         assert_eq!(crate::actions::actions_version(), version_after_local);
+        assert_eq!(crate::indexer::index_batch_factory_entries_for_test(), 0);
     }
 
     #[test]
