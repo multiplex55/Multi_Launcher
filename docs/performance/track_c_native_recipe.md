@@ -1,0 +1,28 @@
+# Track C native responsiveness protocol (draft, not executed)
+
+Status: NOT RUN. This protocol will be frozen at C0-D after fixture/source review. Native desktop control is unavailable in this session's configured computer-use surface; headless egui timing is CPU evidence only. Process/API observations cannot substitute for visible composition or input-to-display latency.
+
+## Isolation and source identity
+
+Use an interactive Windows session with an owned synthetic workspace. The launcher resolves `settings.json` relative to its process working directory (`main.rs`, `AppDataRoot::from_settings_path`); there is no assumed data-dir CLI flag. Use a unique directory under ignored `target/performance/track-c/native/`, with synthetic settings/actions/notes/todos/index roots only. Do not launch from the repository root or copy personal configuration. Do not mutate HOME/USERPROFILE/CODEX_HOME. Keep raw process identities, logs, paths and any synthetic-only captures under the ignored owned directory.
+
+Before launch record exact source SHA, executable SHA256, build command/profile, host/power, viewport/font/DPI, fixture signature and sample protocol. G0/G1 comparisons require the same profile, fixtures and observation boundaries. Build serially with `cargo build --profile iteration --bin multi_launcher`; canonical release is a separate series. Never measure during another build or benchmark.
+
+Prepare settings using the current Settings serialization, with only the necessary synthetic plugins and an available isolated launcher hotkey. Explicitly disable clipboard synchronization, gesture/macro/global item hooks and unrelated plugin work. Keep OmniSearch/VirtualDesktop initial catalog completeness checks available in their own controlled scenario. Verify a configured hotkey does not collide with the user's running application before exercising it. Preserve tap/hold semantics. Record settings/fixture identity without absolute paths in committed summaries.
+
+Before launching, set process-scoped MULTI_LAUNCHER_PERF=1 and ML_SKIP_CLIPBOARD_SYNC=1 in the launch shell so the owned child inherits them; clipboard synchronization suppression is an environment bypass, not an assumed settings field. Save prior values and restore them in a finally block immediately after launch. Record the effective child environment in private evidence and these sanitized switches in G0/G1 summaries; both comparisons require identical telemetry state. Never change machine/user environment settings. Launch the verified executable with `Start-Process -WorkingDirectory <owned-fixture> -WindowStyle Hidden -PassThru`, retaining the process handle and start time. The launcher creates its own visible GUI. Record only the owned process/root HWND and descendants in private evidence; never select or close a window solely by title. Confirm complete synthetic catalog and plugin readiness before counting a usable frame. A single-instance early exit is not a successful startup sample.
+
+## Minimum interaction sequence
+
+1. Observe process start, complete index acknowledgement, plugin readiness, accepted launcher invocation and completed usable-root CPU frame separately. Observe actual visible state independently. Do not use the historical first-update marker as displayed/usable latency.
+2. Exercise the owned root hotkey show/hide and tap/hold radial transition. Verify a complete catalog, no blank results, correct query focus/caret and no stray radial surface.
+3. Type synthetic exact/fuzzy `app` queries in list and grid; navigate first/middle/last, resize standard/narrow viewports, and open/close a context menu after scrolling its original item offscreen. Verify full result ordering and selection identity. Execute only an owned fixture action whose sole effect is an owned marker; verify one receipt.
+4. Open a synthetic note and Quick Notes. Verify relationship categories, draft retention, filtered original identity and scroll anchor after an owned edit/removal. Avoid unrelated data stores.
+5. Send a bounded synthetic notification burst with an explicit stop/cancellation condition. Verify urgent effects exactly once, no stale index result, no uncontrolled repaint loop, and queue completion. Report handler cost separately from backlog age and visible frame gaps.
+6. Request ordinary application close and wait for the retained process to exit. Confirm its GUI/owned workers and any fixture action process have ended before cleaning owned files. The launch shell's environment has already been restored by its launch-time finally block. Check PID/start-time identity before any cleanup action. Do not delete another worktree or unknown temp directory.
+
+## Sampling and report
+
+Use five warmups and twenty measured operations where practical. For slower native launches explicitly record the smaller sample count; do not call a single observation p95. Keep every valid measured sample, including unfavorable cases; document exclusions and failures. Record p50/p95/max only for stated distributions, actual work/depth/wake counters, full catalog/result signature, and separately viewport receipts. Distinguish cold independent invalidation from warm repeat.
+
+Report API execution, CPU root completion, actual displayed usability, focus/tap/hold, action receipt, note/Quick Notes, resource stability and clean shutdown individually as PASS/FAIL/NOT RUN/NOT MEASURED. Native displayed latency remains NOT MEASURED without an appropriate visible observation method. Commit sanitized aggregates only. If unavailable, retain this precise manual sequence and the headless evidence without claiming native success.

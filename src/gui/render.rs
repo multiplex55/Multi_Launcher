@@ -2584,7 +2584,7 @@ impl LauncherApp {
                 }
             } else {
                 let area_height = ui.available_height();
-                let root_scroll_output = ScrollArea::vertical()
+                let _root_scroll_output = ScrollArea::vertical()
                     .max_height(area_height)
                     .show_viewport(ui, |ui, viewport| {
                         #[cfg(test)]
@@ -2592,6 +2592,16 @@ impl LauncherApp {
                             self.test_root_scroll_viewport_rect = Some(ui.clip_rect());
                         }
                         scale_ui(ui, self.list_scale, |ui| {
+                            #[cfg(test)]
+                            {
+                                let available_width = ui.available_width();
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(
+                                        egui::Id::new("track-c-root-list-available-width"),
+                                        available_width,
+                                    );
+                                });
+                            }
                             let mut refresh = false;
                             let mut set_focus = false;
                             let show_full = self
@@ -2888,14 +2898,14 @@ impl LauncherApp {
                 #[cfg(test)]
                 {
                     self.test_root_scroll_area_extent = Some((
-                        root_scroll_output.inner_rect,
-                        root_scroll_output.content_size,
-                        root_scroll_output.state.offset,
+                        _root_scroll_output.inner_rect,
+                        _root_scroll_output.content_size,
+                        _root_scroll_output.state.offset,
                     ));
                 }
                 #[cfg(test)]
                 {
-                    self.test_root_scroll_area_id = Some(root_scroll_output.id);
+                    self.test_root_scroll_area_id = Some(_root_scroll_output.id);
                 }
             }
             if let Some(deferred) = deferred_activation_unless_radial_add(
@@ -4256,6 +4266,143 @@ mod tests {
         )
     }
 
+    #[derive(Clone, Debug)]
+    struct EagerRootListLayout {
+        rows: Vec<egui::Rect>,
+        available_widths: Vec<f32>,
+        bounds: egui::Rect,
+    }
+
+    fn eager_root_list_selectable_labels(
+        ui: &mut egui::Ui,
+        actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+        outer: egui::Rect,
+    ) -> EagerRootListLayout {
+        let mut layout = EagerRootListLayout {
+            rows: Vec::with_capacity(actions.len()),
+            available_widths: Vec::with_capacity(actions.len()),
+            bounds: outer,
+        };
+        for action in actions {
+            let text = root_list_display_text(action, aliases, show_full_paths).into_owned();
+            let available_width = ui.available_width();
+            layout.available_widths.push(available_width);
+            let response = ui.add_sized(
+                [available_width, 0.0],
+                egui::SelectableLabel::new(false, text),
+            );
+            layout.bounds = layout.bounds.union(response.rect);
+            layout.rows.push(response.rect);
+        }
+        layout
+    }
+
+    fn track_c_eager_root_list_layout(
+        ctx: &egui::Context,
+        actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+        width: f32,
+        style: &egui::Style,
+        scale: f32,
+    ) -> (egui::Rect, EagerRootListLayout) {
+        let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1_000_000.0));
+        let layer = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("track-c-root-list-eager-oracle"),
+        );
+        let mut layout = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(outer),
+                ..Default::default()
+            },
+            |ctx| {
+                let mut ui = egui::Ui::new(
+                    ctx.clone(),
+                    layer,
+                    egui::Id::new("track-c-root-list-eager-ui"),
+                    outer,
+                    outer,
+                );
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_style(style.clone());
+                    scale_ui(ui, scale, |ui| {
+                        layout = Some(eager_root_list_selectable_labels(
+                            ui,
+                            actions,
+                            aliases,
+                            show_full_paths,
+                            outer,
+                        ));
+                    });
+                });
+            },
+        );
+        (outer, layout.expect("Track C eager list composition ran"))
+    }
+
+    fn assert_root_list_cache_matches_eager(
+        cache: &RootListGeometryCache,
+        eager: &EagerRootListLayout,
+        outer: egui::Rect,
+        label: &str,
+    ) {
+        assert_eq!(cache.row_tops.len(), eager.rows.len());
+        for (index, response) in eager.rows.iter().enumerate() {
+            let expected_top = response.top() - outer.top();
+            assert!(
+                (cache.row_tops[index] - expected_top).abs() <= 1.0,
+                "{label} row {index} top: cache={} eager={expected_top}",
+                cache.row_tops[index]
+            );
+            assert!(
+                (cache.row_heights[index] - response.height()).abs() <= 1.0,
+                "{label} row {index} height: cache={} eager={}",
+                cache.row_heights[index],
+                response.height()
+            );
+            assert!(
+                (cache.row_widths[index] - eager.available_widths[index]).abs() <= 1.0,
+                "{label} row {index} available width: cache={} eager={}",
+                cache.row_widths[index],
+                eager.available_widths[index]
+            );
+            let expected_left = response.left() - outer.left();
+            assert!(
+                (cache.row_response_x_offsets[index] - expected_left).abs() <= 1.0,
+                "{label} row {index} response left: cache={} eager={expected_left}",
+                cache.row_response_x_offsets[index]
+            );
+            assert!(
+                (cache.row_response_widths[index] - response.width()).abs() <= 1.0,
+                "{label} row {index} response width: cache={} eager={}",
+                cache.row_response_widths[index],
+                response.width()
+            );
+        }
+        assert!(
+            (cache.content_x_offset - (eager.bounds.left() - outer.left())).abs() <= 1.0,
+            "{label} content left: cache={} eager={}",
+            cache.content_x_offset,
+            eager.bounds.left() - outer.left()
+        );
+        assert!(
+            (cache.content_width - eager.bounds.width()).abs() <= 1.0,
+            "{label} content width: cache={} eager={}",
+            cache.content_width,
+            eager.bounds.width()
+        );
+        assert!(
+            (cache.total_height - (eager.rows.last().unwrap().bottom() - outer.top())).abs() <= 1.0,
+            "{label} total height: cache={} eager={}",
+            cache.total_height,
+            eager.rows.last().unwrap().bottom() - outer.top()
+        );
+    }
+
     #[test]
     fn root_list_geometry_matches_eager_selectable_label_layout() {
         let cases = [
@@ -4313,10 +4460,8 @@ mod tests {
                 ..Default::default()
             };
             let mut cache = RootListGeometryCache::default();
-            let mut eager_rows = Vec::new();
             let mut virtual_rows = Vec::new();
-            let mut eager_available_widths = Vec::new();
-            let mut eager_bounds = outer;
+            let mut eager_layout = None;
 
             let _ = ctx.run(input, |ctx| {
                 let mut eager = egui::Ui::new(
@@ -4331,17 +4476,9 @@ mod tests {
                     style.wrap = Some(wrap);
                     ui.set_style(style);
                     scale_ui(ui, scale, |ui| {
-                        for action in &actions {
-                            let text = root_list_display_text(action, &aliases, false).into_owned();
-                            let available_width = ui.available_width();
-                            eager_available_widths.push(available_width);
-                            let response = ui.add_sized(
-                                [available_width, 0.0],
-                                egui::SelectableLabel::new(false, text),
-                            );
-                            eager_bounds = eager_bounds.union(response.rect);
-                            eager_rows.push(response.rect);
-                        }
+                        eager_layout = Some(eager_root_list_selectable_labels(
+                            ui, &actions, &aliases, false, outer,
+                        ));
                     });
                 });
 
@@ -4385,6 +4522,10 @@ mod tests {
                 });
             });
 
+            let eager_layout = eager_layout.expect("the eager selectable-label oracle ran");
+            let eager_rows = &eager_layout.rows;
+            let eager_available_widths = &eager_layout.available_widths;
+            let eager_bounds = eager_layout.bounds;
             assert_eq!(cache.row_tops.len(), eager_rows.len());
             for (index, response) in eager_rows.iter().enumerate() {
                 let expected_top = response.top() - outer.top();
@@ -4444,6 +4585,244 @@ mod tests {
                 eager_rows.last().unwrap().bottom() - outer.top()
             );
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EagerRootGridLayout {
+        cells: Vec<egui::Rect>,
+        cell_cursors: Vec<egui::Pos2>,
+        grid_bounds: egui::Rect,
+        content_bounds: egui::Rect,
+        nominal_width: f32,
+    }
+
+    fn eager_root_grid_layout(
+        ui: &mut egui::Ui,
+        actions: &[Action],
+        columns: usize,
+        identity: usize,
+    ) -> EagerRootGridLayout {
+        let nominal_width = ((ui.available_width() - columns.saturating_sub(1) as f32 * 8.0)
+            / columns as f32)
+            .max(160.0);
+        let mut cells = Vec::with_capacity(actions.len());
+        let mut cell_cursors = Vec::with_capacity(actions.len());
+        let grid = egui::Grid::new(("root-grid-real", identity))
+            .num_columns(columns)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                for (index, action) in actions.iter().enumerate() {
+                    cell_cursors.push(ui.cursor().min);
+                    let response = ui.add_sized(
+                        [nominal_width, 44.0],
+                        egui::SelectableLabel::new(
+                            false,
+                            format!("{}\n{}", action.label, action.desc),
+                        ),
+                    );
+                    cells.push(response.rect);
+                    if (index + 1) % columns == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+        EagerRootGridLayout {
+            cells,
+            cell_cursors,
+            grid_bounds: grid.response.rect,
+            content_bounds: ui.min_rect(),
+            nominal_width,
+        }
+    }
+
+    fn track_c_eager_root_grid_layout(
+        ctx: &egui::Context,
+        actions: &[Action],
+        columns: usize,
+        width: f32,
+        style: &egui::Style,
+        scale: f32,
+    ) -> (egui::Rect, EagerRootGridLayout) {
+        let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1_000_000.0));
+        ctx.set_style(style.clone());
+        let layer = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("track-c-root-grid-eager-oracle"),
+        );
+        let mut layout = None;
+        for frame in 0..4 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_800.0, 1_500.0),
+                    )),
+                    time: Some(1.0 + frame as f64 / 60.0),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let mut ui = egui::Ui::new(
+                        ctx.clone(),
+                        layer,
+                        egui::Id::new("track-c-root-grid-eager-ui"),
+                        outer,
+                        outer,
+                    );
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_style(style.clone());
+                        scale_ui(ui, scale, |ui| {
+                            layout = Some(eager_root_grid_layout(ui, actions, columns, 0));
+                        });
+                    });
+                },
+            );
+        }
+        (outer, layout.expect("Track C eager grid composition ran"))
+    }
+
+    fn eager_grid_row_geometry(
+        eager: &EagerRootGridLayout,
+        columns: usize,
+        outer: egui::Rect,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let row_count = eager.cells.len().div_ceil(columns);
+        (0..row_count)
+            .map(|row| {
+                let first = row * columns;
+                let last = (first + columns).min(eager.cells.len());
+                let top = eager.cell_cursors[first].y - outer.top();
+                let height = if row + 1 < row_count {
+                    eager.cell_cursors[(row + 1) * columns].y - eager.cell_cursors[first].y - 6.0
+                } else {
+                    eager.content_bounds.bottom() - outer.top() - top
+                };
+                let visual_top = eager.cells[first..last]
+                    .iter()
+                    .map(|cell| cell.top() - outer.top())
+                    .fold(f32::INFINITY, f32::min);
+                let visual_bottom = eager.cells[first..last]
+                    .iter()
+                    .map(|cell| cell.bottom() - outer.top())
+                    .fold(f32::NEG_INFINITY, f32::max);
+                (top, height, visual_top, visual_bottom)
+            })
+            .collect()
+    }
+
+    fn assert_track_c_root_grid_matches_eager(
+        cache: &RootListGeometryCache,
+        eager: &EagerRootGridLayout,
+        outer: egui::Rect,
+        actions: &[Action],
+        columns: usize,
+        style: &egui::Style,
+        label: &str,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let expected_columns = columns.min(actions.len());
+        let row_geometry = eager_grid_row_geometry(eager, columns, outer);
+        assert_eq!(eager.cells.len(), actions.len());
+        assert_eq!(eager.cell_cursors.len(), actions.len());
+        assert_eq!(cache.grid_columns, columns);
+        assert_eq!(
+            cache.grid_nominal_width.to_bits(),
+            eager.nominal_width.to_bits()
+        );
+        assert_eq!(cache.grid_cell_widths.len(), actions.len());
+        assert_eq!(cache.grid_cell_heights.len(), actions.len());
+        assert_eq!(cache.grid_column_x_offsets.len(), expected_columns);
+        assert_eq!(cache.grid_column_widths.len(), expected_columns);
+        assert_eq!(cache.row_tops.len(), row_geometry.len());
+        assert_eq!(cache.row_heights.len(), row_geometry.len());
+        assert_eq!(cache.grid_visual_row_tops.len(), row_geometry.len());
+        assert_eq!(cache.grid_visual_row_bottoms.len(), row_geometry.len());
+        for row in 0..row_geometry.len() {
+            let (top, height, visual_top, visual_bottom) = row_geometry[row];
+            assert!(
+                (cache.row_tops[row] - top).abs() <= 1.0,
+                "{label} logical row {row} top: cache={} eager={top}",
+                cache.row_tops[row]
+            );
+            assert!(
+                (cache.row_heights[row] - height).abs() <= 1.0,
+                "{label} logical row {row} height: cache={} eager={height}",
+                cache.row_heights[row]
+            );
+            assert!(
+                (cache.grid_visual_row_tops[row] - visual_top).abs() <= 1.0,
+                "{label} visual row {row} top: cache={} eager={visual_top}",
+                cache.grid_visual_row_tops[row]
+            );
+            assert!(
+                (cache.grid_visual_row_bottoms[row] - visual_bottom).abs() <= 1.0,
+                "{label} visual row {row} bottom: cache={} eager={visual_bottom}",
+                cache.grid_visual_row_bottoms[row]
+            );
+        }
+
+        let interaction_width = style.spacing.interact_size.x;
+        let mut expected_column_widths = vec![interaction_width; expected_columns];
+        for (index, cell) in eager.cells.iter().enumerate() {
+            let column = index % columns;
+            let expected_left = cell.left() - outer.left();
+            let cell_width = cell.width().max(interaction_width);
+            expected_column_widths[column] = expected_column_widths[column].max(cell_width);
+            assert!(
+                (cache.grid_cell_widths[index] - cell.width()).abs() <= 1.0,
+                "{label} cell {index} width: cache={} eager={}",
+                cache.grid_cell_widths[index],
+                cell.width()
+            );
+            assert!(
+                (cache.grid_cell_heights[index] - cell.height()).abs() <= 1.0,
+                "{label} cell {index} height: cache={} eager={}",
+                cache.grid_cell_heights[index],
+                cell.height()
+            );
+            assert!(
+                (cache.grid_column_x_offsets[column] - expected_left).abs() <= 1.0,
+                "{label} cell {index} column offset: cache={} eager={expected_left}",
+                cache.grid_column_x_offsets[column]
+            );
+        }
+        assert!(
+            cache.row_x_offsets.is_empty()
+                && cache.row_response_x_offsets.is_empty()
+                && cache.row_widths.is_empty()
+                && cache.row_response_widths.is_empty(),
+            "{label} grid cache has no stale list-row geometry"
+        );
+        assert_eq!(cache.content_x_offset, 0.0);
+        for (column, (actual, expected)) in cache
+            .grid_column_widths
+            .iter()
+            .zip(&expected_column_widths)
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() <= 1.0,
+                "{label} column {column} width: cache={actual} eager={expected}"
+            );
+        }
+        let expected_grid_width = expected_column_widths.iter().sum::<f32>()
+            + expected_columns.saturating_sub(1) as f32 * 8.0;
+        let expected_content_width = eager.content_bounds.right() - outer.left();
+        let expected_total_height = eager.content_bounds.bottom() - outer.top();
+        assert!(
+            (cache.grid_full_width - expected_grid_width).abs() <= 1.0,
+            "{label} full grid width: cache={} eager={expected_grid_width}",
+            cache.grid_full_width
+        );
+        assert!(
+            (cache.content_width - expected_content_width).abs() <= 1.0,
+            "{label} content width: cache={} eager={expected_content_width}",
+            cache.content_width
+        );
+        assert!(
+            (cache.total_height - expected_total_height).abs() <= 1.0,
+            "{label} total height: cache={} eager={expected_total_height}",
+            cache.total_height
+        );
+        row_geometry
     }
 
     #[test]
@@ -4545,34 +4924,11 @@ mod tests {
                             ui.set_style(style);
                         }
                         scale_ui(ui, scale, |ui| {
-                            let nominal_width = ((ui.available_width()
-                                - columns.saturating_sub(1) as f32 * 8.0)
-                                / columns as f32)
-                                .max(160.0);
-                            let mut actual = Vec::new();
-                            eager_grid_cursors.clear();
-                            let grid = egui::Grid::new(("root-grid-real", case_index))
-                                .num_columns(columns)
-                                .spacing([8.0, 6.0])
-                                .show(ui, |ui| {
-                                    for (index, action) in actions.iter().enumerate() {
-                                        eager_grid_cursors.push(ui.cursor().min);
-                                        let response = ui.add_sized(
-                                            [nominal_width, 44.0],
-                                            egui::SelectableLabel::new(
-                                                false,
-                                                format!("{}\n{}", action.label, action.desc),
-                                            ),
-                                        );
-                                        actual.push(response.rect);
-                                        if (index + 1) % columns == 0 {
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                            eager_grid_bounds = grid.response.rect;
-                            eager_content_bounds = ui.min_rect();
-                            eager_cells = actual;
+                            let layout = eager_root_grid_layout(ui, &actions, columns, case_index);
+                            eager_grid_cursors = layout.cell_cursors;
+                            eager_grid_bounds = layout.grid_bounds;
+                            eager_content_bounds = layout.content_bounds;
+                            eager_cells = layout.cells;
                         });
                     });
 
@@ -4784,6 +5140,15 @@ mod tests {
         LauncherApp,
     ) {
         let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let app = root_list_app_at(ctx, results, workspace.root());
+        (workspace, app)
+    }
+
+    fn root_list_app_at(
+        ctx: &egui::Context,
+        results: Vec<Action>,
+        root: &std::path::Path,
+    ) -> LauncherApp {
         let mut settings = Settings::default();
         settings.hotkey = None;
         settings.quit_hotkey = None;
@@ -4798,16 +5163,8 @@ mod tests {
             Arc::new(Vec::new()),
             0,
             PluginManager::new_inert_for_test(),
-            workspace
-                .root()
-                .join("actions.json")
-                .to_string_lossy()
-                .into_owned(),
-            workspace
-                .root()
-                .join("settings.json")
-                .to_string_lossy()
-                .into_owned(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
             settings,
             None,
             None,
@@ -4830,7 +5187,7 @@ mod tests {
         app.recompute_query_results_layout();
         app.list_scale = 1.0;
         app.selected = None;
-        (workspace, app)
+        app
     }
 
     fn root_list_action(index: usize) -> Action {
@@ -4882,6 +5239,1259 @@ mod tests {
         app.visibility_revision
             .arm_first_usable_frame_for_test(revision, Some(invocation_id));
         revision
+    }
+
+    struct TrackCRootListState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        expected_actions: Vec<Action>,
+        expected_visible_ids: Vec<(usize, egui::Id)>,
+        available_width: f32,
+        eager_outer: egui::Rect,
+        eager: EagerRootListLayout,
+        before: RootListGeometryObservation,
+        cold: bool,
+        frame_index: usize,
+    }
+
+    fn track_c_prepare_root_list_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        cold: bool,
+    ) -> TrackCRootListState {
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        let before = app.root_list_geometry.test_observation();
+        assert!(before.rebuild_count > 0, "setup warms real root geometry");
+        assert_eq!(before.measured_rows, actions.len() as u64);
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real scaled root UI records its available width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let expected_visible_ids = app.test_root_rendered_row_ids.clone();
+        assert!(!expected_visible_ids.is_empty());
+        let oracle_ctx = egui::Context::default();
+        let oracle_style = ctx.style().as_ref().clone();
+        oracle_ctx.set_style(oracle_style.clone());
+        let (eager_outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &oracle_style,
+            app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            eager_outer,
+            "Track C independent root list oracle",
+        );
+        if cold {
+            app.invalidate_root_list_display_geometry();
+        }
+        let before = app.root_list_geometry.test_observation();
+        crate::performance::track_c::reset();
+        TrackCRootListState {
+            app,
+            ctx,
+            expected_actions: actions.to_vec(),
+            expected_visible_ids,
+            available_width,
+            eager_outer,
+            eager,
+            before,
+            cold,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c_root_list_signature(app: &LauncherApp, viewport_receipt: u64) -> (u64, u64) {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let cache = &app.root_list_geometry;
+        let mut structure = StableSignature::new(
+            0x435F_524F_4F54_4C53,
+            "track-c-root-list-complete-geometry",
+            app.results.len(),
+        );
+        structure.number(action_fixture_identity(&app.results));
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.row_x_offsets,
+            &cache.row_response_x_offsets,
+            &cache.row_widths,
+            &cache.row_response_widths,
+        ] {
+            structure.number(values.len() as u64);
+            for value in values {
+                structure.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            structure.number(u64::from(value.to_bits()));
+        }
+        let structural_signature = structure.finish();
+        let mut complete = StableSignature::new(
+            0x435F_524F_4F54_4C53,
+            "track-c-root-list-frame-output",
+            app.test_root_rendered_rows.len(),
+        );
+        complete.number(structural_signature);
+        complete.number(viewport_receipt);
+        complete.number(app.root_list_geometry.result_generation);
+        complete.number(app.selected.map_or(u64::MAX, |selected| selected as u64));
+        (complete.finish(), structural_signature)
+    }
+
+    fn track_c_validate_root_list_state(
+        state: &TrackCRootListState,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        assert_eq!(state.app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in state
+            .app
+            .results
+            .iter()
+            .zip(&state.expected_actions)
+            .enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "result {index} label");
+            assert_eq!(actual.desc, expected.desc, "result {index} description");
+            assert_eq!(actual.action, expected.action, "result {index} action id");
+            assert_eq!(actual.args, expected.args, "result {index} arguments");
+        }
+        assert_root_list_cache_matches_eager(
+            &state.app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            "actual root frame",
+        );
+        let actual_available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real root UI records its available width");
+        assert!(
+            (actual_available_width - state.available_width).abs() <= 0.01,
+            "the measured root frame keeps the independent oracle width: actual={actual_available_width} expected={}",
+            state.available_width
+        );
+        let after = state.app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.before.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.before.measured_rows);
+        if state.cold {
+            assert_eq!(rebuilds, 1, "cold geometry rebuilds exactly once");
+            assert_eq!(measured_rows, state.expected_actions.len() as u64);
+        } else {
+            assert_eq!(rebuilds, 0, "warm geometry is reused");
+            assert_eq!(measured_rows, 0, "warm geometry measures no full rows");
+        }
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        assert!(
+            !rows.is_empty(),
+            "the real frame paints visible result rows"
+        );
+        assert!(
+            rows.len() <= 64,
+            "painted row count is bounded: {}",
+            rows.len()
+        );
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(
+            ids, &state.expected_visible_ids,
+            "geometry-only invalidation preserves surviving root widget IDs"
+        );
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("real root ScrollArea records its viewport and extent");
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("real root viewport is captured");
+        let content_origin = inner_rect.min - offset;
+        let visible_start = state.eager.rows.partition_point(|row| {
+            let screen_bottom = content_origin.y + row.bottom() - state.eager_outer.top();
+            screen_bottom <= viewport.min.y
+        });
+        let visible_end = state.eager.rows.partition_point(|row| {
+            let screen_top = content_origin.y + row.top() - state.eager_outer.top();
+            screen_top < viewport.max.y
+        });
+        let expected_start = visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS);
+        let expected_end = visible_end
+            .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+            .min(state.eager.rows.len());
+        let expected_built_indices = (expected_start..expected_end).collect::<Vec<_>>();
+        let actual_built_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(
+            actual_built_indices, expected_built_indices,
+            "root frame builds exactly visible rows plus the documented overscan"
+        );
+        for ((index, action_id), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(
+                action_id, &state.expected_actions[*index].action,
+                "rendered absolute index keeps its catalog action"
+            );
+            let expected_relative = state.eager.rows[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (expected_relative.min - state.eager_outer.min),
+                expected_relative.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "rendered row {index} differs from independent eager layout: actual={rect:?}, eager={expected_rect:?}"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(
+                    viewport.intersects(*rect),
+                    "visible row {index} intersects the current scroll viewport"
+                );
+            }
+        }
+        let mut viewport_signature = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_524F_4F54_4C53,
+            "track-c-root-list-visible-viewport",
+            rows.len(),
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            viewport_signature.bytes(action_id.as_bytes());
+            viewport_signature.bytes(format!("{id:?}").as_bytes());
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+        let (output_identity, structural_signature) =
+            track_c_root_list_signature(&state.app, viewport_receipt);
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: vec![
+                state.app.root_list_geometry.result_generation,
+                rebuilds,
+                measured_rows,
+            ],
+            viewport_receipt: Some(viewport_receipt),
+            work_units: measured_rows,
+            work_counters: vec![rebuilds, measured_rows, rows.len() as u64],
+        }
+    }
+
+    struct TrackCRootGridState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        expected_actions: Vec<Action>,
+        expected_visible_ids: Vec<(usize, egui::Id)>,
+        available_width: f32,
+        columns: usize,
+        eager_outer: egui::Rect,
+        eager: EagerRootGridLayout,
+        style: egui::Style,
+        before: RootListGeometryObservation,
+        cold: bool,
+        frame_index: usize,
+    }
+
+    fn track_c_prepare_root_grid_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        columns: usize,
+        cold: bool,
+    ) -> TrackCRootGridState {
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = columns;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        let warm = app.root_list_geometry.test_observation();
+        assert!(
+            warm.rebuild_count > 0,
+            "setup warms real root grid geometry"
+        );
+        assert_eq!(warm.measured_cells, actions.len() as u64);
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real scaled root UI records its available width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let expected_visible_ids = app.test_root_rendered_row_ids.clone();
+        assert!(!expected_visible_ids.is_empty());
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let (eager_outer, eager) = track_c_eager_root_grid_layout(
+            &oracle_ctx,
+            actions,
+            columns,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        let row_geometry = assert_track_c_root_grid_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            eager_outer,
+            actions,
+            columns,
+            &style,
+            "Track C independent root grid oracle",
+        );
+        assert_eq!(row_geometry.len(), app.root_list_geometry.row_tops.len());
+        if cold {
+            app.invalidate_root_list_display_geometry();
+        }
+        let before = app.root_list_geometry.test_observation();
+        crate::performance::track_c::reset();
+        TrackCRootGridState {
+            app,
+            ctx,
+            expected_actions: actions.to_vec(),
+            expected_visible_ids,
+            available_width,
+            columns,
+            eager_outer,
+            eager,
+            style,
+            before,
+            cold,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c_root_grid_signature(app: &LauncherApp, viewport_receipt: u64) -> (u64, u64) {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let cache = &app.root_list_geometry;
+        let mut structure = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c-root-grid-complete-geometry",
+            cache.grid_cell_widths.len(),
+        );
+        structure.number(action_fixture_identity(&app.results));
+        structure.number(cache.grid_columns as u64);
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.grid_column_x_offsets,
+            &cache.grid_column_widths,
+            &cache.grid_cell_widths,
+            &cache.grid_cell_heights,
+            &cache.grid_visual_row_tops,
+            &cache.grid_visual_row_bottoms,
+            &cache.grid_visual_max_end_tree,
+        ] {
+            structure.number(values.len() as u64);
+            for value in values {
+                structure.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.grid_nominal_width,
+            cache.grid_full_width,
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            structure.number(u64::from(value.to_bits()));
+        }
+        let structural_signature = structure.finish();
+        let mut complete = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c-root-grid-frame-output",
+            app.test_root_rendered_rows.len(),
+        );
+        complete.number(structural_signature);
+        complete.number(viewport_receipt);
+        complete.number(cache.result_generation);
+        complete.number(app.query_results_layout.cols as u64);
+        complete.number(app.selected.map_or(u64::MAX, |selected| selected as u64));
+        (complete.finish(), structural_signature)
+    }
+
+    fn track_c_validate_root_grid_state(
+        state: &TrackCRootGridState,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        assert_eq!(state.app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in state
+            .app
+            .results
+            .iter()
+            .zip(&state.expected_actions)
+            .enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "grid result {index} label");
+            assert_eq!(
+                actual.desc, expected.desc,
+                "grid result {index} description"
+            );
+            assert_eq!(
+                actual.action, expected.action,
+                "grid result {index} action id"
+            );
+            assert_eq!(actual.args, expected.args, "grid result {index} arguments");
+        }
+        assert!(state.app.resolved_grid_layout);
+        assert_eq!(state.app.query_results_layout.cols, state.columns);
+        let actual_available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real root grid UI records its available width");
+        assert!(
+            (actual_available_width - state.available_width).abs() <= 0.01,
+            "the measured root grid keeps the independent oracle width: actual={actual_available_width} expected={}",
+            state.available_width
+        );
+        assert_track_c_root_grid_matches_eager(
+            &state.app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            &state.expected_actions,
+            state.columns,
+            &state.style,
+            "actual root grid frame",
+        );
+        let after = state.app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.before.rebuild_count);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.before.measured_cells);
+        if state.cold {
+            assert_eq!(rebuilds, 1, "cold grid geometry rebuilds exactly once");
+            assert_eq!(measured_cells, state.expected_actions.len() as u64);
+        } else {
+            assert_eq!(rebuilds, 0, "warm grid geometry is reused");
+            assert_eq!(measured_cells, 0, "warm grid measures no full cells");
+        }
+
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        assert!(!rows.is_empty(), "the real frame paints root grid cells");
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(
+            ids, &state.expected_visible_ids,
+            "geometry-only invalidation preserves surviving root grid widget IDs"
+        );
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("real root grid ScrollArea records its viewport and extent");
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("real root grid viewport is captured");
+        let content_origin = inner_rect.min - offset;
+        let row_geometry = eager_grid_row_geometry(&state.eager, state.columns, state.eager_outer);
+        let visible_start = row_geometry
+            .iter()
+            .position(|(top, height, _, _)| content_origin.y + *top + *height > viewport.min.y)
+            .unwrap_or(row_geometry.len());
+        let visible_end = row_geometry
+            .iter()
+            .take_while(|(top, _, _, _)| content_origin.y + *top < viewport.max.y)
+            .count();
+        let mut expected_rows = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(row_geometry.len()))
+            .collect::<Vec<_>>();
+        expected_rows.extend(row_geometry.iter().enumerate().filter_map(
+            |(row, (_, _, visual_top, visual_bottom))| {
+                (content_origin.y + *visual_top < viewport.max.y
+                    && content_origin.y + *visual_bottom > viewport.min.y)
+                    .then_some(row)
+            },
+        ));
+        expected_rows.sort_unstable();
+        expected_rows.dedup();
+        let expected_indices = expected_rows
+            .into_iter()
+            .flat_map(|row| {
+                let start = row * state.columns;
+                start..(start + state.columns).min(state.expected_actions.len())
+            })
+            .collect::<Vec<_>>();
+        let actual_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(
+            actual_indices, expected_indices,
+            "root grid builds exactly logical overscan rows plus eager visual spill rows"
+        );
+        assert_eq!(
+            rows.len(),
+            expected_indices.len(),
+            "the independently eager-derived viewport and overscan set bounds grid painting"
+        );
+        for ((index, action_id), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(
+                action_id, &state.expected_actions[*index].action,
+                "rendered grid absolute index keeps its catalog action"
+            );
+            let eager_cell = state.eager.cells[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_cell.min - state.eager_outer.min),
+                eager_cell.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "rendered grid cell {index} differs from independent eager layout: actual={rect:?}, eager={expected_rect:?}"
+            );
+        }
+
+        let mut viewport_signature = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c-root-grid-visible-viewport",
+            rows.len(),
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            viewport_signature.bytes(action_id.as_bytes());
+            viewport_signature.bytes(format!("{id:?}").as_bytes());
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+        let (output_identity, structural_signature) =
+            track_c_root_grid_signature(&state.app, viewport_receipt);
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: vec![
+                state.app.root_list_geometry.result_generation,
+                rebuilds,
+                measured_cells,
+            ],
+            viewport_receipt: Some(viewport_receipt),
+            work_units: measured_cells,
+            work_counters: vec![rebuilds, measured_cells, rows.len() as u64],
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_root_list_frame_matches_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for cold in [true, false] {
+            let mut state =
+                track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold);
+            let frame = state.frame_index;
+            state.frame_index += 1;
+            let _ =
+                run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new());
+            let _ = track_c_validate_root_list_state(&state);
+            drop(state);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C owner benchmark; isolated synthetic action catalog only"]
+    fn track_c_benchmark_root_list_frame_geometry() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, TrackCWorkspace, action_fixture, emit_samples,
+            measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for cold in [true, false] {
+                let cold_type = if cold {
+                    "geometry-cold-warm-fonts"
+                } else {
+                    "geometry-warm-warm-fonts"
+                };
+                let samples = measure_owner(
+                    || track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold),
+                    |state| {
+                        let frame = state.frame_index;
+                        state.frame_index += 1;
+                        run_root_list_frame(
+                            &state.ctx,
+                            &mut state.app,
+                            frame,
+                            960.0,
+                            640.0,
+                            Vec::new(),
+                        )
+                    },
+                    |state, _frame_output| track_c_validate_root_list_state(state),
+                );
+                emit_samples(
+                    ReportMetadata {
+                        owner: "egui_Context_run+LauncherApp::render_root_frame",
+                        fixture_name: "root-list-default-layout",
+                        fixture_signature: fixture.summary.signature,
+                        item_count: *count,
+                        viewport: "960x640",
+                        scale_milli: 1_000,
+                        font_state: "warm-egui-font-atlas",
+                        settings: "list-wrap-default",
+                        cold_type,
+                        mode,
+                    },
+                    &samples,
+                );
+            }
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c_oracle_root_grid_frame_matches_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for columns in [1, 2, 3, 5, 6] {
+            for cold in [true, false] {
+                let mut state = track_c_prepare_root_grid_state(
+                    workspace.root(),
+                    &fixture.values,
+                    columns,
+                    cold,
+                );
+                let frame = state.frame_index;
+                state.frame_index += 1;
+                let _ = run_root_list_frame(
+                    &state.ctx,
+                    &mut state.app,
+                    frame,
+                    960.0,
+                    640.0,
+                    Vec::new(),
+                );
+                let _ = track_c_validate_root_grid_state(&state);
+                drop(state);
+            }
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C owner benchmark; isolated synthetic action catalog only"]
+    fn track_c_benchmark_root_grid_frame_geometry() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, StableSignature, TrackCWorkspace, action_fixture,
+            action_fixture_identity, emit_samples, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for columns in [1, 2, 3, 5, 6] {
+                let mut fixture_signature = StableSignature::new(
+                    0x435F_524F_4F54_4752,
+                    "track-c-root-grid-input",
+                    fixture.values.len(),
+                );
+                fixture_signature.number(action_fixture_identity(&fixture.values));
+                fixture_signature.number(columns as u64);
+                let fixture_signature = fixture_signature.finish();
+                for cold in [true, false] {
+                    let cold_type = if cold {
+                        "geometry_cold_warm_fonts"
+                    } else {
+                        "geometry_warm_warm_fonts"
+                    };
+                    let samples = measure_owner(
+                        || {
+                            track_c_prepare_root_grid_state(
+                                workspace.root(),
+                                &fixture.values,
+                                columns,
+                                cold,
+                            )
+                        },
+                        |state| {
+                            let frame = state.frame_index;
+                            state.frame_index += 1;
+                            run_root_list_frame(
+                                &state.ctx,
+                                &mut state.app,
+                                frame,
+                                960.0,
+                                640.0,
+                                Vec::new(),
+                            )
+                        },
+                        |state, _frame_output| track_c_validate_root_grid_state(state),
+                    );
+                    emit_samples(
+                        ReportMetadata {
+                            owner: "egui_Context_run+LauncherApp::render_root_frame",
+                            fixture_name: "root_grid_action_fixture",
+                            fixture_signature,
+                            item_count: *count,
+                            viewport: "960x640",
+                            scale_milli: 1_000,
+                            font_state: "warm_egui_font_atlas",
+                            settings: match columns {
+                                1 => "grid_cols_1_default_style",
+                                2 => "grid_cols_2_default_style",
+                                3 => "grid_cols_3_default_style",
+                                5 => "grid_cols_5_default_style",
+                                6 => "grid_cols_6_default_style",
+                                _ => unreachable!("the owner iterates supported grid columns"),
+                            },
+                            cold_type,
+                            mode,
+                        },
+                        &samples,
+                    );
+                }
+            }
+        }
+        drop(workspace);
+    }
+
+    struct TrackCRootQueryState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        source_actions: Vec<Action>,
+        expected_actions: Vec<Action>,
+        query_suffix: &'static str,
+        expected_query: String,
+        expected_provider_revision: u64,
+        expected_catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
+        generation_before_search: u64,
+        available_width: f32,
+        eager_outer: egui::Rect,
+        eager: EagerRootListLayout,
+        style: egui::Style,
+        geometry_before: RootListGeometryObservation,
+        frame_index: usize,
+        invocation_id: u64,
+        armed_revision: Option<u64>,
+    }
+
+    fn track_c_expected_root_query_actions(actions: &[Action], term: &str) -> Vec<Action> {
+        let term = term.to_lowercase();
+        actions
+            .iter()
+            .filter(|action| {
+                action.label.to_lowercase().contains(&term)
+                    || action.desc.to_lowercase().contains(&term)
+                    || action.action.to_lowercase().contains(&term)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn track_c_prepare_root_query_state(
+        root: &std::path::Path,
+        actions: &[Action],
+    ) -> TrackCRootQueryState {
+        const QUERY_SUFFIX: &str = "00009";
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        // `default_folders()` supplies path entries when the isolated workspace
+        // has no folders file. Clear those constructor defaults so this owner
+        // exercises only the synthetic action catalog and no host paths.
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.query = "app ".into();
+        app.match_exact = true;
+        app.fuzzy_weight = 0.0;
+        app.usage.clear();
+        app.update_action_cache();
+        app.search();
+        assert_eq!(
+            app.results, actions,
+            "the setup query seeds the full catalog"
+        );
+        app.selected = None;
+        focus_launcher_query(&ctx, &mut app);
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert!(
+            ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))),
+            "the production launcher query TextEdit owns input before measurement"
+        );
+        set_query_cursor(&ctx, app.query.chars().count(), app.query.chars().count());
+
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real scaled root UI records its available width");
+        let expected_query = format!("app {QUERY_SUFFIX}");
+        let expected_actions = track_c_expected_root_query_actions(actions, QUERY_SUFFIX);
+        assert!(!expected_actions.is_empty());
+        assert!(app.match_exact && app.fuzzy_weight == 0.0);
+        assert!(app.usage.is_empty());
+        assert!(app.folder_aliases_lc.is_empty() && app.bookmark_aliases_lc.is_empty());
+        let expected_provider_revision = app.plugins.search_generation();
+        let expected_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            app.last_search_provider_revision, expected_provider_revision,
+            "the inert provider snapshot is current before the query event"
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(expected_catalog_versions)
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert!(app.last_results_valid);
+
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let (eager_outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            &expected_actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        let generation_before_search = app.root_list_geometry.result_generation;
+        let geometry_before = app.root_list_geometry.test_observation();
+        assert!(
+            geometry_before.rebuild_count > 0,
+            "setup settles real root geometry"
+        );
+        crate::performance::track_c::reset();
+        TrackCRootQueryState {
+            app,
+            ctx,
+            source_actions: actions.to_vec(),
+            expected_actions,
+            query_suffix: QUERY_SUFFIX,
+            expected_query,
+            expected_provider_revision,
+            expected_catalog_versions,
+            generation_before_search,
+            available_width,
+            eager_outer,
+            eager,
+            style,
+            geometry_before,
+            frame_index: 9,
+            invocation_id: 0x4350_435F_5152_0001,
+            armed_revision: None,
+        }
+    }
+
+    fn track_c_run_root_query_owner(state: &mut TrackCRootQueryState) -> egui::FullOutput {
+        state.armed_revision = Some(arm_track_c_frame_sample(
+            &mut state.app,
+            state.invocation_id,
+        ));
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        run_root_list_frame(
+            &state.ctx,
+            &mut state.app,
+            frame,
+            960.0,
+            640.0,
+            vec![egui::Event::Text(state.query_suffix.to_owned())],
+        )
+    }
+
+    fn track_c_validate_root_query_frame(
+        state: &TrackCRootQueryState,
+        _output: &egui::FullOutput,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::{OwnerObservation, StableSignature};
+
+        let app = &state.app;
+        assert_eq!(app.query, state.expected_query);
+        assert_eq!(app.last_search_query, state.expected_query);
+        assert_eq!(app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in
+            app.results.iter().zip(&state.expected_actions).enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "query result {index} label");
+            assert_eq!(
+                actual.desc, expected.desc,
+                "query result {index} description"
+            );
+            assert_eq!(
+                actual.action, expected.action,
+                "query result {index} action id"
+            );
+            assert_eq!(actual.args, expected.args, "query result {index} arguments");
+        }
+        assert_eq!(
+            app.results,
+            track_c_expected_root_query_actions(&state.source_actions, state.query_suffix,)
+        );
+        assert!(
+            app.last_results_valid,
+            "the query result is accepted and current"
+        );
+        assert!(!app.last_search_pending);
+        assert!(app.pending_query.is_none() && !app.background_query_refresh_pending);
+        assert_eq!(
+            app.selected, None,
+            "replacing results clears the old selection"
+        );
+        assert_eq!(
+            app.last_search_provider_revision,
+            state.expected_provider_revision
+        );
+        assert_eq!(
+            app.plugins.search_generation(),
+            state.expected_provider_revision
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(state.expected_catalog_versions)
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            crate::radial::dynamic::MutableResultCatalogVersions::current(),
+            state.expected_catalog_versions,
+            "the controlled owner leaves result-provider catalogs unchanged"
+        );
+        assert_eq!(
+            app.root_list_geometry.result_generation,
+            state.generation_before_search.wrapping_add(1),
+            "the query replacement publishes exactly one new result generation"
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            "actual query-to-root frame",
+        );
+        let available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the actual root UI records its query-frame width");
+        assert!((available_width - state.available_width).abs() <= 0.01);
+        let after = app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.geometry_before.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.geometry_before.measured_rows);
+        assert_eq!(
+            rebuilds, 1,
+            "the accepted query rebuilds its result geometry once"
+        );
+        assert_eq!(measured_rows, state.expected_actions.len() as u64);
+
+        let rows = &app.test_root_rendered_rows;
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert!(!rows.is_empty(), "the current query paints a root viewport");
+        assert!(rows.len() <= 64, "query viewport paint remains bounded");
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        let (inner_rect, content_size, offset) = app
+            .test_root_scroll_area_extent
+            .expect("the real root ScrollArea records its extent");
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the real root ScrollArea records its viewport");
+        let content_origin = inner_rect.min - offset;
+        let visible_start = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.bottom() - state.eager_outer.top() <= viewport.min.y
+        });
+        let visible_end = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.top() - state.eager_outer.top() < viewport.max.y
+        });
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(state.eager.rows.len()))
+            .collect::<Vec<_>>();
+        let actual_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(actual_indices, expected_indices);
+        for ((index, action_id), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager = state.eager.rows[*index];
+            let expected = egui::Rect::from_min_size(
+                content_origin + (eager.min - state.eager_outer.min),
+                eager.size(),
+            );
+            assert!(
+                rect.min.distance(expected.min) <= 1.0 && rect.max.distance(expected.max) <= 1.0,
+                "query frame row {index} differs from the independent eager layout"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(viewport.intersects(*rect));
+            }
+        }
+        let armed_revision = state
+            .armed_revision
+            .expect("the production root query owner arms its visibility revision");
+        assert_eq!(app.visibility_revision.current(), armed_revision);
+        assert_eq!(
+            app.visibility_revision.invocation_id(),
+            Some(state.invocation_id)
+        );
+
+        let mut viewport_signature = StableSignature::new(
+            0x435F_5155_4552_5956,
+            "track-c-root-query-visible-viewport",
+            rows.len(),
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            viewport_signature.bytes(action_id.as_bytes());
+            viewport_signature.bytes(format!("{id:?}").as_bytes());
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+        let structural_signature = {
+            let mut structure = StableSignature::new(
+                0x435F_5155_4552_5953,
+                "track-c-root-query-complete-results",
+                app.results.len(),
+            );
+            structure.number(
+                crate::performance::track_c_workloads::action_fixture_identity(&app.results),
+            );
+            structure.bytes(app.query.as_bytes());
+            structure.number(app.selected.map_or(u64::MAX, |value| value as u64));
+            structure.number(app.last_results_valid as u64);
+            structure.number(app.last_search_pending as u64);
+            structure.finish()
+        };
+        let versions = state.expected_catalog_versions;
+        let mut output = StableSignature::new(
+            0x435F_5155_4552_594F,
+            "track-c-root-query-usable-frame-state",
+            rows.len(),
+        );
+        output.number(structural_signature);
+        output.number(viewport_receipt);
+        output.number(app.root_list_geometry.result_generation);
+        output.number(app.last_search_provider_revision);
+        output.number(versions.clipboard);
+        output.number(versions.todo);
+        output.number(versions.notes);
+        let output_identity = output.finish();
+
+        let metrics = crate::performance::track_c::snapshot();
+        let metric = |phase| {
+            metrics
+                .iter()
+                .find(|(candidate, _)| *candidate == phase)
+                .expect("Track C phase has a fixed slot")
+                .1
+        };
+        let (candidates_scored, local_clones, moved_results) = if crate::performance::enabled() {
+            let first_frame = metric(crate::performance::track_c::Phase::HotkeyFirstUsableFrame);
+            assert_eq!(first_frame.calls, 1);
+            assert_eq!(first_frame.completed, 1);
+            let scoring = metric(crate::performance::track_c::Phase::SearchScoreAndCloneHits);
+            assert_eq!(scoring.calls, 1);
+            let move_results = metric(crate::performance::track_c::Phase::SearchMoveResults);
+            assert_eq!(move_results.calls, 1);
+            let geometry = metric(crate::performance::track_c::Phase::RootGeometryCold);
+            assert_eq!(geometry.calls, 1);
+            (
+                scoring.candidates_scored,
+                scoring.action_clones,
+                move_results.work_units,
+            )
+        } else {
+            (
+                state.source_actions.len() as u64,
+                state.expected_actions.len() as u64,
+                state.expected_actions.len() as u64,
+            )
+        };
+        assert_eq!(candidates_scored, state.source_actions.len() as u64);
+        assert_eq!(local_clones, state.expected_actions.len() as u64);
+        assert_eq!(moved_results, state.expected_actions.len() as u64);
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: vec![
+                state.generation_before_search,
+                app.root_list_geometry.result_generation,
+                app.last_search_provider_revision,
+                versions.clipboard,
+                versions.todo,
+                versions.notes,
+                app.last_search_result_catalog_versions_stable as u64,
+            ],
+            viewport_receipt: Some(viewport_receipt),
+            work_units: candidates_scored,
+            work_counters: vec![
+                state.source_actions.len() as u64,
+                candidates_scored,
+                local_clones,
+                moved_results,
+                rebuilds,
+                measured_rows,
+                rows.len() as u64,
+            ],
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_root_query_reaches_current_usable_cpu_frame() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let mut state = track_c_prepare_root_query_state(workspace.root(), &fixture.values);
+        let _output = track_c_run_root_query_owner(&mut state);
+        let _ = track_c_validate_root_query_frame(&state, &_output);
+        drop(state);
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C end-to-end query-to-current CPU root frame owner"]
+    fn track_c_benchmark_root_query_to_usable_cpu_frame() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, StableSignature, TrackCWorkspace, action_fixture,
+            action_fixture_identity, emit_samples, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            let mut fixture_signature = StableSignature::new(
+                0x435F_5155_4552_5949,
+                "track-c-root-query-input",
+                fixture.values.len(),
+            );
+            fixture_signature.number(action_fixture_identity(&fixture.values));
+            fixture_signature.bytes(b"app 00009");
+            fixture_signature.number(1); // exact matching
+            fixture_signature.number(0); // no aliases or usage weights
+            let fixture_signature = fixture_signature.finish();
+            let samples = measure_owner(
+                || track_c_prepare_root_query_state(workspace.root(), &fixture.values),
+                track_c_run_root_query_owner,
+                |state, output| track_c_validate_root_query_frame(state, output),
+            );
+            emit_samples(
+                ReportMetadata {
+                    owner: "query_event+egui_Context_run+LauncherApp::render_root_frame",
+                    fixture_name: "root_query_action_fixture",
+                    fixture_signature,
+                    item_count: *count,
+                    viewport: "960x640",
+                    scale_milli: 1_000,
+                    font_state: "warm_egui_font_atlas",
+                    settings: "app_prefix_exact_match_default_list",
+                    cold_type: "fresh_query_geometry_cold_warm_fonts",
+                    mode,
+                },
+                &samples,
+            );
+        }
+        drop(workspace);
     }
 
     #[test]

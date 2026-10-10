@@ -11,6 +11,8 @@ struct EventEnvelope {
     metadata: Option<(EventClass, EventOrigin)>,
     depth: Option<Arc<AtomicUsize>>,
     pending: bool,
+    #[cfg(test)]
+    age_recorder: Option<Arc<std::sync::Mutex<EventAgeRecorderState>>>,
 }
 
 impl EventEnvelope {
@@ -19,6 +21,7 @@ impl EventEnvelope {
         origin: EventOrigin,
         observe: bool,
         depth: Option<Arc<AtomicUsize>>,
+        #[cfg(test)] age_recorder: Option<Arc<std::sync::Mutex<EventAgeRecorderState>>>,
     ) -> Self {
         Self {
             metadata: observe.then(|| (class_of(&event), origin)),
@@ -26,6 +29,8 @@ impl EventEnvelope {
             enqueued_at: observe.then(Instant::now),
             depth,
             pending: false,
+            #[cfg(test)]
+            age_recorder,
         }
     }
 
@@ -69,6 +74,10 @@ impl EventEnvelope {
             let age = enqueued_at.elapsed();
             track_c::record_sample_if(true, Phase::EventEnqueueAge, 1, age, Outcome::Completed);
             track_c::record_event_dequeue_if(true, class, origin, age, false);
+            #[cfg(test)]
+            if let Some(recorder) = &self.age_recorder {
+                EventAgeRecorder::record_delivered(recorder, class, origin, age);
+            }
         }
     }
 
@@ -77,6 +86,10 @@ impl EventEnvelope {
             let age = enqueued_at.elapsed();
             track_c::record_sample_if(true, Phase::EventEnqueueAge, 1, age, Outcome::Abandoned);
             track_c::record_event_dequeue_if(true, class, origin, age, true);
+            #[cfg(test)]
+            if let Some(recorder) = &self.age_recorder {
+                EventAgeRecorder::record_abandoned(recorder);
+            }
         }
     }
 
@@ -155,6 +168,8 @@ pub(super) struct EventSender {
     depth: Option<Arc<AtomicUsize>>,
     origin: EventOrigin,
     observe: bool,
+    #[cfg(test)]
+    age_recorder: Option<Arc<std::sync::Mutex<EventAgeRecorderState>>>,
 }
 
 impl EventSender {
@@ -164,6 +179,8 @@ impl EventSender {
             depth: self.depth.clone(),
             origin,
             observe: self.observe,
+            #[cfg(test)]
+            age_recorder: self.age_recorder.clone(),
         }
     }
 
@@ -177,7 +194,14 @@ impl EventSender {
         origin: EventOrigin,
     ) -> Result<(), SendError<WatchEvent>> {
         let observing = self.observe;
-        let mut envelope = EventEnvelope::new(event, origin, observing, self.depth.clone());
+        let mut envelope = EventEnvelope::new(
+            event,
+            origin,
+            observing,
+            self.depth.clone(),
+            #[cfg(test)]
+            self.age_recorder.clone(),
+        );
         let metadata = envelope.metadata;
         if let Some(depth) = &self.depth {
             depth.fetch_add(1, Ordering::AcqRel);
@@ -185,6 +209,10 @@ impl EventSender {
         }
         match self.tx.send(envelope) {
             Ok(()) => {
+                #[cfg(test)]
+                if let Some(recorder) = &self.age_recorder {
+                    EventAgeRecorder::record_successful_send(recorder);
+                }
                 if let Some((class, origin)) = metadata {
                     track_c::record_event_enqueue_if(observing, class, origin);
                 }
@@ -257,6 +285,17 @@ pub(super) fn channel() -> (EventSender, EventReceiver) {
 }
 
 pub(super) fn channel_with_observation(observe: bool) -> (EventSender, EventReceiver) {
+    channel_inner(
+        observe,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn channel_inner(
+    observe: bool,
+    #[cfg(test)] age_recorder: Option<Arc<std::sync::Mutex<EventAgeRecorderState>>>,
+) -> (EventSender, EventReceiver) {
     let (tx, rx) = mpsc::channel();
     let depth = observe.then(|| Arc::new(AtomicUsize::new(0)));
     (
@@ -265,9 +304,128 @@ pub(super) fn channel_with_observation(observe: bool) -> (EventSender, EventRece
             depth: depth.clone(),
             origin: EventOrigin::Gui,
             observe,
+            #[cfg(test)]
+            age_recorder: age_recorder.clone(),
         },
         EventReceiver { rx, depth },
     )
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct EventAgeSample {
+    pub age_nanos: u64,
+    pub class: EventClass,
+    pub origin: EventOrigin,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct EventAgeSnapshot {
+    pub delivered: Vec<EventAgeSample>,
+    pub overflow: usize,
+    pub abandoned: usize,
+}
+
+#[cfg(test)]
+impl EventAgeSnapshot {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            delivered: Vec::with_capacity(capacity),
+            overflow: 0,
+            abandoned: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct EventAgeRecorderState {
+    capacity: usize,
+    successful_sends: usize,
+    snapshot: EventAgeSnapshot,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(super) struct EventAgeRecorder {
+    state: Arc<std::sync::Mutex<EventAgeRecorderState>>,
+}
+
+#[cfg(test)]
+impl EventAgeRecorder {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            state: Arc::new(std::sync::Mutex::new(EventAgeRecorderState {
+                capacity,
+                successful_sends: 0,
+                snapshot: EventAgeSnapshot::with_capacity(capacity),
+            })),
+        }
+    }
+
+    fn record_successful_send(state: &Arc<std::sync::Mutex<EventAgeRecorderState>>) {
+        if let Ok(mut state) = state.lock() {
+            state.successful_sends = state.successful_sends.saturating_add(1);
+        }
+    }
+
+    fn record_delivered(
+        state: &Arc<std::sync::Mutex<EventAgeRecorderState>>,
+        class: EventClass,
+        origin: EventOrigin,
+        age: std::time::Duration,
+    ) {
+        if let Ok(mut state) = state.lock() {
+            if state.snapshot.delivered.len() == state.capacity {
+                state.snapshot.overflow = state.snapshot.overflow.saturating_add(1);
+            } else {
+                state.snapshot.delivered.push(EventAgeSample {
+                    age_nanos: age.as_nanos().min(u64::MAX as u128) as u64,
+                    class,
+                    origin,
+                });
+            }
+        }
+    }
+
+    fn record_abandoned(state: &Arc<std::sync::Mutex<EventAgeRecorderState>>) {
+        if let Ok(mut state) = state.lock() {
+            state.snapshot.abandoned = state.snapshot.abandoned.saturating_add(1);
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> EventAgeSnapshot {
+        self.state
+            .lock()
+            .map(|state| state.snapshot.clone())
+            .unwrap_or_default()
+    }
+
+    pub(super) fn reset(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.successful_sends = 0;
+            state.snapshot.delivered.clear();
+            state.snapshot.overflow = 0;
+            state.snapshot.abandoned = 0;
+        }
+    }
+
+    pub(super) fn successful_sends(&self) -> usize {
+        self.state
+            .lock()
+            .map(|state| state.successful_sends)
+            .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+pub(super) fn channel_with_test_age_recorder(
+    capacity: usize,
+) -> (EventSender, EventReceiver, EventAgeRecorder) {
+    let recorder = EventAgeRecorder::new(capacity);
+    let (sender, receiver) = channel_inner(true, Some(Arc::clone(&recorder.state)));
+    (sender, receiver, recorder)
 }
 
 #[cfg(test)]
@@ -334,6 +492,7 @@ mod tests {
             EventOrigin::RadialProvider,
             true,
             None,
+            None,
         );
         assert_eq!(
             envelope.metadata,
@@ -374,5 +533,68 @@ mod tests {
         let delivery = rx.try_recv_for_dispatch().unwrap();
         assert!(delivery._handler_timer.is_none());
         assert_eq!(rx.queued_depth(), None);
+    }
+
+    #[test]
+    fn track_c_event_age_recorder_captures_only_successful_bounded_dequeues() {
+        let (tx, rx, recorder) = super::channel_with_test_age_recorder(2);
+        tx.with_origin(EventOrigin::FileWatcher)
+            .send(WatchEvent::Actions)
+            .unwrap();
+        tx.with_origin(EventOrigin::IndexCoordinator)
+            .send(WatchEvent::IndexReady)
+            .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(WatchEvent::Actions)));
+        assert!(matches!(rx.try_recv_for_dispatch(), Ok(_)));
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.delivered.len(), 2);
+        assert_eq!(snapshot.overflow, 0);
+        assert_eq!(snapshot.abandoned, 0);
+        assert_eq!(snapshot.delivered[0].class, EventClass::FileReload);
+        assert_eq!(snapshot.delivered[0].origin, EventOrigin::FileWatcher);
+        assert_eq!(snapshot.delivered[1].class, EventClass::IndexCompletion);
+        assert_eq!(snapshot.delivered[1].origin, EventOrigin::IndexCoordinator);
+
+        recorder.reset();
+        tx.with_origin(EventOrigin::Gui)
+            .send(WatchEvent::Actions)
+            .unwrap();
+        tx.with_origin(EventOrigin::Gui)
+            .send(WatchEvent::Folders)
+            .unwrap();
+        tx.with_origin(EventOrigin::Gui)
+            .send(WatchEvent::Bookmarks)
+            .unwrap();
+        assert!(matches!(rx.try_recv(), Ok(_)));
+        assert!(matches!(rx.try_recv(), Ok(_)));
+        assert!(matches!(rx.try_recv(), Ok(_)));
+        let snapshot = recorder.snapshot();
+        assert_eq!(snapshot.delivered.len(), 2);
+        assert_eq!(snapshot.overflow, 1, "overflow fails a benchmark receipt");
+        assert_eq!(snapshot.abandoned, 0);
+    }
+
+    #[test]
+    fn track_c_event_age_recorder_acknowledges_only_committed_sends() {
+        let (tx, rx, recorder) = super::channel_with_test_age_recorder(2);
+        assert_eq!(recorder.successful_sends(), 0);
+        tx.send(WatchEvent::Actions).unwrap();
+        assert_eq!(recorder.successful_sends(), 1);
+        drop(rx);
+        assert!(tx.send(WatchEvent::Folders).is_err());
+        assert_eq!(recorder.successful_sends(), 1);
+    }
+
+    #[test]
+    fn track_c_event_age_recorder_excludes_abandoned_envelopes() {
+        let (tx, rx, recorder) = super::channel_with_test_age_recorder(2);
+        tx.with_origin(EventOrigin::Dashboard)
+            .send(WatchEvent::Actions)
+            .unwrap();
+        drop(rx);
+        let snapshot = recorder.snapshot();
+        assert!(snapshot.delivered.is_empty());
+        assert_eq!(snapshot.overflow, 0);
+        assert_eq!(snapshot.abandoned, 1);
     }
 }

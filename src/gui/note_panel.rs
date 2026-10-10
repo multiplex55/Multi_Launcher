@@ -4707,6 +4707,585 @@ mod tests {
         signature.finish()
     }
 
+    // Frozen test-local copy of the eager Track C relationship oracle. Keep
+    // this independent from `backlink_rows_for_note` so a later fused pass
+    // cannot silently become its own expected result.
+    fn track_c_eager_fenced_content(content: &str) -> String {
+        let mut output = String::new();
+        let mut in_fence = false;
+        for line in content.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                output.push('\n');
+            } else if !in_fence {
+                output.push_str(line);
+                output.push('\n');
+            } else {
+                output.push('\n');
+            }
+        }
+        output
+    }
+
+    fn track_c_eager_needles(current: &Note) -> Vec<(String, String)> {
+        let mut needles = vec![
+            (format!("[[{}]]", current.title), "wiki title".to_string()),
+            (format!("[[{}]]", current.slug), "wiki slug".to_string()),
+            (
+                format!("link://note/{}", current.slug),
+                "link id".to_string(),
+            ),
+            (
+                format!("@note:{}", current.slug),
+                "note mention".to_string(),
+            ),
+        ];
+        if let Some(alias) = current
+            .alias
+            .as_deref()
+            .filter(|alias| !alias.trim().is_empty())
+        {
+            needles.push((format!("[[{}]]", alias.trim()), "wiki alias".to_string()));
+        }
+        needles.sort();
+        needles.dedup();
+        needles
+    }
+
+    fn track_c_eager_snippet(content: &str, needle: &str) -> String {
+        const WINDOW: usize = 44;
+        let compact = content.replace('\n', " ");
+        if compact.is_empty() {
+            return String::new();
+        }
+        let lower = compact.to_lowercase();
+        let needle_lower = needle.to_lowercase();
+        if let Some(position) = lower.find(&needle_lower) {
+            let start = position.saturating_sub(WINDOW);
+            let end = (position + needle_lower.len() + WINDOW).min(compact.len());
+            let mut output = compact[start..end].trim().to_string();
+            if start > 0 {
+                output = format!("…{output}");
+            }
+            if end < compact.len() {
+                output.push('…');
+            }
+            output
+        } else {
+            compact.chars().take(90).collect()
+        }
+    }
+
+    fn track_c_eager_note_rows(
+        current: &Note,
+        tab: BacklinkTab,
+        todos: &[crate::plugins::todo::TodoEntry],
+        notes: &[Note],
+    ) -> Vec<BacklinkRow> {
+        use crate::common::entity_ref::EntityKind;
+
+        let mut rows = Vec::new();
+        let needles = track_c_eager_needles(current);
+        let current_searchable = track_c_eager_fenced_content(&current.content);
+        for todo in todos {
+            let matched = todo
+                .entity_refs
+                .iter()
+                .any(|reference| reference.kind == EntityKind::Note && reference.id == current.slug)
+                .then(|| {
+                    (
+                        format!("@note:{}", current.slug),
+                        "todo linked to note".to_string(),
+                    )
+                })
+                .or_else(|| {
+                    needles
+                        .iter()
+                        .find(|(needle, _)| todo.text.contains(needle))
+                        .cloned()
+                });
+            let current_note_mentions_todo = !todo.id.is_empty()
+                && (current_searchable.contains(&format!("@todo:{}", todo.id))
+                    || current.entity_refs.iter().any(|reference| {
+                        reference.kind == EntityKind::Todo && reference.id == todo.id
+                    }));
+            let matched = matched.or_else(|| {
+                current_note_mentions_todo.then(|| {
+                    (
+                        format!("@todo:{}", todo.id),
+                        "note mentions todo".to_string(),
+                    )
+                })
+            });
+            if let Some((needle, reason)) = matched
+                && matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions)
+            {
+                rows.push(BacklinkRow {
+                    title: todo.text.clone(),
+                    type_badge: "Todo".into(),
+                    updated: "n/a".into(),
+                    snippet: track_c_eager_snippet(&todo.text, &needle),
+                    reason,
+                    note_slug: None,
+                    todo_id: Some(todo.id.clone()),
+                });
+            }
+        }
+
+        for note in notes {
+            if note.slug == current.slug {
+                continue;
+            }
+            let searchable = track_c_eager_fenced_content(&note.content);
+            let matched = note
+                .links
+                .iter()
+                .any(|link| link == &current.slug)
+                .then(|| (format!("[[{}", current.slug), "wiki link".into()))
+                .or_else(|| {
+                    note.entity_refs
+                        .iter()
+                        .any(|reference| {
+                            reference.kind == EntityKind::Note && reference.id == current.slug
+                        })
+                        .then(|| {
+                            (
+                                format!("@note:{}", current.slug),
+                                "entity reference".to_string(),
+                            )
+                        })
+                })
+                .or_else(|| {
+                    needles
+                        .iter()
+                        .find(|(needle, _)| searchable.contains(needle))
+                        .cloned()
+                });
+            if let Some((needle, reason)) = matched {
+                let is_mention = reason.contains("mention") || reason.contains("entity");
+                if (tab == BacklinkTab::RelatedNotes && !is_mention)
+                    || (tab == BacklinkTab::Mentions && is_mention)
+                {
+                    let updated = std::fs::metadata(&note.path)
+                        .ok()
+                        .and_then(|metadata| metadata.modified().ok())
+                        .map(|modified| {
+                            chrono::DateTime::<chrono::Local>::from(modified)
+                                .format("%Y-%m-%d %H:%M")
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| "unknown".to_string());
+                    rows.push(BacklinkRow {
+                        title: note.title.clone(),
+                        type_badge: "Note".into(),
+                        updated,
+                        snippet: track_c_eager_snippet(&searchable, &needle),
+                        reason,
+                        note_slug: Some(note.slug.clone()),
+                        todo_id: None,
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    fn track_c_backlink_rows_identity(
+        rows: &[Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        )>],
+        labels: &HashMap<String, String>,
+    ) -> u64 {
+        let mut signature = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_4E4F_5445,
+            "track-c-backlink-output",
+            rows.iter().map(Vec::len).sum::<usize>(),
+        );
+        let string = |signature: &mut crate::performance::track_c_workloads::StableSignature,
+                      value: &str| {
+            signature.number(value.len() as u64);
+            signature.bytes(value.as_bytes());
+        };
+        for category in rows {
+            signature.number(category.len() as u64);
+            for row in category {
+                string(&mut signature, &row.0);
+                string(&mut signature, &row.1);
+                string(&mut signature, &row.2);
+                string(&mut signature, &row.3);
+                string(&mut signature, &row.4);
+                for value in [&row.5, &row.6] {
+                    if let Some(value) = value {
+                        signature.number(1);
+                        string(&mut signature, value);
+                    } else {
+                        signature.number(0);
+                    }
+                }
+            }
+        }
+        let mut sorted_labels = labels.iter().collect::<Vec<_>>();
+        sorted_labels.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        for (id, label) in sorted_labels {
+            string(&mut signature, id);
+            string(&mut signature, label);
+        }
+        signature.finish()
+    }
+
+    type TrackCBacklinkRowIdentity = (
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+
+    struct TrackCNoteOwnerState {
+        context: egui::Context,
+        panel: NotePanel,
+        _cache_guard: crate::plugins::note::NoteCachePublicationGuard,
+        expected_rows: Vec<Vec<TrackCBacklinkRowIdentity>>,
+        expected_labels: HashMap<String, String>,
+        expected_note_revision: u64,
+        expected_todo_revision: u64,
+    }
+
+    fn track_c_note_inputs(
+        count: usize,
+    ) -> (
+        crate::performance::workloads::Fixture<Note>,
+        Vec<crate::plugins::todo::TodoEntry>,
+    ) {
+        use crate::common::entity_ref::{EntityKind, EntityRef};
+        use crate::plugins::todo::TodoEntry;
+
+        let mut fixture = crate::performance::track_c_workloads::note_fixture(count);
+        let current_slug = "synthetic-note-00000";
+        if count > 1 {
+            let note = &mut fixture.values[1];
+            // Preserve the seeded multi-kilobyte body and place a real Unicode
+            // snippet inside the selected 44-byte window at valid byte
+            // boundaries. The known invalid-boundary case is separate below.
+            let prefix = format!("[[{current_slug}]]\n東京{}", "u".repeat(35));
+            note.content = format!("{prefix}\n{}", note.content);
+        }
+        if count > 2 {
+            let fenced_only = &mut fixture.values[2];
+            // This row contains the current-note mention needle only inside a
+            // fenced block. Keep wiki syntax out of this case: NoteCache
+            // intentionally resolves wiki links from raw content before the
+            // panel's prose/fence filtering boundary.
+            fenced_only
+                .content
+                .push_str(&format!("\n```text\n@note:{current_slug}\n```\n"));
+        }
+        fixture.summary.signature =
+            crate::performance::track_c_workloads::note_fixture_identity(&fixture.values);
+        let todos = (0..12)
+            .map(|index| {
+                let linked = index % 3 == 0;
+                TodoEntry {
+                    id: format!("todo-{index:02}"),
+                    text: if linked {
+                        format!("Synthetic task {index:02} for @note:{current_slug}")
+                    } else {
+                        format!("Synthetic unrelated task {index:02}")
+                    },
+                    done: index % 4 == 0,
+                    priority: (index % 5) as u8,
+                    tags: vec![format!("work-{:02}", index % 3)],
+                    entity_refs: linked
+                        .then(|| {
+                            vec![EntityRef::new(
+                                EntityKind::Note,
+                                current_slug,
+                                Some("Synthetic Unicode title 東京".into()),
+                            )]
+                        })
+                        .unwrap_or_default(),
+                }
+            })
+            .collect();
+        (fixture, todos)
+    }
+
+    fn track_c_note_and_todo_fixture_identity(
+        notes: &[Note],
+        todos: &[crate::plugins::todo::TodoEntry],
+    ) -> u64 {
+        use crate::common::entity_ref::EntityKind;
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_4E4F_5445,
+            "track-c-note-and-todo-relations",
+            notes.len().saturating_add(todos.len()),
+        );
+        signature.number(crate::performance::track_c_workloads::note_fixture_identity(notes));
+        signature.number(todos.len() as u64);
+        for todo in todos {
+            signature.number(todo.id.len() as u64);
+            signature.bytes(todo.id.as_bytes());
+            signature.number(todo.text.len() as u64);
+            signature.bytes(todo.text.as_bytes());
+            signature.number(todo.done as u64);
+            signature.number(todo.priority as u64);
+            signature.number(todo.tags.len() as u64);
+            for tag in &todo.tags {
+                signature.number(tag.len() as u64);
+                signature.bytes(tag.as_bytes());
+            }
+            signature.number(todo.entity_refs.len() as u64);
+            for reference in &todo.entity_refs {
+                signature.number(match reference.kind {
+                    EntityKind::Note => 0,
+                    EntityKind::Todo => 1,
+                    EntityKind::Event => 2,
+                });
+                signature.number(reference.id.len() as u64);
+                signature.bytes(reference.id.as_bytes());
+                if let Some(title) = &reference.title {
+                    signature.number(1);
+                    signature.number(title.len() as u64);
+                    signature.bytes(title.as_bytes());
+                } else {
+                    signature.number(0);
+                }
+            }
+        }
+        signature.finish()
+    }
+
+    fn track_c_make_note_owner_state(
+        notes: &[Note],
+        todos: &[crate::plugins::todo::TodoEntry],
+    ) -> TrackCNoteOwnerState {
+        let cache_guard = crate::plugins::note::publish_note_cache_for_test(notes.to_vec());
+        let (expected_note_revision, snapshot_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("synthetic note cache snapshot is healthy");
+        assert_eq!(snapshot_notes.len(), notes.len());
+        assert_eq!(
+            snapshot_notes
+                .iter()
+                .map(|note| &note.slug)
+                .collect::<Vec<_>>(),
+            notes.iter().map(|note| &note.slug).collect::<Vec<_>>(),
+            "cache publication retains the fixture's ordered note identities"
+        );
+        let mut panel = NotePanel::from_note(snapshot_notes[0].clone());
+        // Force one revision/settings-driven owner recompute regardless of
+        // whether this fixture happens to match a process's original cache.
+        panel.last_backlinks_enabled = None;
+        let expected_todo_revision = crate::plugins::todo::todo_version();
+        let current = &snapshot_notes[0];
+        let expected_rows = [
+            BacklinkTab::LinkedTodos,
+            BacklinkTab::RelatedNotes,
+            BacklinkTab::Mentions,
+        ]
+        .into_iter()
+        .map(|tab| {
+            backlink_rows_signature(&track_c_eager_note_rows(
+                current,
+                tab,
+                todos,
+                &snapshot_notes,
+            ))
+        })
+        .collect::<Vec<_>>();
+        let expected_labels = todos
+            .iter()
+            .filter(|todo| !todo.id.is_empty())
+            .map(|todo| (todo.id.clone(), todo.text.clone()))
+            .collect::<HashMap<_, _>>();
+        crate::performance::track_c::reset();
+        TrackCNoteOwnerState {
+            context: egui::Context::default(),
+            panel,
+            _cache_guard: cache_guard,
+            expected_rows,
+            expected_labels,
+            expected_note_revision,
+            expected_todo_revision,
+        }
+    }
+
+    fn track_c_validate_note_owner(
+        state: &TrackCNoteOwnerState,
+        require_metrics: bool,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c::{self, Phase};
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        let actual_rows = [
+            &state.panel.derived.backlink_rows_linked_todos,
+            &state.panel.derived.backlink_rows_related_notes,
+            &state.panel.derived.backlink_rows_mentions,
+        ]
+        .into_iter()
+        .map(|rows| backlink_rows_signature(rows))
+        .collect::<Vec<_>>();
+        assert_eq!(
+            actual_rows, state.expected_rows,
+            "all row fields/order match frozen eager reference"
+        );
+        assert_eq!(state.panel.derived.todo_label_map, state.expected_labels);
+        assert_eq!(state.panel.last_notes_version, state.expected_note_revision);
+        assert_eq!(state.panel.last_todo_revision, state.expected_todo_revision);
+
+        let structure = track_c_backlink_rows_identity(&actual_rows, &state.expected_labels);
+        let mut complete = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_4E4F_5445,
+            "track-c-note-complete-state",
+            3,
+        );
+        complete.number(structure);
+        complete.number(state.expected_note_revision);
+        complete.number(state.expected_todo_revision);
+        let refresh = track_c::snapshot()
+            .into_iter()
+            .find(|(phase, _)| *phase == Phase::NoteRelationshipRefresh)
+            .expect("note relationship phase is fixed-cardinality")
+            .1;
+        let mentions = track_c::snapshot()
+            .into_iter()
+            .find(|(phase, _)| *phase == Phase::NoteMentionsScan)
+            .expect("note mentions phase is fixed-cardinality")
+            .1;
+        if require_metrics {
+            assert_eq!(refresh.calls, 1, "actual heavy-refresh owner ran once");
+            assert_eq!(refresh.completed, 1);
+            assert_eq!(mentions.calls, 1);
+            assert_eq!(refresh.work_units, mentions.work_units.saturating_mul(3));
+        }
+        OwnerObservation {
+            output_identity: complete.finish(),
+            structural_signature: structure,
+            revision_receipts: vec![state.expected_note_revision, state.expected_todo_revision],
+            viewport_receipt: None,
+            work_units: refresh.work_units,
+            work_counters: vec![
+                refresh.calls,
+                refresh.work_units,
+                mentions.calls,
+                mentions.work_units,
+            ],
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_note_refresh_matches_frozen_full_rows_and_revisions() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let (fixture, todos) = track_c_note_inputs(100);
+        std::fs::write(
+            crate::plugins::todo::TODO_FILE,
+            serde_json::to_vec(&todos).expect("serialize synthetic todo data"),
+        )
+        .expect("write isolated todo data");
+        let mut state = track_c_make_note_owner_state(&fixture.values, &todos);
+        state
+            .panel
+            .maybe_refresh_heavy_derived(&state.context, true);
+        let observation = track_c_validate_note_owner(&state, false);
+        assert!(observation.output_identity != 0);
+        assert_eq!(observation.revision_receipts.len(), 2);
+        assert!(
+            state.expected_rows[1].iter().any(|row| {
+                row.5.as_deref() == Some("synthetic-note-00001") && row.3.contains("東京")
+            }),
+            "the real related-note snippet includes Unicode body text"
+        );
+        assert!(
+            state.expected_rows.iter().flatten().all(|row| {
+                row.5.as_deref() != Some("synthetic-note-00002")
+                    && row.5.as_deref() != Some("synthetic-note-00003")
+            }),
+            "fenced-only and unrelated rows remain excluded"
+        );
+        assert!(fixture.values[0].content.len() > 4_000);
+        assert!(fixture.values[28].content.len() > 32_000);
+        let fixture_signature = track_c_note_and_todo_fixture_identity(&fixture.values, &todos);
+        let mut changed_todos = todos.clone();
+        changed_todos[0].tags.push("changed-input-field".into());
+        assert_ne!(
+            fixture_signature,
+            track_c_note_and_todo_fixture_identity(&fixture.values, &changed_todos),
+            "the report identity includes complete todo inputs"
+        );
+        drop(state);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c_oracle_records_existing_utf8_snippet_boundary_panic() {
+        let content = format!("界{}@note:synthetic-note-00000", "a".repeat(43));
+        let result = std::panic::catch_unwind(|| {
+            extract_snippet_around(&content, "@note:synthetic-note-00000")
+        });
+        assert!(
+            result.is_err(),
+            "this input places WINDOW inside 界's UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C owner benchmark; isolated synthetic notes only"]
+    fn track_c_benchmark_note_panel_heavy_refresh_owner() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, TrackCWorkspace, emit_samples, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.note_sizes() {
+            let (fixture, todos) = track_c_note_inputs(*count);
+            std::fs::write(
+                crate::plugins::todo::TODO_FILE,
+                serde_json::to_vec(&todos).expect("serialize synthetic todo data"),
+            )
+            .expect("write isolated todo data");
+            let fixture_signature = track_c_note_and_todo_fixture_identity(&fixture.values, &todos);
+            let samples = measure_owner(
+                || track_c_make_note_owner_state(&fixture.values, &todos),
+                |state| {
+                    state
+                        .panel
+                        .maybe_refresh_heavy_derived(&state.context, true)
+                },
+                |state, ()| track_c_validate_note_owner(state, true),
+            );
+            emit_samples(
+                ReportMetadata {
+                    owner: "NotePanel::maybe_refresh_heavy_derived",
+                    fixture_name: "synthetic-note-and-todo-relations",
+                    fixture_signature,
+                    item_count: *count,
+                    viewport: "not-rendered",
+                    scale_milli: 1_000,
+                    font_state: "not-applicable",
+                    settings: "backlinks-enabled-inert",
+                    cold_type: "note-cache-revision-refresh",
+                    mode,
+                },
+                &samples,
+            );
+        }
+        drop(workspace);
+    }
+
     #[test]
     fn note_editor_timestamp_formats_milliseconds_exactly() {
         let offset = FixedOffset::east_opt(5 * 60 * 60 + 30 * 60).expect("valid fixed offset");

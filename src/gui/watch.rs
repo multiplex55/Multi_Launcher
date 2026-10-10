@@ -381,6 +381,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         mpsc::channel,
     };
+    static TRACK_C_EVENT_REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     use tempfile::tempdir;
 
     fn action_reload_payload(
@@ -644,6 +645,1666 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn track_c_watch_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        value: &str,
+    ) {
+        signature.number(value.len() as u64);
+        signature.bytes(value.as_bytes());
+    }
+
+    fn track_c_watch_normalize_indexed_path(root: &Path, value: &str) -> String {
+        let root = root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_lowercase();
+        let value = value.replace('\\', "/");
+        let folded = value.to_lowercase();
+        if folded == root {
+            return "@owned-index".into();
+        }
+        let Some(relative) = folded
+            .strip_prefix(&root)
+            .filter(|suffix| suffix.starts_with('/'))
+        else {
+            return value;
+        };
+        format!("@owned-index{relative}")
+    }
+
+    fn track_c_watch_signature_path_field(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        root: &Path,
+        value: &str,
+    ) {
+        track_c_watch_signature_string(
+            signature,
+            &track_c_watch_normalize_indexed_path(root, value),
+        );
+    }
+
+    fn track_c_expected_cached_search_entry(action: &crate::actions::Action) -> CachedSearchEntry {
+        CachedSearchEntry {
+            label_lc: action.label.to_lowercase(),
+            desc_lc: action.desc.to_lowercase(),
+            action_lc: action.action.to_lowercase(),
+        }
+    }
+
+    fn track_c_expected_filter_metadata(
+        action: &crate::actions::Action,
+    ) -> crate::common::query::ActionFilterMetadata {
+        let mut normalized_kind_candidates = Vec::new();
+        if !action.desc.trim().is_empty() {
+            normalized_kind_candidates.push(action.desc.trim().to_lowercase());
+        }
+        if let Some(prefix) = action.action.split(':').next()
+            && !prefix.trim().is_empty()
+        {
+            normalized_kind_candidates.push(prefix.trim().to_lowercase());
+        }
+        normalized_kind_candidates.sort_unstable();
+        normalized_kind_candidates.dedup();
+        crate::common::query::ActionFilterMetadata {
+            normalized_id: action.action.to_lowercase(),
+            normalized_kind_candidates,
+        }
+    }
+
+    fn track_c_watch_action_signature(root: &Path, actions: &[crate::actions::Action]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(0, "track-c-watch-actions", actions.len());
+        for action in actions {
+            track_c_watch_signature_string(&mut signature, &action.label);
+            track_c_watch_signature_path_field(&mut signature, root, &action.desc);
+            track_c_watch_signature_path_field(&mut signature, root, &action.action);
+            match action.args.as_deref() {
+                Some(args) => {
+                    signature.number(1);
+                    track_c_watch_signature_string(&mut signature, args);
+                }
+                None => signature.number(0),
+            }
+        }
+        signature.finish()
+    }
+
+    fn track_c_watch_projection_signature(app: &LauncherApp, root: &Path) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(0, "track-c-watch-projections", app.actions.len());
+        signature.number(track_c_watch_action_signature(root, app.actions.as_slice()));
+        signature.number(app.custom_len as u64);
+        signature.number(app.action_cache.len() as u64);
+        for cached in &app.action_cache {
+            track_c_watch_signature_string(&mut signature, &cached.label_lc);
+            track_c_watch_signature_path_field(&mut signature, root, &cached.desc_lc);
+            track_c_watch_signature_path_field(&mut signature, root, &cached.action_lc);
+        }
+        signature.number(app.action_filter_metadata.len() as u64);
+        for metadata in &app.action_filter_metadata {
+            track_c_watch_signature_path_field(&mut signature, root, &metadata.normalized_id);
+            signature.number(metadata.normalized_kind_candidates.len() as u64);
+            for candidate in &metadata.normalized_kind_candidates {
+                track_c_watch_signature_path_field(&mut signature, root, candidate);
+            }
+        }
+        let mut by_id = app.actions_by_id.iter().collect::<Vec<_>>();
+        by_id.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        signature.number(by_id.len() as u64);
+        for (id, action) in by_id {
+            track_c_watch_signature_path_field(&mut signature, root, id);
+            signature.number(track_c_watch_action_signature(
+                root,
+                std::slice::from_ref(action),
+            ));
+        }
+        signature.number(track_c_watch_action_signature(root, &app.results));
+        track_c_watch_signature_string(&mut signature, &app.query);
+        track_c_watch_signature_string(&mut signature, &app.last_search_query);
+        signature.number(app.last_results_valid as u64);
+        signature.number(app.last_search_pending as u64);
+        signature.number(app.background_query_refresh_pending as u64);
+        signature.number(app.last_search_result_catalog_versions_stable as u64);
+        match app.selected {
+            Some(selected) => {
+                signature.number(1);
+                signature.number(selected as u64);
+            }
+            None => signature.number(0),
+        }
+        signature.number(app.suggestions.len() as u64);
+        for suggestion in &app.suggestions {
+            track_c_watch_signature_string(&mut signature, suggestion);
+        }
+        signature.finish()
+    }
+
+    struct TrackCActionsOwnerState {
+        app: LauncherApp,
+        expected_actions: Vec<crate::actions::Action>,
+        indexed_tail: Vec<crate::actions::Action>,
+        index_root: PathBuf,
+        actions_path: PathBuf,
+        custom_len: usize,
+        actions_version_before: u64,
+    }
+
+    struct TrackCWatchQueueOwnerState {
+        // Field order ensures the app and its coordinator/registration drop
+        // before the global registry serialization guard is released.
+        owner: TrackCActionsOwnerState,
+        age_recorder: super::event_channel::EventAgeRecorder,
+        recorder_capacity: usize,
+        expected_actions_events: usize,
+        expected_index_ready_events: usize,
+        expected_recycle_events: usize,
+        expected_event_count: usize,
+        expected_metadata: Vec<(
+            crate::performance::track_c::EventClass,
+            crate::performance::track_c::EventOrigin,
+        )>,
+        _registry_guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    struct TrackCStaleIndexQueueOwnerState {
+        queue: TrackCWatchQueueOwnerState,
+        release_blocked_scan: Option<std::sync::mpsc::Sender<()>>,
+        blocked_generation: u64,
+    }
+
+    impl Drop for TrackCStaleIndexQueueOwnerState {
+        fn drop(&mut self) {
+            if let Some(release) = self.release_blocked_scan.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    struct TrackCWatchQueueSampleReceipt {
+        delivered: super::event_channel::EventAgeSnapshot,
+        drain: crate::performance::track_c::Snapshot,
+        handlers: Vec<crate::performance::track_c::EventSnapshot>,
+    }
+
+    struct TrackCActionsFixture {
+        // The owner apps are local to each sample and drop before this fixture
+        // drops its CWD/temp-directory guard.
+        _workspace: crate::performance::track_c_workloads::TrackCWorkspace,
+        index_root: PathBuf,
+        actions_path: PathBuf,
+        settings_path: PathBuf,
+        initial_custom: Vec<crate::actions::Action>,
+        replacement_custom: Vec<crate::actions::Action>,
+        expected_actions: Vec<crate::actions::Action>,
+        indexed_tail: Vec<crate::actions::Action>,
+        custom_len: usize,
+        fixture_signature: u64,
+    }
+
+    fn track_c_actions_fixture(total_count: usize) -> TrackCActionsFixture {
+        use crate::performance::track_c_workloads;
+
+        assert!(total_count >= 4);
+        let workspace = track_c_workloads::TrackCWorkspace::new();
+        let owner_root = workspace.root().join("actions-owner");
+        std::fs::create_dir_all(&owner_root).expect("create owned action fixture directory");
+        let index_root = owner_root.join("indexed");
+        let custom_len = total_count / 2;
+        let indexed_count = total_count - custom_len;
+        let index_fixture = track_c_workloads::index_tree(&index_root, indexed_count);
+        let indexed_tail = indexed_actions(&index_root, indexed_count);
+        assert_eq!(indexed_tail.len(), indexed_count);
+
+        let custom_fixture = track_c_workloads::action_fixture(custom_len);
+        let custom_fixture_signature =
+            track_c_workloads::action_fixture_identity(&custom_fixture.values);
+        let mut initial_custom = custom_fixture.values.clone();
+        let mut replacement_custom = custom_fixture.values;
+        // Deliberately collide one custom id with the first indexed id. The
+        // catalog remains custom-first and the independent id-only projection
+        // must therefore retain the later indexed winner.
+        initial_custom[0].action = indexed_tail[0].action.clone();
+        replacement_custom[0].action = indexed_tail[0].action.clone();
+        replacement_custom[0]
+            .desc
+            .push_str("; accepted external replacement");
+
+        let mut expected_actions = replacement_custom.clone();
+        expected_actions.extend(indexed_tail.iter().cloned());
+        let actions_path = owner_root.join("actions.json");
+        let settings_path = workspace.settings_path();
+        let canonical_index_root =
+            std::fs::canonicalize(&index_root).expect("canonicalize owned index fixture root");
+
+        let mut fixture =
+            track_c_workloads::StableSignature::new(0, "track-c-actions-watch-owner", total_count);
+        fixture.number(custom_fixture_signature);
+        fixture.number(index_fixture.signature);
+        fixture.number(track_c_watch_action_signature(
+            &canonical_index_root,
+            &initial_custom,
+        ));
+        fixture.number(track_c_watch_action_signature(
+            &canonical_index_root,
+            &replacement_custom,
+        ));
+        fixture.number(track_c_watch_action_signature(
+            &canonical_index_root,
+            &indexed_tail,
+        ));
+        fixture.number(custom_len as u64);
+        fixture.number(indexed_count as u64);
+        fixture.bytes(b"custom-first-index-tail-duplicate-id-fixed-json-payload");
+        fixture.bytes(b"query=app Synthetic action 00009;match_exact=true;plugins=inert");
+        fixture.bytes(
+            b"enabled-plugins=empty;folder-bookmark-aliases=empty;usage=empty;usage-weight=0;fuzzy-weight=1;toasts=off;dashboard=off;hotkeys=off",
+        );
+        let fixture_signature = fixture.finish();
+
+        TrackCActionsFixture {
+            _workspace: workspace,
+            index_root: canonical_index_root,
+            actions_path,
+            settings_path,
+            initial_custom,
+            replacement_custom,
+            expected_actions,
+            indexed_tail,
+            custom_len,
+            fixture_signature,
+        }
+    }
+
+    fn make_track_c_actions_owner_state(fixture: &TrackCActionsFixture) -> TrackCActionsOwnerState {
+        make_track_c_actions_owner_state_inner(fixture, None).0
+    }
+
+    fn make_track_c_actions_owner_state_with_recorder(
+        fixture: &TrackCActionsFixture,
+        recorder_capacity: usize,
+    ) -> (
+        TrackCActionsOwnerState,
+        super::event_channel::EventAgeRecorder,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let registry_guard = TRACK_C_EVENT_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (state, recorder) =
+            make_track_c_actions_owner_state_inner(fixture, Some(recorder_capacity));
+        (
+            state,
+            recorder.expect("observed queue setup creates its age recorder"),
+            registry_guard,
+        )
+    }
+
+    fn install_track_c_observed_channel(
+        app: &mut LauncherApp,
+        recorder_capacity: usize,
+    ) -> super::event_channel::EventAgeRecorder {
+        let (sender, receiver, recorder) =
+            super::event_channel::channel_with_test_age_recorder(recorder_capacity);
+        let registration = crate::gui::register_observed_event_sender(
+            sender.clone(),
+            ViewportWake::root(&app.egui_ctx),
+        );
+        let previous_registration = std::mem::replace(&mut app.event_sink, registration);
+        drop(previous_registration);
+        let previous_sender = std::mem::replace(&mut app.event_tx, sender);
+        let previous_receiver = std::mem::replace(&mut app.rx, receiver);
+        drop(previous_sender);
+        drop(previous_receiver);
+        recorder
+    }
+
+    #[test]
+    fn track_c_observed_channel_replaces_only_its_own_registry_sink() {
+        let _registry_guard = TRACK_C_EVENT_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fixture = track_c_actions_fixture(24);
+        let mut state = make_track_c_actions_owner_state(&fixture);
+        let (unrelated_tx, unrelated_rx) = channel();
+        let unrelated_registration = crate::gui::register_event_sender(unrelated_tx);
+        let old_owner_registration_id = state.app.event_sink.id;
+
+        let registry_snapshot = || {
+            let registry = crate::gui::APP_EVENT_REGISTRY
+                .lock()
+                .expect("lock app event registry for assertion");
+            let ids = registry
+                .sinks
+                .iter()
+                .map(|sink| sink.id)
+                .collect::<Vec<_>>();
+            (
+                ids,
+                registry.pending_before_owner.len(),
+                registry.owner_registered,
+            )
+        };
+        let (before_ids, before_pending, before_owner_registered) = registry_snapshot();
+        let mut expected_ids = before_ids
+            .into_iter()
+            .filter(|id| *id != old_owner_registration_id)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(expected_ids.contains(&unrelated_registration.id));
+
+        let _recorder = install_track_c_observed_channel(&mut state.app, 4);
+        let new_owner_registration_id = state.app.event_sink.id;
+        assert_ne!(new_owner_registration_id, old_owner_registration_id);
+        expected_ids.insert(new_owner_registration_id);
+        let (after_ids, after_pending, after_owner_registered) = registry_snapshot();
+        assert_eq!(
+            after_ids
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>(),
+            expected_ids,
+            "only the app's old registration is replaced"
+        );
+        assert_eq!(
+            after_pending, before_pending,
+            "pre-owner events are retained"
+        );
+        assert_eq!(
+            after_owner_registered, before_owner_registered,
+            "replacing a registered app does not reset owner history"
+        );
+
+        crate::gui::send_event(WatchEvent::IndexReady);
+        assert!(matches!(
+            unrelated_rx.try_recv(),
+            Ok(WatchEvent::IndexReady)
+        ));
+        state.app.process_watch_events();
+        assert!(state.app.rx.try_recv().is_err());
+        drop(unrelated_registration);
+        drop(state);
+        drop(fixture);
+    }
+
+    fn wait_for_track_c_successful_enqueue(
+        app: &LauncherApp,
+        recorder: &super::event_channel::EventAgeRecorder,
+        successful_sends: usize,
+        expected_depth: usize,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if recorder.successful_sends() >= successful_sends {
+                assert_eq!(
+                    app.rx.queued_depth(),
+                    Some(expected_depth),
+                    "the successful-send acknowledgment precedes queue-depth observation"
+                );
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "event send did not commit number {successful_sends}"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn make_track_c_watch_queue_owner_state(
+        fixture: &TrackCActionsFixture,
+        recorder_capacity: usize,
+        extra_actions_events: usize,
+        recycle_events: usize,
+    ) -> TrackCWatchQueueOwnerState {
+        let (owner, age_recorder, registry_guard) =
+            make_track_c_actions_owner_state_with_recorder(fixture, recorder_capacity);
+        let event_tx = owner.app.event_tx.clone();
+        for _ in 0..extra_actions_events {
+            event_tx
+                .with_origin(EventOrigin::FileWatcher)
+                .send(WatchEvent::Actions)
+                .expect("enqueue finite Actions burst");
+        }
+        for _ in 0..recycle_events {
+            event_tx
+                .with_origin(EventOrigin::Registry)
+                .send(WatchEvent::Recycle(Ok(())))
+                .expect("enqueue recycle completion receipt without invoking cleanup");
+        }
+
+        let expected_actions_events = extra_actions_events + 1;
+        let expected_event_count = expected_actions_events + recycle_events;
+        assert!(recorder_capacity >= expected_event_count);
+        assert_eq!(owner.app.rx.queued_depth(), Some(expected_event_count));
+        crate::performance::track_c::reset();
+
+        let mut expected_metadata = vec![
+            (
+                crate::performance::track_c::EventClass::FileReload,
+                EventOrigin::FileWatcher,
+            );
+            expected_actions_events
+        ];
+        expected_metadata.extend(std::iter::repeat_n(
+            (
+                crate::performance::track_c::EventClass::Clipboard,
+                EventOrigin::Registry,
+            ),
+            recycle_events,
+        ));
+
+        TrackCWatchQueueOwnerState {
+            owner,
+            age_recorder,
+            recorder_capacity,
+            expected_actions_events,
+            expected_index_ready_events: 0,
+            expected_recycle_events: recycle_events,
+            expected_event_count,
+            expected_metadata,
+            _registry_guard: registry_guard,
+        }
+    }
+
+    fn expected_track_c_watch_queue_metadata(
+        state: &TrackCWatchQueueOwnerState,
+    ) -> Vec<(
+        crate::performance::track_c::EventClass,
+        crate::performance::track_c::EventOrigin,
+    )> {
+        state.expected_metadata.clone()
+    }
+
+    fn make_track_c_stale_index_watch_queue_owner_state(
+        fixture: &TrackCActionsFixture,
+        recorder_capacity: usize,
+        extra_actions_events: usize,
+        recycle_events: usize,
+    ) -> TrackCStaleIndexQueueOwnerState {
+        use crate::indexer::coordinator::{IndexConfig, IndexCoordinator};
+
+        let mut queue = make_track_c_watch_queue_owner_state(fixture, recorder_capacity, 0, 0);
+        let (candidate_finished_tx, candidate_finished_rx) = channel();
+        let (replacement_started_tx, replacement_started_rx) = channel();
+        let (release_replacement_tx, release_replacement_rx) = channel();
+        let release_replacement_rx = Arc::new(Mutex::new(release_replacement_rx));
+        let unchanged_tail = queue.owner.indexed_tail.clone();
+        let mut stale_candidate = unchanged_tail.clone();
+        stale_candidate[0]
+            .desc
+            .push_str("; stale queue candidate must not publish");
+        let candidate_tail = stale_candidate;
+        let coordinator = IndexCoordinator::with_test_scanner(move |config| {
+            match config.roots().first().map(String::as_str) {
+                Some("queue-candidate") => {
+                    candidate_finished_tx.send(()).unwrap();
+                    Ok(candidate_tail.clone())
+                }
+                Some("queue-blocked-replacement") => {
+                    replacement_started_tx.send(()).unwrap();
+                    release_replacement_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .map_err(|error| format!("queue replacement release failed: {error}"))?;
+                    Ok(unchanged_tail.clone())
+                }
+                other => Err(format!("unexpected Track C queue scan config: {other:?}")),
+            }
+        })
+        .expect("construct gated queue coordinator");
+        queue.owner.app.install_test_index_coordinator(coordinator);
+
+        let indexed_count = queue.owner.indexed_tail.len();
+        let config = |root: &str| IndexConfig::new(vec![root.to_owned()], Some(indexed_count));
+        queue
+            .owner
+            .app
+            .request_index_config(config("queue-candidate"));
+        let candidate_generation = queue.owner.app.indexing.expected_generation.unwrap();
+        candidate_finished_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("coordinator completed the original candidate scan");
+        queue
+            .owner
+            .app
+            .wait_for_index_completion_for_test(candidate_generation)
+            .expect("candidate scan completion is available");
+        wait_for_track_c_successful_enqueue(&queue.owner.app, &queue.age_recorder, 2, 2);
+
+        // The candidate's original IndexReady envelope stays in the app queue.
+        // Submitting B makes that real envelope stale while B is held at its
+        // scanner gate; no receive/re-enqueue step changes its timestamp.
+        queue
+            .owner
+            .app
+            .request_index_config(config("queue-blocked-replacement"));
+        let blocked_generation = queue.owner.app.indexing.expected_generation.unwrap();
+        replacement_started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("replacement scan reached its gate");
+
+        for _ in 0..extra_actions_events {
+            queue
+                .owner
+                .app
+                .event_tx
+                .with_origin(EventOrigin::FileWatcher)
+                .send(WatchEvent::Actions)
+                .expect("enqueue finite Actions duplicate after original index envelope");
+        }
+        for _ in 0..recycle_events {
+            queue
+                .owner
+                .app
+                .event_tx
+                .with_origin(EventOrigin::Registry)
+                .send(WatchEvent::Recycle(Ok(())))
+                .expect("enqueue toast-disabled completion after stale index envelope");
+        }
+
+        let recorder_capacity_required = 1 + 1 + extra_actions_events + recycle_events + 1; // B's completion is drained outside the measured receipt.
+        assert!(recorder_capacity >= recorder_capacity_required);
+        queue.expected_actions_events = 1 + extra_actions_events;
+        queue.expected_index_ready_events = 1;
+        queue.expected_recycle_events = recycle_events;
+        queue.expected_event_count =
+            queue.expected_actions_events + queue.expected_index_ready_events + recycle_events;
+        queue.expected_metadata = vec![
+            (
+                crate::performance::track_c::EventClass::FileReload,
+                EventOrigin::FileWatcher,
+            ),
+            (
+                crate::performance::track_c::EventClass::IndexCompletion,
+                EventOrigin::IndexCoordinator,
+            ),
+        ];
+        queue.expected_metadata.extend(std::iter::repeat_n(
+            (
+                crate::performance::track_c::EventClass::FileReload,
+                EventOrigin::FileWatcher,
+            ),
+            extra_actions_events,
+        ));
+        queue.expected_metadata.extend(std::iter::repeat_n(
+            (
+                crate::performance::track_c::EventClass::Clipboard,
+                EventOrigin::Registry,
+            ),
+            recycle_events,
+        ));
+        assert_eq!(queue.expected_metadata.len(), queue.expected_event_count);
+        wait_for_track_c_successful_enqueue(
+            &queue.owner.app,
+            &queue.age_recorder,
+            queue.expected_event_count,
+            queue.expected_event_count,
+        );
+        assert_eq!(
+            queue.owner.app.indexing.expected_generation,
+            Some(blocked_generation),
+            "the queued candidate completion is stale under the blocked generation"
+        );
+        crate::performance::track_c::reset();
+
+        TrackCStaleIndexQueueOwnerState {
+            queue,
+            release_blocked_scan: Some(release_replacement_tx),
+            blocked_generation,
+        }
+    }
+
+    fn finish_track_c_stale_index_watch_queue_owner(state: &mut TrackCStaleIndexQueueOwnerState) {
+        let queue = &mut state.queue;
+        let release = state
+            .release_blocked_scan
+            .take()
+            .expect("blocked scan release is consumed exactly once");
+        release
+            .send(())
+            .expect("blocked replacement scanner remains available");
+        queue
+            .owner
+            .app
+            .wait_for_index_completion_for_test(state.blocked_generation)
+            .expect("replacement scan completes after owner timing");
+        wait_for_track_c_successful_enqueue(
+            &queue.owner.app,
+            &queue.age_recorder,
+            queue.expected_event_count + 1,
+            1,
+        );
+
+        let actions_before_equal_completion = Arc::clone(&queue.owner.app.actions);
+        let version_before_equal_completion = crate::actions::actions_version();
+        queue.owner.app.process_watch_events();
+        assert!(Arc::ptr_eq(
+            &queue.owner.app.actions,
+            &actions_before_equal_completion
+        ));
+        assert_eq!(
+            crate::actions::actions_version(),
+            version_before_equal_completion,
+            "equal replacement completion preserves the accepted catalog"
+        );
+        assert_eq!(queue.owner.app.rx.queued_depth(), Some(0));
+        assert_track_c_actions_owner_state(
+            &queue.owner,
+            &queue.owner.expected_actions,
+            queue.owner.actions_version_before + 1,
+        );
+        let all_delivered = queue.age_recorder.snapshot();
+        assert_eq!(
+            all_delivered.delivered.len(),
+            queue.expected_event_count + 1
+        );
+        assert_eq!(all_delivered.overflow, 0);
+        assert_eq!(all_delivered.abandoned, 0);
+        let mut expected_all_metadata = expected_track_c_watch_queue_metadata(queue);
+        expected_all_metadata.push((
+            crate::performance::track_c::EventClass::IndexCompletion,
+            EventOrigin::IndexCoordinator,
+        ));
+        assert_eq!(
+            all_delivered
+                .delivered
+                .iter()
+                .map(|event| (event.class, event.origin))
+                .collect::<Vec<_>>(),
+            expected_all_metadata,
+            "cleanup consumes B's original coordinator notification outside the timed receipt"
+        );
+    }
+
+    fn validate_track_c_watch_queue_owner(
+        state: &TrackCWatchQueueOwnerState,
+    ) -> (
+        crate::performance::track_c_workloads::OwnerObservation,
+        TrackCWatchQueueSampleReceipt,
+    ) {
+        use crate::performance::track_c::{self, EventClass, EventOrigin, Phase};
+
+        assert_eq!(state.owner.app.rx.queued_depth(), Some(0));
+        let actions_version_after = crate::actions::actions_version();
+        let mut observation = validate_track_c_actions_owner(&state.owner, actions_version_after);
+        let delivered = state.age_recorder.snapshot();
+        assert!(delivered.delivered.len() <= state.recorder_capacity);
+        assert_eq!(delivered.delivered.len(), state.expected_event_count);
+        assert_eq!(delivered.overflow, 0, "event age recorder did not overflow");
+        assert_eq!(
+            delivered.abandoned, 0,
+            "the bounded queue sample has no abandoned event envelopes"
+        );
+        let expected_metadata = expected_track_c_watch_queue_metadata(state);
+        assert_eq!(
+            delivered
+                .delivered
+                .iter()
+                .map(|sample| (sample.class, sample.origin))
+                .collect::<Vec<_>>(),
+            expected_metadata,
+            "one producer preserves the event sequence and static attribution"
+        );
+
+        let drain = track_c::snapshot()[Phase::EventDrain as usize].1;
+        let mut handlers = Vec::new();
+        if crate::performance::enabled() {
+            assert!(drain.calls > 0, "the real event reducer was measured");
+            assert_eq!(drain.completed, drain.calls);
+            assert_eq!(drain.errors, 0);
+            assert_eq!(drain.abandoned, 0);
+            assert_eq!(drain.work_units, state.expected_event_count as u64);
+
+            let event_snapshots = track_c::snapshot_events();
+            for (class, origin) in [
+                (EventClass::FileReload, EventOrigin::FileWatcher),
+                (EventClass::IndexCompletion, EventOrigin::IndexCoordinator),
+                (EventClass::Clipboard, EventOrigin::Registry),
+            ] {
+                let count = expected_metadata
+                    .iter()
+                    .filter(|pair| **pair == (class, origin))
+                    .count() as u64;
+                if count == 0 {
+                    continue;
+                }
+                let event = event_snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.class == class && snapshot.origin == origin)
+                    .copied()
+                    .expect("event class/origin pair exists in fixed collector");
+                assert_eq!(event.dequeued, count);
+                assert_eq!(event.send_failed, 0);
+                assert_eq!(event.abandoned, 0);
+                assert_eq!(event.handler_calls, count);
+                handlers.push(event);
+            }
+            assert_eq!(
+                event_snapshots
+                    .iter()
+                    .filter(|event| event.dequeued != 0 || event.handler_calls != 0)
+                    .count(),
+                handlers.len(),
+                "no other event class/origin was handled in this owner"
+            );
+        }
+
+        observation.work_units = state.expected_event_count as u64;
+        observation.work_counters = vec![
+            state.expected_event_count as u64,
+            state.expected_actions_events as u64,
+            state.expected_index_ready_events as u64,
+            state.expected_recycle_events as u64,
+            state.owner.custom_len as u64,
+            state.owner.indexed_tail.len() as u64,
+            state.owner.app.actions.len() as u64,
+            state.owner.app.action_cache.len() as u64,
+            state.owner.app.action_filter_metadata.len() as u64,
+            state.owner.app.actions_by_id.len() as u64,
+            state.owner.app.results.len() as u64,
+        ];
+        (
+            observation,
+            TrackCWatchQueueSampleReceipt {
+                delivered,
+                drain,
+                handlers,
+            },
+        )
+    }
+
+    fn set_track_c_concurrent_queue_counts(
+        state: &mut TrackCWatchQueueOwnerState,
+        producer_actions: usize,
+        producer_recycle: usize,
+    ) {
+        state.expected_actions_events = 1 + producer_actions;
+        state.expected_index_ready_events = 0;
+        state.expected_recycle_events = producer_recycle;
+        state.expected_event_count = state.expected_actions_events + producer_recycle;
+        state.expected_metadata = vec![
+            (
+                crate::performance::track_c::EventClass::FileReload,
+                EventOrigin::FileWatcher,
+            );
+            state.expected_actions_events
+        ];
+        state.expected_metadata.extend(std::iter::repeat_n(
+            (
+                crate::performance::track_c::EventClass::Clipboard,
+                EventOrigin::Registry,
+            ),
+            producer_recycle,
+        ));
+        assert!(state.expected_event_count <= state.recorder_capacity);
+    }
+
+    fn run_track_c_concurrent_queue_owner(
+        state: &mut TrackCWatchQueueOwnerState,
+        producer_actions: usize,
+        producer_recycle: usize,
+    ) {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let producer_barrier = Arc::clone(&barrier);
+        let producer_tx = state.owner.app.event_tx.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                producer_barrier.wait();
+                for _ in 0..producer_actions {
+                    producer_tx
+                        .with_origin(EventOrigin::FileWatcher)
+                        .send(WatchEvent::Actions)
+                        .expect("finite concurrent Actions send succeeds");
+                }
+                for _ in 0..producer_recycle {
+                    producer_tx
+                        .with_origin(EventOrigin::Registry)
+                        .send(WatchEvent::Recycle(Ok(())))
+                        .expect("finite concurrent completion receipt succeeds");
+                }
+            });
+            barrier.wait();
+            state.owner.app.process_watch_events();
+        });
+        if state.owner.app.rx.queued_depth().unwrap_or_default() > 0 {
+            state.owner.app.process_watch_events();
+        }
+        assert_eq!(state.owner.app.rx.queued_depth(), Some(0));
+        assert_eq!(
+            state.age_recorder.successful_sends(),
+            state.expected_event_count,
+            "all offered events committed before final validation"
+        );
+    }
+
+    fn track_c_watch_queue_fixture_signature(
+        fixture: &TrackCActionsFixture,
+        recorder_capacity: usize,
+        actions_events: usize,
+        index_ready_events: usize,
+        recycle_events: usize,
+        concurrent_producer: bool,
+    ) -> u64 {
+        let mut signature = crate::performance::track_c_workloads::StableSignature::new(
+            0,
+            "track-c-watch-queue-fixture",
+            fixture.expected_actions.len(),
+        );
+        signature.number(fixture.fixture_signature);
+        signature.number(recorder_capacity as u64);
+        signature.number(actions_events as u64);
+        signature.number(index_ready_events as u64);
+        signature.number(recycle_events as u64);
+        signature.number(concurrent_producer as u64);
+        signature.bytes(b"unbounded-app-mpsc;fixed-capacity-test-age-recorder");
+        if index_ready_events == 0 {
+            signature.bytes(b"FileWatcher:Actions;Registry:RecycleOk;no-index-ready");
+        } else {
+            signature.bytes(
+                b"FileWatcher:Actions;IndexCoordinator:original-stale-IndexReady(candidate-tail-differs);Registry:RecycleOk;blocked-B-unchanged-tail-cleanup-outside-interval",
+            );
+        }
+        signature.finish()
+    }
+
+    fn emit_track_c_watch_event_age_rows(
+        metadata: crate::performance::track_c_workloads::ReportMetadata,
+        recorder_capacity: usize,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+        receipts: &[TrackCWatchQueueSampleReceipt],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, nearest_rank};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert_eq!(receipts.len(), MEASURED_SAMPLES);
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let telemetry_enabled = crate::performance::enabled();
+        for (sample_index, (sample, receipt)) in samples.iter().zip(receipts).enumerate() {
+            let ages = receipt
+                .delivered
+                .delivered
+                .iter()
+                .map(|event| event.age_nanos)
+                .collect::<Vec<_>>();
+            let age_text = ages.iter().map(u64::to_string).collect::<Vec<_>>();
+            let classes = receipt
+                .delivered
+                .delivered
+                .iter()
+                .map(|event| format!("{:?}", event.class))
+                .collect::<Vec<_>>();
+            let origins = receipt
+                .delivered
+                .delivered
+                .iter()
+                .map(|event| format!("{:?}", event.origin))
+                .collect::<Vec<_>>();
+            let handler_receipts = receipt
+                .handlers
+                .iter()
+                .map(|event| {
+                    format!(
+                        "{:?}.{:?}:{}:{}:{}",
+                        event.class,
+                        event.origin,
+                        event.handler_calls,
+                        event.handler_nanos_total,
+                        event.handler_nanos_max
+                    )
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "TRACK_C_EVENT_AGES schema=1 owner={} source={} profile={} mode={:?} telemetry_enabled={} fixture={} fixture_signature={:016x} count={} cold_type={} recorder_capacity={} sample={} events={} age_ns=[{}] age_p50_ns={} age_p95_ns={} age_max_ns={} classes=[{}] origins=[{}] complete_output_state_id={:016x} structural_output_id={:016x} drain_calls={} drain_ns={} handler_receipts=[{}] overflow={} abandoned={}",
+                metadata.owner,
+                source,
+                profile,
+                metadata.mode,
+                telemetry_enabled,
+                metadata.fixture_name,
+                metadata.fixture_signature,
+                metadata.item_count,
+                metadata.cold_type,
+                recorder_capacity,
+                sample_index,
+                ages.len(),
+                age_text.join(","),
+                nearest_rank(&ages, 50),
+                nearest_rank(&ages, 95),
+                ages.iter().copied().max().unwrap_or_default(),
+                classes.join(","),
+                origins.join(","),
+                sample.output_identity,
+                sample.structural_signature,
+                receipt.drain.calls,
+                receipt.drain.elapsed_nanos_total,
+                handler_receipts.join(","),
+                receipt.delivered.overflow,
+                receipt.delivered.abandoned,
+            );
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_original_index_ready_merges_latest_prefix_and_ignores_stale_wake() {
+        use crate::indexer::coordinator::{IndexConfig, IndexCoordinator};
+
+        let fixture = track_c_actions_fixture(24);
+        let (mut state, age_recorder, _registry_guard) =
+            make_track_c_actions_owner_state_with_recorder(&fixture, 16);
+        let (latest_started_tx, latest_started_rx) = channel();
+        let (release_latest_tx, release_latest_rx) = channel();
+        let release_latest_rx = Arc::new(Mutex::new(release_latest_rx));
+        let (replacement_started_tx, replacement_started_rx) = channel();
+        let (release_replacement_tx, release_replacement_rx) = channel();
+        let release_replacement_rx = Arc::new(Mutex::new(release_replacement_rx));
+
+        struct ReleaseGates(Vec<std::sync::mpsc::Sender<()>>);
+        impl Drop for ReleaseGates {
+            fn drop(&mut self) {
+                for sender in &self.0 {
+                    let _ = sender.send(());
+                }
+            }
+        }
+        let _release_gates = ReleaseGates(vec![
+            release_latest_tx.clone(),
+            release_replacement_tx.clone(),
+        ]);
+
+        let mut latest_tail = state.indexed_tail.clone();
+        latest_tail[0].desc.push_str("; latest blocked scan");
+        let mut stale_tail = state.indexed_tail.clone();
+        stale_tail[0].desc.push_str("; stale completed scan");
+        let mut replacement_tail = state.indexed_tail.clone();
+        replacement_tail[0]
+            .desc
+            .push_str("; replacement completed scan");
+
+        let latest_for_scanner = latest_tail.clone();
+        let stale_for_scanner = stale_tail.clone();
+        let replacement_for_scanner = replacement_tail.clone();
+        let coordinator = IndexCoordinator::with_test_scanner(move |config| {
+            match config.roots().first().map(String::as_str) {
+                Some("latest-blocked") => {
+                    latest_started_tx.send(()).unwrap();
+                    release_latest_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .map_err(|error| format!("latest scan release failed: {error}"))?;
+                    Ok(latest_for_scanner.clone())
+                }
+                Some("stale-complete") => Ok(stale_for_scanner.clone()),
+                Some("replacement-blocked") => {
+                    replacement_started_tx.send(()).unwrap();
+                    release_replacement_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .map_err(|error| format!("replacement scan release failed: {error}"))?;
+                    Ok(replacement_for_scanner.clone())
+                }
+                other => Err(format!("unexpected Track C scan config: {other:?}")),
+            }
+        })
+        .expect("construct gated test coordinator");
+        state.app.install_test_index_coordinator(coordinator);
+
+        let indexed_count = state.indexed_tail.len();
+        let config = |root: &str| IndexConfig::new(vec![root.to_owned()], Some(indexed_count));
+        let version_before = state.actions_version_before;
+
+        // The first scan is held while the actual Actions event publishes the
+        // latest custom prefix. Its later original IndexReady envelope must
+        // merge the scan result with that prefix.
+        state.app.request_index_config(config("latest-blocked"));
+        let latest_generation = state.app.indexing.expected_generation.unwrap();
+        latest_started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("latest-prefix scan reached its gate");
+        state.app.process_watch_events();
+        state.expected_actions = fixture.replacement_custom.clone();
+        state
+            .expected_actions
+            .extend(state.indexed_tail.iter().cloned());
+        assert_track_c_actions_owner_state(&state, &state.expected_actions, version_before + 1);
+        assert_eq!(state.app.rx.queued_depth(), Some(0));
+
+        release_latest_tx
+            .send(())
+            .expect("release latest-prefix scan");
+        state
+            .app
+            .wait_for_index_completion_for_test(latest_generation)
+            .expect("latest-prefix scan completes");
+        wait_for_track_c_successful_enqueue(&state.app, &age_recorder, 2, 1);
+        assert_eq!(
+            state.app.rx.queued_depth(),
+            Some(1),
+            "the coordinator's original notification remains queued"
+        );
+        state.app.process_watch_events();
+        state.indexed_tail = latest_tail;
+        state.expected_actions = fixture.replacement_custom.clone();
+        state
+            .expected_actions
+            .extend(state.indexed_tail.iter().cloned());
+        assert_track_c_actions_owner_state(&state, &state.expected_actions, version_before + 2);
+        assert_eq!(state.app.rx.queued_depth(), Some(0));
+
+        // Queue A's real notification, then submit B before reducing A. The
+        // stale A wake is consumed through the ordinary event reducer while B
+        // remains gated and cannot publish.
+        state.app.request_index_config(config("stale-complete"));
+        let stale_generation = state.app.indexing.expected_generation.unwrap();
+        state
+            .app
+            .wait_for_index_completion_for_test(stale_generation)
+            .expect("stale candidate scan completes");
+        wait_for_track_c_successful_enqueue(&state.app, &age_recorder, 3, 1);
+        state
+            .app
+            .request_index_config(config("replacement-blocked"));
+        let replacement_generation = state.app.indexing.expected_generation.unwrap();
+        replacement_started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("replacement scan reached its gate");
+        let retained_actions = Arc::clone(&state.app.actions);
+        let retained_version = crate::actions::actions_version();
+        state.app.process_watch_events();
+        assert!(Arc::ptr_eq(&state.app.actions, &retained_actions));
+        assert_track_c_actions_owner_state(&state, &state.expected_actions, retained_version);
+        assert_eq!(retained_version, version_before + 2);
+        assert_eq!(
+            state.app.indexing.expected_generation,
+            Some(replacement_generation)
+        );
+        assert_eq!(state.app.rx.queued_depth(), Some(0));
+
+        release_replacement_tx
+            .send(())
+            .expect("release replacement scan");
+        state
+            .app
+            .wait_for_index_completion_for_test(replacement_generation)
+            .expect("replacement scan completes");
+        wait_for_track_c_successful_enqueue(&state.app, &age_recorder, 4, 1);
+        state.app.process_watch_events();
+        state.indexed_tail = replacement_tail;
+        state.expected_actions = fixture.replacement_custom.clone();
+        state
+            .expected_actions
+            .extend(state.indexed_tail.iter().cloned());
+        assert_track_c_actions_owner_state(&state, &state.expected_actions, version_before + 3);
+        assert_eq!(state.app.rx.queued_depth(), Some(0));
+
+        let delivered = age_recorder.snapshot();
+        assert_eq!(delivered.overflow, 0);
+        assert_eq!(delivered.abandoned, 0);
+        assert_eq!(delivered.delivered.len(), 4);
+        assert_eq!(
+            delivered
+                .delivered
+                .iter()
+                .map(|sample| (sample.class, sample.origin))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    crate::performance::track_c::EventClass::FileReload,
+                    EventOrigin::FileWatcher
+                ),
+                (
+                    crate::performance::track_c::EventClass::IndexCompletion,
+                    EventOrigin::IndexCoordinator,
+                ),
+                (
+                    crate::performance::track_c::EventClass::IndexCompletion,
+                    EventOrigin::IndexCoordinator,
+                ),
+                (
+                    crate::performance::track_c::EventClass::IndexCompletion,
+                    EventOrigin::IndexCoordinator,
+                ),
+            ]
+        );
+        assert_eq!(state.app.rx.queued_depth(), Some(0));
+    }
+
+    fn make_track_c_actions_owner_state_inner(
+        fixture: &TrackCActionsFixture,
+        recorder_capacity: Option<usize>,
+    ) -> (
+        TrackCActionsOwnerState,
+        Option<super::event_channel::EventAgeRecorder>,
+    ) {
+        use crate::performance::track_c_workloads;
+
+        let initial_payload = serde_json::to_vec(&fixture.initial_custom)
+            .expect("serialize initial custom actions outside owner interval");
+        let replacement_payload = serde_json::to_vec(&fixture.replacement_custom)
+            .expect("serialize replacement custom actions outside owner interval");
+        std::fs::write(&fixture.actions_path, initial_payload)
+            .expect("write initial action fixture before app construction");
+
+        let context = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.match_exact = true;
+        settings.usage_weight = 0.0;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.max_indexed_items = Some(fixture.indexed_tail.len());
+        let mut initial_actions = fixture.initial_custom.clone();
+        initial_actions.extend(fixture.indexed_tail.iter().cloned());
+        let mut app = LauncherApp::new(
+            &context,
+            Arc::new(initial_actions),
+            fixture.custom_len,
+            PluginManager::new_inert_for_test(),
+            fixture.actions_path.to_string_lossy().into_owned(),
+            fixture.settings_path.to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.watchers.clear();
+        app.process_watch_events();
+        assert!(app.rx.try_recv().is_err(), "startup events are quiescent");
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.usage.clear();
+        app.usage_weight = 0.0;
+        app.fuzzy_weight = 1.0;
+        app.query = "app Synthetic action 00009".into();
+        app.match_exact = true;
+        app.search();
+        assert_eq!(app.results, vec![app.actions[9].clone()]);
+        app.selected = Some(0);
+
+        let age_recorder =
+            recorder_capacity.map(|capacity| install_track_c_observed_channel(&mut app, capacity));
+        if age_recorder.is_some() {
+            crate::performance::track_c::reset();
+        }
+
+        std::fs::write(&fixture.actions_path, replacement_payload)
+            .expect("write replacement payload before owner interval");
+        app.event_tx
+            .with_origin(EventOrigin::FileWatcher)
+            .send(WatchEvent::Actions)
+            .expect("enqueue one synthetic file-reload event");
+        let actions_version_before = crate::actions::actions_version();
+
+        (
+            TrackCActionsOwnerState {
+                app,
+                expected_actions: fixture.expected_actions.clone(),
+                indexed_tail: fixture.indexed_tail.clone(),
+                index_root: fixture.index_root.clone(),
+                actions_path: fixture.actions_path.clone(),
+                custom_len: fixture.custom_len,
+                actions_version_before,
+            },
+            age_recorder,
+        )
+    }
+
+    fn assert_track_c_actions_owner_state(
+        state: &TrackCActionsOwnerState,
+        expected_actions: &[crate::actions::Action],
+        expected_actions_version: u64,
+    ) {
+        let app = &state.app;
+        assert_eq!(app.actions.as_slice(), expected_actions);
+        assert_eq!(app.custom_len, state.custom_len);
+        assert_eq!(
+            &app.actions[state.custom_len..],
+            state.indexed_tail.as_slice(),
+            "custom reload retains the exact indexed tail"
+        );
+        let expected_cache = expected_actions
+            .iter()
+            .map(track_c_expected_cached_search_entry)
+            .collect::<Vec<_>>();
+        assert_eq!(app.action_cache, expected_cache);
+        let expected_filter_metadata = expected_actions
+            .iter()
+            .map(track_c_expected_filter_metadata)
+            .collect::<Vec<_>>();
+        assert_eq!(app.action_filter_metadata, expected_filter_metadata);
+        let expected_by_id = expected_actions
+            .iter()
+            .map(|action| (action.action.clone(), action.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(app.actions_by_id, expected_by_id);
+        assert_eq!(
+            app.actions_by_id
+                .get(&state.indexed_tail[0].action)
+                .expect("duplicate action id is projected"),
+            &state.indexed_tail[0],
+            "id-only map keeps the last custom-first/indexed-tail duplicate"
+        );
+        assert_eq!(app.query, "app Synthetic action 00009");
+        assert_eq!(app.last_search_query, app.query);
+        assert_eq!(app.results, vec![expected_actions[9].clone()]);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.selected, None, "catalog refresh clears stale selection");
+        assert_eq!(
+            crate::actions::actions_version(),
+            expected_actions_version,
+            "catalog version remains at the expected publication revision"
+        );
+    }
+
+    fn validate_track_c_actions_owner(
+        state: &TrackCActionsOwnerState,
+        actions_version_after: u64,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        let app = &state.app;
+        assert_track_c_actions_owner_state(
+            state,
+            &state.expected_actions,
+            state.actions_version_before + 1,
+        );
+        assert_eq!(
+            actions_version_after,
+            state.actions_version_before + 1,
+            "one changed custom-prefix publication advances the version once"
+        );
+
+        let structural_signature =
+            track_c_watch_action_signature(&state.index_root, app.actions.as_slice());
+        let output_identity = track_c_watch_projection_signature(app, &state.index_root);
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: {
+                let mut receipts = vec![actions_version_after, app.last_search_provider_revision];
+                if let Some(versions) = app.last_search_result_catalog_versions {
+                    receipts.extend([versions.clipboard, versions.todo, versions.notes]);
+                } else {
+                    receipts.extend([u64::MAX, u64::MAX, u64::MAX]);
+                }
+                receipts
+            },
+            viewport_receipt: None,
+            work_units: app.actions.len() as u64,
+            work_counters: vec![
+                app.custom_len as u64,
+                app.actions.len().saturating_sub(app.custom_len) as u64,
+                app.action_cache.len() as u64,
+                app.action_filter_metadata.len() as u64,
+                app.actions_by_id.len() as u64,
+                app.results.len() as u64,
+            ],
+        }
+    }
+
+    fn enqueue_track_c_actions_event(app: &LauncherApp) {
+        app.event_tx
+            .with_origin(EventOrigin::FileWatcher)
+            .send(WatchEvent::Actions)
+            .expect("enqueue synthetic file-reload event");
+    }
+
+    #[test]
+    fn track_c_oracle_actions_reload_preserves_catalog_and_last_good_state() {
+        let fixture = track_c_actions_fixture(24);
+        let mut state = make_track_c_actions_owner_state(&fixture);
+        let expected_file_payload = serde_json::to_vec(&state.expected_actions[..state.custom_len])
+            .expect("serialize expected custom prefix for unchanged notification");
+        state.app.process_watch_events();
+        validate_track_c_actions_owner(&state, crate::actions::actions_version());
+
+        let retained = Arc::clone(&state.app.actions);
+        let retained_version = crate::actions::actions_version();
+        std::fs::write(&state.actions_path, &expected_file_payload)
+            .expect("write identical custom prefix");
+        enqueue_track_c_actions_event(&state.app);
+        state.app.process_watch_events();
+        assert!(Arc::ptr_eq(&state.app.actions, &retained));
+        assert_eq!(crate::actions::actions_version(), retained_version);
+        assert!(state.app.actions_persistence_diagnostic.is_none());
+        assert_track_c_actions_owner_state(&state, &state.expected_actions, retained_version);
+
+        std::fs::write(&state.actions_path, b"{").expect("write invalid JSON fixture");
+        enqueue_track_c_actions_event(&state.app);
+        state.app.process_watch_events();
+        assert!(Arc::ptr_eq(&state.app.actions, &retained));
+        assert_eq!(crate::actions::actions_version(), retained_version);
+        assert!(state.app.actions_persistence_diagnostic.is_some());
+        assert_track_c_actions_owner_state(&state, &state.expected_actions, retained_version);
+
+        std::fs::remove_file(&state.actions_path).expect("remove actions fixture");
+        enqueue_track_c_actions_event(&state.app);
+        state.app.process_watch_events();
+        assert!(Arc::ptr_eq(&state.app.actions, &retained));
+        assert_eq!(crate::actions::actions_version(), retained_version);
+        assert!(state.app.actions_persistence_diagnostic.is_some());
+        assert_track_c_actions_owner_state(&state, &state.expected_actions, retained_version);
+
+        let mut recovered_custom = state.expected_actions[..state.custom_len].to_vec();
+        recovered_custom[1]
+            .desc
+            .push_str("; recovered after reload error");
+        let mut recovered = recovered_custom.clone();
+        recovered.extend(state.indexed_tail.iter().cloned());
+        std::fs::write(
+            &state.actions_path,
+            serde_json::to_vec(&recovered_custom).expect("serialize recovery fixture"),
+        )
+        .expect("write valid recovery fixture");
+        enqueue_track_c_actions_event(&state.app);
+        let before_recovery = crate::actions::actions_version();
+        state.app.process_watch_events();
+        assert_eq!(state.app.actions.as_slice(), recovered.as_slice());
+        assert_eq!(state.app.custom_len, state.custom_len);
+        assert!(state.app.actions_persistence_diagnostic.is_none());
+        assert_eq!(crate::actions::actions_version(), before_recovery + 1);
+        assert_track_c_actions_owner_state(&state, &recovered, before_recovery + 1);
+        assert_eq!(
+            state.app.actions_by_id.get(&state.indexed_tail[0].action),
+            Some(&state.indexed_tail[0])
+        );
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C benchmark; use an owned isolated test process and small mode for smoke"]
+    fn track_c_benchmark_actions_reload_owner() {
+        use crate::performance::track_c_workloads;
+
+        assert!(crate::performance::enabled());
+        let mode = track_c_workloads::BenchmarkMode::from_process_env()
+            .expect("valid Track C benchmark mode");
+        for total_count in mode.combined_action_sizes() {
+            let fixture = track_c_actions_fixture(*total_count);
+            crate::performance::track_c::reset();
+            let samples = track_c_workloads::measure_owner(
+                || {
+                    let state = make_track_c_actions_owner_state(&fixture);
+                    crate::performance::track_c::reset();
+                    // The event was queued by the state factory. Reset setup
+                    // counters after the envelope has its original timestamp.
+                    state
+                },
+                |state| {
+                    state.app.process_watch_events();
+                    crate::actions::actions_version()
+                },
+                |state, version_after| validate_track_c_actions_owner(state, *version_after),
+            );
+            assert_eq!(samples.len(), track_c_workloads::MEASURED_SAMPLES);
+            assert!(
+                samples
+                    .iter()
+                    .all(|sample| sample.output_identity == samples[0].output_identity)
+            );
+            assert!(samples.iter().all(|sample| {
+                sample.structural_signature == samples[0].structural_signature
+                    && sample.work_units == *total_count as u64
+                    && sample.work_counters == samples[0].work_counters
+            }));
+            let phase_snapshot = crate::performance::track_c::snapshot()
+                [crate::performance::track_c::Phase::EventDrain as usize]
+                .1;
+            // `measure_owner` includes five warmups and 20 measured calls.
+            // Its state factory drops any previous app and then resets counters,
+            // so the final sample leaves exactly one production drain receipt.
+            assert_eq!(phase_snapshot.calls, 1);
+            assert_eq!(phase_snapshot.completed, 1);
+            assert_eq!(phase_snapshot.work_units, 1);
+            let metadata = track_c_workloads::ReportMetadata {
+                owner: "process_watch_events_actions_reload",
+                fixture_name: "custom_prefix_retained_indexed_tail",
+                fixture_signature: fixture.fixture_signature,
+                item_count: *total_count,
+                viewport: "none",
+                scale_milli: 1_000,
+                font_state: "not_applicable",
+                settings: "inert_plugins_toasts_off",
+                cold_type: "typed_file_read_and_catalog_publish",
+                mode,
+            };
+            track_c_workloads::emit_samples(metadata, &samples);
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_finite_watch_burst_preserves_fifo_and_state() {
+        let fixture = track_c_actions_fixture(24);
+        let mut state = make_track_c_stale_index_watch_queue_owner_state(&fixture, 16, 2, 1);
+        state.queue.owner.app.process_watch_events();
+        let (observation, receipt) = validate_track_c_watch_queue_owner(&state.queue);
+        assert_eq!(observation.work_units, 5);
+        assert_eq!(receipt.delivered.delivered.len(), 5);
+        assert_eq!(
+            receipt
+                .delivered
+                .delivered
+                .iter()
+                .map(|sample| (sample.class, sample.origin))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    crate::performance::track_c::EventClass::FileReload,
+                    EventOrigin::FileWatcher,
+                ),
+                (
+                    crate::performance::track_c::EventClass::IndexCompletion,
+                    EventOrigin::IndexCoordinator,
+                ),
+                (
+                    crate::performance::track_c::EventClass::FileReload,
+                    EventOrigin::FileWatcher,
+                ),
+                (
+                    crate::performance::track_c::EventClass::FileReload,
+                    EventOrigin::FileWatcher,
+                ),
+                (
+                    crate::performance::track_c::EventClass::Clipboard,
+                    EventOrigin::Registry,
+                ),
+            ]
+        );
+        finish_track_c_stale_index_watch_queue_owner(&mut state);
+        assert_eq!(state.queue.owner.app.rx.queued_depth(), Some(0));
+    }
+
+    #[test]
+    fn track_c_oracle_concurrent_watch_producer_drains_finite_offered_load() {
+        const PRODUCER_ACTIONS: usize = 12;
+        const PRODUCER_RECYCLE: usize = 1;
+        const EVENT_COUNT: usize = 1 + PRODUCER_ACTIONS + PRODUCER_RECYCLE;
+
+        let fixture = track_c_actions_fixture(24);
+        let mut state = make_track_c_watch_queue_owner_state(&fixture, 32, 0, 0);
+        set_track_c_concurrent_queue_counts(&mut state, PRODUCER_ACTIONS, PRODUCER_RECYCLE);
+        run_track_c_concurrent_queue_owner(&mut state, PRODUCER_ACTIONS, PRODUCER_RECYCLE);
+
+        assert_eq!(state.expected_event_count, EVENT_COUNT);
+        let (observation, receipt) = validate_track_c_watch_queue_owner(&state);
+        assert_eq!(observation.work_units, EVENT_COUNT as u64);
+        assert_eq!(receipt.delivered.delivered.len(), EVENT_COUNT);
+        assert_eq!(state.owner.app.rx.queued_depth(), Some(0));
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C benchmark; use an owned isolated test process and small mode for smoke"]
+    fn track_c_benchmark_watch_event_finite_burst_owner() {
+        use crate::performance::track_c_workloads::{self, ReportMetadata};
+
+        assert!(crate::performance::enabled());
+        let mode = track_c_workloads::BenchmarkMode::from_process_env()
+            .expect("valid Track C benchmark mode");
+        for total_count in mode.combined_action_sizes() {
+            const EXTRA_ACTIONS: usize = 5;
+            const RECYCLE: usize = 1;
+            const RECORDER_CAPACITY: usize = 16;
+            let fixture = track_c_actions_fixture(*total_count);
+            let fixture_signature = track_c_watch_queue_fixture_signature(
+                &fixture,
+                RECORDER_CAPACITY,
+                EXTRA_ACTIONS + 1,
+                1,
+                RECYCLE,
+                false,
+            );
+            let mut queue_receipts = Vec::with_capacity(
+                track_c_workloads::WARMUPS + track_c_workloads::MEASURED_SAMPLES,
+            );
+            let samples = track_c_workloads::measure_owner(
+                || {
+                    make_track_c_stale_index_watch_queue_owner_state(
+                        &fixture,
+                        RECORDER_CAPACITY,
+                        EXTRA_ACTIONS,
+                        RECYCLE,
+                    )
+                },
+                |state| state.queue.owner.app.process_watch_events(),
+                |state, ()| {
+                    let (observation, receipt) = validate_track_c_watch_queue_owner(&state.queue);
+                    queue_receipts.push(receipt);
+                    // Preserve the primary drain's complete observation and
+                    // age receipt before consuming B's cleanup notification.
+                    finish_track_c_stale_index_watch_queue_owner(state);
+                    observation
+                },
+            );
+            assert_eq!(samples.len(), track_c_workloads::MEASURED_SAMPLES);
+            assert!(samples.iter().all(|sample| {
+                sample.output_identity == samples[0].output_identity
+                    && sample.structural_signature == samples[0].structural_signature
+                    && sample.work_units == 8
+                    && sample.work_counters == samples[0].work_counters
+            }));
+            assert_eq!(
+                queue_receipts.len(),
+                track_c_workloads::WARMUPS + track_c_workloads::MEASURED_SAMPLES
+            );
+            let metadata = ReportMetadata {
+                owner: "process_watch_events_finite_burst",
+                fixture_name: "actions_original_stale_indexready_recycle",
+                fixture_signature,
+                item_count: *total_count,
+                viewport: "none",
+                scale_milli: 1_000,
+                font_state: "not_applicable",
+                settings: "inert_plugins_toasts_off",
+                cold_type: "stale_index_gate_finite_burst",
+                mode,
+            };
+            track_c_workloads::emit_samples(metadata, &samples);
+            emit_track_c_watch_event_age_rows(
+                metadata,
+                RECORDER_CAPACITY,
+                &samples,
+                &queue_receipts[track_c_workloads::WARMUPS..],
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C benchmark; use an owned isolated test process and small mode for smoke"]
+    fn track_c_benchmark_watch_event_concurrent_offered_load_owner() {
+        use crate::performance::track_c_workloads::{
+            self, OwnerObservation, ReportMetadata, SampleRecord,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = track_c_workloads::BenchmarkMode::from_process_env()
+            .expect("valid Track C benchmark mode");
+        for total_count in mode.combined_action_sizes() {
+            const PRODUCER_ACTIONS: usize = 12;
+            const PRODUCER_RECYCLE: usize = 1;
+            const RECORDER_CAPACITY: usize = 32;
+            let fixture = track_c_actions_fixture(*total_count);
+            let fixture_signature = track_c_watch_queue_fixture_signature(
+                &fixture,
+                RECORDER_CAPACITY,
+                PRODUCER_ACTIONS + 1,
+                0,
+                PRODUCER_RECYCLE,
+                true,
+            );
+            let make_state = || {
+                let mut state =
+                    make_track_c_watch_queue_owner_state(&fixture, RECORDER_CAPACITY, 0, 0);
+                set_track_c_concurrent_queue_counts(&mut state, PRODUCER_ACTIONS, PRODUCER_RECYCLE);
+                state
+            };
+            for _ in 0..track_c_workloads::WARMUPS {
+                let mut state = make_state();
+                run_track_c_concurrent_queue_owner(&mut state, PRODUCER_ACTIONS, PRODUCER_RECYCLE);
+                let _ = validate_track_c_watch_queue_owner(&state);
+            }
+
+            let mut samples = Vec::with_capacity(track_c_workloads::MEASURED_SAMPLES);
+            let mut receipts = Vec::with_capacity(track_c_workloads::MEASURED_SAMPLES);
+            for _ in 0..track_c_workloads::MEASURED_SAMPLES {
+                let mut state = make_state();
+                run_track_c_concurrent_queue_owner(&mut state, PRODUCER_ACTIONS, PRODUCER_RECYCLE);
+                let (observation, receipt): (OwnerObservation, TrackCWatchQueueSampleReceipt) =
+                    validate_track_c_watch_queue_owner(&state);
+                samples.push(SampleRecord {
+                    // The result uses actual reducer timers; the scoped producer
+                    // spawn, barrier, and join remain outside those intervals.
+                    elapsed_nanos: receipt.drain.elapsed_nanos_total,
+                    output_identity: observation.output_identity,
+                    structural_signature: observation.structural_signature,
+                    revision_receipts: observation.revision_receipts,
+                    viewport_receipt: observation.viewport_receipt,
+                    work_units: observation.work_units,
+                    work_counters: observation.work_counters,
+                });
+                receipts.push(receipt);
+            }
+            assert_eq!(samples.len(), track_c_workloads::MEASURED_SAMPLES);
+            assert!(samples.iter().all(|sample| {
+                sample.output_identity == samples[0].output_identity
+                    && sample.structural_signature == samples[0].structural_signature
+                    && sample.work_units == 14
+                    && sample.work_counters == samples[0].work_counters
+            }));
+            let metadata = ReportMetadata {
+                owner: "process_watch_events_concurrent_offered_load",
+                fixture_name: "actions_recycle_finite_producer",
+                fixture_signature,
+                item_count: *total_count,
+                viewport: "none",
+                scale_milli: 1_000,
+                font_state: "not_applicable",
+                settings: "inert_plugins_toasts_off",
+                cold_type: "concurrent_finite_offered_load",
+                mode,
+            };
+            track_c_workloads::emit_samples(metadata, &samples);
+            emit_track_c_watch_event_age_rows(metadata, RECORDER_CAPACITY, &samples, &receipts);
+        }
     }
 
     #[test]

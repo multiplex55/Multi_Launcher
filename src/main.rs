@@ -3220,6 +3220,423 @@ mod tests {
     use multi_launcher::{plugin::Plugin, plugins::omni_search::OmniSearchPlugin};
     use tempfile::tempdir;
 
+    const TRACK_C_STARTUP_WARMUPS: usize = 5;
+    const TRACK_C_STARTUP_SAMPLES: usize = 20;
+
+    #[derive(Clone, Copy, Debug)]
+    enum TrackCStartupMode {
+        Small,
+        Full,
+    }
+
+    impl TrackCStartupMode {
+        fn from_process_env() -> Self {
+            match std::env::var("ML_TRACK_C_BENCH_MODE")
+                .unwrap_or_else(|_| "full".to_owned())
+                .as_str()
+            {
+                "small" => Self::Small,
+                "full" => Self::Full,
+                other => panic!("unsupported ML_TRACK_C_BENCH_MODE={other:?}"),
+            }
+        }
+
+        fn indexed_file_sizes(self) -> Vec<usize> {
+            match self {
+                Self::Small => vec![16],
+                Self::Full => vec![16, 1_000, 10_000],
+            }
+        }
+    }
+
+    /// Small binary-local framed FNV signature. The binary test target cannot
+    /// use the library's cfg(test) workload helpers without adding a new API.
+    struct TrackCStartupSignature(u64);
+
+    impl TrackCStartupSignature {
+        fn new(domain: &str) -> Self {
+            let mut signature = Self(0xcbf2_9ce4_8422_2325);
+            signature.string(domain);
+            signature
+        }
+
+        fn raw(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        fn bytes(&mut self, bytes: &[u8]) {
+            self.raw(&(bytes.len() as u64).to_le_bytes());
+            self.raw(bytes);
+        }
+
+        fn string(&mut self, value: &str) {
+            self.bytes(value.as_bytes());
+        }
+
+        fn number(&mut self, value: u64) {
+            self.bytes(&value.to_le_bytes());
+        }
+
+        fn finish(self) -> u64 {
+            self.0
+        }
+    }
+
+    struct TrackCStartupFixture {
+        root: PathBuf,
+        custom_actions: Vec<Action>,
+        config: multi_launcher::indexer::coordinator::IndexConfig,
+        expected_catalog: Vec<Action>,
+        fixture_signature: u64,
+        // Declared last so the owned workspace outlives all fixture paths/data.
+        _workspace: tempfile::TempDir,
+    }
+
+    impl TrackCStartupFixture {
+        fn new(indexed_file_count: usize) -> Self {
+            let workspace = tempdir().expect("startup fixture owns a temporary workspace");
+            let root = workspace.path().join("startup-index-root");
+            std::fs::create_dir_all(&root).expect("startup fixture root is created");
+            let root = std::fs::canonicalize(root).expect("startup fixture root canonicalizes");
+            let root_text = root.to_string_lossy().into_owned();
+            let custom_actions = track_c_startup_custom_actions();
+            let config = multi_launcher::indexer::coordinator::IndexConfig::new(
+                vec![root_text],
+                Some(indexed_file_count),
+            );
+
+            let mut fixture_signature =
+                TrackCStartupSignature::new("multi-launcher-track-c-startup-fixture-v1");
+            fixture_signature.number(indexed_file_count as u64);
+            fixture_signature.string("$TRACK_C_ROOT");
+            fixture_signature.number(1); // exactly one configured root
+            fixture_signature.number(1); // max_items is Some
+            fixture_signature.number(indexed_file_count as u64);
+            fixture_signature.number(custom_actions.len() as u64);
+            for action in &custom_actions {
+                hash_track_c_startup_action(&mut fixture_signature, action, None);
+            }
+
+            for index in 0..indexed_file_count {
+                let name = format!("entry-{index:05}.bin");
+                let content = format!("Track C startup fixture\nindex={index:05}\n");
+                std::fs::write(root.join(&name), content.as_bytes())
+                    .expect("startup fixture file is written outside owner timing");
+                fixture_signature.string(&name);
+                fixture_signature.bytes(content.as_bytes());
+            }
+
+            // The tree is deliberately flat. Read its direct entries independently
+            // of the coordinator and retain filesystem enumeration order.
+            let mut indexed_actions = Vec::with_capacity(indexed_file_count);
+            for entry in std::fs::read_dir(&root).expect("startup fixture root is readable") {
+                let entry = entry.expect("startup fixture entry is readable");
+                if !entry
+                    .file_type()
+                    .expect("startup fixture entry type is readable")
+                    .is_file()
+                {
+                    continue;
+                }
+                let canonical = std::fs::canonicalize(entry.path())
+                    .expect("startup fixture entry canonicalizes");
+                let name = canonical
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .expect("fixture filenames are valid Unicode");
+                let display = canonical.display().to_string();
+                indexed_actions.push(Action {
+                    label: name.to_owned(),
+                    desc: display.clone(),
+                    action: display,
+                    args: None,
+                });
+            }
+            assert_eq!(indexed_actions.len(), indexed_file_count);
+            let mut expected_catalog = custom_actions.clone();
+            expected_catalog.extend(indexed_actions);
+
+            Self {
+                root,
+                custom_actions,
+                config,
+                expected_catalog,
+                fixture_signature: fixture_signature.finish(),
+                _workspace: workspace,
+            }
+        }
+
+        fn custom_len(&self) -> usize {
+            self.custom_actions.len()
+        }
+
+        fn indexed_len(&self) -> usize {
+            self.expected_catalog.len() - self.custom_len()
+        }
+    }
+
+    fn track_c_startup_custom_actions() -> Vec<Action> {
+        vec![
+            Action {
+                label: "Track C custom entry".into(),
+                desc: "synthetic startup prefix".into(),
+                action: "custom:track-c-startup".into(),
+                args: None,
+            },
+            Action {
+                label: "Track C empty arguments".into(),
+                desc: "preserve Some empty arguments".into(),
+                action: "custom:track-c-empty-args".into(),
+                args: Some(String::new()),
+            },
+            Action {
+                label: "Track C Unicode λ".into(),
+                desc: "synthetic startup Unicode payload".into(),
+                action: "custom:track-c-unicode".into(),
+                args: Some("--origin=synthetic".into()),
+            },
+        ]
+    }
+
+    fn hash_track_c_startup_action(
+        signature: &mut TrackCStartupSignature,
+        action: &Action,
+        root_prefix: Option<&str>,
+    ) {
+        for field in [&action.label, &action.desc, &action.action] {
+            let field = field.as_str();
+            let normalized = root_prefix
+                .map(|root| normalize_track_c_owned_root_prefix(field, root))
+                .unwrap_or_else(|| std::borrow::Cow::Borrowed(field));
+            signature.string(normalized.as_ref());
+        }
+        match &action.args {
+            None => signature.number(0),
+            Some(args) => {
+                signature.number(1);
+                signature.string(args);
+            }
+        }
+    }
+
+    fn normalize_track_c_owned_root_prefix<'a>(
+        value: &'a str,
+        root: &str,
+    ) -> std::borrow::Cow<'a, str> {
+        let Some(suffix) = value.strip_prefix(root) else {
+            return std::borrow::Cow::Borrowed(value);
+        };
+        if !suffix.is_empty() && !suffix.starts_with('\\') && !suffix.starts_with('/') {
+            return std::borrow::Cow::Borrowed(value);
+        }
+        std::borrow::Cow::Owned(format!("$TRACK_C_ROOT{suffix}"))
+    }
+
+    fn hash_track_c_startup_config(
+        signature: &mut TrackCStartupSignature,
+        config: &multi_launcher::indexer::coordinator::IndexConfig,
+        fixture_root: &str,
+        normalize_root: bool,
+    ) {
+        signature.number(config.roots().len() as u64);
+        for root in config.roots() {
+            if normalize_root {
+                assert_eq!(root, fixture_root, "only the owned root is normalized");
+                signature.string("$TRACK_C_ROOT");
+            } else {
+                signature.string(root);
+            }
+        }
+        match config.max_items() {
+            None => signature.number(0),
+            Some(max_items) => {
+                signature.number(1);
+                signature.number(max_items as u64);
+            }
+        }
+    }
+
+    struct TrackCStartupSample {
+        elapsed_nanos: u64,
+        complete_output_state_id: u64,
+        structural_output_id: u64,
+        generation: u64,
+        work_units: u64,
+        work_counters: [u64; 3],
+    }
+
+    fn run_track_c_startup_action_catalog_owner(
+        fixture: &TrackCStartupFixture,
+    ) -> TrackCStartupSample {
+        let custom_actions = fixture.custom_actions.clone();
+        let config = fixture.config.clone();
+        let started = Instant::now();
+        let result = startup_action_catalog(custom_actions, config);
+        let elapsed_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let (catalog, custom_len, transfer) =
+            result.expect("owned synthetic startup catalog completes successfully");
+
+        assert_eq!(custom_len, fixture.custom_len(), "custom prefix boundary");
+        assert_eq!(catalog.len(), fixture.expected_catalog.len());
+        assert_eq!(
+            catalog.as_ref().as_slice(),
+            fixture.expected_catalog.as_slice(),
+            "complete custom-first Actions catalog, including every field and args Option"
+        );
+        assert_eq!(
+            &catalog[custom_len..],
+            &fixture.expected_catalog[fixture.custom_len()..],
+            "indexed membership and order match the independent flat-tree enumeration"
+        );
+        for action in &catalog[custom_len..] {
+            let path = std::path::Path::new(&action.action);
+            assert_eq!(
+                action.label.as_str(),
+                path.file_name().unwrap().to_string_lossy().as_ref(),
+                "indexed label is the complete filename"
+            );
+            assert_eq!(action.desc, action.action);
+            assert_eq!(action.args.as_deref(), None);
+            assert!(path.starts_with(&fixture.root));
+        }
+
+        let transfer = transfer.expect("nonempty indexed roots transfer the coordinator");
+        assert_eq!(transfer.config, fixture.config, "transferred scan config");
+        assert_eq!(transfer.generation, 1, "new coordinator first generation");
+        transfer
+            .coordinator
+            .validate_acknowledged_result(transfer.generation, &transfer.config)
+            .expect("startup result remains acknowledged for exact transfer config");
+        assert!(
+            transfer.coordinator.take_result().is_none(),
+            "startup scan result was consumed exactly once before transfer"
+        );
+
+        let root_text = fixture.root.to_string_lossy();
+        let mut complete = TrackCStartupSignature::new("track-c-startup-raw-output-v1");
+        complete.number(custom_len as u64);
+        complete.number(catalog.len() as u64);
+        for action in catalog.iter() {
+            hash_track_c_startup_action(&mut complete, action, None);
+        }
+        hash_track_c_startup_config(&mut complete, &transfer.config, &root_text, false);
+        complete.number(transfer.generation);
+        complete.number(1); // validate_acknowledged_result succeeded
+        complete.number(1); // take_result returned None
+
+        let mut structural = TrackCStartupSignature::new("track-c-startup-structural-output-v1");
+        structural.number(custom_len as u64);
+        structural.number(catalog.len() as u64);
+        for action in catalog.iter() {
+            hash_track_c_startup_action(&mut structural, action, Some(&root_text));
+        }
+        hash_track_c_startup_config(&mut structural, &transfer.config, &root_text, true);
+        structural.number(transfer.generation);
+        structural.number(1);
+        structural.number(1);
+
+        let sample = TrackCStartupSample {
+            elapsed_nanos,
+            complete_output_state_id: complete.finish(),
+            structural_output_id: structural.finish(),
+            generation: transfer.generation,
+            work_units: catalog.len() as u64,
+            work_counters: [
+                custom_len as u64,
+                catalog.len().saturating_sub(custom_len) as u64,
+                catalog.len() as u64,
+            ],
+        };
+        // Drop the acknowledged coordinator before the fixture workspace can
+        // leave scope; its worker has completed and no result remains queued.
+        drop(transfer);
+        sample
+    }
+
+    fn track_c_startup_nearest_rank(samples: &[u64], percentile: usize) -> u64 {
+        assert!(!samples.is_empty());
+        assert!((1..=100).contains(&percentile));
+        let mut ordered = samples.to_vec();
+        ordered.sort_unstable();
+        let rank = percentile.saturating_mul(ordered.len()).saturating_add(99) / 100;
+        ordered[rank.saturating_sub(1)]
+    }
+
+    fn emit_track_c_startup_samples(
+        mode: TrackCStartupMode,
+        fixture: &TrackCStartupFixture,
+        samples: &[TrackCStartupSample],
+    ) {
+        assert_eq!(samples.len(), TRACK_C_STARTUP_SAMPLES);
+        assert!(samples.iter().all(|sample| {
+            sample.structural_output_id == samples[0].structural_output_id
+                && sample.complete_output_state_id == samples[0].complete_output_state_id
+                && sample.generation == 1
+                && sample.work_units == samples[0].work_units
+                && sample.work_counters == samples[0].work_counters
+        }));
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos)
+            .collect::<Vec<_>>();
+        let complete = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.complete_output_state_id))
+            .collect::<Vec<_>>();
+        let structural = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.structural_output_id))
+            .collect::<Vec<_>>();
+        let generations = samples
+            .iter()
+            .map(|sample| sample.generation.to_string())
+            .collect::<Vec<_>>();
+        let work_units = samples
+            .iter()
+            .map(|sample| sample.work_units.to_string())
+            .collect::<Vec<_>>();
+        let work_counters = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .work_counters
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>();
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        eprintln!(
+            "TRACK_C_RESULT schema=1 owner=startup_action_catalog source={source} profile={profile} mode={mode:?} telemetry_enabled={} fixture=owned_synthetic_index_tree fixture_signature={:016x} count={} viewport=none scale_milli=1000 fonts=not_applicable settings=custom_first_initial_catalog cold_type=new_coordinator_warm_os_cache warmups={} samples={} elapsed_ns=[{}] p50_ns={} p95_ns={} max_ns={} complete_output_state_ids=[{}] structural_output_ids=[{}] revision_receipts=[{}] viewport_receipts=[{}] work_units=[{}] work_counters=[{}] exclusions=0",
+            multi_launcher::performance::enabled(),
+            fixture.fixture_signature,
+            fixture.indexed_len(),
+            TRACK_C_STARTUP_WARMUPS,
+            samples.len(),
+            elapsed
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            track_c_startup_nearest_rank(&elapsed, 50),
+            track_c_startup_nearest_rank(&elapsed, 95),
+            elapsed.iter().copied().max().unwrap_or_default(),
+            complete.join(","),
+            structural.join(","),
+            generations.join(","),
+            vec!["none"; samples.len()].join(","),
+            work_units.join(","),
+            work_counters.join("|"),
+        );
+    }
+
     #[test]
     fn startup_index_returns_the_complete_catalog_and_acknowledges_before_transfer() {
         let directory = tempdir().unwrap();
@@ -3327,6 +3744,45 @@ mod tests {
             Ok(_) => panic!("a missing startup root must propagate its scan failure"),
         };
         assert!(error.to_string().contains("startup index scan failed"));
+    }
+
+    #[test]
+    fn track_c_oracle_startup_action_catalog_matches_complete_acknowledged_output() {
+        let fixture = TrackCStartupFixture::new(16);
+        let sample = run_track_c_startup_action_catalog_owner(&fixture);
+
+        assert_eq!(sample.generation, 1);
+        assert_eq!(
+            sample.work_units,
+            (fixture.custom_len() + fixture.indexed_len()) as u64
+        );
+        assert_eq!(
+            sample.work_counters,
+            [
+                fixture.custom_len() as u64,
+                fixture.indexed_len() as u64,
+                fixture.expected_catalog.len() as u64,
+            ]
+        );
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C benchmark; use an owned isolated test process and small mode for smoke"]
+    fn track_c_benchmark_startup_action_catalog_owner() {
+        assert!(multi_launcher::performance::enabled());
+        let mode = TrackCStartupMode::from_process_env();
+
+        for indexed_file_count in mode.indexed_file_sizes() {
+            let fixture = TrackCStartupFixture::new(indexed_file_count);
+            for _ in 0..TRACK_C_STARTUP_WARMUPS {
+                let _ = run_track_c_startup_action_catalog_owner(&fixture);
+            }
+
+            let samples = (0..TRACK_C_STARTUP_SAMPLES)
+                .map(|_| run_track_c_startup_action_catalog_owner(&fixture))
+                .collect::<Vec<_>>();
+            emit_track_c_startup_samples(mode, &fixture, &samples);
+        }
     }
 
     #[test]

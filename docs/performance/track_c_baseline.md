@@ -36,4 +36,4 @@ Protected urgent/irreversible variants include ExecuteAction, Recycle, radial di
 
 ## Measurement state
 
-G0 is NOT FROZEN. No Track C tests or benchmarks have executed. No performance result is borrowed from Track A/B. C0-B instrumentation and C0-C owner fixtures/oracles must pass review and scoped checks before C0-D freezes matched observations. No source optimization is authorized before that freeze.
+G0 is NOT FROZEN. C0-B instrumentation checks passed with the explicit native verification incident recorded in `track_c_verification_incident.md`. C0-C's shared support, all actual owner oracles and Small benchmark smoke passed scoped checks and independent source/output review. Actions and startup fresh-process repeats retain fixture/structural identities; startup raw complete IDs legitimately vary with owned paths. No G0 benchmark distribution has been measured and no performance result is borrowed from Track A/B. C0-D next freezes matched full-mode observations on the precise accepted C0-C commit; the native recipe is explicitly NOT RUN. No source optimization is authorized before that freeze.

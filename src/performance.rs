@@ -15,6 +15,9 @@ pub mod track_c;
 #[cfg(test)]
 pub(crate) mod workloads;
 
+#[cfg(test)]
+pub(crate) mod track_c_workloads;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
 pub enum Metric {

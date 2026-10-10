@@ -860,6 +860,674 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum TrackCSearchCase {
+        SparseExact,
+        DenseExact,
+        DenseFuzzy,
+        EmptyBrowse,
+        PendingExact,
+    }
+
+    impl TrackCSearchCase {
+        fn query(self) -> &'static str {
+            match self {
+                Self::SparseExact | Self::PendingExact => "app marker",
+                Self::DenseExact => "app",
+                Self::DenseFuzzy => "app synthetic",
+                Self::EmptyBrowse => "",
+            }
+        }
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::SparseExact => "sparse-exact-alias-tie",
+                Self::DenseExact => "dense-exact-empty-term",
+                Self::DenseFuzzy => "dense-fuzzy-usage-weighted",
+                Self::EmptyBrowse => "empty-query-browse",
+                Self::PendingExact => "sparse-exact-pending-provider",
+            }
+        }
+
+        fn id(self) -> u64 {
+            match self {
+                Self::SparseExact => 0,
+                Self::DenseExact => 1,
+                Self::DenseFuzzy => 2,
+                Self::EmptyBrowse => 3,
+                Self::PendingExact => 4,
+            }
+        }
+    }
+
+    struct TrackCSearchState {
+        app: LauncherApp,
+        scenario: TrackCSearchCase,
+        query: String,
+        plugin_snapshot: Option<crate::plugin::PluginSearchSnapshotResult>,
+        expected: LauncherSearchOutcome,
+        expected_local_hits: u64,
+        fixture_signature: u64,
+    }
+
+    fn track_c_search_app(
+        ctx: &egui::Context,
+        root: &std::path::Path,
+        actions: Vec<Action>,
+        provider_result: Action,
+        searched: Option<Arc<AtomicBool>>,
+    ) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        let mut plugins = PluginManager::new_inert_for_test();
+        plugins.register(Box::new(StaticSearchPlugin {
+            name: "track_c_fixture_provider",
+            result: provider_result,
+            always: true,
+            searched,
+        }));
+        let mut app = LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            plugins,
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(HashSet::from(["track_c_fixture_provider".into()])),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.actions = Arc::new(actions);
+        app.update_action_cache();
+        app.match_exact = true;
+        app.usage_weight = 0.25;
+        app.usage.clear();
+        app
+    }
+
+    // Frozen eager reference for the small Track C search scenario set. It
+    // deliberately spells out the original exact/fuzzy selection, provider
+    // filtering, usage weighting, stable score sort, and result assembly.
+    fn track_c_eager_search_outcome(
+        app: &LauncherApp,
+        raw_query: &str,
+        provider: &crate::plugin::PluginSearchSnapshotResult,
+    ) -> LauncherSearchOutcome {
+        let trimmed = raw_query.trim();
+        let trimmed_lc = trimmed.to_lowercase();
+        // Keep the frozen test reference independent of LauncherApp's helper
+        // while retaining its current exact-mode predicate.
+        let exact_mode = app.match_exact || app.fuzzy_weight <= 0.0;
+        if trimmed.is_empty() {
+            let mut actions = app.command_cache.clone();
+            actions.extend(app.actions.iter().map(|action| Action {
+                label: format!("app {}", action.label),
+                desc: action.desc.clone(),
+                action: action.action.clone(),
+                args: action.args.clone(),
+            }));
+            return LauncherSearchOutcome {
+                state: LauncherSearchState::Results,
+                actions,
+                provider_revision: provider.provider_revision,
+                result_catalog_versions: Some(provider.catalog_versions),
+                result_catalog_versions_stable: provider.catalog_versions_at_start
+                    == provider.catalog_versions,
+                provider_deferral: ProviderSearchDeferral::None,
+            };
+        }
+
+        let searches_app = trimmed_lc == "app" || trimmed_lc.starts_with("app ");
+        let action_query = searches_app
+            .then(|| trimmed.split_once(' ').map(|(_, tail)| tail).unwrap_or(""))
+            .unwrap_or("");
+        let query_term = action_query.trim().to_lowercase();
+        let alias_matches = |action_id: &str| {
+            app.folder_aliases_lc
+                .get(action_id)
+                .or_else(|| app.bookmark_aliases_lc.get(action_id))
+                .and_then(Option::as_ref)
+                .is_some_and(|alias| alias.contains(&query_term))
+        };
+        let mut scored = Vec::new();
+        if searches_app {
+            for action in app.actions.iter() {
+                // Production's app-action path treats an empty app term as a
+                // score-zero catalog browse before alias matching.
+                if query_term.is_empty() {
+                    scored.push((action.clone(), 0.0));
+                } else if exact_mode {
+                    let alias = alias_matches(&action.action);
+                    let label = action.label.to_lowercase().contains(&query_term);
+                    let desc = action.desc.to_lowercase().contains(&query_term);
+                    let id = action.action.to_lowercase().contains(&query_term);
+                    if alias || label || desc || id {
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                    }
+                } else if let Some(score) = app
+                    .matcher
+                    .fuzzy_match(&action.label, action_query)
+                    .max(app.matcher.fuzzy_match(&action.desc, action_query))
+                {
+                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
+                }
+            }
+        }
+        for action in &provider.actions {
+            if exact_mode {
+                let alias = alias_matches(&action.action);
+                let label = action.label.to_lowercase().contains(&query_term);
+                let desc = action.desc.to_lowercase().contains(&query_term);
+                let id = action.action.to_lowercase().contains(&query_term);
+                if query_term.is_empty() || alias || label || desc || id {
+                    scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                }
+            } else {
+                let score = app
+                    .matcher
+                    .fuzzy_match(&action.label, raw_query)
+                    .max(app.matcher.fuzzy_match(&action.desc, raw_query))
+                    .unwrap_or(0) as f32
+                    * app.fuzzy_weight;
+                scored.push((action.clone(), score));
+            }
+        }
+        for (action, score) in &mut scored {
+            *score += app.usage.get(&action.action).copied().unwrap_or(0) as f32 * app.usage_weight;
+        }
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let actions = scored
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>();
+        let stable = provider.catalog_versions_at_start == provider.catalog_versions;
+        let state =
+            if provider.pending || provider.start_revision != provider.provider_revision || !stable
+            {
+                LauncherSearchState::Pending
+            } else if actions.is_empty() {
+                LauncherSearchState::NoResults
+            } else {
+                LauncherSearchState::Results
+            };
+        LauncherSearchOutcome {
+            state,
+            actions,
+            provider_revision: provider.provider_revision,
+            result_catalog_versions: Some(provider.catalog_versions),
+            result_catalog_versions_stable: stable,
+            provider_deferral: ProviderSearchDeferral::None,
+        }
+    }
+
+    fn track_c_search_state_signature(outcome: &LauncherSearchOutcome) -> u64 {
+        let mut signature = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_5345_4152_4348,
+            "track-c-search-complete-output",
+            outcome.actions.len(),
+        );
+        signature.number(
+            crate::performance::track_c_workloads::action_fixture_identity(&outcome.actions),
+        );
+        signature.number(match outcome.state {
+            LauncherSearchState::Results => 0,
+            LauncherSearchState::NoResults => 1,
+            LauncherSearchState::Pending => 2,
+        });
+        signature.number(outcome.provider_revision);
+        if let Some(versions) = outcome.result_catalog_versions {
+            signature.number(1);
+            signature.number(versions.clipboard);
+            signature.number(versions.todo);
+            signature.number(versions.notes);
+        } else {
+            signature.number(0);
+        }
+        signature.number(outcome.result_catalog_versions_stable as u64);
+        signature.number(match outcome.provider_deferral {
+            ProviderSearchDeferral::None => 0,
+            ProviderSearchDeferral::Capacity => 1,
+        });
+        signature.finish()
+    }
+
+    fn track_c_search_fixture_signature(
+        app: &LauncherApp,
+        query: &str,
+        scenario: TrackCSearchCase,
+        provider_actions: &[Action],
+    ) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x435F_5345_4152_4348,
+            "track-c-search-input-state",
+            app.actions.len().saturating_add(provider_actions.len()),
+        );
+        let append_string = |signature: &mut StableSignature, value: &str| {
+            signature.number(value.len() as u64);
+            signature.bytes(value.as_bytes());
+        };
+        signature.number(scenario.id());
+        append_string(&mut signature, query);
+        signature.number(action_fixture_identity(&app.actions));
+        signature.number(action_fixture_identity(provider_actions));
+        signature.number(action_fixture_identity(&app.command_cache));
+        signature.number(app.match_exact as u64);
+        signature.number(u64::from(app.fuzzy_weight.to_bits()));
+        signature.number(u64::from(app.usage_weight.to_bits()));
+        for aliases in [&app.folder_aliases_lc, &app.bookmark_aliases_lc] {
+            let mut entries = aliases.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            signature.number(entries.len() as u64);
+            for (id, alias) in entries {
+                append_string(&mut signature, id);
+                match alias {
+                    Some(alias) => {
+                        signature.number(1);
+                        append_string(&mut signature, alias);
+                    }
+                    None => signature.number(0),
+                }
+            }
+        }
+        let mut usage = app.usage.iter().collect::<Vec<_>>();
+        usage.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        signature.number(usage.len() as u64);
+        for (id, value) in usage {
+            append_string(&mut signature, id);
+            signature.number(*value as u64);
+        }
+        let mut enabled = app.enabled_plugins.as_ref().map(|values| {
+            let mut values = values.iter().collect::<Vec<_>>();
+            values.sort_unstable();
+            values
+        });
+        match enabled.as_mut() {
+            Some(values) => {
+                signature.number(1);
+                signature.number(values.len() as u64);
+                for value in values.iter() {
+                    append_string(&mut signature, value);
+                }
+            }
+            None => signature.number(0),
+        }
+        signature.finish()
+    }
+
+    fn track_c_prepare_search_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        scenario: TrackCSearchCase,
+    ) -> TrackCSearchState {
+        let query = scenario.query();
+        let ctx = egui::Context::default();
+        let provider_result = Action {
+            label: "Track C marker provider result".into(),
+            desc: "controlled provider marker".into(),
+            action: "track_c_provider:marker".into(),
+            args: Some(String::new()),
+        };
+        let mut app = track_c_search_app(&ctx, root, actions.to_vec(), provider_result, None);
+        if matches!(
+            scenario,
+            TrackCSearchCase::SparseExact | TrackCSearchCase::PendingExact
+        ) {
+            for index in [
+                actions.len().saturating_sub(1),
+                actions.len().saturating_sub(2),
+                actions.len().saturating_sub(3),
+            ] {
+                if let Some(action) = actions.get(index) {
+                    app.folder_aliases_lc.insert(
+                        action.action.clone(),
+                        Some("track-c-marker shared-alias".into()),
+                    );
+                }
+            }
+        }
+        if matches!(scenario, TrackCSearchCase::DenseExact) {
+            for index in [
+                actions.len().saturating_sub(1),
+                actions.len().saturating_sub(2),
+                actions.len().saturating_sub(3),
+            ] {
+                if let Some(action) = actions.get(index) {
+                    app.folder_aliases_lc.insert(
+                        action.action.clone(),
+                        Some("track-c-empty-query alias".into()),
+                    );
+                }
+            }
+        }
+        for index in [1, 7, 13] {
+            if let Some(action) = actions.get(index) {
+                app.usage.insert(action.action.clone(), 8);
+            }
+        }
+        if matches!(
+            scenario,
+            TrackCSearchCase::SparseExact | TrackCSearchCase::PendingExact
+        ) {
+            for index in [
+                actions.len().saturating_sub(1),
+                actions.len().saturating_sub(2),
+                actions.len().saturating_sub(3),
+            ] {
+                if let Some(action) = actions.get(index) {
+                    app.usage.insert(action.action.clone(), 8);
+                }
+            }
+        }
+        app.match_exact = !matches!(scenario, TrackCSearchCase::DenseFuzzy);
+        let captured = app
+            .plugins
+            .search_snapshot(
+                app.enabled_plugins.as_ref(),
+                app.enabled_capabilities.as_ref(),
+            )
+            .search(query);
+        let mut captured = captured;
+        if matches!(scenario, TrackCSearchCase::PendingExact) {
+            captured.pending = true;
+        }
+        let expected = track_c_eager_search_outcome(&app, query, &captured);
+        let expected_local_hits = expected
+            .actions
+            .iter()
+            .filter(|action| action.action != "track_c_provider:marker")
+            .count() as u64;
+        let fixture_signature =
+            track_c_search_fixture_signature(&app, query, scenario, &captured.actions);
+        crate::performance::track_c::reset();
+        TrackCSearchState {
+            app,
+            scenario,
+            query: query.to_string(),
+            plugin_snapshot: Some(captured),
+            expected,
+            expected_local_hits,
+            fixture_signature,
+        }
+    }
+
+    fn track_c_validate_search_state(
+        state: &TrackCSearchState,
+        actual: &LauncherSearchOutcome,
+        require_metrics: bool,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c::{self, Phase};
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        assert_eq!(actual.state, state.expected.state);
+        assert_eq!(
+            actual.actions, state.expected.actions,
+            "complete ordered Actions/args parity"
+        );
+        assert_eq!(actual.provider_revision, state.expected.provider_revision);
+        assert_eq!(
+            actual.result_catalog_versions,
+            state.expected.result_catalog_versions
+        );
+        assert_eq!(
+            actual.result_catalog_versions_stable,
+            state.expected.result_catalog_versions_stable
+        );
+        assert_eq!(actual.provider_deferral, state.expected.provider_deferral);
+        let score = track_c::snapshot()
+            .into_iter()
+            .find(|(phase, _)| *phase == Phase::SearchScoreAndCloneHits)
+            .expect("search score phase is fixed-cardinality")
+            .1;
+        let moved = track_c::snapshot()
+            .into_iter()
+            .find(|(phase, _)| *phase == Phase::SearchMoveResults)
+            .expect("search move phase is fixed-cardinality")
+            .1;
+        if require_metrics && !state.query.trim().is_empty() {
+            assert_eq!(
+                score.calls, 1,
+                "actual shared search owner scored this query"
+            );
+            assert_eq!(
+                moved.calls, 1,
+                "actual shared search owner moved final results"
+            );
+            assert_eq!(score.work_units, state.app.actions.len() as u64);
+            assert_eq!(
+                score.candidates_scored,
+                if matches!(state.scenario, TrackCSearchCase::DenseExact) {
+                    0
+                } else {
+                    state.app.actions.len() as u64
+                }
+            );
+            assert_eq!(score.action_clones, state.expected_local_hits);
+            assert_eq!(moved.work_units, actual.actions.len() as u64);
+        }
+        let structure =
+            crate::performance::track_c_workloads::action_fixture_identity(&actual.actions);
+        let complete = track_c_search_state_signature(actual);
+        let catalog_versions = actual.result_catalog_versions;
+        let mut revisions = vec![actual.provider_revision];
+        if let Some(versions) = catalog_versions {
+            revisions.extend([versions.clipboard, versions.todo, versions.notes]);
+        }
+        revisions.push(actual.result_catalog_versions_stable as u64);
+        revisions.push(match actual.provider_deferral {
+            ProviderSearchDeferral::None => 0,
+            ProviderSearchDeferral::Capacity => 1,
+        });
+        OwnerObservation {
+            output_identity: complete,
+            structural_signature: structure,
+            revision_receipts: revisions,
+            viewport_receipt: None,
+            work_units: score.candidates_scored + moved.work_units,
+            work_counters: vec![
+                score.work_units,
+                score.candidates_scored,
+                score.action_clones,
+                moved.work_units,
+            ],
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_search_shared_owner_matches_frozen_complete_results() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let mut state = track_c_prepare_search_state(
+            workspace.root(),
+            &fixture.values,
+            TrackCSearchCase::SparseExact,
+        );
+        let actual = state.app.search_read_only_outcome_with_plugin_snapshot(
+            &state.query,
+            state
+                .plugin_snapshot
+                .take()
+                .expect("captured provider snapshot is consumed once"),
+        );
+        let observation = track_c_validate_search_state(&state, &actual, false);
+        assert_eq!(
+            actual.actions.len(),
+            4,
+            "three colliding aliases and one controlled provider action participate"
+        );
+        assert_eq!(actual.actions[0].action, fixture.values[97].action);
+        assert_eq!(actual.actions[1].action, fixture.values[98].action);
+        assert_eq!(actual.actions[2].action, fixture.values[99].action);
+        assert_eq!(actual.actions[0].args, fixture.values[97].args);
+        assert_eq!(actual.actions[1].args, fixture.values[98].args);
+        assert_eq!(actual.actions[2].args, fixture.values[99].args);
+        assert_eq!(
+            actual.actions[3].action, "track_c_provider:marker",
+            "provider contribution follows higher weighted alias hits"
+        );
+        assert_ne!(observation.output_identity, 0);
+        drop(state);
+
+        for scenario in [
+            TrackCSearchCase::DenseExact,
+            TrackCSearchCase::DenseFuzzy,
+            TrackCSearchCase::EmptyBrowse,
+            TrackCSearchCase::PendingExact,
+        ] {
+            let mut state =
+                track_c_prepare_search_state(workspace.root(), &fixture.values, scenario);
+            let actual = state.app.search_read_only_outcome_with_plugin_snapshot(
+                &state.query,
+                state
+                    .plugin_snapshot
+                    .take()
+                    .expect("captured provider snapshot is consumed once"),
+            );
+            let _ = track_c_validate_search_state(&state, &actual, false);
+            match scenario {
+                TrackCSearchCase::DenseExact | TrackCSearchCase::DenseFuzzy => {
+                    assert_eq!(actual.actions.len(), fixture.values.len() + 1);
+                }
+                TrackCSearchCase::EmptyBrowse => {
+                    assert_eq!(actual.actions.len(), fixture.values.len());
+                    assert!(actual.actions[0].label.starts_with("app "));
+                }
+                TrackCSearchCase::PendingExact => {
+                    assert_eq!(actual.state, LauncherSearchState::Pending);
+                }
+                TrackCSearchCase::SparseExact => unreachable!(),
+            }
+            drop(state);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c_fixture_search_ordinary_path_calls_controlled_provider() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let searched = Arc::new(AtomicBool::new(false));
+        let ctx = egui::Context::default();
+        let provider_result = Action {
+            label: "Track C ordinary provider result".into(),
+            desc: "ordinary provider marker".into(),
+            action: "track_c_provider:marker".into(),
+            args: Some("ordinary".into()),
+        };
+        let app = track_c_search_app(
+            &ctx,
+            workspace.root(),
+            Vec::new(),
+            provider_result,
+            Some(Arc::clone(&searched)),
+        );
+        let outcome = app.search_read_only_outcome("app marker");
+        assert!(searched.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(outcome.state, LauncherSearchState::Results);
+        assert_eq!(outcome.actions.len(), 1);
+        assert_eq!(outcome.actions[0].action, "track_c_provider:marker");
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C owner benchmark; isolated action catalog/provider only"]
+    fn track_c_benchmark_search_shared_owner() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, TrackCWorkspace, action_fixture, emit_samples,
+            measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for scenario in [
+                TrackCSearchCase::SparseExact,
+                TrackCSearchCase::DenseExact,
+                TrackCSearchCase::DenseFuzzy,
+                TrackCSearchCase::EmptyBrowse,
+                TrackCSearchCase::PendingExact,
+            ] {
+                let fixture_state =
+                    track_c_prepare_search_state(workspace.root(), &fixture.values, scenario);
+                let fixture_signature = fixture_state.fixture_signature;
+                drop(fixture_state);
+                let samples = measure_owner(
+                    || track_c_prepare_search_state(workspace.root(), &fixture.values, scenario),
+                    |state| {
+                        state.app.search_read_only_outcome_with_plugin_snapshot(
+                            &state.query,
+                            state
+                                .plugin_snapshot
+                                .take()
+                                .expect("captured provider snapshot is consumed once"),
+                        )
+                    },
+                    |state, actual| {
+                        assert_eq!(state.fixture_signature, fixture_signature);
+                        track_c_validate_search_state(state, actual, true)
+                    },
+                );
+                let (settings, cold_type) = match scenario {
+                    TrackCSearchCase::SparseExact => (
+                        "exact-alias-collision-usage-tied",
+                        "fresh-query-sparse-provider-result",
+                    ),
+                    TrackCSearchCase::DenseExact => (
+                        "exact-empty-term-usage-weighted",
+                        "fresh-query-dense-results",
+                    ),
+                    TrackCSearchCase::DenseFuzzy => {
+                        ("fuzzy-mode-usage-weighted", "fresh-query-dense-results")
+                    }
+                    TrackCSearchCase::EmptyBrowse => {
+                        ("empty-query-browse", "fresh-query-complete-catalog")
+                    }
+                    TrackCSearchCase::PendingExact => (
+                        "exact-alias-collision-provider-pending",
+                        "fresh-query-pending-provider-snapshot",
+                    ),
+                };
+                emit_samples(
+                    ReportMetadata {
+                        owner: "LauncherApp::search_read_only_outcome_with_plugin_snapshot",
+                        fixture_name: scenario.name(),
+                        fixture_signature,
+                        item_count: *count,
+                        viewport: "not-rendered",
+                        scale_milli: 1_000,
+                        font_state: "not-applicable",
+                        settings,
+                        cold_type,
+                        mode,
+                    },
+                    &samples,
+                );
+            }
+        }
+        drop(workspace);
+    }
+
     #[test]
     fn deferred_snapshot_matches_ordinary_g_prefix_provider_selection() {
         for enabled in [

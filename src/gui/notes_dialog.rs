@@ -1298,7 +1298,7 @@ impl NotesDialog {
                         crate::performance::Metric::QuickNotesRowsBuilt,
                     );
                     rows_timer.set_work_units(0);
-                    let output = egui::ScrollArea::both()
+                    let _output = egui::ScrollArea::both()
                         .max_height(area_height)
                         .show_viewport(ui, |ui, viewport| {
                             let old_geometry = self.ensure_notes_geometry(
@@ -1603,10 +1603,10 @@ impl NotesDialog {
                         });
                     #[cfg(test)]
                     {
-                        self.test_scroll_area_id = Some(output.id);
-                        self.test_scroll_area_offset = output.state.offset;
-                        self.test_scroll_area_inner_rect = Some(output.inner_rect);
-                        self.test_scroll_area_content_size = output.content_size;
+                        self.test_scroll_area_id = Some(_output.id);
+                        self.test_scroll_area_offset = _output.state.offset;
+                        self.test_scroll_area_inner_rect = Some(_output.inner_rect);
+                        self.test_scroll_area_content_size = _output.content_size;
                     }
                     drop(rows_timer);
                     if let Some(idx) = remove {
@@ -1666,10 +1666,20 @@ mod tests {
 
     #[derive(Debug)]
     struct EagerNoteRowRects {
+        original_index: usize,
         outer: egui::Rect,
         header: egui::Rect,
+        title: egui::Rect,
+        meta: egui::Rect,
         preview: Option<egui::Rect>,
         separator: egui::Rect,
+    }
+
+    struct EagerNotesRowsLayout {
+        rows: Vec<EagerNoteRowRects>,
+        estimated: super::NotesGeometry,
+        content_origin: egui::Pos2,
+        bounds: egui::Rect,
     }
 
     #[derive(Debug)]
@@ -1682,6 +1692,79 @@ mod tests {
         estimated_content_size: egui::Vec2,
     }
 
+    fn eager_notes_rows(
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        entries: &[Note],
+        metadata: &[super::NoteRowMetadata],
+        filtered_indices: &[usize],
+        viewport_width: f32,
+    ) -> EagerNotesRowsLayout {
+        let content_origin = ui.min_rect().min;
+        let estimated = super::measure_notes_geometry(
+            ctx,
+            ui.style(),
+            viewport_width,
+            entries,
+            metadata,
+            filtered_indices,
+            1,
+            1,
+            1,
+        );
+        let mut rows = Vec::with_capacity(filtered_indices.len());
+        let mut bounds = egui::Rect::NOTHING;
+        for &original_index in filtered_indices {
+            let Some(row) = metadata
+                .get(original_index)
+                .filter(|row| row.original_index == original_index)
+            else {
+                continue;
+            };
+            let outer = ui.vertical(|ui| {
+                let header = ui.horizontal(|ui| {
+                    let title = ui.strong(&row.display_title);
+                    let meta = ui.small(&row.meta);
+                    (title.rect, meta.rect)
+                });
+                let preview = if row.preview.is_empty() {
+                    None
+                } else {
+                    Some(ui.small(&row.preview).rect)
+                };
+                (
+                    header.response.rect,
+                    header.inner.0,
+                    header.inner.1,
+                    preview,
+                )
+            });
+            let separator = ui.separator().rect;
+            let (header, title, meta, preview) = outer.inner;
+            for rect in [outer.response.rect, header, title, meta, separator] {
+                bounds = bounds.union(rect);
+            }
+            if let Some(preview) = preview {
+                bounds = bounds.union(preview);
+            }
+            rows.push(EagerNoteRowRects {
+                original_index,
+                outer: outer.response.rect,
+                header,
+                title,
+                meta,
+                preview,
+                separator,
+            });
+        }
+        EagerNotesRowsLayout {
+            rows,
+            estimated,
+            content_origin,
+            bounds,
+        }
+    }
+
     // Independent copy of the pre-virtualization row composition. Keep this
     // actual-widget oracle separate from the cached geometry estimator so the
     // virtualization tests can catch egui layout changes and estimate drift.
@@ -1691,6 +1774,7 @@ mod tests {
         screen_width: f32,
     ) -> EagerNotesGeometry {
         let metadata = super::build_row_metadata(entries, false, false).unwrap();
+        let all_indices = (0..entries.len()).collect::<Vec<_>>();
         let mut result = None;
         let _ = ctx.run(
             egui::RawInput {
@@ -1705,45 +1789,15 @@ mod tests {
                     let output = egui::ScrollArea::both().max_height(520.0).show_viewport(
                         ui,
                         |ui, viewport| {
-                            let content_origin = ui.min_rect().min;
-                            let all_indices = (0..entries.len()).collect::<Vec<_>>();
-                            let estimated = super::measure_notes_geometry(
+                            let layout = eager_notes_rows(
                                 ctx,
-                                ui.style(),
-                                viewport.width(),
+                                ui,
                                 entries,
                                 &metadata,
                                 &all_indices,
-                                1,
-                                1,
-                                1,
+                                viewport.width(),
                             );
-                            let mut rows = Vec::with_capacity(entries.len());
-                            for row in &metadata {
-                                let outer = ui.vertical(|ui| {
-                                    let header = ui
-                                        .horizontal(|ui| {
-                                            ui.strong(&row.display_title);
-                                            ui.small(&row.meta);
-                                        })
-                                        .response
-                                        .rect;
-                                    let preview = if row.preview.is_empty() {
-                                        None
-                                    } else {
-                                        Some(ui.small(&row.preview).rect)
-                                    };
-                                    (header, preview)
-                                });
-                                let separator = ui.separator().rect;
-                                rows.push(EagerNoteRowRects {
-                                    outer: outer.response.rect,
-                                    header: outer.inner.0,
-                                    preview: outer.inner.1,
-                                    separator,
-                                });
-                            }
-                            (rows, content_origin, estimated)
+                            (layout.rows, layout.content_origin, layout.estimated)
                         },
                     );
                     result = Some(EagerNotesGeometry {
@@ -1758,6 +1812,999 @@ mod tests {
             },
         );
         result.expect("the eager geometry oracle runs its central panel")
+    }
+
+    fn eager_notes_geometry_for_projection(
+        ctx: &egui::Context,
+        entries: &[Note],
+        filtered_indices: &[usize],
+        viewport_size: egui::Vec2,
+        style: &egui::Style,
+        backlinks_enabled: bool,
+        task_lists_enabled: bool,
+    ) -> EagerNotesGeometry {
+        let metadata = super::build_row_metadata(entries, backlinks_enabled, task_lists_enabled)
+            .expect("synthetic note metadata builds in the isolated fixture");
+        let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, viewport_size);
+        let content_rect = viewport;
+        ctx.set_style(style.clone());
+        let layer = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("track-c-notes-eager-oracle"),
+        );
+        let mut result = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            |ctx| {
+                let mut ui = egui::Ui::new(
+                    ctx.clone(),
+                    layer,
+                    egui::Id::new("track-c-notes-eager-ui"),
+                    content_rect,
+                    viewport,
+                );
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_style(style.clone());
+                    let layout = eager_notes_rows(
+                        ctx,
+                        ui,
+                        entries,
+                        &metadata,
+                        filtered_indices,
+                        viewport.width(),
+                    );
+                    let content_size = if layout.rows.is_empty() {
+                        egui::Vec2::ZERO
+                    } else {
+                        egui::vec2(
+                            viewport
+                                .width()
+                                .max(layout.bounds.right() - layout.content_origin.x),
+                            (layout.bounds.bottom() - layout.content_origin.y).max(0.0),
+                        )
+                    };
+                    result = Some(EagerNotesGeometry {
+                        rows: layout.rows,
+                        content_size,
+                        viewport,
+                        content_origin: layout.content_origin,
+                        estimated_rows: layout.estimated.rows,
+                        estimated_content_size: layout.estimated.content_size,
+                    });
+                });
+            },
+        );
+        result.expect("the projection-aware eager note oracle runs its row composition")
+    }
+
+    fn track_c_expected_note_indices(entries: &[Note], filter: &str) -> Vec<usize> {
+        let filter = filter.to_lowercase();
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, note)| {
+                let mut searchable = note.content.to_lowercase();
+                if let Some(alias) = &note.alias {
+                    searchable.push('\n');
+                    searchable.push_str(&alias.to_lowercase());
+                }
+                for alias in &note.aliases {
+                    searchable.push('\n');
+                    searchable.push_str(&alias.to_lowercase());
+                }
+                searchable.push('\n');
+                searchable.push_str(&note.slug.to_lowercase());
+                for tag in &note.tags {
+                    searchable.push('\n');
+                    searchable.push_str(&tag.to_lowercase());
+                }
+                (filter.is_empty() || searchable.contains(&filter)).then_some(index)
+            })
+            .collect()
+    }
+
+    struct TrackCQuickNotesState {
+        dialog: NotesDialog,
+        app: LauncherApp,
+        ctx: egui::Context,
+        expected_notes: Vec<Note>,
+        expected_metadata: Vec<super::NoteRowMetadata>,
+        expected_indices: Vec<usize>,
+        eager: EagerNotesGeometry,
+        screen_width: f32,
+        screen_height: f32,
+        actual_scroll_area_width: f32,
+        wide_scroll_area_width: Option<f32>,
+        wide_geometry_width: Option<u32>,
+        wide_rebuilds: Option<u64>,
+        rebuilds_before: u64,
+        rows_measured_before: u64,
+        cold: bool,
+        frame_index: usize,
+        _cache_guard: crate::plugins::note::NoteCachePublicationGuard,
+    }
+
+    fn track_c_prepare_quick_notes_state(
+        root: &std::path::Path,
+        notes: &[Note],
+        filter: &str,
+        screen_width: f32,
+        screen_height: f32,
+        cold: bool,
+        transition_from_width: Option<f32>,
+    ) -> TrackCQuickNotesState {
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, root);
+        let cache_guard = crate::plugins::note::publish_note_cache_for_test(notes.to_vec());
+        let (published_revision, canonical_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("synthetic note cache snapshot is healthy");
+        assert_eq!(canonical_notes.len(), notes.len());
+        assert_eq!(
+            canonical_notes
+                .iter()
+                .map(|note| &note.slug)
+                .collect::<Vec<_>>(),
+            notes.iter().map(|note| &note.slug).collect::<Vec<_>>(),
+            "cache publication retains the fixture's ordered note identities"
+        );
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        dialog.search = filter.to_owned();
+        if let Some(wide_width) = transition_from_width {
+            for frame in 0..7 {
+                render_notes_frame_at(
+                    &ctx,
+                    &mut dialog,
+                    &mut app,
+                    1.0 + frame as f64 / 60.0,
+                    wide_width,
+                    screen_height,
+                );
+            }
+        }
+        let wide_viewport = transition_from_width.map(|_| {
+            dialog
+                .test_scroll_area_inner_rect
+                .expect("the wide Quick Notes ScrollArea rendered")
+        });
+        let wide_geometry_width = transition_from_width.map(|_| {
+            dialog
+                .notes_geometry
+                .as_ref()
+                .expect("wide Quick Notes geometry is installed")
+                .key
+                .viewport_width
+        });
+        let wide_rebuilds = transition_from_width.map(|_| dialog.test_geometry_rebuilds);
+        let first_final_frame = if transition_from_width.is_some() {
+            7
+        } else {
+            0
+        };
+        for frame in first_final_frame..first_final_frame + 7 {
+            render_notes_frame_at(
+                &ctx,
+                &mut dialog,
+                &mut app,
+                1.0 + frame as f64 / 60.0,
+                screen_width,
+                screen_height,
+            );
+        }
+
+        assert_eq!(
+            dialog.entries, canonical_notes,
+            "Quick Notes loaded the complete canonical published snapshot"
+        );
+        assert_eq!(dialog.entries_revision, Some(published_revision));
+        let backlinks_enabled = app.note_settings.backlinks_enabled;
+        let task_lists_enabled = app.note_settings.task_lists_enabled;
+        let expected_metadata =
+            super::build_row_metadata(&canonical_notes, backlinks_enabled, task_lists_enabled)
+                .expect("synthetic note metadata builds in the isolated fixture");
+        assert_eq!(dialog.row_metadata, expected_metadata);
+        let expected_indices = track_c_expected_note_indices(&canonical_notes, filter);
+        assert_eq!(dialog.filtered_indices, expected_indices);
+        let viewport = dialog
+            .test_scroll_area_inner_rect
+            .expect("the actual NotesDialog ScrollArea rendered");
+        assert!(viewport.width() > 0.0 && viewport.height() > 0.0);
+        if let Some(wide_viewport) = wide_viewport {
+            assert!(
+                viewport.width() + 0.5 < wide_viewport.width(),
+                "the real 300-point screen constrains the NotesDialog viewport: wide={} narrow={}",
+                wide_viewport.width(),
+                viewport.width()
+            );
+            let geometry_width = dialog
+                .notes_geometry
+                .as_ref()
+                .expect("narrow Quick Notes geometry is installed")
+                .key
+                .viewport_width;
+            assert_ne!(geometry_width, wide_geometry_width.unwrap());
+            assert!(dialog.test_geometry_rebuilds > wide_rebuilds.unwrap());
+        }
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let eager = eager_notes_geometry_for_projection(
+            &oracle_ctx,
+            &canonical_notes,
+            &expected_indices,
+            viewport.size(),
+            &style,
+            backlinks_enabled,
+            task_lists_enabled,
+        );
+        assert_quick_notes_geometry_matches_eager(&dialog, &eager, &expected_indices);
+
+        let rebuilds_before = dialog.test_geometry_rebuilds;
+        let rows_measured_before = dialog.test_geometry_rows_measured;
+        if cold {
+            dialog.notes_geometry = None;
+        }
+        crate::performance::track_c::reset();
+        TrackCQuickNotesState {
+            dialog,
+            app,
+            ctx,
+            expected_notes: canonical_notes,
+            expected_metadata,
+            expected_indices,
+            eager,
+            screen_width,
+            screen_height,
+            actual_scroll_area_width: viewport.width(),
+            wide_scroll_area_width: wide_viewport.map(|rect| rect.width()),
+            wide_geometry_width,
+            wide_rebuilds,
+            rebuilds_before,
+            rows_measured_before,
+            cold,
+            frame_index: if transition_from_width.is_some() {
+                14
+            } else {
+                7
+            },
+            _cache_guard: cache_guard,
+        }
+    }
+
+    fn assert_quick_notes_geometry_matches_eager(
+        dialog: &NotesDialog,
+        eager: &EagerNotesGeometry,
+        expected_indices: &[usize],
+    ) {
+        let geometry = dialog
+            .notes_geometry
+            .as_ref()
+            .expect("the production NotesDialog geometry is installed");
+        assert_eq!(geometry.rows.len(), expected_indices.len());
+        assert_eq!(eager.rows.len(), expected_indices.len());
+        assert_eq!(geometry.rows.len(), eager.estimated_rows.len());
+        assert!(
+            (geometry.content_size.x - eager.estimated_content_size.x).abs() <= 0.5
+                && (geometry.content_size.y - eager.estimated_content_size.y).abs() <= 0.5,
+            "production and eager content extents differ: actual={:?} estimated={:?}",
+            geometry.content_size,
+            eager.estimated_content_size
+        );
+        for (position, ((actual, estimated), expected_index)) in geometry
+            .rows
+            .iter()
+            .zip(&eager.rows)
+            .zip(expected_indices)
+            .enumerate()
+        {
+            assert_eq!(actual.original_index, *expected_index);
+            assert_eq!(estimated.original_index, *expected_index);
+            assert_eq!(actual.identity, dialog.entries[*expected_index].slug);
+            let expected_top = estimated.outer.min.y - eager.content_origin.y;
+            assert!(
+                (actual.top - expected_top).abs() <= 0.5,
+                "row {position} top differs from eager widget: geometry={} eager={expected_top}",
+                actual.top
+            );
+            assert!(
+                (actual.body_height - estimated.outer.height()).abs() <= 0.5,
+                "row {position} body height differs: geometry={} eager={}",
+                actual.body_height,
+                estimated.outer.height()
+            );
+            assert!(
+                (actual.body_width - estimated.outer.width()).abs() <= 1.0,
+                "row {position} body width differs: geometry={} eager={}",
+                actual.body_width,
+                estimated.outer.width()
+            );
+            assert!(
+                (actual.header_height - estimated.header.height()).abs() <= 0.5,
+                "row {position} header height differs: geometry={} eager={}",
+                actual.header_height,
+                estimated.header.height()
+            );
+            assert!(
+                (actual.header_width - estimated.header.width()).abs() <= 1.0,
+                "row {position} header width differs: geometry={} eager={}",
+                actual.header_width,
+                estimated.header.width()
+            );
+            let expected_separator_top = estimated.separator.min.y - eager.content_origin.y;
+            assert!(
+                (actual.separator_top - expected_separator_top).abs() <= 0.5,
+                "row {position} separator top differs: geometry={} eager={expected_separator_top}",
+                actual.separator_top
+            );
+            assert!(
+                (actual.width_after - estimated.separator.width()).abs() <= 1.0,
+                "row {position} trailing width differs: geometry={} eager={}",
+                actual.width_after,
+                estimated.separator.width()
+            );
+            let expected_width_before = if position == 0 {
+                eager.viewport.width()
+            } else {
+                eager.rows[position - 1].separator.width()
+            };
+            assert!(
+                (actual.width_before - expected_width_before).abs() <= 1.0,
+                "row {position} leading width differs: geometry={} eager={expected_width_before}",
+                actual.width_before
+            );
+            match (actual.preview_height, estimated.preview) {
+                (Some(actual_height), Some(preview)) => assert!(
+                    (actual_height - preview.height()).abs() <= 0.5,
+                    "row {position} preview height differs: geometry={actual_height} eager={}",
+                    preview.height()
+                ),
+                (None, None) => {}
+                mismatch => panic!("row {position} preview presence differs: {mismatch:?}"),
+            }
+        }
+        assert!(
+            (eager.content_size.x - eager.estimated_content_size.x).abs() <= 1.0
+                && (eager.content_size.y - eager.estimated_content_size.y).abs() <= 1.0,
+            "complete eager note extent differs from the geometry estimate: actual={:?} estimated={:?}",
+            eager.content_size,
+            eager.estimated_content_size
+        );
+    }
+
+    fn track_c_validate_quick_notes_state(
+        state: &TrackCQuickNotesState,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::{
+            OwnerObservation, StableSignature, note_fixture_identity,
+        };
+
+        let dialog = &state.dialog;
+        assert!(dialog.open);
+        assert_eq!(dialog.entries, state.expected_notes);
+        assert_eq!(dialog.row_metadata, state.expected_metadata);
+        assert_eq!(dialog.filtered_indices, state.expected_indices);
+        assert_eq!(
+            track_c_expected_note_indices(&state.expected_notes, &dialog.search),
+            state.expected_indices,
+            "the complete original-index projection matches the independent filter"
+        );
+        assert_quick_notes_geometry_matches_eager(dialog, &state.eager, &state.expected_indices);
+        assert!(
+            (dialog.test_scroll_area_content_size.x - state.eager.content_size.x).abs() <= 1.0
+                && (dialog.test_scroll_area_content_size.y - state.eager.content_size.y).abs()
+                    <= 1.0,
+            "the real Quick Notes ScrollArea exposes the independent eager full extent: actual={:?} eager={:?}",
+            dialog.test_scroll_area_content_size,
+            state.eager.content_size
+        );
+
+        let rebuilds = dialog
+            .test_geometry_rebuilds
+            .saturating_sub(state.rebuilds_before);
+        let rows_measured = dialog
+            .test_geometry_rows_measured
+            .saturating_sub(state.rows_measured_before);
+        if state.cold {
+            assert_eq!(rebuilds, 1, "cold Quick Notes geometry rebuilds once");
+            assert_eq!(rows_measured, state.expected_indices.len() as u64);
+        } else {
+            assert_eq!(rebuilds, 0, "warm Quick Notes geometry is reused");
+            assert_eq!(rows_measured, 0, "warm Quick Notes measures no full rows");
+        }
+
+        let viewport = dialog
+            .test_scroll_area_inner_rect
+            .expect("the production Quick Notes ScrollArea rendered");
+        assert!(
+            (viewport.width() - state.actual_scroll_area_width).abs() <= 0.5,
+            "actual ScrollArea row width remains stable: setup={} measured={}",
+            state.actual_scroll_area_width,
+            viewport.width()
+        );
+        if let (Some(wide_width), Some(wide_key), Some(wide_rebuilds)) = (
+            state.wide_scroll_area_width,
+            state.wide_geometry_width,
+            state.wide_rebuilds,
+        ) {
+            assert!(state.actual_scroll_area_width + 0.5 < wide_width);
+            let narrow_key = dialog
+                .notes_geometry
+                .as_ref()
+                .expect("narrow geometry remains installed")
+                .key
+                .viewport_width;
+            assert_ne!(narrow_key, wide_key);
+            assert!(dialog.test_geometry_rebuilds > wide_rebuilds);
+        }
+        let content_origin = dialog.test_content_origin;
+        let eager_rows = &state.eager.rows;
+        let first_visible = eager_rows.partition_point(|row| {
+            content_origin.y + row.separator.bottom() - state.eager.content_origin.y
+                <= viewport.min.y
+        });
+        let after_visible = eager_rows.partition_point(|row| {
+            content_origin.y + row.outer.top() - state.eager.content_origin.y <= viewport.max.y
+        });
+        let first = first_visible.saturating_sub(2);
+        let after = after_visible.saturating_add(2).min(eager_rows.len());
+        let expected_visible_indices = eager_rows[first..after]
+            .iter()
+            .map(|row| row.original_index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dialog.last_rendered_indices, expected_visible_indices,
+            "NotesDialog builds exactly the eager visible range plus its two-row overscan"
+        );
+        assert!(!dialog.last_rendered_indices.is_empty());
+        assert!(dialog.last_rendered_indices.len() < 64);
+        assert!(
+            dialog
+                .last_rendered_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert_eq!(
+            dialog.last_rendered_row_rects.len(),
+            expected_visible_indices.len()
+        );
+        for (actual_index, actual) in &dialog.last_rendered_row_rects {
+            let position = state
+                .expected_indices
+                .binary_search(actual_index)
+                .expect("rendered original index remains in the full projection");
+            let eager = &state.eager.rows[position];
+            assert_eq!(*actual_index, eager.original_index);
+            let offset = content_origin - state.eager.content_origin;
+            let compare_rect = |label: &str, actual: egui::Rect, expected: egui::Rect| {
+                let expected = expected.translate(offset);
+                assert!(
+                    actual.min.distance(expected.min) <= 1.0
+                        && actual.max.distance(expected.max) <= 1.0,
+                    "rendered note {actual_index} {label} differs from eager widget: actual={actual:?} eager={expected:?}"
+                );
+            };
+            compare_rect("outer", actual.outer, eager.outer);
+            compare_rect("header", actual.header, eager.header);
+            compare_rect("title", actual.title, eager.title);
+            compare_rect("meta", actual.meta, eager.meta);
+            compare_rect("separator", actual.separator, eager.separator);
+            match (actual.preview, eager.preview) {
+                (Some(actual), Some(expected)) => compare_rect("preview", actual, expected),
+                (None, None) => {}
+                mismatch => panic!("rendered note {actual_index} preview differs: {mismatch:?}"),
+            }
+        }
+
+        let geometry = dialog.notes_geometry.as_ref().unwrap();
+        let mut structure = StableSignature::new(
+            0x435F_5155_4943_4B4E,
+            "track-c-quick-notes-complete-geometry",
+            geometry.rows.len(),
+        );
+        structure.number(note_fixture_identity(&dialog.entries));
+        structure.number(dialog.search.len() as u64);
+        structure.bytes(dialog.search.as_bytes());
+        structure.number(dialog.entries_generation);
+        structure.number(dialog.metadata_generation);
+        structure.number(dialog.projection_generation);
+        structure.number(geometry.key.viewport_width as u64);
+        structure.number(geometry.key.pixels_per_point as u64);
+        structure.number(geometry.rows.len() as u64);
+        for (index, row) in geometry.rows.iter().enumerate() {
+            structure.number(row.original_index as u64);
+            structure.number(row.identity.len() as u64);
+            structure.bytes(row.identity.as_bytes());
+            assert_eq!(geometry.row_by_identity.get(&row.identity), Some(&index));
+            for value in [
+                row.top,
+                row.header_height,
+                row.header_width,
+                row.body_width,
+                row.preview_height.unwrap_or(-1.0),
+                row.body_height,
+                row.separator_top,
+                row.visual_bottom,
+                row.width_before,
+                row.width_after,
+            ] {
+                structure.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [geometry.content_size.x, geometry.content_size.y] {
+            structure.number(u64::from(value.to_bits()));
+        }
+        for (index, metadata) in dialog.row_metadata.iter().enumerate() {
+            structure.number(index as u64);
+            structure.number(metadata.original_index as u64);
+            for value in [
+                metadata.display_title.as_str(),
+                metadata.meta.as_str(),
+                metadata.preview.as_str(),
+            ] {
+                structure.number(value.len() as u64);
+                structure.bytes(value.as_bytes());
+            }
+        }
+        structure.number(state.expected_indices.len() as u64);
+        for index in &state.expected_indices {
+            structure.number(*index as u64);
+        }
+        let structural_signature = structure.finish();
+
+        let offset = dialog.test_scroll_area_offset;
+        let content_size = dialog.test_scroll_area_content_size;
+        let mut viewport_signature = StableSignature::new(
+            0x435F_5155_4943_4B4E,
+            "track-c-quick-notes-visible-viewport",
+            dialog.last_rendered_row_rects.len(),
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            content_origin.x,
+            content_origin.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+            state.screen_width,
+            state.screen_height,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        if let (Some(width), Some(key), Some(rebuilds)) = (
+            state.wide_scroll_area_width,
+            state.wide_geometry_width,
+            state.wide_rebuilds,
+        ) {
+            viewport_signature.number(1);
+            viewport_signature.number(u64::from(width.to_bits()));
+            viewport_signature.number(u64::from(state.actual_scroll_area_width.to_bits()));
+            viewport_signature.number(key as u64);
+            viewport_signature.number(rebuilds);
+        }
+        for (index, rects) in &dialog.last_rendered_row_rects {
+            viewport_signature.number(*index as u64);
+            for rect in [
+                Some(rects.outer),
+                Some(rects.header),
+                Some(rects.title),
+                Some(rects.meta),
+                rects.preview,
+                Some(rects.separator),
+            ]
+            .into_iter()
+            {
+                if let Some(rect) = rect {
+                    viewport_signature.number(1);
+                    for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                        viewport_signature.number(u64::from(value.to_bits()));
+                    }
+                } else {
+                    viewport_signature.number(0);
+                }
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+        let revisions = vec![
+            dialog.entries_revision.unwrap_or_default(),
+            dialog.entries_generation,
+            dialog.metadata_generation,
+            dialog.projection_generation,
+        ];
+        let mut complete = StableSignature::new(
+            0x435F_5155_4943_4B4F,
+            "track-c-quick-notes-output-state",
+            dialog.last_rendered_indices.len(),
+        );
+        complete.number(structural_signature);
+        complete.number(viewport_receipt);
+        for revision in &revisions {
+            complete.number(*revision);
+        }
+        let output_identity = complete.finish();
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: revisions,
+            viewport_receipt: Some(viewport_receipt),
+            work_units: rows_measured,
+            work_counters: vec![
+                rebuilds,
+                rows_measured,
+                dialog.last_rendered_indices.len() as u64,
+            ],
+        }
+    }
+
+    fn track_c_notes_settings_label(scenario: &str) -> &'static str {
+        match scenario {
+            "empty" => "notes_empty_backlinks_on_tasks_on",
+            "sparse" => "notes_sparse_backlinks_on_tasks_on",
+            "long_unicode" => "notes_long_unicode_backlinks_on_tasks_on",
+            "horizontal_empty" => "notes_empty_backlinks_on_tasks_on",
+            _ => unreachable!("the owner uses documented Quick Notes scenarios"),
+        }
+    }
+
+    fn track_c_notes_fixture_signature(notes: &[Note], filter: &str, screen_height: f32) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, note_fixture_identity};
+
+        let settings = Settings::default().note;
+        let mut signature = StableSignature::new(
+            0x435F_5155_4943_4B4E,
+            "track-c-quick-notes-input",
+            notes.len(),
+        );
+        signature.number(note_fixture_identity(notes));
+        signature.number(filter.len() as u64);
+        signature.bytes(filter.as_bytes());
+        signature.number(u64::from(screen_height.to_bits()));
+        signature.number(settings.backlinks_enabled as u64);
+        signature.number(settings.task_lists_enabled as u64);
+        signature.finish()
+    }
+
+    fn track_c_notes_width_transition_fixture_signature(
+        notes: &[Note],
+        from_width: f32,
+        to_width: f32,
+        screen_height: f32,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, note_fixture_identity};
+
+        let settings = Settings::default().note;
+        let mut signature = StableSignature::new(
+            0x435F_5155_4943_4B4E,
+            "track-c-quick-notes-width-transition-input",
+            notes.len(),
+        );
+        signature.number(note_fixture_identity(notes));
+        signature.bytes(b"empty-filter-horizontal-cold-warm-pair");
+        signature.number(u64::from(from_width.to_bits()));
+        signature.number(u64::from(to_width.to_bits()));
+        signature.number(u64::from(screen_height.to_bits()));
+        signature.number(settings.backlinks_enabled as u64);
+        signature.number(settings.task_lists_enabled as u64);
+        signature.finish()
+    }
+
+    fn emit_track_c_notes_width_receipt(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        fixture_signature: u64,
+        count: usize,
+        cold_type: &str,
+        widths_milli: &[u64],
+    ) {
+        assert_eq!(
+            widths_milli.len(),
+            crate::performance::track_c_workloads::MEASURED_SAMPLES
+        );
+        let values = widths_milli
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        eprintln!(
+            "TRACK_C_WIDTH_RECEIPT schema=1 owner=egui_Context_run+NotesDialog::ui source={} profile={} mode={:?} telemetry_enabled={} fixture=quick_notes_note_fixture fixture_signature={:016x} count={} viewport=screen_300x640_transition_960x640 settings=notes_empty_backlinks_on_tasks_on cold_type={} scenario=quick_notes_empty_horizontal_width_transition transition=screen_960x640_to_300x640 actual_scroll_area_width_milli=[{}] samples={}",
+            source,
+            profile,
+            mode,
+            crate::performance::enabled(),
+            fixture_signature,
+            count,
+            cold_type,
+            values,
+            widths_milli.len(),
+        );
+    }
+
+    #[test]
+    fn track_c_oracle_quick_notes_dialog_matches_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, note_fixture};
+
+        let _test_lock = TEST_MUTEX.lock().unwrap();
+        let workspace = TrackCWorkspace::new();
+        let fixture = note_fixture(100);
+        let scenarios = [
+            ("empty", ""),
+            ("sparse", "track-a-note-00050"),
+            ("long_unicode", "layout-segment-λ"),
+        ];
+        for (scenario, filter) in scenarios {
+            for screen_height in [640.0, 180.0] {
+                for cold in [true, false] {
+                    let mut state = track_c_prepare_quick_notes_state(
+                        workspace.root(),
+                        &fixture.values,
+                        filter,
+                        960.0,
+                        screen_height,
+                        cold,
+                        None,
+                    );
+                    assert_eq!(state.dialog.search, filter, "scenario {scenario}");
+                    let frame = state.frame_index;
+                    state.frame_index += 1;
+                    let _ = run_track_c_notes_frame(
+                        &state.ctx,
+                        &mut state.dialog,
+                        &mut state.app,
+                        2.0 + frame as f64 / 60.0,
+                        state.screen_width,
+                        state.screen_height,
+                    );
+                    let _ = track_c_validate_quick_notes_state(&state);
+                    drop(state);
+                }
+            }
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c_oracle_quick_notes_horizontal_width_transition_matches_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, note_fixture};
+
+        let _test_lock = TEST_MUTEX.lock().unwrap();
+        let workspace = TrackCWorkspace::new();
+        let fixture = note_fixture(100);
+        let mut widths = Vec::with_capacity(2);
+        for cold in [true, false] {
+            let mut state = track_c_prepare_quick_notes_state(
+                workspace.root(),
+                &fixture.values,
+                "",
+                300.0,
+                640.0,
+                cold,
+                Some(960.0),
+            );
+            assert!(state.actual_scroll_area_width < state.wide_scroll_area_width.unwrap());
+            widths.push(
+                state
+                    .dialog
+                    .test_scroll_area_inner_rect
+                    .expect("the measured Quick Notes ScrollArea rendered")
+                    .width(),
+            );
+            let frame = state.frame_index;
+            state.frame_index += 1;
+            let _ = run_track_c_notes_frame(
+                &state.ctx,
+                &mut state.dialog,
+                &mut state.app,
+                2.0 + frame as f64 / 60.0,
+                state.screen_width,
+                state.screen_height,
+            );
+            let _ = track_c_validate_quick_notes_state(&state);
+            drop(state);
+        }
+        assert!((widths[0] - widths[1]).abs() <= 0.5);
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C owner benchmark; isolated synthetic note fixture only"]
+    fn track_c_benchmark_quick_notes_dialog_geometry() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, TrackCWorkspace, emit_samples, measure_owner,
+            note_fixture,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let _test_lock = TEST_MUTEX.lock().unwrap();
+        let workspace = TrackCWorkspace::new();
+        for count in mode.note_sizes() {
+            let fixture = note_fixture(*count);
+            for (scenario, filter) in [
+                ("empty", ""),
+                ("sparse", "track-a-note-00050"),
+                ("long_unicode", "layout-segment-λ"),
+            ] {
+                for screen_height in [640.0, 180.0] {
+                    let fixture_signature =
+                        track_c_notes_fixture_signature(&fixture.values, filter, screen_height);
+                    for cold in [true, false] {
+                        let cold_type = if cold {
+                            "geometry_cold_warm_fonts"
+                        } else {
+                            "geometry_warm_warm_fonts"
+                        };
+                        let samples = measure_owner(
+                            || {
+                                track_c_prepare_quick_notes_state(
+                                    workspace.root(),
+                                    &fixture.values,
+                                    filter,
+                                    960.0,
+                                    screen_height,
+                                    cold,
+                                    None,
+                                )
+                            },
+                            |state| {
+                                let frame = state.frame_index;
+                                state.frame_index += 1;
+                                run_track_c_notes_frame(
+                                    &state.ctx,
+                                    &mut state.dialog,
+                                    &mut state.app,
+                                    2.0 + frame as f64 / 60.0,
+                                    state.screen_width,
+                                    state.screen_height,
+                                )
+                            },
+                            |state, _frame_output| track_c_validate_quick_notes_state(state),
+                        );
+                        emit_samples(
+                            ReportMetadata {
+                                owner: "egui_Context_run+NotesDialog::ui",
+                                fixture_name: "quick_notes_note_fixture",
+                                fixture_signature,
+                                item_count: *count,
+                                viewport: if screen_height == 640.0 {
+                                    "screen_960x640"
+                                } else {
+                                    "screen_960x180"
+                                },
+                                scale_milli: 1_000,
+                                font_state: "warm_egui_font_atlas",
+                                settings: track_c_notes_settings_label(scenario),
+                                cold_type,
+                                mode,
+                            },
+                            &samples,
+                        );
+                    }
+                }
+            }
+            let from_width = 960.0;
+            let to_width = 300.0;
+            let screen_height = 640.0;
+            let fixture_signature = track_c_notes_width_transition_fixture_signature(
+                &fixture.values,
+                from_width,
+                to_width,
+                screen_height,
+            );
+            for cold in [true, false] {
+                let cold_type = if cold {
+                    "geometry_cold_warm_fonts"
+                } else {
+                    "geometry_warm_warm_fonts"
+                };
+                let mut width_receipts_milli = Vec::with_capacity(
+                    crate::performance::track_c_workloads::WARMUPS
+                        + crate::performance::track_c_workloads::MEASURED_SAMPLES,
+                );
+                let samples = measure_owner(
+                    || {
+                        track_c_prepare_quick_notes_state(
+                            workspace.root(),
+                            &fixture.values,
+                            "",
+                            to_width,
+                            screen_height,
+                            cold,
+                            Some(from_width),
+                        )
+                    },
+                    |state| {
+                        let frame = state.frame_index;
+                        state.frame_index += 1;
+                        run_track_c_notes_frame(
+                            &state.ctx,
+                            &mut state.dialog,
+                            &mut state.app,
+                            2.0 + frame as f64 / 60.0,
+                            state.screen_width,
+                            state.screen_height,
+                        )
+                    },
+                    |state, _frame_output| {
+                        let observation = track_c_validate_quick_notes_state(state);
+                        let measured_width = state
+                            .dialog
+                            .test_scroll_area_inner_rect
+                            .expect("the measured Quick Notes ScrollArea rendered")
+                            .width();
+                        width_receipts_milli.push((measured_width * 1_000.0).round() as u64);
+                        observation
+                    },
+                );
+                assert_eq!(
+                    width_receipts_milli.len(),
+                    crate::performance::track_c_workloads::WARMUPS
+                        + crate::performance::track_c_workloads::MEASURED_SAMPLES,
+                );
+                let measured_widths =
+                    &width_receipts_milli[crate::performance::track_c_workloads::WARMUPS..];
+                assert_eq!(measured_widths.len(), samples.len());
+                assert!(measured_widths.iter().all(|width| *width > 0));
+                let min_width = measured_widths.iter().min().copied().unwrap();
+                let max_width = measured_widths.iter().max().copied().unwrap();
+                assert!(
+                    max_width.saturating_sub(min_width) <= 1_000,
+                    "narrow actual ScrollArea width is stable within one point"
+                );
+                emit_samples(
+                    ReportMetadata {
+                        owner: "egui_Context_run+NotesDialog::ui",
+                        fixture_name: "quick_notes_note_fixture",
+                        fixture_signature,
+                        item_count: *count,
+                        viewport: "screen_300x640_transition_960x640",
+                        scale_milli: 1_000,
+                        font_state: "warm_egui_font_atlas",
+                        settings: track_c_notes_settings_label("horizontal_empty"),
+                        cold_type,
+                        mode,
+                    },
+                    &samples,
+                );
+                emit_track_c_notes_width_receipt(
+                    mode,
+                    fixture_signature,
+                    *count,
+                    cold_type,
+                    measured_widths,
+                );
+            }
+        }
+        drop(workspace);
+    }
+
+    fn run_track_c_notes_frame(
+        ctx: &egui::Context,
+        dialog: &mut NotesDialog,
+        app: &mut LauncherApp,
+        time: f64,
+        width: f32,
+        height: f32,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width, height),
+                )),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ctx| dialog.ui(ctx, app),
+        )
     }
 
     #[test]
