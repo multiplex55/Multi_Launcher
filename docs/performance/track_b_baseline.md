@@ -1,66 +1,76 @@
-# Track B frozen baseline
+# Track B baseline
 
-Initial branch: `cargo-build-perf`
-Initial HEAD: `6a6be519685652a282f7d0a411008601f158d075`
-Initial subject: `6a6be519 md`
-Initial working tree: clean (git status --short produced no entries).
-Remote: origin, GitHub multiplex55/Multi_Launcher (read-only provenance; no fetch/pull/push).
-Recorded before branch creation. Implementation branch: `build-optimization`, from the exact initial HEAD.
+Initial branch: `cargo-build-perf`; initial HEAD: `6a6be519685652a282f7d0a411008601f158d075` (`6a6be519 md`). Initial Git status was clean. Provenance was captured before creating `build-optimization` at that exact HEAD. Origin identifies GitHub multiplex55/Multi_Launcher; no remote operations, push or merge occurred.
 
-## Environment verified
+**B0 frozen:** BL-01 through BL-10 completed, source restored, roster normalized and baseline PE icon verified. No production compiler/profile/build-script changes were made before this freeze.
 
-- Windows MSVC host: x86_64-pc-windows-msvc.
-- rustc 1.97.1, commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452, LLVM 22.1.6.
-- cargo 1.97.1 (c980f4866 2026-06-30).
-- cargo-nextest 0.9.135 (610eefb88762529a316373f4a50f5fd9194c3c35).
-- Actual linker: NOT YET VERIFIED. LLVM version alone is not linker evidence.
-- Profiles: no explicit profiles in baseline Cargo.toml; canonical release must remain unchanged.
+## Verified environment and source
 
-## Measurements
+- Windows 10 Home 10.0.19045; stable-x86_64-pc-windows-msvc.
+- Intel Core i7-7700K, 4 physical / 8 logical processors; 34,318,487,552 bytes RAM (approximately 32 GiB).
+- G: NTFS, 4 TB, approximately 3.19 TB free at inventory; WDC WD40EZRZ HDD. Balanced power scheme; Defender/realtime protection enabled and unchanged.
+- rustc 1.97.1, commit `8bab26f4f68e0e26f0bb7960be334d5b520ea452`, LLVM 22.1.6; cargo 1.97.1 (`c980f4866`); nextest 0.9.135 (`610eefb88762529a316373f4a50f5fd9194c3c35`).
+- Actual owned build linker: MSVC 14.44.35207, Visual Studio 2022 Community HostX64/x64/link.exe. LLVM version does not identify the linker. Bundled rust-lld exists; no linker executable was found on shell PATH. sccache unavailable.
+- No inspected repo/ancestor/default Cargo-home config or relevant flags, wrappers, jobs, target-directory or profile environment overrides at initial inventory.
+- Baseline has no explicit Cargo profiles. Observed release flags include opt-level=3, embed-bitcode=no, strip=debuginfo. Canonical release remains authoritative.
+- Cargo metadata: 78 targets: 1 library, 4 binaries, 67 integration tests, 5 benchmarks, 1 build script. Binaries: multi_launcher, coordinate_tool_smoke, passive_overlay_smoke, radial_acceptance. Integrations: 65 standalone targets plus domain/plugin_queries aggregators (24/35 modules). Benchmarks: search, omni_search, todo_widget_filtering, radial_runtime, macros_search.
+- Existing Track A runtime changes were confirmed through source/history inspection. This is preservation provenance, not newly executed runtime qualification.
 
-B0 inventory/protocol in progress. No build measurements yet. Runtime preservation, target counts, host constraints and selected linker remain under inspection. Six-minute reported scenario is a warm-dependency source-edit or branch-switch release rebuild, not a measured no-op.
+## Controlled protocol
 
-## Host and target inventory
+Owned scratch worktree: `target/track-b/baseline`; initial source SHA above. Raw evidence is outside that source root under ignored `target/track-b`. Serial builds reuse the existing primary `target` dependency cache; no clean, cache deletion or concurrent build. First scratch-path/profile/target population is labelled separately from warmed edits and no-ops.
 
-- Intel Core i7-7700K, 4 physical cores / 8 logical processors.
-- Physical memory: 34,318,487,552 bytes (approximately 32 GiB).
-- Windows 10 Home 10.0.19045; Balanced power scheme.
-- G: NTFS, 4,000,768,323,584 bytes; approximately 3.19 TB free at inventory.
-- G: maps to WDC WD40EZRZ-19GXCB0 HDD. An SSD exists but is not the repository drive.
-- Defender antivirus and real-time protection enabled; no security settings changed.
-- Active toolchain stable-x86_64-pc-windows-msvc (default).
-- link, lld-link and rust-lld were not found on the shell PATH; selection remains pending compilation evidence.
-- No repository/ancestor or default Cargo-home config found in inspected paths. No RUSTFLAGS, RUSTC_WRAPPER, CARGO_TARGET_DIR, CARGO_BUILD_JOBS or CARGO_ENCODED_RUSTFLAGS set at initial inventory.
+Small fixture changes only the RGB formatting expression in `src/color.rs`; large fixture changes only RADIAL_DESIGNER_WINDOW_TITLE in `src/gui/mod.rs`. Exact original bytes are restored in finally and hash/clean status checked. Native validation requires original source. Same source and target paths, toolchain, command, flags and fixture bytes must be used for final comparisons.
 
-Cargo metadata: 78 targets = 1 library + 4 binaries + 67 integration tests + 5 benchmarks + 1 build script.
-Binaries: multi_launcher, coordinate_tool_smoke, passive_overlay_smoke, radial_acceptance.
-Integration tests: 65 top-level targets plus domain and plugin_queries aggregators (24/35 modules respectively).
-Benchmarks: search, omni_search, todo_widget_filtering, radial_runtime, macros_search.
+Git autocrlf=true: active source has LF, scratch checkout has CRLF. Actual scratch original SHA256 values:
 
-Track A preservation confirmed by planner source/history inspection: completed runtime commits precede HEAD; revisioned note cache, bounded history preparation, GUI geometry caches, bounded indexer worker and native effect refresh ordering remain present. This is source provenance, not a newly run runtime verification.
+| File | SHA256 |
+| --- | --- |
+| src/color.rs | 407D4A9B551258C39E563E5CB48753CED7CD9ED357E2CE78109112552193EE9C |
+| src/gui/mod.rs | B2379F2ED9D2A45A8ECE046F0659C626DE72004DC6B985870C4F96F7156C5975 |
+| Resources/Green_MultiLauncher.ico | 73A4231F0021FD3F2B039B3B701307706ED10B721C4A4031492D6579B041C34B |
 
-## Ownership and protocol
+Branch trials use owned refs codex/track-b-baseline-a and codex/track-b-fixture-b (color-only local fixture commit), canonicalize captured checkout bytes before timing, and restore baseline A. The active implementation branch is unaffected.
 
-Owned detached benchmark worktree: target/track-b/baseline at initial HEAD. Raw evidence lives outside that scratch source root under ignored target/track-b. No benchmark fixture will be applied to active source. Existing primary target dependencies are reused serially (no clean/deletion); first scratch-path build is labelled cache transition, not a warm edit or no-op. Path changes may rebuild the application. All subsequent comparisons keep the same scratch source and target paths. No concurrent Cargo jobs.
+## Measured baseline
 
-Selected real edit fixtures (restore exact bytes in finally): src/color.rs RGB formatting expression; src/gui/mod.rs RADIAL_DESIGNER_WINDOW_TITLE string. They alter generated behavior only in isolated benchmarks; native acceptance runs only with originals restored. Two comparable edited samples where feasible; three cheap no-op samples. Resource fixtures separately track RC/icon/build.rs invalidation. Timing HTML measures combined compile/codegen/link unless independent process evidence supports attribution.
+All completed commands below exited 0. Times are seconds; preparation/restoration costs are excluded from edited medians.
 
-Git metadata and ignored target writes need sandbox escalation on this host. Initial non-escalated branch creation and log writes failed before a build ran; the successfully escalated branch/worktree operations preserved the initial HEAD. Read-only host CIM queries also needed escalation. These are permission/environment facts, not benchmark failures.
+| Scenario | Command/workload | Wall time |
+| --- | --- | --- |
+| Scratch-path transition | cargo build --release --bin multi_launcher --timings -vv | 279.014845 |
+| BL-01 unchanged launcher, n=3 | same command, Fresh | 1.058698 / 1.017300 / 0.997221; median 1.017300 |
+| BL-02 original to small edit, n=2 | same explicit launcher command | 249.803047 / 239.562765; median 244.682906 |
+| BL-03 original to large GUI edit, n=2 | same explicit launcher command | 237.433298 / 243.186698; median 240.309998 |
+| All-bin population | cargo build --release --timings -vv; library/launcher fresh | 100.259540 |
+| BL-04 original to same small edit, n=2 | default all-bin release | 317.662238 / 328.656558; median 323.159398 |
+| BL-05 library target preparation | cargo nextest run --lib -E 'test(history_prepare_)' --no-run | 210.186021 |
+| BL-05 cached selected invocation | same without --no-run | 2.009562; runner 0.111; 8 passed, 5111 skipped |
+| BL-06 history preparation / cached invocation | cargo nextest run --test history [--no-run] | 215.092202 / 2.077256; runner 0.246; 5 passed |
+| BL-07 domain preparation / cached invocation | cargo nextest run --test domain [--no-run] | 20.862317 / 2.796195; runner 1.001; 102 passed |
+| BL-08 broad compile/discovery | cargo nextest list --message-format json | 943.248524; 6389 declared cases; no full-suite execution |
+| BL-09 check target population | cargo check --lib --timings | 76.682837 |
+| BL-09 subsequent warm checks, n=2 | same command | 1.078176 / 0.918521 |
+| BL-10 A→B switch, n=2 | explicit launcher release | 249.333422 / 237.573284; median243.453353 |
+| BL-10 B→A switch, n=2 | same command | 241.676204 / 240.233264; median240.954734 |
+| BL-11 cold build | isolated empty target | NOT RUN; warmed edit bottleneck established without deleting caches |
 
-## Preliminary B0 measurements (not yet frozen)
+The all-bin edited median exceeds explicit launcher by 78.476492s. Extra targets are the intended workload difference; sequential trials and differing library durations prevent exact attribution of every second. Compiler configuration did not change. The all-bin 5m23s median most closely resembles the approximate six-minute report among completed workloads; the user's exact original command remains unknown. Small and large module edits invalidate the same library, so file size is not an independent compilation boundary.
 
-Cache transition: `cargo build --release --bin multi_launcher --timings -vv`, scratch source at initial SHA, warm existing dependency target, first use of scratch path: **279.014845 s**, exit 0. This is NOT a real edited-build comparison.
+Targeted preparations have different preceding cache states and must not be compared as grouping gains. First check population is not part of a no-op median. Final profile comparisons require matched source edits, not comparisons to population or cached execution.
 
-Cargo timing artifact: `target/cargo-timings/cargo-timing-20261010T112458841Z-1b77695a7ba411db.html` (ignored). Application library duration 253.78 s; report frontend 68.97 s and codegen section 184.81 s; launcher binary 21.94 s; build-script compilation 2.03 s and execution 0.22 s. Sections are Cargo/rustc attribution, not separately measured exact linker time. Dependency cache was already populated; no cold-build inference.
+## Attribution and limitations
 
-BL-01 truly unchanged release: 1.0586979, 1.0173001, 0.9972210 s; median 1.0173001 s, range 0.9972210–1.0586979. All exit 0, verbose log reports Fresh multi_launcher. Source, flags, cwd and target path unchanged. Raw manifests/logs: target/track-b/baseline-noop-{1,2,3}.{json,log}.
+Transition Cargo timing: library253.78s (frontend68.97/codegen184.81), launcher21.94s, build-script compilation2.03/run0.22. Small-edit sample1: library231.84s (60.20/171.64), launcher16.88s, resource0.06. Large sample1: library218.95s (60.57/158.38), launcher17.37s. All-bin sample1: library219.86s (60.15/159.71), then parallel aggregates radial_acceptance96.60s, launcher20.44s, coordinate6.15s, passive2.45s. Overlapping binary durations must not be summed. Cargo codegen/binary aggregates include linking; exact release linker duration is NOT MEASURED.
 
-Actual linker observed during the owned launcher compilation: Microsoft Visual Studio 2022 Community MSVC **14.44.35207**, HostX64/x64/link.exe. Rust LLVM version is unrelated to this selection. The 2-second process sampler observed this linker at one sample only; exact link duration is NOT MEASURED. Full private executable/command evidence: target/track-b/baseline-processes.json. Sampler started after library compilation began, so it does not measure complete compiler lifetime or peak memory.
+Broad discovery observed 8rustc/4link and 22,357,471,232 combined working-set bytes at one snapshot, not a measured peak. Proper ancestry includes batch→rustup→cargo→nextest→cargo→rustc/link. An initial filter omitted rustup and failed attribution; it does not establish termination or reparenting. Verified owned linkers had multi-minute lifetime lower bounds. Sparse paging/HDD samples suggest reassessing jobs/linker after reduced-symbol profiles; they do not establish sustained thrashing or causation. Correct ancestry snapshot: `target/track-b/broad-owned-resource-snapshot.json`.
 
-Initial profile invocation confirmed opt-level=3, embed-bitcode=no, strip=debuginfo; no explicit iteration profile or canonical release override introduced. All additional CARGO_PROFILE_*, CARGO_TARGET_*, CARGO_BUILD_*, CARGO_INCREMENTAL and RUSTC_WORKSPACE_WRAPPER overrides absent at host inventory.
+The domain run generated an initially absent `clipboard_modifiers.json` in the owned scratch tree. All 23 Cargo/Nextest measurements succeeded, but the batch process exited1 at final clean-tree assertion. Parent preserved the file, hash and provenance, verified all manifests/expected scenarios and moved only that owned file to evidence, then verified clean restoration. See `batch-cleanup-verification.json` and `generated-test-data/` under target/track-b. The old dependent queue failed its prerequisite and performed no branch work; the new verified queue completed all branch trials. This generated file may explain incidental broad package invalidation under baseline build.rs, but causation was not proven by fingerprint logs.
 
-## B0-B harness
+## Evidence and harness
 
-`dev/track_b/measure.ps1` runs native executable/argument arrays without shell evaluation, returns Succeeded/ExitCode, restores scoped environment/location, streams stdout/stderr to unique external evidence directories, and snapshots only changed/new timing HTML. Caller must explicitly reject unsuccessful results; script does not exit its caller. The target path is checked against CLI/environment overrides, including removal of CARGO_TARGET_DIR. Reviewer identified and implementer corrected that null-override edge case. Parent parsed both scripts and the transient batch successfully; harness-only self-tests passed (implementer report).
+`dev/track_b/measure.ps1` captures exact arguments, source SHA/dirty paths, fixture hashes, scoped environment/cache history, exit status, unique stdout/stderr/manifests and changed/new Cargo timing HTML. Callers reject failed records. Self-tests passed for exit0/7, argument spacing, env/cwd restoration, unique evidence, stale timing suppression and null target override; independent review approved corrected override handling.
 
-Full-debug default dev/test remain untouched. Profile planning corrected an advisory-plan error: Cargo lto=false permits thin local LTO; lto="off" disables it. Any iteration experiment must disclose this difference and cannot claim equivalence to default release.
+Raw initial evidence: baseline-populate, baseline-noop-{1,2,3}, baseline-processes.json. Subsequent immutable manifests are indexed by `target/track-b/batch-summary.jsonl`; HTML snapshots live in each run. Broad JSON: `runs/BL-08-broad-list_20261010T123737746Z_6f2b549f42be4108adcf625c6a507489/stdout.bin`. Normalized inventory:72suites (1lib/4bin/67test),6389cases,17ignored,6372matched/17unmatched,2empty suites,zero duplicate logical identities; baseline-nextest-roster-final{,-summary}.json retains stable cases independently of artifact paths. Baseline PE/icon comparison passed after branch restoration: group1, one32x32entry,4264-byte payload hash1c3aea13e6652ff273d2d995c68df5db23805476ad96d4cd751461b3b0d89d3b matches original ICO; see baseline-icon-resource.json. Native startup is NOT RUN. Full suite execution and exact peak/link telemetry are NOT MEASURED.
+
+Branch preparations270.213662/255.819132s are excluded from measured switch medians. All four measured switches exited0; branch queue terminated0 and exact original scratch bytes/Git clean status were verified. Owned fixture commit db027294 only changes the color expression; no branch was overwritten. B0 independent review confirmed timings/roster/ownership and resolved over-attribution wording and roster no-overwrite safeguard; no outstanding findings.

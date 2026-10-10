@@ -1,17 +1,25 @@
 # Track B results
 
-Baseline: cargo-build-perf at 6a6be519685652a282f7d0a411008601f158d075.
-Implementation: build-optimization; local commits only, no push/merge.
+Baseline: cargo-build-perf at `6a6be519685652a282f7d0a411008601f158d075`. Implementation: build-optimization; local commits only, no push/merge.
 
-B0 inventory complete; controlled baseline measurements in progress. No speedup claims yet.
+B0 is frozen; source/profile configuration is unchanged. No final improvement claim yet. Full protocol and cache caveats are in track_b_baseline.md.
 
-| Scenario | Baseline | Final | Caveat |
+| Scenario | Baseline seconds | Final | Comparison constraint |
 | --- | --- | --- | --- |
-| No-op release launcher | NOT MEASURED | NOT MEASURED | Must be fresh |
-| Small source-edit release launcher | NOT MEASURED | NOT MEASURED | User-reported six-minute class |
-| Large source-edit release launcher | NOT MEASURED | NOT MEASURED | Same library crate |
-| Default all-bin release | NOT MEASURED | NOT MEASURED | Four binaries |
-| Branch switch release | NOT MEASURED | NOT MEASURED | Isolated refs only |
-| Targeted Nextest build | NOT MEASURED | NOT MEASURED | Select Cargo targets first |
-| Broad Nextest discovery/build | NOT MEASURED | NOT MEASURED | Retain ignored cases |
-| Iteration profile | NOT MEASURED | NOT MEASURED | New cache population separate |
+| No-op release launcher | median1.017300; range0.997221–1.058698; n=3 | NOT MEASURED | Fresh, identical command |
+| Small edited release launcher | median244.682906; range239.562765–249.803047; n=2 | NOT MEASURED | Same original-to-color-edit workload |
+| Large edited release launcher | median240.309998; range237.433298–243.186698; n=2 | NOT MEASURED | Same original-to-GUI-edit workload |
+| Default all-bin edited release | median323.159398; range317.662238–328.656558; n=2 | NOT MEASURED | Same small edit; four binaries |
+| Branch-switch release A→B / B→A | medians243.453353 / 240.954734; n=2 each | NOT MEASURED | Owned refs, exact same color change |
+| Library Nextest preparation / cached invocation | 210.186021 / 2.009562 | NOT MEASURED | First target preparation; 8 passed |
+| History preparation / cached invocation | 215.092202 / 2.077256 | NOT MEASURED | 5 passed; normal Cargo prerequisites |
+| Domain preparation / cached invocation | 20.862317 / 2.796195 | NOT MEASURED | 102 passed; prior prerequisites reused |
+| Broad Nextest compile/discovery | 943.248524; declared6389cases | NOT MEASURED | Inventory only; no full-suite execution |
+| Check target population / warm checks | 76.682837 / 1.078176,0.918521 | NOT MEASURED | Keep first population separate |
+| Named iteration profile | NOT MEASURED | NOT MEASURED | Population/edit/no-op separate |
+
+The all-bin median was78.476492s slower under the same edit; extra targets are the intended workload difference. Sequential trials and differing library durations prevent attributing every second solely to target selection. The all-bin baseline is closest to the approximate six-minute report; original user command is not established. No compiler change has yet been measured.
+
+Conditional gates: broad test linker/memory observations justify reassessing one jobs4 experiment after reduced symbols; alternative linker only if material residual cost persists. sccache unavailable; dependency pruning lacks demonstrated expensive-dependency evidence; broad crate extraction remains deferred. These decisions will be finalized at B4, not presumed accepted now.
+
+B0 PE/icon verification passed against original ICO after branch restoration. Inventory:72suites,6389cases,17ignored,2empty; zero duplicate logical cases. Native startup remains NOT RUN. Independent baseline/support review approved after causal-attribution wording and fresh-output collision fixes.
