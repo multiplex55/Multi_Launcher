@@ -153,3 +153,26 @@ cache histories differ, so this is not a normalized storage comparison. Its PDB
 was larger: 21,491,712 bytes versus release's 15,069,184 bytes. Both restored
 binaries passed icon-resource and bounded responsive-startup/shutdown checks.
 See the detailed Track B report for the measured source SHA and limitations.
+
+## Profile boundaries and environment
+
+Use plain `cargo check --lib` for a quick type check, `fast-dev` for opt-in
+reduced-symbol launcher/selected-test builds, `iteration` for release-like local
+launcher builds, and `cargo build --release --bin multi_launcher` for production.
+Default `cargo build --bin multi_launcher` and target-selected Nextest commands
+retain full development debug information under `target/debug`. No additional
+debugging profile is needed. Manual debugger variable/breakpoint inspection was
+NOT RUN; passing assertions and source-line backtraces are separate evidence.
+
+`iteration` inherits release's safety-check defaults, so choose dev/test when
+debug assertions are needed. Each named profile has a separate artifact cache.
+The fixed workflow helper intentionally leaves named-profile choices to direct
+Cargo commands.
+
+Cargo environment variables and configuration can override manifest profile
+settings. `CARGO_PROFILE_*`, `CARGO_INCREMENTAL`, Rust flags and Cargo
+configuration can change the effective build. Track B measurements used guarded
+settings and retained actual compiler invocations; the manifest and workflow
+helper do not prevent intentional user overrides. Reproduce measurements in an
+equivalent environment. `lto = "off"` differs from default `false`, which can
+permit local ThinLTO; no canonical release setting was changed.

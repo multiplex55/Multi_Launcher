@@ -1136,15 +1136,37 @@ compiles the shared library that the application needs.
 
 ### Development checks and tests
 
-Use the default debug profile for an iterative launcher build and `check` for a
-quick library type check:
+Choose the command for the work you need:
+
+| Purpose | Command |
+| --- | --- |
+| Quick library type check | `cargo check --lib` |
+| Reduced-symbol launcher | `cargo build --profile fast-dev --bin multi_launcher` |
+| Reduced-symbol library tests | `cargo nextest run --cargo-profile fast-dev --lib -E 'test(history_prepare_)'` |
+| Release-like local iteration | `cargo build --profile iteration --bin multi_launcher` |
+| Full-debug launcher | `cargo build --bin multi_launcher` |
+| Full-debug library tests | `cargo nextest run --lib -E 'test(history_prepare_)'` |
+| Canonical production launcher | `cargo build --release --bin multi_launcher` |
+
+The optional profiles use separate `target/fast-dev` and `target/iteration`
+caches. Default dev/test artifacts use `target/debug`; production artifacts use
+`target/release`. `fast-dev` keeps line tables with less variable information.
+`iteration` trades optimization for local build speed and inherits release's
+safety-check defaults. Use dev/test when debug assertions are needed and
+canonical release before distribution. See [measured tradeoffs](dev/README.md).
+
+Select the Cargo target before filtering test names. For example:
 
 ```powershell
-cargo build --bin multi_launcher
-cargo check --lib
 cargo nextest run --lib -E 'test(history_prepare_)'
 cargo nextest run --test history
 ```
+
+Cargo environment variables and configuration can override manifest settings.
+`CARGO_PROFILE_*`, `CARGO_INCREMENTAL`, Rust flags and Cargo configuration can
+change the effective build; neither the manifest nor the workflow helper
+prevents intentional overrides. Track B used guarded settings and captured
+compiler invocations. Reproduce measurements in an equivalent environment.
 
 `dev/track_b/cargo.ps1` provides fixed launcher and test-target presets. For
 example, pass Nextest filters as an explicit PowerShell array:
