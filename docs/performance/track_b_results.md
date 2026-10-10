@@ -50,3 +50,16 @@ README and dev README now recommend explicit launcher build/run and target-selec
 Accepted B1 source metadata still reports78targets and4binaries; combined explicit4-bin check passed28.667616s, exit0 (target/track-b/b1-bin-preflight). This scoped compile evidence is reused for B1-C rather than repeated for documentation changes.
 
 Implementer checks passed: parser; four PrintCommand presets; spaced filters; arguments after --; Nextest runner profile pass-through; missing integration target and long/short/packed selector rejection; invocation from TEMP with caller cwd/environment unchanged; Cargo build/Nextest run help exit0; invalid-option native exit1 identical direct and through wrapper, without compilation. Parent corrected comment-help placement and verified synopsis, description and three examples. Independent final source review approved, no outstanding findings. Parent diff check passed.
+
+## B1-C matched low-risk verification (PASS)
+
+Accepted source `73fce728c91e47d2b7e122bf91aab7b5e72dfbac`; same owned scratch path, primary target, toolchain, exact B0 color edit and canonical `cargo build --release --bin multi_launcher --timings -vv`. Raw evidence: target/track-b/b1-matched-1. All eight commands exited0; runner94284 terminated0, success marker and byte-exact original color hash/clean scratch verified.
+
+| Scenario | B0 seconds | B1 seconds | Interpretation |
+| --- | --- | --- | --- |
+| No-op, n=3 | median1.017300;0.997221–1.058698 | median1.015507;0.923352–1.069035 | Essentially unchanged |
+| Same small edit, n=2 | median244.682906;239.562765–249.803047 | median258.432568;257.320716–259.544420 | Observed5.62% slower; no demonstrated release speedup |
+| Original restoration preparation, n=2 | excluded |239.838158,244.770315 | Excluded from edited samples |
+| Accepted-source transition | excluded |17.966304 | AllFresh/no compile observed; cause unassigned |
+
+Both edited B1 builds kept the resource script fresh, whereas B0 reran it. Cargo timing aggregates: library236.84/240.97s, frontend73.70/64.86s, codegen163.14/176.11s; launcher19.53/17.55s. Exact linker duration remains NOT MEASURED. The observed slowdown's cause is unresolved; neither causal regression nor random variability is established. No performance claim is made for the two resource watches. Independent review verified unchanged opt-level3/embed-bitcode=no/strip=debuginfo, metadata/link arguments, fixture hash, command and production content outside the two watches; no correctness findings. Four-bin check/metadata from B1-B and icon/resource gates from B1-A are reused. Final B5 matched comparison remains pending.
