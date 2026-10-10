@@ -1245,6 +1245,10 @@ impl NotePanel {
             return true;
         }
 
+        let mut relationship_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::NoteRelationshipRefresh,
+        );
+
         #[cfg(test)]
         let snapshot = if std::mem::take(&mut self.fail_next_heavy_snapshot) {
             Err(anyhow::anyhow!("injected note snapshot failure"))
@@ -1257,6 +1261,7 @@ impl NotePanel {
         let (snapshot_notes_revision, notes) = match snapshot {
             Ok(snapshot) => snapshot,
             Err(_) => {
+                relationship_timer.finish(crate::performance::track_c::Outcome::Error);
                 self.heavy_refresh_retry = Some(HeavyRefreshRetry {
                     notes_revision: current_notes_version,
                     todo_revision: current_todo_revision,
@@ -1280,8 +1285,13 @@ impl NotePanel {
             backlink_rows_for_note(&self.note, BacklinkTab::LinkedTodos, &todos, &notes);
         let related_note_rows =
             backlink_rows_for_note(&self.note, BacklinkTab::RelatedNotes, &todos, &notes);
+        let mut mentions_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::NoteMentionsScan,
+        );
         let mention_rows =
             backlink_rows_for_note(&self.note, BacklinkTab::Mentions, &todos, &notes);
+        mentions_timer.set_work_units(todos.len().saturating_add(notes.len()));
+        mentions_timer.finish(crate::performance::track_c::Outcome::Completed);
 
         self.derived.todo_label_map = todo_label_map;
         self.derived.backlink_rows_linked_todos = linked_todo_rows;
@@ -1296,6 +1306,9 @@ impl NotePanel {
         self.last_backlinks_enabled = Some(true);
         self.heavy_recompute_requested = false;
         self.heavy_refresh_retry = None;
+        relationship_timer
+            .set_work_units(todos.len().saturating_add(notes.len()).saturating_mul(3));
+        relationship_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
             self.heavy_recompute_count += 1;

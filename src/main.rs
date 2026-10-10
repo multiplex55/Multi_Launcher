@@ -939,10 +939,23 @@ fn startup_action_catalog(
     mut custom_actions: Vec<Action>,
     config: multi_launcher::indexer::coordinator::IndexConfig,
 ) -> anyhow::Result<(Arc<Vec<Action>>, usize, Option<StartupIndexingTransfer>)> {
+    let mut timer = multi_launcher::performance::track_c::Timer::start(
+        multi_launcher::performance::track_c::Phase::StartupCatalogReady,
+    );
     let custom_len = custom_actions.len();
-    let (indexed_actions, transfer) = startup_indexed_actions(config)?;
+    let (indexed_actions, transfer) = match startup_indexed_actions(config) {
+        Ok(result) => result,
+        Err(error) => {
+            timer.finish(multi_launcher::performance::track_c::Outcome::Error);
+            return Err(error);
+        }
+    };
     custom_actions.extend(indexed_actions.iter().cloned());
-    Ok((Arc::new(custom_actions), custom_len, transfer))
+    let work_units = custom_actions.len();
+    let catalog = Arc::new(custom_actions);
+    timer.set_work_units(work_units);
+    timer.finish(multi_launcher::performance::track_c::Outcome::Completed);
+    Ok((catalog, custom_len, transfer))
 }
 
 /// Spawn the GUI on a separate thread.

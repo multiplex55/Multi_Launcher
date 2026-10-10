@@ -3,6 +3,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use crate::hotkey::HotkeyTrigger;
 use crate::launcher_parking::{CAPTURE_PARKING_MARGIN, compute_capture_safe_parking_position};
@@ -542,6 +543,55 @@ pub struct VisibilityRevision {
     invocation_id: Arc<AtomicU64>,
     side_effect_gate: Arc<Mutex<()>>,
     root_activation_submission: Arc<Mutex<Option<(u64, RootActivationTarget)>>>,
+    first_usable_frame: Arc<Mutex<FirstUsableFrameState>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FirstUsableFrameSample {
+    revision: u64,
+    invocation_id: Option<u64>,
+    started_at: Instant,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FirstUsableFrameState {
+    pending: Option<FirstUsableFrameSample>,
+}
+
+impl FirstUsableFrameState {
+    fn arm_at(&mut self, revision: u64, invocation_id: Option<u64>, started_at: Instant) {
+        self.pending = Some(FirstUsableFrameSample {
+            revision,
+            invocation_id,
+            started_at,
+        });
+    }
+
+    fn complete_at(
+        &mut self,
+        revision: u64,
+        invocation_id: Option<u64>,
+        visible_at_start: bool,
+        visible_now: bool,
+        eligible: bool,
+        painted_generation: Option<u64>,
+        current_generation: u64,
+        now: Instant,
+    ) -> Option<Duration> {
+        let sample = self.pending.as_ref()?;
+        if sample.revision != revision || sample.invocation_id != invocation_id {
+            return None;
+        }
+        if !visible_at_start
+            || !visible_now
+            || !eligible
+            || painted_generation != Some(current_generation)
+        {
+            return None;
+        }
+        let sample = self.pending.take()?;
+        Some(now.saturating_duration_since(sample.started_at))
+    }
 }
 
 impl VisibilityRevision {
@@ -631,8 +681,94 @@ impl VisibilityRevision {
         self.invocation_id
             .store(invocation_id.unwrap_or(0), Ordering::Release);
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        self.clear_first_usable_frame();
         publish(revision, &result);
         (revision, result)
+    }
+
+    fn clear_first_usable_frame(&self) {
+        if !crate::performance::enabled() {
+            return;
+        }
+        let mut state = self
+            .first_usable_frame
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.pending = None;
+    }
+
+    fn arm_first_usable_frame(&self, revision: u64, invocation_id: Option<u64>) {
+        if !crate::performance::enabled() {
+            return;
+        }
+        let mut state = self
+            .first_usable_frame
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.arm_at(revision, invocation_id, Instant::now());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_first_usable_frame_for_test(
+        &self,
+        revision: u64,
+        invocation_id: Option<u64>,
+    ) {
+        let mut state = self
+            .first_usable_frame
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.arm_at(revision, invocation_id, Instant::now());
+    }
+
+    /// Complete the correlated CPU-side first usable ROOT frame only when the
+    /// visibility owner, invocation, and painted result generation still match.
+    pub(crate) fn complete_first_usable_frame(
+        &self,
+        revision: u64,
+        invocation_id: Option<u64>,
+        visible_flag: &AtomicBool,
+        visible_at_start: bool,
+        eligible: bool,
+        painted_generation: Option<u64>,
+        current_generation: u64,
+        tracking_enabled: bool,
+    ) -> bool {
+        if !tracking_enabled {
+            return false;
+        }
+        let _gate = self
+            .side_effect_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.current() != revision || self.invocation_id() != invocation_id {
+            return false;
+        }
+        let visible_now = visible_flag.load(Ordering::SeqCst);
+        let mut state = self
+            .first_usable_frame
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(elapsed) = state.complete_at(
+            revision,
+            invocation_id,
+            visible_at_start,
+            visible_now,
+            eligible,
+            painted_generation,
+            current_generation,
+            Instant::now(),
+        ) else {
+            return false;
+        };
+        crate::performance::track_c::record_sample_if(
+            true,
+            crate::performance::track_c::Phase::HotkeyFirstUsableFrame,
+            1,
+            elapsed,
+            crate::performance::track_c::Outcome::Completed,
+        );
+        true
     }
 
     pub fn focus_intent(&self) -> RootFocusIntent {
@@ -775,13 +911,13 @@ impl VisibilityToggleBatch {
 
     fn record_toggle_with_publication(
         &mut self,
-        revision: &VisibilityRevision,
+        order: &VisibilityRevision,
         visibility: &AtomicBool,
         invocation_id: Option<u64>,
         focus_intent: RootFocusIntent,
         publish: impl FnOnce(Event),
     ) -> (bool, u64) {
-        let (revision, was_visible) = revision.request_with_publication(
+        let (revision, was_visible) = order.request_with_publication(
             focus_intent,
             invocation_id,
             || {
@@ -790,6 +926,9 @@ impl VisibilityToggleBatch {
                 was_visible
             },
             |revision, was_visible| {
+                if !*was_visible {
+                    order.arm_first_usable_frame(revision, invocation_id);
+                }
                 publish(Event::DesiredVisibility {
                     visible: !was_visible,
                     revision,
@@ -1174,13 +1313,18 @@ pub fn handle_visibility_trigger_with_owner_ordered<C: ViewportCtx>(
 ) -> bool {
     let mut changed = false;
     if trigger.take() {
-        let (revision, old) = order.request_with_focus_intent_and_invocation(
+        let (revision, old) = order.request_with_publication(
             RootFocusIntent::ActivateRoot,
             None,
             || {
                 let old = visibility.load(Ordering::SeqCst);
                 visibility.store(!old, Ordering::SeqCst);
                 old
+            },
+            |revision, was_visible| {
+                if !*was_visible {
+                    order.arm_first_usable_frame(revision, None);
+                }
             },
         );
         let next = !old;
@@ -2697,5 +2841,99 @@ mod tests {
 
         assert!(!visibility.load(Ordering::SeqCst));
         assert!(!keyboard_suspended);
+    }
+}
+
+#[cfg(test)]
+mod track_c_visibility_tests {
+    use super::FirstUsableFrameState;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn track_c_metric_stale_and_duplicate_frame_completions_are_rejected() {
+        let started = Instant::now();
+        let mut state = FirstUsableFrameState::default();
+        state.arm_at(12, None, started);
+
+        assert_eq!(
+            state.complete_at(
+                11,
+                None,
+                true,
+                true,
+                true,
+                Some(3),
+                3,
+                started + Duration::from_millis(10),
+            ),
+            None
+        );
+        assert_eq!(
+            state.complete_at(
+                12,
+                None,
+                true,
+                true,
+                true,
+                Some(3),
+                3,
+                started + Duration::from_millis(20),
+            ),
+            Some(Duration::from_millis(20))
+        );
+        assert_eq!(
+            state.complete_at(
+                12,
+                None,
+                true,
+                true,
+                true,
+                Some(3),
+                3,
+                started + Duration::from_millis(30),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn track_c_metric_ineligible_visibility_and_changed_generation_keep_sample_pending() {
+        let started = Instant::now();
+        let mut state = FirstUsableFrameState::default();
+        state.arm_at(21, Some(7), started);
+
+        for (visible_start, visible_now, eligible, painted, current) in [
+            (false, true, true, Some(8), 8),
+            (true, false, true, Some(8), 8),
+            (true, true, false, Some(8), 8),
+            (true, true, true, Some(8), 9),
+        ] {
+            assert_eq!(
+                state.complete_at(
+                    21,
+                    Some(7),
+                    visible_start,
+                    visible_now,
+                    eligible,
+                    painted,
+                    current,
+                    started + Duration::from_millis(15),
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            state.complete_at(
+                21,
+                Some(7),
+                true,
+                true,
+                true,
+                Some(8),
+                8,
+                started + Duration::from_millis(25),
+            ),
+            Some(Duration::from_millis(25))
+        );
     }
 }

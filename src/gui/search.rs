@@ -296,7 +296,13 @@ impl LauncherApp {
             self.last_search_provider_deferral = ProviderSearchDeferral::None;
             self.autocomplete_index = 0;
             self.suggestions.clear();
-            self.results = self.search_read_only_outcome(&self.query).actions;
+            let outcome = self.search_read_only_outcome(&self.query);
+            self.last_search_pending = outcome.state == LauncherSearchState::Pending;
+            self.last_search_provider_revision = outcome.provider_revision;
+            self.last_search_result_catalog_versions = outcome.result_catalog_versions;
+            self.last_search_result_catalog_versions_stable =
+                outcome.result_catalog_versions_stable;
+            self.results = outcome.actions;
             self.invalidate_root_list_results();
             self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
@@ -310,6 +316,10 @@ impl LauncherApp {
         } else {
             self.search_read_only_outcome(&self.query)
         };
+        self.last_search_pending = outcome.state == LauncherSearchState::Pending;
+        self.last_search_provider_revision = outcome.provider_revision;
+        self.last_search_result_catalog_versions = outcome.result_catalog_versions;
+        self.last_search_result_catalog_versions_stable = outcome.result_catalog_versions_stable;
         self.last_search_provider_deferral = outcome.provider_deferral;
         self.results = outcome.actions;
         self.invalidate_root_list_results();
@@ -349,11 +359,17 @@ impl LauncherApp {
             // by the worker that released capacity. Deliberate failed-query
             // fallback has no capacity deferral and stays suppressed.
             self.last_results_valid = false;
+            self.last_search_pending = false;
             self.request_background_query_refresh();
         }
     }
 
     fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
+        let telemetry_enabled = crate::performance::enabled();
+        let mut timer = crate::performance::track_c::Timer::start_if(
+            crate::performance::track_c::Phase::SearchScoreAndCloneHits,
+            telemetry_enabled,
+        );
         let (filtered_query, filters) = split_action_filters(query);
         let filtered_query = filtered_query.trim();
         let filtered_query_lc = filtered_query.to_lowercase();
@@ -361,6 +377,7 @@ impl LauncherApp {
         let query_lc = filtered_query_lc.as_str();
 
         let mut res = Vec::new();
+        let mut candidates_scored = 0_usize;
         if query.is_empty() {
             for (i, a) in self.actions.iter().enumerate() {
                 if action_matches_filters(&self.action_filter_metadata[i], &filters) {
@@ -373,6 +390,9 @@ impl LauncherApp {
                     continue;
                 }
 
+                if telemetry_enabled {
+                    candidates_scored = candidates_scored.saturating_add(1);
+                }
                 let cached = &self.action_cache[i];
                 if self.is_exact_match_mode() {
                     let alias_match = self.alias_matches_lc(&a.action, query_lc);
@@ -394,6 +414,9 @@ impl LauncherApp {
                 }
             }
         }
+        timer.set_work_units(self.actions.len());
+        timer.set_search_counts(candidates_scored, res.len());
+        timer.finish(crate::performance::track_c::Outcome::Completed);
         res
     }
 
@@ -694,10 +717,16 @@ impl LauncherApp {
         scored.extend(plugin_results);
         self.apply_usage_weight(&mut scored);
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut materialize_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::SearchMoveResults,
+        );
+        let materialized = scored.len();
         let actions = scored
             .into_iter()
             .map(|(action, _)| action)
             .collect::<Vec<_>>();
+        materialize_timer.set_work_units(materialized);
+        materialize_timer.finish(crate::performance::track_c::Outcome::Completed);
         LauncherSearchOutcome {
             state: if provider_pending
                 || start_revision != provider_revision

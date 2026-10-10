@@ -238,6 +238,11 @@ impl RootListGeometryCache {
             return;
         }
 
+        let mut track_c_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::RootGeometryCold,
+        );
+        track_c_timer.set_work_units(results.len());
+
         #[cfg(test)]
         let started = std::time::Instant::now();
         let width = f32::from_bits(key.width_bits);
@@ -303,6 +308,7 @@ impl RootListGeometryCache {
         self.grid_visual_max_end_tree.clear();
         self.key = Some(key);
         self.font_atlas = Some(font_atlas);
+        track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
             self.rebuild_count = self.rebuild_count.saturating_add(1);
@@ -357,6 +363,11 @@ impl RootListGeometryCache {
         {
             return;
         }
+
+        let mut track_c_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::RootGeometryCold,
+        );
+        track_c_timer.set_work_units(results.len());
 
         #[cfg(test)]
         let started = std::time::Instant::now();
@@ -470,6 +481,7 @@ impl RootListGeometryCache {
         };
         self.key = Some(key);
         self.font_atlas = Some(font_atlas);
+        track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
             self.rebuild_count = self.rebuild_count.saturating_add(1);
@@ -1780,6 +1792,11 @@ impl LauncherApp {
     pub(super) fn render_root_frame(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use egui::*;
 
+        let track_c_enabled = crate::performance::enabled();
+        #[cfg(test)]
+        let track_c_enabled = track_c_enabled || self.track_c_test_force_enabled;
+        let mut painted_root_generation = None;
+
         #[cfg(test)]
         self.test_root_rendered_rows.clear();
         #[cfg(test)]
@@ -2552,14 +2569,18 @@ impl LauncherApp {
                     crate::performance::record_dashboard_repaint_request();
                     ctx.request_repaint_after(interval);
                 }
-                if crate::dashboard::dashboard_should_render(dashboard_visible, true)
-                    && let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click)
-                {
-                    self.activate_action(
-                        action.action,
-                        action.query_override,
-                        ActivationSource::Dashboard,
-                    );
+                if crate::dashboard::dashboard_should_render(dashboard_visible, true) {
+                    if track_c_enabled {
+                        painted_root_generation = Some(self.root_list_geometry.result_generation);
+                    }
+                    if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click)
+                    {
+                        self.activate_action(
+                            action.action,
+                            action.query_override,
+                            ActivationSource::Dashboard,
+                        );
+                    }
                 }
             } else {
                 let area_height = ui.available_height();
@@ -2587,6 +2608,10 @@ impl LauncherApp {
                             if self.resolved_grid_layout {
                                 let cols = self.query_results_layout.cols.max(1);
                                 self.root_list_geometry.ensure_grid(ui, &self.results, cols);
+                                if track_c_enabled {
+                                    painted_root_generation =
+                                        Some(self.root_list_geometry.result_generation);
+                                }
                                 let content_origin = ui.max_rect().min;
                                 let total_height = self.root_list_geometry.total_height;
                                 let content_width = self.root_list_geometry.content_width;
@@ -2706,6 +2731,10 @@ impl LauncherApp {
                                     show_full,
                                     false,
                                 );
+                                if track_c_enabled {
+                                    painted_root_generation =
+                                        Some(self.root_list_geometry.result_generation);
+                                }
                                 let total_height = self.root_list_geometry.total_height;
                                 let content_width = self.root_list_geometry.content_width;
                                 let content_origin = ui.max_rect().min;
@@ -3244,6 +3273,60 @@ impl LauncherApp {
         let note_close_snapshot = note_close_frame.map(|frame| frame.snapshot(&self.note_panels));
         self.poll_radial_query_observation(ctx, note_close_snapshot);
         self.show_ocr_surface(ctx);
+
+        #[cfg(test)]
+        if std::mem::take(&mut self.track_c_test_provider_change_at_frame_end) {
+            self.plugins
+                .notify_search_update_for_test("track_c_frame_end");
+        }
+        #[cfg(test)]
+        if std::mem::take(&mut self.track_c_test_catalog_version_change_at_frame_end) {
+            // Publish through the real mutable-catalog owner and restore its
+            // process-global cache when this isolated render fixture exits.
+            let _catalog_guard = crate::plugins::note::publish_note_cache_for_test(vec![
+                crate::plugins::note::Note {
+                    title: "Track C frame catalog mutation".into(),
+                    path: std::path::PathBuf::from("track-c-frame-catalog-mutation.md"),
+                    content: "synthetic mid-frame catalog change".into(),
+                    tags: Vec::new(),
+                    links: Vec::new(),
+                    slug: "track-c-frame-catalog-mutation".into(),
+                    alias: None,
+                    aliases: Vec::new(),
+                    entity_refs: Vec::new(),
+                },
+            ]);
+        }
+
+        if track_c_enabled {
+            let frame_eligible = painted_root_generation.is_some()
+                && self.pending_query.is_none()
+                && !self.background_query_refresh_pending
+                && !self.last_search_pending
+                && self.last_search_provider_revision == self.plugins.search_generation()
+                && self.last_search_result_catalog_versions_stable
+                && self.last_search_result_catalog_versions
+                    == Some(crate::radial::dynamic::MutableResultCatalogVersions::current())
+                && self.last_search_provider_deferral == search::ProviderSearchDeferral::None
+                && !self.radial_provider_search_capacity.is_occupied()
+                && self.coordinate_capture_parking.is_none()
+                && self.screen_draw_launcher_parking.is_none()
+                && !self.color_pick_owns_root()
+                && !self.ocr_owns_root()
+                && !self.ocr_surface_visible()
+                && !self.ocr_defers_launcher_query_refresh();
+            let current_generation = self.root_list_geometry.result_generation;
+            self.visibility_revision.complete_first_usable_frame(
+                visibility_request,
+                visibility_invocation_id,
+                &self.visible_flag,
+                should_be_visible,
+                frame_eligible,
+                painted_root_generation,
+                current_generation,
+                track_c_enabled,
+            );
+        }
     }
 }
 
@@ -4781,6 +4864,128 @@ mod tests {
             ..Default::default()
         };
         ctx.run(input, |ctx| app.render_root_frame(ctx, None))
+    }
+
+    fn arm_track_c_frame_sample(app: &mut LauncherApp, invocation_id: u64) -> u64 {
+        use crate::visibility::VisibilityToggleBatch;
+
+        let mut batch = VisibilityToggleBatch::default();
+        let (was_visible, revision) = batch.record_toggle_ordered_with_invocation(
+            &app.visibility_revision,
+            &app.visible_flag,
+            Some(invocation_id),
+        );
+        assert!(!was_visible, "the fixture begins hidden");
+        app.track_c_test_force_enabled = true;
+        // The test uses the production render/completion path while explicitly
+        // seeding its revision-owned timer independent of the process switch.
+        app.visibility_revision
+            .arm_first_usable_frame_for_test(revision, Some(invocation_id));
+        revision
+    }
+
+    #[test]
+    fn track_c_metric_empty_browse_frame_completes_without_last_results_valid() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.query.clear();
+        app.search();
+        app.last_results_valid = false;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+        assert!(!app.last_search_pending);
+        assert_eq!(
+            app.last_search_provider_revision,
+            app.plugins.search_generation()
+        );
+        let invocation_id = 77;
+        let revision = arm_track_c_frame_sample(&mut app, invocation_id);
+
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+
+        let generation = app.root_list_geometry.result_generation;
+        assert!(!app.visibility_revision.complete_first_usable_frame(
+            revision,
+            Some(invocation_id),
+            &app.visible_flag,
+            true,
+            true,
+            Some(generation),
+            generation,
+            true,
+        ));
+    }
+
+    #[test]
+    fn track_c_metric_provider_change_during_root_frame_blocks_completion() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.query.clear();
+        app.search();
+        app.last_results_valid = false;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+        let accepted_provider_revision = app.last_search_provider_revision;
+        assert_eq!(accepted_provider_revision, app.plugins.search_generation());
+        let invocation_id = 78;
+        let revision = arm_track_c_frame_sample(&mut app, invocation_id);
+        app.track_c_test_provider_change_at_frame_end = true;
+
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+
+        let current_provider_revision = app.plugins.search_generation();
+        assert_ne!(accepted_provider_revision, current_provider_revision);
+        let generation = app.root_list_geometry.result_generation;
+        assert!(app.visibility_revision.complete_first_usable_frame(
+            revision,
+            Some(invocation_id),
+            &app.visible_flag,
+            true,
+            true,
+            Some(generation),
+            generation,
+            true,
+        ));
+    }
+
+    #[test]
+    fn track_c_metric_catalog_change_during_root_frame_blocks_completion() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.query.clear();
+        app.search();
+        app.last_results_valid = false;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+        assert!(app.last_search_result_catalog_versions_stable);
+        let accepted_catalog_versions = app
+            .last_search_result_catalog_versions
+            .expect("accepted empty browse results capture mutable catalog versions");
+        assert_eq!(
+            accepted_catalog_versions,
+            crate::radial::dynamic::MutableResultCatalogVersions::current()
+        );
+        let invocation_id = 79;
+        let revision = arm_track_c_frame_sample(&mut app, invocation_id);
+        app.track_c_test_catalog_version_change_at_frame_end = true;
+
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+
+        assert_ne!(
+            accepted_catalog_versions,
+            crate::radial::dynamic::MutableResultCatalogVersions::current()
+        );
+        let generation = app.root_list_geometry.result_generation;
+        assert!(app.visibility_revision.complete_first_usable_frame(
+            revision,
+            Some(invocation_id),
+            &app.visible_flag,
+            true,
+            true,
+            Some(generation),
+            generation,
+            true,
+        ));
     }
 
     fn settle_root_selection(

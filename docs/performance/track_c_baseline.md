@@ -9,7 +9,7 @@ Captured 2026-10-10 before feature branch creation. LOCAL ONLY.
 - rustc 1.97.1 (8bab26f4f 2026-07-14), full commit `8bab26f4f68e0e26f0bb7960be334d5b520ea452`, host `x86_64-pc-windows-msvc`, LLVM 22.1.6.
 - cargo 1.97.1 (c980f4866 2026-06-30).
 - cargo-nextest 0.9.135 (610eefb88 2026-05-14), full commit `610eefb88762529a316373f4a50f5fd9194c3c35`.
-- Active power scheme: Balanced. CIM queries for OS/CPU/RAM/storage were denied; these current host details are NOT MEASURED. Historical Track B host details are context only.
+- Active power scheme: Balanced. CIM queries for OS/CPU/RAM/storage were denied. Follow-up read-only .NET/registry inventory reports Windows NT 10.0.19045.0, 8 available logical processors, Intel Core i7-7700K CPU @ 4.20GHz. Physical core count, RAM and storage media/volume details remain NOT MEASURED (volume query also unavailable). Historical Track B host details are context only.
 
 ## Preservation inspection
 

@@ -1,9 +1,11 @@
+use super::event_channel::EventSender;
 use super::*;
+use crate::performance::track_c::EventOrigin;
 use std::path::{Path, PathBuf};
 
 pub(super) fn watch_file(
     path: &Path,
-    tx: Sender<WatchEvent>,
+    tx: EventSender,
     event: WatchEvent,
     repaint: egui::Context,
 ) -> notify::Result<RecommendedWatcher> {
@@ -12,10 +14,11 @@ pub(super) fn watch_file(
 
 pub(super) fn watch_file_with_wake(
     path: &Path,
-    tx: Sender<WatchEvent>,
+    tx: EventSender,
     event: WatchEvent,
     wake: ViewportWake,
 ) -> notify::Result<RecommendedWatcher> {
+    let tx = tx.with_origin(EventOrigin::FileWatcher);
     let target = path.to_path_buf();
     let target_is_directory = path.is_dir();
     let mut watcher = RecommendedWatcher::new(
@@ -49,9 +52,14 @@ pub(super) fn watch_file_with_wake(
 
 impl LauncherApp {
     pub fn process_watch_events(&mut self) {
-        while let Ok(ev) = self.rx.try_recv() {
+        let mut timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::EventDrain,
+        );
+        let mut drained = 0_usize;
+        while let Ok(delivery) = self.rx.try_recv_for_dispatch() {
+            drained = drained.saturating_add(1);
             self.event_sink.event_consumed();
-            match ev {
+            match delivery.event {
                 WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
                 WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),
                 WatchEvent::RadialResolveDeferred(envelope) => {
@@ -358,6 +366,8 @@ impl LauncherApp {
             }
         }
         self.maybe_rebuild_completion_index(Instant::now());
+        timer.set_work_units(drained);
+        timer.finish(crate::performance::track_c::Outcome::Completed);
     }
 }
 
@@ -598,7 +608,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let path = directory.path().join("actions.json");
         std::fs::write(&path, "[]").unwrap();
-        let (event_tx, event_rx) = channel();
+        let (event_tx, event_rx) = super::event_channel::channel();
         let (repaint_tx, repaint_rx) = channel();
         let ctx = egui::Context::default();
         ctx.set_request_repaint_callback(move |_| {
@@ -1704,12 +1714,12 @@ mod tests {
             TestWatchEvent::ScreenDrawEmergency(emergency)
         );
 
-        let (tx, rx) = channel();
+        let (tx, rx) = super::event_channel::channel();
         tx.send(WatchEvent::Clipboard).unwrap();
         tx.send(WatchEvent::Folders).unwrap();
         assert_eq!(recv_test_event(&rx), Some(TestWatchEvent::Folders));
 
-        let (tx, rx) = channel();
+        let (tx, rx) = super::event_channel::channel();
         tx.send(WatchEvent::ExecuteAction(action)).unwrap();
         tx.send(WatchEvent::Bookmarks).unwrap();
         assert_eq!(recv_test_event(&rx), Some(TestWatchEvent::Bookmarks));

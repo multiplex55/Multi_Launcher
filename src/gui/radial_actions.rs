@@ -23,7 +23,9 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use super::event_channel::EventSender;
 use super::{ActivationSource, DestructiveAction, LauncherApp};
+use crate::performance::track_c::EventOrigin;
 
 fn trace_authoring_provider_search(
     request: &crate::gui::AuthoringProviderSearchRequest,
@@ -45,9 +47,10 @@ fn trace_authoring_provider_search(
 }
 
 fn notify_provider_search_capacity_available(
-    event_tx: &std::sync::mpsc::Sender<crate::gui::WatchEvent>,
+    event_tx: &EventSender,
     repaint: &eframe::egui::Context,
 ) {
+    let event_tx = event_tx.with_origin(EventOrigin::RadialProvider);
     let _ = event_tx.send(crate::gui::WatchEvent::AuthoringProviderCapacityAvailable);
     repaint.request_repaint();
     repaint.request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
@@ -55,7 +58,7 @@ fn notify_provider_search_capacity_available(
 
 fn release_provider_search_capacity_and_wake<T>(
     permit: T,
-    event_tx: &std::sync::mpsc::Sender<crate::gui::WatchEvent>,
+    event_tx: &EventSender,
     repaint: &eframe::egui::Context,
 ) {
     drop(permit);
@@ -1193,7 +1196,7 @@ impl LauncherApp {
                 self.enabled_capabilities.as_ref(),
             );
             let query = request.query.clone();
-            let event_tx = self.event_tx.clone();
+            let event_tx = self.event_tx.with_origin(EventOrigin::RadialProvider);
             let repaint = self.egui_ctx.clone();
             let worker_bridge = Arc::clone(&bridge);
             let failure_request = request.clone();
@@ -1279,6 +1282,7 @@ impl LauncherApp {
                 );
                 let _ = self
                     .event_tx
+                    .with_origin(EventOrigin::RadialProvider)
                     .send(crate::gui::WatchEvent::AuthoringProviderCapacityAvailable);
             }
             return;
@@ -1651,7 +1655,7 @@ impl LauncherApp {
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
-        let event_tx = self.event_tx.clone();
+        let event_tx = self.event_tx.with_origin(EventOrigin::RadialProvider);
         let repaint = self.egui_ctx.clone();
         let failed_envelope = envelope.clone();
         let spawn = std::thread::Builder::new()
@@ -3231,7 +3235,7 @@ mod tests {
             }
         }
 
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = super::super::event_channel::channel();
         let repaint = eframe::egui::Context::default();
         let repaint_count = Arc::new(AtomicUsize::new(0));
         let callback_count = Arc::clone(&repaint_count);

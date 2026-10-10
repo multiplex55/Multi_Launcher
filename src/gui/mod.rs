@@ -20,6 +20,7 @@ pub mod crop_dialog;
 mod dashboard_editor_dialog;
 mod data_recovery_dialog;
 mod diff_dialog;
+mod event_channel;
 mod fav_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
@@ -159,6 +160,7 @@ use crate::indexer;
 
 use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
+use crate::performance::track_c::EventOrigin;
 use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
@@ -178,6 +180,8 @@ use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveActio
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
+pub use event_channel::EventReceiver;
+use event_channel::EventSender;
 use fst::Map;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -261,9 +265,23 @@ fn normalize_static_window_config(
 
 struct AppEventSink {
     id: u64,
-    sender: Sender<WatchEvent>,
+    sender: AppEventSender,
     wake: Option<ViewportWake>,
     queued: Arc<AtomicUsize>,
+}
+
+enum AppEventSender {
+    Raw(Sender<WatchEvent>),
+    Observed(EventSender),
+}
+
+impl AppEventSender {
+    fn send(&self, event: WatchEvent) -> Result<(), ()> {
+        match self {
+            Self::Raw(sender) => sender.send(event).map_err(|_| ()),
+            Self::Observed(sender) => sender.send_as(event, EventOrigin::Registry).map_err(|_| ()),
+        }
+    }
 }
 
 const APP_EVENT_PENDING_CAPACITY: usize = 256;
@@ -371,7 +389,7 @@ impl Drop for EventSinkRegistration {
 }
 
 fn register_event_sink(
-    tx: Sender<WatchEvent>,
+    sender: AppEventSender,
     wake: Option<ViewportWake>,
 ) -> EventSinkRegistration {
     let registration = EventSinkRegistration {
@@ -384,17 +402,22 @@ fn register_event_sink(
         registry.owner_registered = true;
         let sink = AppEventSink {
             id: registration.id,
-            sender: tx,
+            sender,
             wake,
             queued: Arc::clone(&registration.queued),
         };
         if first_owner {
             let pending = registry.pending_before_owner.drain(..).collect::<Vec<_>>();
             for event in pending {
+                sink.queued.fetch_add(1, Ordering::AcqRel);
                 if sink.sender.send(event).is_err() {
+                    let _ = sink
+                        .queued
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                            Some(n.saturating_sub(1))
+                        });
                     return registration;
                 }
-                sink.queued.fetch_add(1, Ordering::Release);
             }
         }
         if sink.queued.load(Ordering::Acquire) > 0 {
@@ -413,11 +436,15 @@ pub fn register_event_sender_with_wake(
     tx: Sender<WatchEvent>,
     wake: ViewportWake,
 ) -> EventSinkRegistration {
-    register_event_sink(tx, Some(wake))
+    register_event_sink(AppEventSender::Raw(tx), Some(wake))
 }
 
 pub fn register_event_sender(tx: Sender<WatchEvent>) -> EventSinkRegistration {
-    register_event_sink(tx, None)
+    register_event_sink(AppEventSender::Raw(tx), None)
+}
+
+fn register_observed_event_sender(tx: EventSender, wake: ViewportWake) -> EventSinkRegistration {
+    register_event_sink(AppEventSender::Observed(tx), Some(wake))
 }
 
 pub fn send_event(ev: WatchEvent) {
@@ -435,10 +462,15 @@ pub fn send_event(ev: WatchEvent) {
             }
             let mut wakes = Vec::new();
             registry.sinks.retain_mut(|sink| {
+                sink.queued.fetch_add(1, Ordering::AcqRel);
                 if sink.sender.send(ev.clone()).is_err() {
+                    let _ = sink
+                        .queued
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                            Some(n.saturating_sub(1))
+                        });
                     return false;
                 }
-                sink.queued.fetch_add(1, Ordering::Release);
                 if let Some(wake) = &sink.wake {
                     wakes.push(wake.clone());
                 }
@@ -757,9 +789,9 @@ pub struct LauncherApp {
     pub show_dashboard_diagnostics: bool,
     pub dashboard_editor: DashboardEditorDialog,
     pub show_dashboard_editor: bool,
-    rx: Receiver<WatchEvent>,
+    rx: EventReceiver,
     event_sink: EventSinkRegistration,
-    event_tx: Sender<WatchEvent>,
+    event_tx: EventSender,
     /// Bounds deferred radial provider work to one in-flight invocation. A
     /// cancelled provider call keeps this slot until the call actually exits.
     pub(crate) radial_provider_search_capacity:
@@ -949,6 +981,17 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    last_search_pending: bool,
+    last_search_provider_revision: u64,
+    last_search_result_catalog_versions:
+        Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+    last_search_result_catalog_versions_stable: bool,
+    #[cfg(test)]
+    track_c_test_force_enabled: bool,
+    #[cfg(test)]
+    track_c_test_provider_change_at_frame_end: bool,
+    #[cfg(test)]
+    track_c_test_catalog_version_change_at_frame_end: bool,
     background_query_refresh_pending: bool,
     last_search_provider_deferral: search::ProviderSearchDeferral,
     last_plugin_search_generation: u64,
@@ -1052,12 +1095,17 @@ impl LauncherApp {
     /// neither path reconstructs indexed actions from the filesystem. Version
     /// changes remain owned by the persistence/watcher caller.
     fn publish_custom_actions_with_indexed_tail(&mut self, custom: Vec<Action>) {
+        let mut timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::ActionPublishPrepare,
+        );
         let indexed = self
             .actions
             .iter()
             .skip(self.custom_len.min(self.actions.len()))
             .cloned()
             .collect::<Vec<_>>();
+        timer.set_work_units(indexed.len());
+        timer.finish(crate::performance::track_c::Outcome::Completed);
         self.publish_actions(custom, indexed);
     }
 
@@ -1066,12 +1114,17 @@ impl LauncherApp {
         custom: Vec<Action>,
         additional: impl IntoIterator<Item = Action>,
     ) {
+        let mut timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::ActionPublishCommit,
+        );
         self.custom_len = custom.len();
         let mut actions = custom;
         actions.extend(additional);
+        timer.set_work_units(actions.len());
         self.actions = Arc::new(actions);
         self.update_action_cache();
         self.request_background_query_refresh();
+        timer.finish(crate::performance::track_c::Outcome::Completed);
     }
 
     pub fn plugin_enabled(&self, name: &str) -> bool {
@@ -1743,8 +1796,8 @@ impl LauncherApp {
             index_paths.unwrap_or_default(),
             settings.max_indexed_items,
         );
-        let (tx, rx) = channel();
-        let event_sink = register_event_sender_with_wake(tx.clone(), ViewportWake::root(ctx));
+        let (tx, rx) = event_channel::channel();
+        let event_sink = register_observed_event_sender(tx.clone(), ViewportWake::root(ctx));
         let mut watchers = Vec::new();
         let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
@@ -1770,7 +1823,7 @@ impl LauncherApp {
         );
         let dashboard_registry = WidgetRegistry::with_defaults();
         let dashboard_event_cb = std::sync::Arc::new({
-            let tx = tx.clone();
+            let tx = tx.with_origin(EventOrigin::Dashboard);
             let ctx = ctx.clone();
             move |ev: DashboardEvent| {
                 if tx.send(WatchEvent::Dashboard(ev)).is_ok() {
@@ -2373,6 +2426,16 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            last_search_pending: false,
+            last_search_provider_revision: 0,
+            last_search_result_catalog_versions: None,
+            last_search_result_catalog_versions_stable: false,
+            #[cfg(test)]
+            track_c_test_force_enabled: false,
+            #[cfg(test)]
+            track_c_test_provider_change_at_frame_end: false,
+            #[cfg(test)]
+            track_c_test_catalog_version_change_at_frame_end: false,
             background_query_refresh_pending: false,
             last_search_provider_deferral: Default::default(),
             last_plugin_search_generation: 0,
@@ -3742,7 +3805,10 @@ impl LauncherApp {
         self.screen_draw_recovery_bridge = bridge;
     }
 
-    pub fn watch_receiver(&self) -> &Receiver<WatchEvent> {
+    /// Returns the app-owned observed event receiver. `try_recv` and
+    /// `recv_timeout` expose plain `WatchEvent` values while internal queue
+    /// age/depth diagnostics remain behind the private envelope.
+    pub fn watch_receiver(&self) -> &EventReceiver {
         &self.rx
     }
 
@@ -4048,7 +4114,7 @@ impl LauncherApp {
     }
 }
 
-pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
+pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
     while let Ok(ev) = rx.try_recv() {
         match ev {
             WatchEvent::Actions
@@ -4094,10 +4160,7 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
     None
 }
 
-pub fn recv_test_event_timeout(
-    rx: &Receiver<WatchEvent>,
-    timeout: Duration,
-) -> Option<TestWatchEvent> {
+pub fn recv_test_event_timeout(rx: &EventReceiver, timeout: Duration) -> Option<TestWatchEvent> {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());

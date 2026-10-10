@@ -12,6 +12,7 @@ use crate::commands::{
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
+use crate::performance::track_c::EventOrigin;
 
 impl LauncherCommandHost for LauncherApp {
     fn launcher_is_visible(&self) -> bool {
@@ -771,8 +772,8 @@ impl HeadlessCommandHost for LauncherApp {
         #[cfg(test)]
         if self.test_defer_virtual_desktop_completion {
             self.test_defer_virtual_desktop_completion = false;
-            let _ = self.event_tx.send(crate::gui::WatchEvent::VirtualDesktop(
-                crate::gui::VirtualDesktopGuiCompletion {
+            let _ = self.event_tx.with_origin(EventOrigin::CommandHost).send(
+                crate::gui::WatchEvent::VirtualDesktop(crate::gui::VirtualDesktopGuiCompletion {
                     invocation,
                     completion_outcome,
                     history_query,
@@ -781,14 +782,14 @@ impl HeadlessCommandHost for LauncherApp {
                     expected_visible,
                     root_policy,
                     result: Ok(()),
-                },
-            ));
+                }),
+            );
             self.egui_ctx.request_repaint();
             return;
         }
 
         let catalog = std::sync::Arc::clone(&self.plugins.internal_services().window_catalog);
-        let tx = self.event_tx.clone();
+        let tx = self.event_tx.with_origin(EventOrigin::CommandHost);
         let ctx = self.egui_ctx.clone();
         std::thread::spawn(move || {
             let result = crate::commands::headless::execute_virtual_desktop_with_catalog(

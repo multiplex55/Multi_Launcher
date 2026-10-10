@@ -1,11 +1,12 @@
+use super::event_channel::EventSender;
 use super::{LauncherApp, ViewportWake, WatchEvent};
 use crate::actions::Action;
 use crate::indexer::coordinator::{
     CoordinatorError, IndexCompletion, IndexConfig, IndexCoordinator, NotifierToken, ShutdownError,
     WorkerTermination,
 };
+use crate::performance::track_c::EventOrigin;
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 
 /// App-owned lifecycle for replaceable indexed-action requests.
 ///
@@ -45,10 +46,10 @@ impl IndexingOwner {
     fn attach(
         &mut self,
         coordinator: IndexCoordinator,
-        event_tx: &Sender<WatchEvent>,
+        event_tx: &EventSender,
         wake: ViewportWake,
     ) -> Result<(), CoordinatorError> {
-        let tx = event_tx.clone();
+        let tx = event_tx.with_origin(EventOrigin::IndexCoordinator);
         let token = coordinator.attach_notifier(move || {
             if tx.send(WatchEvent::IndexReady).is_ok() {
                 wake.wake();
@@ -64,7 +65,7 @@ impl IndexingOwner {
         coordinator: IndexCoordinator,
         config: IndexConfig,
         generation: u64,
-        event_tx: &Sender<WatchEvent>,
+        event_tx: &EventSender,
         wake: ViewportWake,
     ) -> Result<(), CoordinatorError> {
         if self.closed {
@@ -86,7 +87,7 @@ impl IndexingOwner {
 
     fn ensure_coordinator(
         &mut self,
-        event_tx: &Sender<WatchEvent>,
+        event_tx: &EventSender,
         wake: ViewportWake,
     ) -> Result<(), CoordinatorError> {
         if self.coordinator.is_none() {

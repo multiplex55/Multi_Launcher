@@ -1030,6 +1030,10 @@ impl NotesDialog {
         {
             return None;
         }
+        let mut track_c_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::NotesGeometryCold,
+        );
+        track_c_timer.set_work_units(self.filtered_indices.len());
         let geometry = measure_notes_geometry(
             ctx,
             style,
@@ -1049,7 +1053,9 @@ impl NotesDialog {
                 .saturating_add(geometry.measured_rows.try_into().unwrap_or(u64::MAX));
             self.test_last_geometry_rebuild_nanos = geometry.rebuild_nanos;
         }
-        self.notes_geometry.replace(geometry)
+        let result = self.notes_geometry.replace(geometry);
+        track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
+        result
     }
 
     fn close_menu_owner(&mut self) {
