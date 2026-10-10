@@ -36,5 +36,5 @@
 | M6-A | Sampling/HUD measurement decision | complete | PASS:5 collector tests/bincheck;87.277s real profile,2684samples,zero errors/drops;fresh copy/cleanup | independent source/native evidence clear | 3d3dac5df4e78ea08e191e209f646979a57609e3 | LOCAL ONLY |
 | M6-B | Conditional display metadata reuse | SKIPPED (measured) | metadata p95 .3286ms;fresh geometry/invalidation complexity exceeds demonstrated benefit | independent evidence review clear | M6-A decision | LOCAL ONLY |
 | M6-C | Conditional retained GDI resources | SKIPPED (measured) | mean12.58us creation/redraw,balanced1917brush/fontpairs,stableHUDGDIcount | independent evidence review clear | M6-A decision | LOCAL ONLY |
-| M7-A | Bounded cross-surface regression | in_progress | — | — | — | — |
-| M7-B | Final comparable report | pending | — | — | — | — |
+| M7-A | Bounded cross-surface regression | complete | PASS:17 library+2 startup+3 integration;M5/M6 evidence reused;diffcheck | independent cumulative review clear | this checkpoint | LOCAL ONLY |
+| M7-B | Final comparable report | in_progress | — | — | — | — |
