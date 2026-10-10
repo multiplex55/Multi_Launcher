@@ -69,3 +69,54 @@ runner profiles remain available through `-CargoArguments @('-P', 'default')`;
 For a quick library check, run `cargo check --lib`. To deliberately build all
 package binaries, use `cargo build --release` directly; the release preset
 selects only `multi_launcher`.
+
+## Opt-in reduced-symbol development profile
+
+`fast-dev` is accepted as an opt-in for repeated launcher builds and selected
+Nextest compilation. It inherits the `dev` profile and stores line tables instead
+of full debug symbols. Its artifacts use a separate `target/fast-dev` cache;
+the default profile remains under `target/debug`.
+
+~~~powershell
+cargo build --profile fast-dev --bin multi_launcher
+cargo nextest run --lib --cargo-profile fast-dev -E 'test(history_prepare_)'
+~~~
+
+The benchmark changed one exact `color.rs` formatting fixture on one Windows
+host. These are separate first-edited-sample and exact-fixture-replay phases,
+timed as whole commands after original-source artifact preparation:
+
+| Phase | Command | `dev` seconds | `fast-dev` seconds |
+| --- | --- | ---: | ---: |
+| First edited sample | Launcher build | 144.058 | 93.992 |
+| First edited sample | Library test build (`--no-run`) | 196.956 | 175.760 |
+| First edited sample | `cargo check --lib` | 37.153 | 17.655 |
+| Exact-fixture replay | Launcher build | 43.251 | 30.412 |
+| Exact-fixture replay | Library test build (`--no-run`) | 40.201 | 36.489 |
+| Exact-fixture replay | `cargo check --lib` | 12.629 | 13.493 |
+
+The default `dev` cache already existed; `fast-dev` used a newly populated
+profile cache. The baseline first sample was collected before a harness parser
+interruption and imported into the resumed run; these samples were not one
+uninterrupted paired batch. Separate profile-population times are excluded from
+the edit table and are not a fair cold-cache comparison because the starting
+cache histories differed. Results apply only to this host and fixture.
+
+Three no-op medians (`dev` / `fast-dev`) were slower with `fast-dev`: launcher
+0.881s / 1.350s, library test build 1.641s / 1.720s, and `cargo check --lib`
+0.866s / 1.345s. The check result is mixed too: the first edited check was
+faster with `fast-dev`, while exact-fixture replay was slower. Keep plain
+`cargo check --lib` as the quick-check recommendation; opt into `fast-dev` for
+launcher or selected-test compilation when the measured replay behavior suits
+your workflow. See the [detailed Track B measurements](../docs/performance/track_b_results.md).
+
+Line tables support source-line locations but omit much of the information
+needed to inspect variables. Use the default profile when full debug information
+is needed:
+
+~~~powershell
+cargo build --bin multi_launcher
+cargo nextest run --lib -E 'test(history_prepare_)'
+~~~
+
+Timings are process wall time, not isolated linker time.
