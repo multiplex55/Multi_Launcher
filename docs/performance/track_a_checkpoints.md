@@ -32,9 +32,10 @@
 | M4-D | Watcher race and stall evidence | complete | PASS:10 lib+4 domain+2 watcher+2 small+2 full owners/12scenarios;zero reload scans;10k request p95 .0193ms;fmt/diff | independent scoped review clear | f5560cc3660b8187478623ff65fbe1e87c665166 | LOCAL ONLY |
 | M5-A | Tick contract characterization | complete | PASS:6 opt-in serial worker +24 scoped compatibility;API receipts match metrics;fmt/diff | independent scoped review clear | 7696f0dc9faf99adfb4c7a74ab56169bcced8c00 | LOCAL ONLY |
 | M5-B | Current-source presentation ordering | complete | PASS:25 opt-in serial scoped tests;smoke-bin check;moving0refresh/1present,stationary1refresh/0present;fmt/diff | independent scoped review clear | ab3eace9723280cbe0a00f625b1d0b3949035aac | LOCAL ONLY |
-| M5-C | Native reliability/review/comparison | complete | PASS:16 real Windows API/lifecycle stages;stationary44samples/no new fullrender;zero HWND cleanup;visual/latency/mixedDPI NOT MEASURED | independent native-log review clear | commit pending | LOCAL ONLY |
-| M6-A | Sampling/HUD measurement decision | pending | — | — | — | — |
+| M5-C | Native reliability/review/comparison | complete | PASS:16 real Windows API/lifecycle stages;stationary44samples/no new fullrender;zero HWND cleanup;visual/latency/mixedDPI NOT MEASURED | independent native-log review clear | f7049863d6ebe8968b04d4002441d936fc345a27 | LOCAL ONLY |
+| M6-A | Sampling/HUD measurement decision | in_progress | PASS:5 collector tests;smoke-bin check;fmt/diff;actual capture pending | independent source review clear | — | LOCAL ONLY |
 | M6-B | Conditional display metadata reuse | pending | measurement gate | — | — | — |
 | M6-C | Conditional retained GDI resources | pending | measurement gate | — | — | — |
 | M7-A | Bounded cross-surface regression | pending | — | — | — | — |
 | M7-B | Final comparable report | pending | — | — | — | — |
+

@@ -9,6 +9,8 @@ static PROCESS_START: OnceLock<Instant> = OnceLock::new();
 static FRAME_STATE: OnceLock<Mutex<FrameState>> = OnceLock::new();
 static METRICS: MetricCollector = MetricCollector::new();
 
+pub mod coordinate_profile;
+
 #[cfg(test)]
 pub(crate) mod workloads;
 

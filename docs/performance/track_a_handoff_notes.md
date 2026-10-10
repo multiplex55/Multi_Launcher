@@ -309,3 +309,33 @@ B requires material metadata overhead AND defensible invalidation preserving sam
 M5-B COMPLETE source/gates:25/25 serialPERF1 PASS b335f9f6-827a-4d3a-9403-e2078930e9ba;smokebincheck/rustfmt/diffPASS;reviewclear. Movingperkind0refresh/1present,stationary1refresh/0present;invalidrepeatnone;metricreceiptsagree. Onlycontroller/native/native_effects/smokewrapper Rust changes. Parentlocalcommitnext thenM5-C shellnativefixture; writeridle,no jobs/pushes. FinalM6-A packet above.
 
 M5-C COMPLETE: exact B binary buildPASS; sandbox GetCursorPos denied0x80070005, authorized escalation actual --cursor-effects-auto PASS16stages/exit0,851samples/15renders,shutdownOk/ownedHWND0. Exporttrack_a_cursor_effects_native_g1.json; rawtarget/performance/m5c-native/target/coordinate-tool-smoke ignored. Reviewclear exactexclusioncoverage/geometry/disable/recreate;stationary416→460samples/renders7unchanged. Nativevisual/mixedDPI/per-tickdispatch/CPU/GPU/latency NOTMEASURED/NOTRUN. Parentjobs52006/20150finished. Cdocumentationlocalcommitnext; M6-A full finalpacketabove; writeridle. Desktop-native profile needs require_escalated due demonstratedsandboxrestriction, previously approvednativefixture.
+
+M5-C local commit f7049863d6ebe8968b04d4002441d936fc345a27. M6-A sole writer dispatched full final profiling packet above, source/tests/CLI only; parent owns exact-commit native recording after source gate. Reviewer continuous read-only. B/C remain conditional, undecided until actual measurements. Parentjobsnone; no pushes.
+
+## M7-A exact minimal boundary gate (planner verified symbols)
+
+Run serial library filter joining these17 names with OR test(...):
+
+- persisted_note_revision_bypasses_local_edit_debounce
+- failed_heavy_snapshot_retains_rows_and_retries_after_cooldown
+- new_draft_after_failed_refresh_uses_normal_edit_debounce
+- root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection
+- root_list_context_menu_owner_stays_with_its_absolute_row_offscreen
+- root_grid_viewport_builds_complete_bounded_rows_with_absolute_ids_and_click_targets
+- root_grid_popup_owner_retains_complete_row_without_retargeting
+- quick_notes_browsing_virtualizes_rows_and_reuses_geometry
+- quick_notes_popup_owner_stays_with_identity_offscreen_then_closes_on_removal
+- quick_notes_defers_drafts_and_keeps_last_good_candidate_until_recovery
+- failed_quick_notes_edit_retains_dialog_and_committed_note
+- quick_notes_publishes_a_successful_edit_after_the_editor_closes
+- history_prepare_matches_eager_reference
+- gui_index_accepted_publication_updates_search_history_pins_and_radial_catalog
+- gui_index_completion_merges_the_latest_actions_prefix_after_a_blocked_scan
+- gui_index_failure_retains_last_good_actions_then_recovers
+- gui_index_wake_is_app_scoped_and_shutdown_ignores_late_completion
+
+Then binary --bin multi_launcher -E test(startup_index_) (2existing tests). Group integrations --test watchers --test watcher_failures --test note_panel_auto_save with OR exact names actions_watcher_sends_event,invalid_actions_watcher_logs_error,note_panel_auto_saves_on_close. Notification error test is invalid setup, not malformed reload; completed M4 owners retain malformed reload proof.
+
+Reuse final M5 reviewed25-case gate and16-stage native evidence; M6 final collector/profile/disabled hooks/conditional decisions supply later evidence. Repeat M5 only if M6 changes protected behavior. Omit note_panel_scroll/fullnotes/history/radial/repeatedcoordinatorraces/fullgeometryoracles: unaffected or already proved at owning stage. M7-B all7ignored owners/48summaries remains mandatory. No new matrix/fullsuite. Planner ran no tools beyond read-only symbol inspection.
+
+M6-A source gate PASS:5 collector tests run09748278-6143-4766-8ad2-9ebb2c68924c;smoke-bin check/changed-file rustfmt/diff PASS;review clear. Native profile pending after exact-source checkpoint commit. Writer idle; parent owns build/capture. No pushes.

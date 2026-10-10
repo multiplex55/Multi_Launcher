@@ -73,6 +73,7 @@ mod smoke {
         sampler_creations: AtomicUsize,
         backend_creations: AtomicUsize,
         samples: AtomicUsize,
+        stationary_refreshes: AtomicUsize,
         renders: AtomicUsize,
         shutdowns: AtomicUsize,
     }
@@ -114,6 +115,7 @@ mod smoke {
             &mut self,
             frame: &CoordinateRenderFrame,
         ) -> Result<(), String> {
+            self.1.stationary_refreshes.fetch_add(1, Ordering::AcqRel);
             self.0.refresh_stationary_sources(frame)
         }
         fn render(&mut self, frame: &CoordinateRenderFrame) -> Result<(), String> {
@@ -406,6 +408,9 @@ mod smoke {
         }
         if args.iter().any(|arg| arg == "--cursor-effects") {
             return cursor_effects::run(false);
+        }
+        if args.iter().any(|arg| arg == "--coordinate-profile") {
+            return coordinate_profile::run();
         }
         let _dpi = DpiScope::enter()?;
         if args.iter().any(|arg| arg == "--receiver") {
@@ -1245,4 +1250,7 @@ mod smoke {
 
     #[path = "../smoke/cursor_effects.rs"]
     mod cursor_effects;
+
+    #[path = "../smoke/coordinate_profile.rs"]
+    mod coordinate_profile;
 }

@@ -132,6 +132,10 @@ mod windows_runtime {
         zoom_outline_bitmap,
     };
     use super::super::settings::{CrosshairPreferences, HaloPreferences, ZoomPreferences};
+    use crate::performance::coordinate_profile::{
+        GdiObject, HudPath, NativePhase, measure, measure_optional, record_gdi_operation,
+        record_hud_path,
+    };
     use crate::platform::pixels::premultiplied_bgra;
 
     struct ThreadDpiContext(DPI_AWARENESS_CONTEXT);
@@ -170,16 +174,26 @@ mod windows_runtime {
             &mut self,
             desktop_point: super::super::model::PhysicalPoint,
         ) -> Result<CoordinateSample, String> {
-            let point = POINT {
-                x: desktop_point.x,
-                y: desktop_point.y,
-            };
-            Ok(CoordinateSample::new(
-                desktop_point,
-                virtual_desktop_bounds(),
-                monitor_geometry(point),
-                foreground_client_geometry(),
-            ))
+            measure(NativePhase::SampleMetadata, || {
+                let point = POINT {
+                    x: desktop_point.x,
+                    y: desktop_point.y,
+                };
+                let bounds = measure_optional(NativePhase::VirtualDesktopMetrics, || {
+                    virtual_desktop_bounds()
+                });
+                let monitor = monitor_geometry(point);
+                let foreground = measure_optional(
+                    NativePhase::ForegroundClientGeometry,
+                    foreground_client_geometry,
+                );
+                Ok(CoordinateSample::new(
+                    desktop_point,
+                    bounds,
+                    monitor,
+                    foreground,
+                ))
+            })
         }
     }
 
@@ -188,10 +202,16 @@ mod windows_runtime {
             let _timer = crate::performance::MetricTimer::start(
                 crate::performance::Metric::CoordinateSample,
             );
-            let mut point = POINT::default();
-            unsafe { GetCursorPos(&mut point) }
-                .map_err(|error| format!("Could not sample the physical cursor: {error}"))?;
-            self.sample_at(PhysicalPoint::new(point.x, point.y))
+            measure(NativePhase::PassiveSample, || {
+                let point = measure(NativePhase::CursorPosition, || {
+                    let mut point = POINT::default();
+                    unsafe { GetCursorPos(&mut point) }.map_err(|error| {
+                        format!("Could not sample the physical cursor: {error}")
+                    })?;
+                    Ok::<POINT, String>(point)
+                })?;
+                self.sample_at(PhysicalPoint::new(point.x, point.y))
+            })
         }
     }
 
@@ -209,10 +229,10 @@ mod windows_runtime {
     }
 
     fn monitor_geometry(point: POINT) -> Option<MonitorGeometry> {
-        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
-        if monitor.0.is_null() {
-            return None;
-        }
+        let monitor = measure_optional(NativePhase::MonitorLookup, || {
+            let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+            (!monitor.0.is_null()).then_some(monitor)
+        })?;
 
         let mut info = MONITORINFOEXW {
             monitorInfo: windows::Win32::Graphics::Gdi::MONITORINFO {
@@ -221,9 +241,11 @@ mod windows_runtime {
             },
             ..Default::default()
         };
-        if !unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
-            return None;
-        }
+        measure_optional(NativePhase::MonitorInfo, || {
+            unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }
+                .as_bool()
+                .then_some(())
+        })?;
         let bounds = physical_rect(info.monitorInfo.rcMonitor)?;
         let work_area = physical_rect(info.monitorInfo.rcWork)?;
         let end = info
@@ -238,11 +260,12 @@ mod windows_runtime {
 
         let mut dpi_x = 0;
         let mut dpi_y = 0;
-        let effective_dpi =
+        let effective_dpi = measure_optional(NativePhase::MonitorDpi, || {
             unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }
                 .ok()
                 .filter(|_| dpi_x > 0 && dpi_y > 0)
-                .map(|_| (dpi_x, dpi_y));
+                .map(|_| (dpi_x, dpi_y))
+        });
 
         Some(MonitorGeometry {
             id: MonitorId::new(device_name),
@@ -446,6 +469,18 @@ mod windows_runtime {
             font_size: u32,
             lines: &[String],
         ) -> Result<(), String> {
+            measure(NativePhase::HudDraw, || {
+                self.draw_hud_unprofiled(width, height, font_size, lines)
+            })
+        }
+
+        fn draw_hud_unprofiled(
+            &mut self,
+            width: u32,
+            height: u32,
+            font_size: u32,
+            lines: &[String],
+        ) -> Result<(), String> {
             if (width, height) != (self.width, self.height) {
                 return Err("HUD dimensions do not match its backing DIB".into());
             }
@@ -454,6 +489,7 @@ mod windows_runtime {
                 crate::performance::MetricTimer::start(crate::performance::Metric::HudGdiCreate);
             let brush = unsafe { CreateSolidBrush(COLORREF(0x001B_1B_1B)) };
             drop(brush_timer);
+            record_gdi_operation(GdiObject::Brush, true, !brush.0.is_null());
             if brush.0.is_null() {
                 return Err("Could not create coordinate HUD background".into());
             }
@@ -464,7 +500,8 @@ mod windows_runtime {
                 bottom: i32::try_from(height).map_err(|_| "HUD height is too large")?,
             };
             let filled = unsafe { FillRect(self.dc, &bounds, brush) };
-            let _ = unsafe { DeleteObject(brush) };
+            let brush_deleted = unsafe { DeleteObject(brush) }.as_bool();
+            record_gdi_operation(GdiObject::Brush, false, brush_deleted);
             if filled == 0 {
                 return Err("Could not paint coordinate HUD background".into());
             }
@@ -490,12 +527,14 @@ mod windows_runtime {
                 )
             };
             drop(font_timer);
+            record_gdi_operation(GdiObject::Font, true, !font.0.is_null());
             if font.0.is_null() {
                 return Err("Could not create coordinate HUD font".into());
             }
             let original_font = unsafe { SelectObject(self.dc, font) };
             if original_font.0.is_null() || original_font.0 as isize == -1 {
-                let _ = unsafe { DeleteObject(font) };
+                let font_deleted = unsafe { DeleteObject(font) }.as_bool();
+                record_gdi_operation(GdiObject::Font, false, font_deleted);
                 return Err("Could not select coordinate HUD font".into());
             }
             let result = (|| {
@@ -514,8 +553,9 @@ mod windows_runtime {
             })();
             unsafe {
                 let _ = SelectObject(self.dc, original_font);
-                let _ = DeleteObject(font);
             }
+            let font_deleted = unsafe { DeleteObject(font) }.as_bool();
+            record_gdi_operation(GdiObject::Font, false, font_deleted);
             result?;
 
             // GDI text rendering updates BGR but leaves the reserved alpha byte
@@ -664,17 +704,24 @@ mod windows_runtime {
             font_size: u32,
             lines: &[String],
         ) -> Result<(), String> {
-            self.ensure_dib(width, height)?;
-            self.dirty = true;
-            self.dib
-                .as_mut()
-                .ok_or_else(|| "Coordinate HUD backing DIB was not initialized".to_string())?
-                .draw_hud(width, height, font_size, lines)?;
-            self.upload(origin)?;
-            self.show()
+            measure(NativePhase::HudPresentation, || {
+                self.ensure_dib(width, height)?;
+                self.dirty = true;
+                self.dib
+                    .as_mut()
+                    .ok_or_else(|| "Coordinate HUD backing DIB was not initialized".to_string())?
+                    .draw_hud(width, height, font_size, lines)?;
+                measure(NativePhase::HudUpload, || self.upload(origin))?;
+                self.show_hud()
+            })
         }
 
         fn reposition_and_show(&mut self, origin: PhysicalPoint) -> Result<(), String> {
+            self.reposition_to(origin)?;
+            self.show()
+        }
+
+        fn reposition_to(&mut self, origin: PhysicalPoint) -> Result<(), String> {
             if self.position != Some(origin) {
                 unsafe {
                     SetWindowPos(
@@ -690,7 +737,7 @@ mod windows_runtime {
                 .map_err(|error| format!("Could not move coordinate passive surface: {error}"))?;
                 self.position = Some(origin);
             }
-            self.show()
+            Ok(())
         }
 
         fn reposition_without_raising(&mut self, origin: PhysicalPoint) -> Result<(), String> {
@@ -743,6 +790,10 @@ mod windows_runtime {
                 self.filter_input_changed = true;
             }
             Ok(())
+        }
+
+        fn show_hud(&mut self) -> Result<(), String> {
+            measure(NativePhase::HudShow, || self.show())
         }
 
         fn hide(&mut self) {
@@ -2085,46 +2136,53 @@ mod windows_runtime {
         }
 
         fn render_hud(&mut self, frame: &CoordinateRenderFrame, force: bool) -> Result<(), String> {
-            if !frame.runtime_state.hud_enabled() {
-                self.hud.hide();
-                return Ok(());
-            }
+            measure(NativePhase::HudRender, || {
+                if !frame.runtime_state.hud_enabled() {
+                    self.hud.hide();
+                    return Ok(());
+                }
 
-            let lines = hud_lines(frame);
-            let dpi = frame
-                .placement_sample
-                .as_ref()
-                .and_then(|sample| sample.monitor.as_ref())
-                .and_then(|monitor| monitor.effective_dpi.map(|(x, _)| x));
-            let work_area = frame
-                .placement_sample
-                .as_ref()
-                .and_then(|sample| sample.monitor.as_ref())
-                .and_then(|monitor| {
-                    PhysicalSize::new(monitor.work_area.width(), monitor.work_area.height())
-                });
-            let (font_size, width, height) = hud_layout(&lines, hud_font_size(dpi), work_area);
-            let visual = HudVisual {
-                lines,
-                font_size,
-                width,
-                height,
-            };
-            let visual_changed = self.hud_visual.as_ref() != Some(&visual);
-            let origin = hud_origin(frame, width, height);
-            if visual_changed || force || self.hud.needs_upload() {
-                self.hud.present_hud(
-                    origin,
-                    visual.width,
-                    visual.height,
-                    visual.font_size,
-                    &visual.lines,
-                )?;
-                self.hud_visual = Some(visual);
-            } else {
-                self.hud.reposition_and_show(origin)?;
-            }
-            Ok(())
+                let lines = hud_lines(frame);
+                let dpi = frame
+                    .placement_sample
+                    .as_ref()
+                    .and_then(|sample| sample.monitor.as_ref())
+                    .and_then(|monitor| monitor.effective_dpi.map(|(x, _)| x));
+                let work_area = frame
+                    .placement_sample
+                    .as_ref()
+                    .and_then(|sample| sample.monitor.as_ref())
+                    .and_then(|monitor| {
+                        PhysicalSize::new(monitor.work_area.width(), monitor.work_area.height())
+                    });
+                let (font_size, width, height) = hud_layout(&lines, hud_font_size(dpi), work_area);
+                let visual = HudVisual {
+                    lines,
+                    font_size,
+                    width,
+                    height,
+                };
+                let visual_changed = self.hud_visual.as_ref() != Some(&visual);
+                let origin = hud_origin(frame, width, height);
+                if visual_changed || force || self.hud.needs_upload() {
+                    record_hud_path(HudPath::Redraw);
+                    self.hud.present_hud(
+                        origin,
+                        visual.width,
+                        visual.height,
+                        visual.font_size,
+                        &visual.lines,
+                    )?;
+                    self.hud_visual = Some(visual);
+                } else {
+                    record_hud_path(HudPath::Reposition);
+                    measure(NativePhase::HudReposition, || {
+                        self.hud.reposition_to(origin)
+                    })?;
+                    self.hud.show_hud()?;
+                }
+                Ok(())
+            })
         }
 
         fn render_crosshair(
