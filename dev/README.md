@@ -120,3 +120,36 @@ cargo nextest run --lib -E 'test(history_prepare_)'
 ~~~
 
 Timings are process wall time, not isolated linker time.
+
+## Release-like local iteration profile
+
+The `iteration` profile is accepted for opt-in local launcher builds. It writes to
+`target/iteration`, separate from canonical release artifacts in `target/release`:
+
+~~~powershell
+cargo build --profile iteration --bin multi_launcher
+cargo build --release --bin multi_launcher
+~~~
+
+It inherits `release` with `opt-level = 2`, `codegen-units = 64`,
+`incremental = true`, and `lto = "off"`. These choices aim to favor repeated
+local builds: lower optimization and more codegen units can reduce compile work,
+while incremental mode can reuse work between edits. They can also reduce
+runtime optimization or increase generated artifacts. Explicit `lto = "off"`
+disables local ThinLTO that the release profile's default `lto = false` may
+allow. This profile is not distribution-equivalent; use `cargo build --release`
+for canonical release artifacts.
+
+On the same Windows host and exact small-edit fixture, first edited builds took
+235.618s release / 26.147s iteration; replay after original-artifact preparation
+took 244.347s / 27.977s. The large-module screening pair took 238.327s / 28.489s
+(one sample each). These gains belong to the combined profile settings, without
+isolating individual parameters or establishing runtime-performance equivalence.
+
+No-op medians were slower: 0.886s release / 1.389s iteration. Initial population
+and original-source preparations are separate from edited samples. Iteration
+also adds a separate cache (3,988,730,009 logical bytes after this sequence);
+cache histories differ, so this is not a normalized storage comparison. Its PDB
+was larger: 21,491,712 bytes versus release's 15,069,184 bytes. Both restored
+binaries passed icon-resource and bounded responsive-startup/shutdown checks.
+See the detailed Track B report for the measured source SHA and limitations.

@@ -146,3 +146,11 @@ path = "tests/suites/domain.rs"
 [profile.fast-dev]
 inherits = "dev"
 debug = "line-tables-only"
+
+# Measured opt-in local iteration profile; canonical release stays unchanged.
+[profile.iteration]
+inherits = "release"
+opt-level = 2
+codegen-units = 64
+lto = "off"
+incremental = true
