@@ -271,4 +271,16 @@ impl LauncherApp {
             .as_ref()
             .and_then(IndexCoordinator::worker_termination)
     }
+
+    #[cfg(test)]
+    pub(super) fn wait_for_index_completion_for_test(
+        &self,
+        generation: u64,
+    ) -> Result<Arc<IndexCompletion>, CoordinatorError> {
+        self.indexing
+            .coordinator
+            .as_ref()
+            .ok_or(CoordinatorError::Closed)?
+            .wait_for_completion(generation)
+    }
 }

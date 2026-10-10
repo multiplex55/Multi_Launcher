@@ -4240,6 +4240,235 @@ mod tests {
         app.process_index_ready();
     }
 
+    fn process_index_ready_through_watch_event(app: &mut LauncherApp) {
+        let event = app
+            .rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("index completion enqueues an app-scoped ready event");
+        assert!(matches!(event, WatchEvent::IndexReady));
+        app.event_tx
+            .send(event)
+            .expect("the app event receiver remains connected");
+        app.process_watch_events();
+        assert!(app.rx.try_recv().is_err(), "ready event was consumed");
+    }
+
+    #[test]
+    fn gui_index_accepted_publication_updates_search_history_pins_and_radial_catalog() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let empty_config = crate::indexer::coordinator::IndexConfig::new(Vec::new(), None);
+        let (_workspace, mut app) =
+            new_isolated_index_app(&egui::Context::default(), &empty_config);
+        app.watchers.clear();
+        app.process_watch_events();
+
+        let custom = custom_action("custom-prefix");
+        let old_retained = Action {
+            label: "Old retained target".into(),
+            desc: "Indexed file".into(),
+            action: "index:retained-id".into(),
+            args: None,
+        };
+        let old_removed = Action {
+            label: "Removed target".into(),
+            desc: "Indexed file".into(),
+            action: "index:removed-id".into(),
+            args: None,
+        };
+        app.actions = Arc::new(vec![custom.clone(), old_retained, old_removed]);
+        app.custom_len = 1;
+        app.update_action_cache();
+        app.query = "app needle".into();
+        app.match_exact = true;
+        app.search();
+        assert!(app.last_results_valid);
+        assert!(
+            !app.results
+                .iter()
+                .any(|action| action.action == "index:retained-id")
+        );
+        let previous_query = app.last_search_query.clone();
+
+        let renamed = Action {
+            label: "Fresh needle retained target".into(),
+            desc: "Indexed file".into(),
+            action: "index:retained-id".into(),
+            args: None,
+        };
+        let added = Action {
+            label: "Other indexed file".into(),
+            desc: "Indexed file".into(),
+            action: "index:new-id".into(),
+            args: None,
+        };
+        let next_tail = vec![renamed.clone(), added.clone()];
+        let updated_added = Action {
+            label: "Other refreshed indexed file".into(),
+            ..added.clone()
+        };
+        let updated_tail = vec![renamed.clone(), updated_added.clone()];
+        let scanner_tail = next_tail.clone();
+        let scanner_updated_tail = updated_tail.clone();
+        let coordinator =
+            crate::indexer::coordinator::IndexCoordinator::with_test_scanner(move |config| {
+                if config
+                    .roots()
+                    .first()
+                    .is_some_and(|root| root == "version-only-publication")
+                {
+                    Ok(scanner_updated_tail.clone())
+                } else if config
+                    .roots()
+                    .first()
+                    .is_some_and(|root| root == "equal-accepted-publication")
+                {
+                    Ok(scanner_updated_tail.clone())
+                } else {
+                    Ok(scanner_tail.clone())
+                }
+            })
+            .unwrap();
+        app.install_test_index_coordinator(coordinator);
+
+        let version_before = crate::actions::actions_version();
+        let config = crate::indexer::coordinator::IndexConfig::new(
+            vec!["accepted-publication".into()],
+            None,
+        );
+        app.request_index_config(config);
+        process_index_ready_through_watch_event(&mut app);
+
+        assert_eq!(app.custom_len, 1);
+        assert_eq!(
+            &app.actions[..],
+            &[custom.clone(), renamed.clone(), added.clone()]
+        );
+        assert_eq!(crate::actions::actions_version(), version_before + 1);
+        assert_eq!(app.actions_by_id.get("index:retained-id"), Some(&renamed));
+        assert_eq!(app.actions_by_id.get("index:new-id"), Some(&added));
+        assert!(!app.actions_by_id.contains_key("index:removed-id"));
+        assert_eq!(app.action_cache[1].label_lc, "fresh needle retained target");
+        assert_eq!(
+            app.action_filter_metadata[1].normalized_id,
+            "index:retained-id"
+        );
+        assert_eq!(app.query, "app needle");
+        assert_eq!(app.last_search_query, previous_query);
+        assert!(app.last_results_valid);
+        assert_eq!(
+            app.results
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            ["index:retained-id"],
+            "the unchanged query is recomputed against the accepted catalog"
+        );
+
+        let retained_pin = crate::history::HistoryPin {
+            action_id: "index:retained-id".into(),
+            label: "Saved retained label".into(),
+            desc: "Saved indexed file".into(),
+            args: None,
+            query: "needle".into(),
+            timestamp: 20,
+        };
+        let removed_pin = crate::history::HistoryPin {
+            action_id: "index:removed-id".into(),
+            label: "Saved removed label".into(),
+            desc: "Saved indexed file".into(),
+            args: None,
+            query: "removed".into(),
+            timestamp: 10,
+        };
+        let history_rows =
+            crate::dashboard::widgets::CommandHistoryWidget::prepare_pinned_entries_for_test(
+                vec![retained_pin.clone(), removed_pin.clone()],
+                &app.plugins,
+                app.enabled_plugins.as_ref(),
+                &app.actions_by_id,
+                &app.dashboard_data_cache,
+            );
+        assert_eq!(history_rows.len(), 2);
+        assert_eq!(history_rows[0], (renamed.clone(), false));
+        assert_eq!(
+            history_rows[1],
+            (
+                Action {
+                    label: "Saved removed label".into(),
+                    desc: "Saved indexed file".into(),
+                    action: "index:removed-id".into(),
+                    args: None,
+                },
+                true,
+            )
+        );
+        assert_eq!(app.resolve_pin_action(&retained_pin), Some(renamed.clone()));
+        assert_eq!(app.resolve_pin_action(&removed_pin), None);
+
+        // Keep query results stable across this next accepted publication so
+        // the radial snapshot's rebuild is attributable to actions_version.
+        let radial_before = app.cached_universal_action_catalog_snapshot();
+        let radial_builds_before = app.authoring_catalog_build_count.load(Ordering::SeqCst);
+        let results_before_version_only_change = app.results.clone();
+        let query_before_version_only_change = app.query.clone();
+        let version_before_version_only_change = crate::actions::actions_version();
+        app.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            vec!["version-only-publication".into()],
+            None,
+        ));
+        process_index_ready_through_watch_event(&mut app);
+        assert_eq!(
+            &app.actions[..],
+            &[custom.clone(), renamed.clone(), updated_added.clone()]
+        );
+        assert_eq!(
+            crate::actions::actions_version(),
+            version_before_version_only_change + 1
+        );
+        assert_eq!(app.query, query_before_version_only_change);
+        assert_eq!(app.results, results_before_version_only_change);
+
+        let radial_after = app.cached_universal_action_catalog_snapshot();
+        assert!(!Arc::ptr_eq(&radial_before, &radial_after));
+        assert_eq!(
+            radial_after
+                .entries
+                .iter()
+                .take(app.actions.len())
+                .map(|entry| entry.selected_action.clone())
+                .collect::<Vec<_>>(),
+            app.actions.as_ref().clone(),
+            "the accepted action catalog is the radial snapshot prefix"
+        );
+        let builds_after_publication = app.authoring_catalog_build_count.load(Ordering::SeqCst);
+        assert_eq!(builds_after_publication, radial_builds_before + 1);
+        let radial_reused = app.cached_universal_action_catalog_snapshot();
+        assert!(Arc::ptr_eq(&radial_after, &radial_reused));
+        assert_eq!(
+            app.authoring_catalog_build_count.load(Ordering::SeqCst),
+            builds_after_publication
+        );
+
+        let actions_after_publication = Arc::clone(&app.actions);
+        let cache_after_publication = app.actions_by_id.clone();
+        let results_after_publication = app.results.clone();
+        let version_after_publication = crate::actions::actions_version();
+        let second_config = crate::indexer::coordinator::IndexConfig::new(
+            vec!["equal-accepted-publication".into()],
+            None,
+        );
+        app.request_index_config(second_config);
+        process_index_ready_through_watch_event(&mut app);
+        assert!(Arc::ptr_eq(&app.actions, &actions_after_publication));
+        assert_eq!(app.actions_by_id, cache_after_publication);
+        assert_eq!(app.results, results_after_publication);
+        assert_eq!(crate::actions::actions_version(), version_after_publication);
+        assert!(Arc::ptr_eq(
+            &radial_reused,
+            &app.cached_universal_action_catalog_snapshot()
+        ));
+    }
+
     #[test]
     fn gui_index_startup_transfer_keeps_the_acknowledged_catalog_without_resubmitting() {
         let _guard = TEST_MUTEX.lock().unwrap();

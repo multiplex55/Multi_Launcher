@@ -61,6 +61,55 @@ fn indexer_batches_dedupes_and_honors_max_items() {
     }
 }
 
+#[test]
+fn indexer_single_file_roots_preserve_order_and_deduplicate_canonically() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let root_a = dir.path().join("a.txt");
+    let root_b = dir.path().join("b.txt");
+    fs::write(&root_a, b"A").expect("write A");
+    fs::write(&root_b, b"B").expect("write B");
+    let a = fs::canonicalize(root_a).expect("canonical A");
+    let b = fs::canonicalize(root_b).expect("canonical B");
+    let a = a.to_string_lossy().into_owned();
+    let b = b.to_string_lossy().into_owned();
+
+    let first_config = multi_launcher::indexer::coordinator::IndexConfig::new(
+        vec![a.clone(), a.clone(), b.clone(), a.clone()],
+        Some(2),
+    );
+    let reordered_config = multi_launcher::indexer::coordinator::IndexConfig::new(
+        vec![b.clone(), b.clone(), a.clone(), b.clone()],
+        Some(2),
+    );
+    assert_ne!(first_config, reordered_config);
+
+    let collect = |roots: &[String]| {
+        multi_launcher::indexer::index_paths_batched(
+            roots,
+            multi_launcher::indexer::IndexOptions {
+                batch_size: 1,
+                max_items: 2,
+            },
+        )
+        .flat_map(Result::unwrap)
+        .collect::<Vec<_>>()
+    };
+    let first = collect(first_config.roots());
+    let reordered = collect(reordered_config.roots());
+    let expected = |path: &str| {
+        let path = std::path::Path::new(path);
+        let display = path.display().to_string();
+        multi_launcher::actions::Action {
+            label: path.file_name().unwrap().to_string_lossy().into_owned(),
+            desc: display.clone(),
+            action: display,
+            args: None,
+        }
+    };
+    assert_eq!(first, [expected(&a), expected(&b)]);
+    assert_eq!(reordered, [expected(&b), expected(&a)]);
+}
+
 // Ensure indexing a missing path returns an error
 #[test]
 fn indexer_errors_on_missing_path() {

@@ -8,6 +8,8 @@ use crate::history::{HISTORY_PINS_FILE, HistoryEntry, HistoryPin, toggle_pin};
 use chrono::TimeZone;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -425,6 +427,50 @@ impl CommandHistoryWidget {
         .unwrap_or_default();
         entries.extend(ordinary);
         entries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_pinned_entries_for_test(
+        pins: Vec<HistoryPin>,
+        plugins: &crate::plugin::PluginManager,
+        enabled_plugins: Option<&HashSet<String>>,
+        actions_by_id: &HashMap<String, Action>,
+        data_cache: &crate::dashboard::data_cache::DashboardDataCache,
+    ) -> Vec<(Action, bool)> {
+        let actions: &[Action] = &[];
+        let usage = HashMap::new();
+        let context = DashboardContext {
+            actions,
+            actions_by_id,
+            usage: &usage,
+            plugins,
+            enabled_plugins,
+            default_location: None,
+            data_cache,
+            actions_version: 0,
+            fav_version: 0,
+            notes_version: 0,
+            todo_version: 0,
+            calendar_version: 0,
+            clipboard_version: 0,
+            snippets_version: 0,
+            dashboard_visible: false,
+            dashboard_focused: false,
+            reduce_dashboard_work_when_unfocused: false,
+            diagnostics: None,
+            show_diagnostics_widget: false,
+        };
+        let mut widget = Self::new(CommandHistoryConfig {
+            count: pins.len(),
+            show_pinned_only: true,
+            show_filter: false,
+        });
+        widget.cached_pins = pins;
+        widget
+            .prepare_entries(&context)
+            .into_iter()
+            .map(|entry| (entry.action, entry.missing))
+            .collect()
     }
 }
 

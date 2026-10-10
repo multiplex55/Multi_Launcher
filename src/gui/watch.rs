@@ -412,6 +412,142 @@ mod tests {
         actions
     }
 
+    fn indexed_actions_for_roots(
+        roots: &[PathBuf],
+        max_items: usize,
+    ) -> Vec<crate::actions::Action> {
+        let roots = roots
+            .iter()
+            .map(|root| root.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        crate::indexer::index_paths_batched(
+            &roots,
+            crate::indexer::IndexOptions {
+                batch_size: 512,
+                max_items,
+            },
+        )
+        .flat_map(Result::unwrap)
+        .collect()
+    }
+
+    fn multi_root_output_signatures(
+        root_a: &Path,
+        root_b: &Path,
+        actions: &[crate::actions::Action],
+    ) -> (u64, u64) {
+        let root_a = std::fs::canonicalize(root_a).expect("canonicalize first index root");
+        let root_b = std::fs::canonicalize(root_b).expect("canonicalize second index root");
+        let relative_identities = actions
+            .iter()
+            .map(|action| {
+                let path = Path::new(&action.action);
+                if let Ok(relative) = path.strip_prefix(&root_a) {
+                    format!("a/{}", relative.to_string_lossy().replace('\\', "/"))
+                } else if let Ok(relative) = path.strip_prefix(&root_b) {
+                    format!("b/{}", relative.to_string_lossy().replace('\\', "/"))
+                } else {
+                    panic!("indexed action is outside the configured roots");
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut members = relative_identities.clone();
+        members.sort_unstable();
+
+        let mut membership = crate::performance::workloads::StableSignature::new(
+            0,
+            "multi-root-index-membership",
+            members.len(),
+        );
+        for relative in members {
+            membership.bytes(relative.as_bytes());
+        }
+        let mut order = crate::performance::workloads::StableSignature::new(
+            0,
+            "multi-root-index-order",
+            relative_identities.len(),
+        );
+        for relative in relative_identities {
+            order.bytes(relative.as_bytes());
+        }
+        (membership.finish(), order.finish())
+    }
+
+    fn timing_summary(
+        mut samples: [u64; crate::performance::workloads::SAMPLE_COUNT],
+        warmups: usize,
+    ) -> crate::performance::workloads::TimingSummary {
+        samples.sort_unstable();
+        let percentile = |percent: usize| {
+            let rank = (samples.len() * percent).div_ceil(100).max(1);
+            samples[rank - 1]
+        };
+        crate::performance::workloads::TimingSummary {
+            warmups,
+            samples: samples.len(),
+            p50_nanos: percentile(50),
+            p95_nanos: percentile(95),
+            max_nanos: samples[samples.len() - 1],
+        }
+    }
+
+    fn run_index_config_sample(
+        app: &mut LauncherApp,
+        config: &crate::indexer::coordinator::IndexConfig,
+        custom: &[crate::actions::Action],
+        expected_tail: &[crate::actions::Action],
+    ) -> [u64; 3] {
+        let request_started = Instant::now();
+        app.request_index_config(config.clone());
+        let request_nanos = request_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let generation = app
+            .indexing
+            .expected_generation
+            .expect("the changed config is accepted by the coordinator");
+
+        let completion = app
+            .wait_for_index_completion_for_test(generation)
+            .expect("the accepted request completes");
+        let completion_nanos = request_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        assert_eq!(completion.config(), config);
+        assert_eq!(
+            completion
+                .outcome()
+                .as_ref()
+                .expect("synthetic index traversal succeeds")
+                .as_slice(),
+            expected_tail
+        );
+
+        // Wait for and consume the real app-scoped notification outside the
+        // publication timer, then dispatch that exact event through the GUI
+        // event reducer below.
+        let ready = app
+            .rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("worker completion sends the app-scoped ready event");
+        assert!(matches!(ready, WatchEvent::IndexReady));
+        app.event_tx
+            .send(ready)
+            .expect("the app event receiver remains connected");
+
+        let publication_started = Instant::now();
+        app.process_watch_events();
+        let publication_nanos = publication_started
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        assert!(app.rx.try_recv().is_err(), "ready event was consumed");
+        assert_eq!(app.indexing.desired, *config);
+        assert_eq!(app.indexing.expected_generation, Some(generation));
+        assert_eq!(app.custom_len, custom.len());
+        assert_eq!(&app.actions[..custom.len()], custom);
+        assert_eq!(&app.actions[custom.len()..], expected_tail);
+        assert_eq!(app.last_search_query, app.query);
+        assert!(app.last_results_valid);
+        [request_nanos, completion_nanos, publication_nanos]
+    }
+
     fn action_reload_output_signatures(
         root: &Path,
         actions: &[crate::actions::Action],
@@ -718,6 +854,197 @@ mod tests {
                 summary.with_output_signatures(Some(unchanged_output.0), Some(unchanged_output.1)),
                 unchanged_timing,
                 &unchanged_metrics,
+            );
+            drop(app);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track A workload benchmark; set MULTI_LAUNCHER_PERF=1 before the process"]
+    fn track_a_benchmark_index_config_completion_owner() {
+        use crate::performance::{Metric, workloads};
+
+        assert!(crate::performance::enabled());
+        let workspace = workloads::IsolatedWorkspace::new();
+        for indexed_count in workloads::selected_sizes(&[1_000, 10_000]) {
+            let fixture_root = workspace
+                .root()
+                .join(format!("index-config-{indexed_count}"));
+            let root_a = fixture_root.join("root-a");
+            let root_b = fixture_root.join("root-b");
+            let a_count = indexed_count.div_ceil(2);
+            let b_count = indexed_count - a_count;
+            let fixture_a = workloads::create_index_tree(&root_a, 0x494e_4445_5841, a_count);
+            let fixture_b = workloads::create_index_tree(&root_b, 0x494e_4445_5842, b_count);
+            let roots_a = vec![root_a.clone(), root_b.clone()];
+            let roots_b = vec![root_b.clone(), root_a.clone()];
+            let config_a = crate::indexer::coordinator::IndexConfig::new(
+                roots_a
+                    .iter()
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .collect(),
+                Some(indexed_count),
+            );
+            let config_b = crate::indexer::coordinator::IndexConfig::new(
+                roots_b
+                    .iter()
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .collect(),
+                Some(indexed_count),
+            );
+            assert_ne!(config_a, config_b);
+            let expected_a = indexed_actions_for_roots(&roots_a, indexed_count);
+            let expected_b = indexed_actions_for_roots(&roots_b, indexed_count);
+            assert_eq!(expected_a.len(), indexed_count);
+            assert_eq!(expected_b.len(), indexed_count);
+            let signatures_a = multi_root_output_signatures(&root_a, &root_b, &expected_a);
+            let signatures_b = multi_root_output_signatures(&root_a, &root_b, &expected_b);
+            assert_ne!(signatures_a.1, signatures_b.1);
+
+            let custom_fixture = workloads::action_fixture(0x494e_4445_5843, 8);
+            let custom = custom_fixture.values;
+            let mut initial_actions = custom.clone();
+            initial_actions.extend(expected_a.iter().cloned());
+            let actions_path = fixture_root.join("actions.json");
+            let settings_path = fixture_root.join("settings.json");
+            let mut settings = Settings::default();
+            settings.index_paths = Some(config_a.roots().iter().map(Clone::clone).collect());
+            settings.max_indexed_items = Some(indexed_count);
+            settings.hotkey = None;
+            settings.quit_hotkey = None;
+            settings.help_hotkey = None;
+            settings.enabled_plugins = Some(std::collections::HashSet::new());
+            settings.enable_toasts = false;
+            settings.show_inline_errors = false;
+            settings.show_error_toasts = false;
+            settings.dashboard.enabled = false;
+            let context = egui::Context::default();
+            let mut app = LauncherApp::new(
+                &context,
+                Arc::new(initial_actions),
+                custom.len(),
+                PluginManager::new_inert_for_test(),
+                actions_path.to_string_lossy().into_owned(),
+                settings_path.to_string_lossy().into_owned(),
+                settings,
+                None,
+                Some(config_a.roots().to_vec()),
+                Some(std::collections::HashSet::new()),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
+            app.watchers.clear();
+            app.process_watch_events();
+            assert!(app.rx.try_recv().is_err(), "initial watcher events drained");
+            app.update_action_cache();
+            app.query = "file".into();
+            app.search();
+            assert!(app.last_results_valid);
+
+            let coordinator = crate::indexer::coordinator::IndexCoordinator::new()
+                .expect("start one persistent indexing worker");
+            app.install_test_index_coordinator(coordinator);
+
+            // Bootstrap the persistent worker outside the five measured-protocol
+            // warmups. Its scan is discarded when metrics reset below.
+            run_index_config_sample(&mut app, &config_b, &custom, &expected_b);
+            for iteration in 0..workloads::UI_WARMUPS {
+                let (config, expected) = if iteration % 2 == 0 {
+                    (&config_a, &expected_a)
+                } else {
+                    (&config_b, &expected_b)
+                };
+                run_index_config_sample(&mut app, config, &custom, expected);
+            }
+            crate::performance::reset_metrics();
+
+            let mut request_samples = [0_u64; workloads::SAMPLE_COUNT];
+            let mut completion_samples = [0_u64; workloads::SAMPLE_COUNT];
+            let mut publication_samples = [0_u64; workloads::SAMPLE_COUNT];
+            for iteration in 0..workloads::SAMPLE_COUNT {
+                let (config, expected) = if iteration % 2 == 0 {
+                    (&config_b, &expected_b)
+                } else {
+                    (&config_a, &expected_a)
+                };
+                let elapsed = run_index_config_sample(&mut app, config, &custom, expected);
+                request_samples[iteration] = elapsed[0];
+                completion_samples[iteration] = elapsed[1];
+                publication_samples[iteration] = elapsed[2];
+            }
+
+            let scan_metrics = workloads::metrics_for(&[Metric::IndexScan]);
+            assert_eq!(scan_metrics.len(), 1);
+            let scan = scan_metrics[0];
+            assert_eq!(scan.metric, Metric::IndexScan);
+            assert!(scan.calls > 0);
+            assert_eq!(
+                scan.work_units,
+                indexed_count as u64 * workloads::SAMPLE_COUNT as u64
+            );
+            assert_eq!(scan.completed, workloads::SAMPLE_COUNT as u64);
+            assert_eq!(scan.errors, 0);
+            assert_eq!(scan.abandoned, 0);
+
+            let mut fixture_signature = workloads::StableSignature::new(
+                0x494e_4445_5844,
+                "index-config-completion-workload",
+                custom.len() + indexed_count,
+            );
+            fixture_signature.number(custom_fixture.summary.signature);
+            fixture_signature.number(fixture_a.signature);
+            fixture_signature.number(fixture_b.signature);
+            fixture_signature.number(signatures_a.1);
+            fixture_signature.number(signatures_b.1);
+            let mut output_membership = workloads::StableSignature::new(
+                0x494e_4445_584d,
+                "index-config-completion-membership",
+                custom.len() + indexed_count,
+            );
+            output_membership.number(signatures_a.0);
+            output_membership.number(signatures_b.0);
+            let mut output_order = workloads::StableSignature::new(
+                0x494e_4445_584f,
+                "index-config-completion-order",
+                custom.len() + indexed_count,
+            );
+            output_order.number(signatures_a.1);
+            output_order.number(signatures_b.1);
+            let summary = workloads::FixtureSummary {
+                count: custom.len() + indexed_count,
+                estimated_bytes: custom_fixture
+                    .summary
+                    .estimated_bytes
+                    .saturating_add(fixture_a.estimated_bytes)
+                    .saturating_add(fixture_b.estimated_bytes),
+                signature: fixture_signature.finish(),
+                output_signature: Some(output_membership.finish()),
+                output_order_signature: Some(output_order.finish()),
+            };
+
+            workloads::emit_summary(
+                &format!("index-config-{indexed_count}-request"),
+                "LauncherApp::request_index_config; synchronous config acceptance/submission only, with worker traversal and waiting excluded",
+                summary,
+                timing_summary(request_samples, workloads::UI_WARMUPS),
+                &[],
+            );
+            workloads::emit_summary(
+                &format!("index-config-{indexed_count}-completion"),
+                "request entry through IndexCoordinator completion, including synchronous submission and background traversal/wait; GUI event publication excluded; one worker-bootstrap scan is outside the five warmups and discarded with setup metrics",
+                summary,
+                timing_summary(completion_samples, workloads::UI_WARMUPS),
+                &scan_metrics,
+            );
+            workloads::emit_summary(
+                &format!("index-config-{indexed_count}-publication"),
+                "real app-scoped IndexReady notification through LauncherApp::process_watch_events; includes action/cache/query publication, event dequeue wait excluded",
+                summary,
+                timing_summary(publication_samples, workloads::UI_WARMUPS),
+                &[],
             );
             drop(app);
         }

@@ -166,6 +166,10 @@ impl LauncherApp {
             .iter()
             .map(|a| (a.action.clone(), a.clone()))
             .collect();
+        // Search results are derived from the action catalog as well as the
+        // query. Keep the cached-query fast path from treating old results as
+        // current after a catalog publication.
+        self.last_results_valid = false;
         self.action_completion_dirty = true;
         self.schedule_completion_rebuild();
     }
