@@ -103,7 +103,10 @@ impl PluginEditor {
                 crate::plugins::macros::configure_search_runtime(&s, &app.actions_path);
                 app.update_paths(
                     s.plugin_dirs.clone(),
-                    s.index_paths.clone(),
+                    crate::indexer::coordinator::IndexConfig::new(
+                        s.index_paths.clone().unwrap_or_default(),
+                        s.max_indexed_items,
+                    ),
                     s.enabled_plugins.clone(),
                     s.enabled_capabilities.clone(),
                     s.offscreen_pos,

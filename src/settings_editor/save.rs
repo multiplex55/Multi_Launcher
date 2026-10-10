@@ -55,7 +55,10 @@ impl SettingsEditor {
         }
         app.update_paths(
             new_settings.plugin_dirs.clone(),
-            new_settings.index_paths.clone(),
+            crate::indexer::coordinator::IndexConfig::new(
+                new_settings.index_paths.clone().unwrap_or_default(),
+                new_settings.max_indexed_items,
+            ),
             new_settings.enabled_plugins.clone(),
             new_settings.enabled_capabilities.clone(),
             new_settings.offscreen_pos,

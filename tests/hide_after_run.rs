@@ -81,9 +81,9 @@ fn run_action(action: &str) -> bool {
     }];
     let (mut app, flag) = new_app_with_settings(&ctx, actions, Settings::default());
     app.update_paths(
-        None,       // plugin_dirs
-        None,       // index_paths
-        None,       // enabled_plugins
+        None,                                                                     // plugin_dirs
+        multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None), // index_config
+        None,                                                                     // enabled_plugins
         None,       // enabled_capabilities
         None,       // offscreen_pos
         None,       // enable_toasts

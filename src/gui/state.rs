@@ -15,6 +15,8 @@ pub enum ClipboardModifyGuiEvent {
 #[derive(Clone)]
 pub enum WatchEvent {
     Actions,
+    /// A payload-free wake for the app-owned indexed-action coordinator.
+    IndexReady,
     Folders,
     Bookmarks,
     Clipboard,
@@ -323,6 +325,7 @@ pub(crate) struct PendingUniversalActionInvocation {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TestWatchEvent {
     Actions,
+    IndexReady,
     Folders,
     Bookmarks,
     ScreenDrawRecover(crate::screen_draw::ScreenDrawRecoveryIntent),
@@ -334,6 +337,7 @@ impl From<WatchEvent> for TestWatchEvent {
     fn from(value: WatchEvent) -> Self {
         match value {
             WatchEvent::Actions => TestWatchEvent::Actions,
+            WatchEvent::IndexReady => TestWatchEvent::IndexReady,
             WatchEvent::Folders => TestWatchEvent::Folders,
             WatchEvent::Bookmarks => TestWatchEvent::Bookmarks,
             WatchEvent::Clipboard => TestWatchEvent::Actions,

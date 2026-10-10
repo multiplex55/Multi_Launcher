@@ -207,7 +207,7 @@ M3-C local commit: `369744ef9c697ea2cfddca3077ce61407b46b6b8`. No push attempted
 
 These distributions cover warm headless debug-test frames. Initial snapshot/index/metadata preparation remains O(N) and was outside these warm timing windows; it is not a measured cold improvement. D must measure layout invalidation separately and retain this limitation. M3-D sole writer dispatched only after this capture finished.
 
-### M3-D — variable-height Quick Notes virtualization (verification pending)
+### M3-D — variable-height Quick Notes virtualization
 
 NotesDialog now owns variable-row geometry keyed by accepted metadata/projection, actual available width, effective fonts/style/scale and spacing. An independent eager-widget oracle establishes body/header/preview/separator bounds and ordered prefix-width growth. Warm browsing queries visible rows plus overscan, keeps full two-axis extent and original-entry action identities, and retains at most one disjoint popup owner. Cold invalidation measures the complete projection; editor behavior and C's revision/error/draft publication boundary remain unchanged. Geometry timing instrumentation is test-only.
 
@@ -232,7 +232,7 @@ Full exact-commit M3-D owner PASS:1 passed/5,085 skipped/3.32s test duration, ru
 
 Standard actual viewport height180.6375pt; supplementary small-screen case87.9555pt builds4widgets/frame at every size. Supplementary p50/p95(ms): 100 notes 0.4532/0.4934; 1k notes 0.4511/0.4798; 5k notes 0.4614/0.4861. Single small-screen cold rebuild observations are12.7340/125.4593/627.0763ms, measuring100/1k/5k rows respectively. These new scenarios have no frozen baseline comparison. Every case records one cold rebuild. The material627ms cold invalidation cost remains explicit; warm responsiveness does not establish elimination of all UI stalls. Initial metadata/snapshot preparation is also outside warm distributions. Headless debug-test CPU measurements do not establish release GPU/input latency or visible native behavior. M4-A source edits begin only after this capture completed.
 
-### M4-A — Actions-only reload retains the indexed tail (verification pending)
+### M4-A — Actions-only reload retains the indexed tail
 
 The changed Actions watcher branch now shares local persistence's custom-prefix/current-indexed-tail publication boundary. It no longer constructs or consumes the filesystem iterator. The final publication owner still updates action IDs/cache/query; local persistence and external watcher retain their separate single version-bump ownership. No root/cap/order/dedup reconstruction occurs on custom reload. Typed missing/malformed/equal handling retains published state.
 
@@ -254,7 +254,7 @@ Full exact-commit M4-A actual reload owner PASS1/5,085 skipped/20.72s test durat
 
 Changed-path 10k max110.7552ms (baseline1019.6943ms); the remaining110ms debug-test event work is material and is not described as elimination of every stall. Unchanged 1k/10k p95 increases are retained without optimization attribution. These are CPU/event-drain timings, not native input/display latency. B will establish a separate worker foundation; M4-A does not yet migrate startup/config-triggered indexing. Its sole writer started only after this full capture completed.
 
-### M4-B — bounded cancellable index worker (compatibility verification pending)
+### M4-B — bounded cancellable index worker
 
 A GUI-independent coordinator owns one persistent worker with replaceable pending work, complete-result slot and coalesced notification. Public typed config retains exact root ordering and configured optional cap; generations and config identity are rechecked before result publication. Traversal cancellation reaches directory/duplicate/non-UTF8 skip loops and canonicalization boundaries. Failed scans discard partial aggregates. Existing index_paths/index_paths_batched interfaces/order/dedup/cap behavior remain available; no GUI/startup caller migration occurs in B.
 
@@ -265,3 +265,15 @@ Review found and resolved concurrent split handle/permit ownership, known-panic 
 M4-B compatibility PASS:domain/indexer_3passed/98skipped, run7b99b6e8-c853-40de-83ea-c5f12b387d17,0.035s execution (4m03s build/link). Final independent review has no unresolved findings; its compatibility condition is satisfied. Parent diff check clean, final source formatting/inspection precedes local commit. Earlier initial coordinator run9/10 failed only the test-hook mutex lifetime; corrected isolated test8fb1b9cf-9aa7-46d7-a7b8-b7772259e68b PASS and full11-case run above PASS. No reaper implementation or GUI/startup path changed in B; no broad suite or native smoke claimed.
 
 Final M4-B coordinator rerun after a test-only cleanup assertion PASS11/5,086 skipped, run6dda2ef8-94e7-4439-828f-f75e5fe13a31,0.096s tests. Existing domain3/3 remains applicable (no subsequent production change). Changed-file rustfmt/source whitespace checks clean; parent cumulative diff/status contains only intended indexer/coordinator plus parent measurement/docs. Local commit follows; no push.
+
+M4-B local commit: `3468a51dec84c78298de28722aa1317a72b70992`. No push attempted. Final 11 coordinator and 3 domain indexer tests pass; review findings resolved. M4-C sole writer dispatched against this committed API; parent has no compiler jobs. Full original M4-C scope and actual API handoff are above; startup/catalog readiness, typed roots+cap, app-scoped notification, latest-custom merge, exact generation/config guards and nonblocking exit are the active scope.
+
+### M4-C — startup transfer and guarded GUI publication
+
+Main now obtains the complete startup index through the coordinator before plugin construction, acknowledges it and transfers that same worker into the app before its first frame. A narrow public install boundary attaches an app-scoped ready sender/wake. App-owned typed roots+cap config replaces the roots-only setter; both committed settings paths use it. Completions are acknowledged before validation, then require exact desired config and generation. Changed results merge the currently published custom prefix; equal tails preserve Arc/cache/query/version. Failures retain the last-good catalog with a separate index diagnostic. Empty roots clear the tail immediately and invalidate old requests; exit revokes and shuts down without waiting for traversal.
+
+Review corrections in progress: distinguish desired config from accepted/current request so same-config failure can retry; validate startup identity/acknowledgement nonblockingly in the coordinator; isolate new GUI fixtures with inert plugins and disabled native enablement; exercise actual production full startup-catalog assembly in the consumer test; one bounded integration test for app-scoped wakes and closed-owner late events. Initial focused lib8/8 passed before this correction batch; final required execution remains pending. No C performance or completion claim yet.
+
+M4-C corrected focused lib PASS11/5,094 skipped, runfc3d2253-b981-49f1-996e-26c06c85b8b4. Startup binary startup_index_ PASS2/2, run3ea62b2d-6963-4035-89b0-fc968cf6bdd0. Critical final review clear with all retry/validator/isolation/consumer/equal/late-event findings resolved, conditional on remaining domain/settings/bincheck gates. Parent has no compiler jobs; solewriter owns remaining checks. C still in_progress/uncommitted.
+
+M4-C complete scoped verification: corrected GUI lib11/11 (fc3d2253-b981-49f1-996e-26c06c85b8b4); startup binary2/2 (3ea62b2d-6963-4035-89b0-fc968cf6bdd0); domain indexer3/3 (8533db3d-b923-453c-ae26-77ded5996196); settings editor1/1 (6dea57ac-186e-4f90-ae20-0003e8c77cf3). Production cargo check --bin multi_launcher, cargo fmt --all -- --check, and cumulative git diff --check PASS. Final independent review clear; all execution conditions satisfied. Recoverable scan/submission failures permit same-config retry; terminal failures stay explicitly diagnosed. Actual startup helper assembles the full catalog consumed by Omni proof. Source search confirms production GUI has no traversal/wait path; startup main wait and test-only fixture references remain. Confirmed test-created clipboard config removed. No broad suite/native manual check claimed; local commit follows.

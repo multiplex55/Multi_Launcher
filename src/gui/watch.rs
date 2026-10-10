@@ -201,6 +201,7 @@ impl LauncherApp {
                     crate::actions::bump_actions_version();
                     tracing::info!("actions reloaded");
                 }
+                WatchEvent::IndexReady => self.process_index_ready(),
                 WatchEvent::Folders
                     if !Path::new(crate::plugins::folders::FOLDERS_FILE).exists() =>
                 {

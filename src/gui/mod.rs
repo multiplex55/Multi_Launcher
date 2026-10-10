@@ -25,6 +25,7 @@ mod file_search_dialog;
 pub mod file_search_preview_dialog;
 pub mod image_crop_editor;
 mod image_panel;
+mod indexing;
 mod json_utility_dialog;
 mod macro_dialog;
 pub mod mkmacro_dialog;
@@ -688,6 +689,7 @@ pub struct LauncherApp {
     query_history: QueryHistoryNavigator,
     pub results: Vec<Action>,
     root_list_geometry: render::RootListGeometryCache,
+    indexing: indexing::IndexingOwner,
     pub matcher: SkimMatcherV2,
     pub error: Option<String>,
     error_time: Option<Instant>,
@@ -777,8 +779,6 @@ pub struct LauncherApp {
     bookmark_aliases: HashMap<String, Option<String>>,
     bookmark_aliases_lc: HashMap<String, Option<String>>,
     plugin_dirs: Option<Vec<String>>,
-    index_paths: Option<Vec<String>>,
-    max_indexed_items: Option<usize>,
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     root_window_bridge: RootWindowBridge,
@@ -1551,7 +1551,7 @@ impl LauncherApp {
     pub fn update_paths(
         &mut self,
         plugin_dirs: Option<Vec<String>>,
-        index_paths: Option<Vec<String>>,
+        index_config: crate::indexer::coordinator::IndexConfig,
         enabled_plugins: Option<HashSet<String>>,
         enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
         offscreen_pos: Option<(i32, i32)>,
@@ -1592,7 +1592,6 @@ impl LauncherApp {
         show_dashboard_diagnostics: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
-        self.index_paths = index_paths;
         self.enabled_plugins = enabled_plugins;
 
         // Keep MG hook in lockstep with whether the plugin is enabled in the UI/settings.
@@ -1718,6 +1717,7 @@ impl LauncherApp {
         if let Some(v) = show_dashboard_diagnostics {
             self.show_dashboard_diagnostics = v;
         }
+        self.request_index_config(index_config);
         self.recompute_query_results_layout();
         crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
     }
@@ -1739,6 +1739,10 @@ impl LauncherApp {
         help_flag: Arc<AtomicBool>,
     ) -> Self {
         crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
+        let desired_index_config = crate::indexer::coordinator::IndexConfig::new(
+            index_paths.unwrap_or_default(),
+            settings.max_indexed_items,
+        );
         let (tx, rx) = channel();
         let event_sink = register_event_sender_with_wake(tx.clone(), ViewportWake::root(ctx));
         let mut watchers = Vec::new();
@@ -2099,6 +2103,7 @@ impl LauncherApp {
             query_history: QueryHistoryNavigator::default(),
             results: (*actions).clone(),
             root_list_geometry: render::RootListGeometryCache::default(),
+            indexing: indexing::IndexingOwner::new(desired_index_config),
             matcher: SkimMatcherV2::default(),
             error: None,
             error_time: None,
@@ -2189,8 +2194,6 @@ impl LauncherApp {
             bookmark_aliases,
             bookmark_aliases_lc,
             plugin_dirs,
-            index_paths,
-            max_indexed_items: settings.max_indexed_items,
             enabled_plugins,
             enabled_capabilities,
             root_window_bridge: RootWindowBridge::default(),
@@ -4048,7 +4051,10 @@ impl LauncherApp {
 pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
     while let Ok(ev) = rx.try_recv() {
         match ev {
-            WatchEvent::Actions | WatchEvent::Folders | WatchEvent::Bookmarks => {
+            WatchEvent::Actions
+            | WatchEvent::IndexReady
+            | WatchEvent::Folders
+            | WatchEvent::Bookmarks => {
                 return Some(ev.into());
             }
             WatchEvent::Dashboard(_)
@@ -4098,6 +4104,7 @@ pub fn recv_test_event_timeout(
         let event = rx.recv_timeout(remaining).ok()?;
         match event {
             WatchEvent::Actions
+            | WatchEvent::IndexReady
             | WatchEvent::Folders
             | WatchEvent::Bookmarks
             | WatchEvent::ScreenDrawRecover(_)
@@ -4163,6 +4170,485 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn new_isolated_index_app(
+        ctx: &egui::Context,
+        config: &crate::indexer::coordinator::IndexConfig,
+    ) -> (
+        crate::performance::workloads::IsolatedWorkspace,
+        LauncherApp,
+    ) {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let app = new_index_app_in_workspace(ctx, &workspace, config, "index-owner");
+        (workspace, app)
+    }
+
+    fn new_index_app_in_workspace(
+        ctx: &egui::Context,
+        workspace: &crate::performance::workloads::IsolatedWorkspace,
+        config: &crate::indexer::coordinator::IndexConfig,
+        name: &str,
+    ) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.index_paths = Some(config.roots().to_vec());
+        settings.max_indexed_items = config.max_items();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        let actions_path = workspace.root().join(format!("{name}-actions.json"));
+        let settings_path = workspace.root().join(format!("{name}-settings.json"));
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            actions_path.to_string_lossy().into_owned(),
+            settings_path.to_string_lossy().into_owned(),
+            settings,
+            None,
+            Some(config.roots().to_vec()),
+            Some(std::collections::HashSet::new()),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn index_test_action(name: &str) -> Action {
+        Action {
+            label: name.into(),
+            desc: format!("{name} description"),
+            action: format!("index:{name}"),
+            args: None,
+        }
+    }
+
+    fn wait_for_index_ready(app: &mut LauncherApp) {
+        let event = app
+            .rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("index completion enqueues an app-scoped ready event");
+        app.event_sink.event_consumed();
+        assert!(matches!(event, WatchEvent::IndexReady));
+        app.process_index_ready();
+    }
+
+    #[test]
+    fn gui_index_startup_transfer_keeps_the_acknowledged_catalog_without_resubmitting() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let config =
+            crate::indexer::coordinator::IndexConfig::new(vec!["startup-root".into()], Some(17));
+        let (_workspace, mut app) = new_isolated_index_app(&egui::Context::default(), &config);
+        let custom = custom_action("startup-custom");
+        let indexed = index_test_action("startup-indexed");
+        let coordinator = crate::indexer::coordinator::IndexCoordinator::with_test_scanner({
+            let indexed = indexed.clone();
+            move |_| Ok(vec![indexed.clone()])
+        })
+        .unwrap();
+        let generation = coordinator.submit(config.clone()).unwrap();
+        let completed = coordinator.wait_for_completion(generation).unwrap();
+        assert_eq!(completed.outcome().as_ref().unwrap().as_slice(), &[indexed]);
+        let acknowledged = coordinator.take_result().unwrap();
+        assert_eq!(acknowledged.generation(), generation);
+        assert!(coordinator.take_result().is_none());
+        coordinator
+            .validate_acknowledged_result(generation, &config)
+            .unwrap();
+
+        app.actions = Arc::new(vec![custom.clone(), index_test_action("startup-indexed")]);
+        app.custom_len = 1;
+        app.update_action_cache();
+        app.install_startup_indexing(coordinator, config.clone(), generation)
+            .unwrap();
+        app.request_index_config(config);
+
+        assert_eq!(app.indexing.expected_generation, Some(generation));
+        assert_eq!(app.custom_len, 1);
+        assert_eq!(app.actions[0], custom);
+        assert_eq!(app.actions[1].action, "index:startup-indexed");
+        assert!(matches!(
+            app.rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn gui_index_startup_install_rejects_an_unacknowledged_completion() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let config =
+            crate::indexer::coordinator::IndexConfig::new(vec!["startup-root".into()], Some(17));
+        let (_workspace, mut app) = new_isolated_index_app(&egui::Context::default(), &config);
+        let coordinator =
+            crate::indexer::coordinator::IndexCoordinator::with_test_scanner(|_| Ok(Vec::new()))
+                .unwrap();
+        let generation = coordinator.submit(config.clone()).unwrap();
+        coordinator.wait_for_completion(generation).unwrap();
+
+        let error = app
+            .install_startup_indexing(coordinator, config, generation)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::indexer::coordinator::CoordinatorError::StartupResultNotAcknowledged(_)
+        ));
+        assert!(app.indexing.expected_generation.is_none());
+    }
+
+    #[test]
+    fn gui_index_config_identity_includes_cap_and_root_order_and_coalesces_equal_requests() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let (_workspace, mut app) = new_isolated_index_app(
+            &egui::Context::default(),
+            &crate::indexer::coordinator::IndexConfig::new(Vec::new(), None),
+        );
+        let coordinator =
+            crate::indexer::coordinator::IndexCoordinator::with_test_scanner(|_| Ok(Vec::new()))
+                .unwrap();
+        app.install_test_index_coordinator(coordinator);
+
+        let first = crate::indexer::coordinator::IndexConfig::new(
+            vec!["root-a".into(), "root-b".into()],
+            None,
+        );
+        app.request_index_config(first.clone());
+        let generation_one = app.indexing.expected_generation.unwrap();
+        app.request_index_config(first.clone());
+        assert_eq!(app.indexing.expected_generation, Some(generation_one));
+
+        let cap_only = crate::indexer::coordinator::IndexConfig::new(
+            vec!["root-a".into(), "root-b".into()],
+            Some(25),
+        );
+        app.request_index_config(cap_only.clone());
+        let generation_two = app.indexing.expected_generation.unwrap();
+        assert!(generation_two > generation_one);
+
+        let reordered = crate::indexer::coordinator::IndexConfig::new(
+            vec!["root-b".into(), "root-a".into()],
+            Some(25),
+        );
+        app.request_index_config(reordered.clone());
+        let generation_three = app.indexing.expected_generation.unwrap();
+        assert!(generation_three > generation_two);
+
+        let roots_only = crate::indexer::coordinator::IndexConfig::new(
+            vec!["root-c".into(), "root-a".into()],
+            Some(25),
+        );
+        app.request_index_config(roots_only.clone());
+        assert!(app.indexing.expected_generation.unwrap() > generation_three);
+        assert_eq!(app.indexing.desired, roots_only);
+    }
+
+    #[test]
+    fn gui_index_equal_completion_preserves_catalog_and_search_state() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let (_workspace, mut app) = new_isolated_index_app(
+            &egui::Context::default(),
+            &crate::indexer::coordinator::IndexConfig::new(Vec::new(), None),
+        );
+        let custom = custom_action("custom");
+        let tail = index_test_action("same-tail");
+        app.actions = Arc::new(vec![custom, tail.clone()]);
+        app.custom_len = 1;
+        app.update_action_cache();
+        app.query = "same".into();
+        app.results = vec![tail.clone()];
+        app.selected = Some(0);
+        let actions = Arc::clone(&app.actions);
+        let by_id = app.actions_by_id.clone();
+        let results = app.results.clone();
+        let query = app.query.clone();
+        let selected = app.selected;
+        let version = crate::actions::actions_version();
+        let coordinator =
+            crate::indexer::coordinator::IndexCoordinator::with_test_scanner(move |_| {
+                Ok(vec![tail.clone()])
+            })
+            .unwrap();
+        app.install_test_index_coordinator(coordinator);
+        app.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            vec!["equal-result".into()],
+            None,
+        ));
+        wait_for_index_ready(&mut app);
+
+        assert!(Arc::ptr_eq(&app.actions, &actions));
+        assert_eq!(app.actions_by_id, by_id);
+        assert_eq!(app.results, results);
+        assert_eq!(app.query, query);
+        assert_eq!(app.selected, selected);
+        assert_eq!(crate::actions::actions_version(), version);
+    }
+
+    #[test]
+    fn gui_index_wake_is_app_scoped_and_shutdown_ignores_late_completion() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let empty_config = crate::indexer::coordinator::IndexConfig::new(Vec::new(), None);
+        let context_a = egui::Context::default();
+        let context_b = egui::Context::default();
+        let mut app_a =
+            new_index_app_in_workspace(&context_a, &workspace, &empty_config, "owner-a");
+        let app_b = new_index_app_in_workspace(&context_b, &workspace, &empty_config, "owner-b");
+        let (blocked_started_tx, blocked_started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        struct ReleaseOnDrop(std::sync::mpsc::Sender<()>);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        let _release_on_drop = ReleaseOnDrop(release_tx.clone());
+        let coordinator = crate::indexer::coordinator::IndexCoordinator::with_test_scanner({
+            let release_rx = Arc::clone(&release_rx);
+            move |config| match config.roots().first().map(String::as_str) {
+                Some("blocked") => {
+                    blocked_started_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    Ok(vec![index_test_action("late")])
+                }
+                _ => Ok(vec![index_test_action("ready")]),
+            }
+        })
+        .unwrap();
+        app_a.install_test_index_coordinator(coordinator);
+        app_a.actions = Arc::new(vec![custom_action("custom"), index_test_action("old-tail")]);
+        app_a.custom_len = 1;
+        app_a.update_action_cache();
+
+        let initial_version = crate::actions::actions_version();
+        app_a.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            vec!["ready".into()],
+            None,
+        ));
+        wait_for_index_ready(&mut app_a);
+        assert_eq!(app_a.actions[1], index_test_action("ready"));
+        assert_eq!(crate::actions::actions_version(), initial_version + 1);
+        assert!(matches!(
+            app_b.rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        let ready_actions = Arc::clone(&app_a.actions);
+        let ready_version = crate::actions::actions_version();
+        app_a.process_index_ready();
+        assert!(Arc::ptr_eq(&app_a.actions, &ready_actions));
+        assert_eq!(crate::actions::actions_version(), ready_version);
+
+        app_a.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            vec!["blocked".into()],
+            None,
+        ));
+        blocked_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the second scan is blocked inside the test scanner");
+        let retained_actions = Arc::clone(&app_a.actions);
+        let retained_version = crate::actions::actions_version();
+        app_a.shutdown_indexing().unwrap();
+        assert!(app_a.indexing.expected_generation.is_none());
+        app_a.event_tx.send(WatchEvent::IndexReady).unwrap();
+        app_a.process_watch_events();
+        assert!(Arc::ptr_eq(&app_a.actions, &retained_actions));
+        assert_eq!(crate::actions::actions_version(), retained_version);
+        drop(app_a);
+        release_tx.send(()).unwrap();
+        assert!(matches!(
+            app_b.rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn gui_index_completion_merges_the_latest_actions_prefix_after_a_blocked_scan() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let (slow_started_tx, slow_started_rx) = channel();
+        let (release_slow_tx, release_slow_rx) = channel();
+        let release_slow_rx = Arc::new(Mutex::new(release_slow_rx));
+        let (fresh_started_tx, fresh_started_rx) = channel();
+        let coordinator = crate::indexer::coordinator::IndexCoordinator::with_test_scanner({
+            let release_slow_rx = Arc::clone(&release_slow_rx);
+            move |config| match config.roots().first().map(String::as_str) {
+                Some("slow") => {
+                    slow_started_tx.send(()).unwrap();
+                    release_slow_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    Ok(vec![index_test_action("stale")])
+                }
+                Some("fresh") => {
+                    fresh_started_tx.send(()).unwrap();
+                    Ok(vec![index_test_action("fresh")])
+                }
+                _ => Ok(Vec::new()),
+            }
+        })
+        .unwrap();
+        let (workspace, mut app) = new_isolated_index_app(
+            &egui::Context::default(),
+            &crate::indexer::coordinator::IndexConfig::new(Vec::new(), None),
+        );
+        app.install_test_index_coordinator(coordinator);
+        let initial_custom = custom_action("committed");
+        app.actions = Arc::new(vec![initial_custom, index_test_action("old-tail")]);
+        app.custom_len = 1;
+        app.update_action_cache();
+
+        let actions_path = workspace.root().join("actions.json");
+        app.actions_path = actions_path.to_string_lossy().into_owned();
+        let before_version = crate::actions::actions_version();
+        app.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            vec!["slow".into()],
+            None,
+        ));
+        slow_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first request reached its gated scanner");
+        app.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            vec!["fresh".into()],
+            None,
+        ));
+
+        let external_custom = vec![custom_action("external-current")];
+        std::fs::write(&actions_path, serde_json::to_vec(&external_custom).unwrap()).unwrap();
+        app.event_tx.send(WatchEvent::Actions).unwrap();
+        app.process_watch_events();
+        assert_eq!(app.actions[..app.custom_len], external_custom);
+        assert_eq!(app.actions[app.custom_len].action, "index:old-tail");
+
+        release_slow_tx.send(()).unwrap();
+        fresh_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("replacement request follows the cancelled traversal");
+        wait_for_index_ready(&mut app);
+
+        assert_eq!(app.actions[..app.custom_len], external_custom);
+        assert_eq!(app.actions[app.custom_len..], [index_test_action("fresh")]);
+        assert_eq!(crate::actions::actions_version(), before_version + 2);
+        assert!(app.indexing.diagnostic().is_none());
+    }
+
+    #[test]
+    fn gui_index_failure_retains_last_good_actions_then_recovers() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let failure_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let coordinator = {
+            let failure_count = Arc::clone(&failure_count);
+            crate::indexer::coordinator::IndexCoordinator::with_test_scanner(move |config| {
+                if config.roots().first().map(String::as_str) == Some("failure")
+                    && failure_count.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    Err("synthetic scan failure".into())
+                } else {
+                    Ok(vec![index_test_action("recovered")])
+                }
+            })
+            .unwrap()
+        };
+        let (_workspace, mut app) = new_isolated_index_app(
+            &egui::Context::default(),
+            &crate::indexer::coordinator::IndexConfig::new(Vec::new(), None),
+        );
+        app.install_test_index_coordinator(coordinator);
+        app.actions = Arc::new(vec![
+            custom_action("custom"),
+            index_test_action("last-good"),
+        ]);
+        app.custom_len = 1;
+        app.update_action_cache();
+        let last_good = Arc::clone(&app.actions);
+        let version = crate::actions::actions_version();
+
+        let failed_config =
+            crate::indexer::coordinator::IndexConfig::new(vec!["failure".into()], None);
+        app.request_index_config(failed_config.clone());
+        let failed_generation = app.indexing.expected_generation.unwrap();
+        wait_for_index_ready(&mut app);
+        assert!(Arc::ptr_eq(&app.actions, &last_good));
+        assert_eq!(crate::actions::actions_version(), version);
+        assert!(
+            app.indexing
+                .diagnostic()
+                .unwrap()
+                .contains("synthetic scan failure")
+        );
+        assert!(app.actions_persistence_diagnostic.is_none());
+
+        app.request_index_config(failed_config.clone());
+        assert!(app.indexing.expected_generation.unwrap() > failed_generation);
+        wait_for_index_ready(&mut app);
+        assert_eq!(app.actions[0].action, "custom:action");
+        assert_eq!(app.actions[1], index_test_action("recovered"));
+        assert_eq!(crate::actions::actions_version(), version + 1);
+        assert!(app.indexing.diagnostic().is_none());
+    }
+
+    #[test]
+    fn gui_index_empty_config_clears_tail_immediately_and_ignores_cancelled_result() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let coordinator = crate::indexer::coordinator::IndexCoordinator::with_test_scanner({
+            let release_rx = Arc::clone(&release_rx);
+            move |config| {
+                if config.roots().first().map(String::as_str) == Some("blocked") {
+                    started_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    Ok(vec![index_test_action("obsolete")])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+        })
+        .unwrap();
+        let (_workspace, mut app) = new_isolated_index_app(
+            &egui::Context::default(),
+            &crate::indexer::coordinator::IndexConfig::new(Vec::new(), None),
+        );
+        app.install_test_index_coordinator(coordinator);
+        app.actions = Arc::new(vec![custom_action("custom"), index_test_action("old-tail")]);
+        app.custom_len = 1;
+        app.update_action_cache();
+        let version = crate::actions::actions_version();
+        app.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            vec!["blocked".into()],
+            None,
+        ));
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("blocked scan started");
+
+        app.request_index_config(crate::indexer::coordinator::IndexConfig::new(
+            Vec::new(),
+            None,
+        ));
+        assert_eq!(app.actions.as_slice(), &[custom_action("custom")]);
+        assert_eq!(crate::actions::actions_version(), version + 1);
+        let empty_publication = Arc::clone(&app.actions);
+        release_tx.send(()).unwrap();
+        wait_for_index_ready(&mut app);
+        assert!(Arc::ptr_eq(&app.actions, &empty_publication));
+        assert_eq!(app.actions.as_slice(), &[custom_action("custom")]);
+        assert_eq!(crate::actions::actions_version(), version + 1);
     }
 
     #[test]
@@ -4481,9 +4967,6 @@ mod tests {
                 .collect(),
         );
         app.custom_len = 1;
-        let missing_index_root = tempdir().unwrap().path().join("not-created");
-        app.index_paths = Some(vec![missing_index_root.to_string_lossy().into_owned()]);
-        app.max_indexed_items = Some(1);
         app.update_action_cache();
         let directory = tempdir().unwrap();
         let path = directory.path().join("actions.json");
@@ -5359,23 +5842,23 @@ mod tests {
         app.plugins.register(Box::new(CommandPlugin));
 
         app.update_paths(
-            None, // plugin_dirs
-            None, // index_paths
-            None, // enabled_plugins
-            None, // enabled_capabilities
-            None, // offscreen_pos
-            None, // enable_toasts
-            None, // show_inline_errors
-            None, // show_error_toasts
-            None, // toast_duration
-            None, // fuzzy_weight
-            None, // usage_weight
-            None, // match_exact
-            None, // follow_mouse
-            None, // static_enabled
-            None, // static_pos
-            None, // static_size
-            None, // hide_after_run
+            None,                                                            // plugin_dirs
+            crate::indexer::coordinator::IndexConfig::new(Vec::new(), None), // index_config
+            None,                                                            // enabled_plugins
+            None,                                                            // enabled_capabilities
+            None,                                                            // offscreen_pos
+            None,                                                            // enable_toasts
+            None,                                                            // show_inline_errors
+            None,                                                            // show_error_toasts
+            None,                                                            // toast_duration
+            None,                                                            // fuzzy_weight
+            None,                                                            // usage_weight
+            None,                                                            // match_exact
+            None,                                                            // follow_mouse
+            None,                                                            // static_enabled
+            None,                                                            // static_pos
+            None,                                                            // static_size
+            None,                                                            // hide_after_run
             None, // clear_query_after_run
             None, // require_confirm_destructive
             None, // timer_refresh
@@ -5418,23 +5901,23 @@ mod tests {
         note_settings.split_view_enabled = false;
 
         app.update_paths(
-            None,                // plugin_dirs
-            None,                // index_paths
-            None,                // enabled_plugins
-            None,                // enabled_capabilities
-            None,                // offscreen_pos
-            None,                // enable_toasts
-            None,                // show_inline_errors
-            None,                // show_error_toasts
-            None,                // toast_duration
-            None,                // fuzzy_weight
-            None,                // usage_weight
-            None,                // match_exact
-            None,                // follow_mouse
-            None,                // static_enabled
-            None,                // static_pos
-            None,                // static_size
-            None,                // hide_after_run
+            None,                                                            // plugin_dirs
+            crate::indexer::coordinator::IndexConfig::new(Vec::new(), None), // index_config
+            None,                                                            // enabled_plugins
+            None,                                                            // enabled_capabilities
+            None,                                                            // offscreen_pos
+            None,                                                            // enable_toasts
+            None,                                                            // show_inline_errors
+            None,                                                            // show_error_toasts
+            None,                                                            // toast_duration
+            None,                                                            // fuzzy_weight
+            None,                                                            // usage_weight
+            None,                                                            // match_exact
+            None,                                                            // follow_mouse
+            None,                                                            // static_enabled
+            None,                                                            // static_pos
+            None,                                                            // static_size
+            None,                                                            // hide_after_run
             None,                // clear_query_after_run
             None,                // require_confirm_destructive
             None,                // timer_refresh

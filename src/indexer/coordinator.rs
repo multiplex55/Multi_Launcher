@@ -124,6 +124,7 @@ pub enum CoordinatorError {
         requested: u64,
         current: Option<u64>,
     },
+    StartupResultNotAcknowledged(u64),
     ResultAlreadyAcknowledged(u64),
 }
 
@@ -149,6 +150,10 @@ impl std::fmt::Display for CoordinatorError {
                     "index request {requested} was superseded by {current:?}"
                 )
             }
+            Self::StartupResultNotAcknowledged(generation) => write!(
+                formatter,
+                "startup index result {generation} has not been acknowledged"
+            ),
             Self::ResultAlreadyAcknowledged(generation) => {
                 write!(
                     formatter,
@@ -379,6 +384,30 @@ impl IndexCoordinator {
         result
     }
 
+    /// Validate that startup consumed the result for the coordinator's exact
+    /// latest identity before ownership is transferred to the GUI.
+    pub fn validate_acknowledged_result(
+        &self,
+        generation: u64,
+        config: &IndexConfig,
+    ) -> Result<(), CoordinatorError> {
+        let state = self.shared.state();
+        let matches_latest = state
+            .latest
+            .as_ref()
+            .is_some_and(|latest| latest.generation == generation && latest.config == *config);
+        if !matches_latest {
+            return Err(CoordinatorError::Superseded {
+                requested: generation,
+                current: state.latest.as_ref().map(|latest| latest.generation),
+            });
+        }
+        if state.acknowledged_generation != Some(generation) {
+            return Err(CoordinatorError::StartupResultNotAcknowledged(generation));
+        }
+        Ok(())
+    }
+
     /// Attach one wake callback. A result retained before attachment wakes it.
     pub fn attach_notifier(
         &self,
@@ -569,6 +598,24 @@ impl IndexCoordinator {
                     .spawn(task)
             }),
         )
+    }
+
+    /// Narrow bridge for owner tests outside this private implementation
+    /// module. Production construction continues to use the real scanner.
+    #[cfg(test)]
+    pub(crate) fn with_test_scanner(
+        scanner: impl Fn(&IndexConfig) -> Result<Vec<Action>, String> + Send + Sync + 'static,
+    ) -> Result<Self, CoordinatorError> {
+        Self::with_scanner(move |config, cancellation| {
+            if cancellation.load(Ordering::Acquire) {
+                return ScanDisposition::Cancelled;
+            }
+            match scanner(config) {
+                Ok(_actions) if cancellation.load(Ordering::Acquire) => ScanDisposition::Cancelled,
+                Ok(actions) => ScanDisposition::Complete(actions),
+                Err(message) => ScanDisposition::Failed(ScanFailure::new(message)),
+            }
+        })
     }
 
     #[cfg(test)]

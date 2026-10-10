@@ -3288,6 +3288,9 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Err(error) = self.shutdown_indexing() {
+            self.report_error_message("index.shutdown", error.to_string());
+        }
         if let Err(error) = self.coordinate_tool.shutdown() {
             self.report_error("coordinate_tool.shutdown", error);
         }

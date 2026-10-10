@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 #![allow(clippy::type_complexity)]
 
+use anyhow::Context;
 use multi_launcher::actions::{Action, load_startup_actions};
 use multi_launcher::common::persistence::PersistenceError;
 use multi_launcher::gui::LauncherApp;
@@ -9,6 +10,7 @@ use multi_launcher::hotkey::launcher_invocation::{
     RouteHandoff, ServiceNotice, exclusive_owners, install_exclusive_wake,
 };
 use multi_launcher::hotkey::{HotkeyListener, HotkeyTrigger, parse_hotkey};
+use multi_launcher::logging;
 use multi_launcher::platform::{
     app_data::AppDataRoot,
     single_instance::{SingleInstanceAcquire, SingleInstanceGuard},
@@ -39,7 +41,6 @@ use multi_launcher::visibility::{
     RootViewportCtx, RootWindowBridge, ViewportCtx, VisibilityRevision, VisibilityToggleBatch,
     handle_visibility_toggle_batch_ordered, handle_visibility_trigger_with_owner_ordered,
 };
-use multi_launcher::{indexer, logging};
 
 use eframe::{egui, icon_data};
 use once_cell::sync::Lazy;
@@ -876,6 +877,74 @@ impl GuiWorker {
     }
 }
 
+struct StartupIndexingTransfer {
+    coordinator: multi_launcher::indexer::coordinator::IndexCoordinator,
+    config: multi_launcher::indexer::coordinator::IndexConfig,
+    generation: u64,
+}
+
+/// Complete the initial index on the main thread before plugin registration.
+/// The returned coordinator has acknowledged its startup result and is ready
+/// to own later configuration changes after transfer to the GUI app.
+fn startup_indexed_actions(
+    config: multi_launcher::indexer::coordinator::IndexConfig,
+) -> anyhow::Result<(Arc<Vec<Action>>, Option<StartupIndexingTransfer>)> {
+    if config.roots().is_empty() {
+        return Ok((Arc::new(Vec::new()), None));
+    }
+
+    let coordinator = multi_launcher::indexer::coordinator::IndexCoordinator::new()
+        .context("failed to create startup index coordinator")?;
+    let generation = coordinator
+        .submit(config.clone())
+        .context("failed to submit startup index request")?;
+    let waited = coordinator
+        .wait_for_completion(generation)
+        .context("startup index request did not complete")?;
+    anyhow::ensure!(
+        waited.generation() == generation && waited.config() == &config,
+        "startup index completion did not match its submitted identity"
+    );
+
+    let completion = coordinator
+        .take_result()
+        .context("startup index completion was not retained for acknowledgement")?;
+    anyhow::ensure!(
+        completion.generation() == generation && completion.config() == &config,
+        "startup index result changed before acknowledgement"
+    );
+    let indexed_actions = completion
+        .outcome()
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|error| anyhow::anyhow!("startup index scan failed: {error}"))?;
+    coordinator
+        .validate_acknowledged_result(generation, &config)
+        .context("startup index result failed transfer validation")?;
+
+    Ok((
+        indexed_actions,
+        Some(StartupIndexingTransfer {
+            coordinator,
+            config,
+            generation,
+        }),
+    ))
+}
+
+/// Build the exact catalog supplied to startup plugin consumers and the GUI.
+/// Keeping assembly here makes the custom-first/indexed-tail boundary shared
+/// by startup and its consumer-parity test.
+fn startup_action_catalog(
+    mut custom_actions: Vec<Action>,
+    config: multi_launcher::indexer::coordinator::IndexConfig,
+) -> anyhow::Result<(Arc<Vec<Action>>, usize, Option<StartupIndexingTransfer>)> {
+    let custom_len = custom_actions.len();
+    let (indexed_actions, transfer) = startup_indexed_actions(config)?;
+    custom_actions.extend(indexed_actions.iter().cloned());
+    Ok((Arc::new(custom_actions), custom_len, transfer))
+}
+
 /// Spawn the GUI on a separate thread.
 ///
 /// `actions` is wrapped in an [`Arc`] so the main thread and GUI worker can
@@ -886,6 +955,7 @@ impl GuiWorker {
 fn spawn_gui(
     actions: Arc<Vec<Action>>,
     custom_len: usize,
+    startup_indexing: Option<StartupIndexingTransfer>,
     settings: Settings,
     settings_path: String,
     startup_settings_diagnostic: Option<SettingsStartupDiagnostic>,
@@ -958,6 +1028,7 @@ fn spawn_gui(
     let root_window_bridge = RootWindowBridge::default();
     let root_window_bridge_for_gui = root_window_bridge.clone();
     let actions_for_window = Arc::clone(&actions);
+    let startup_indexing_for_window = startup_indexing;
 
     let worker = GuiWorker::spawn(event_tx, move |completion| {
         let viewport = build_viewport_with_icon(
@@ -1003,6 +1074,15 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                if let Some(startup) = startup_indexing_for_window {
+                    if let Err(error) = app.install_startup_indexing(
+                        startup.coordinator,
+                        startup.config,
+                        startup.generation,
+                    ) {
+                        app.report_error_message("index.startup", error.to_string());
+                    }
+                }
                 app.install_visibility_revision(visibility_revision);
                 app.install_root_window_bridge(root_window_bridge_for_gui.clone());
                 app.install_screen_draw_recovery_bridge(screen_draw_recovery_bridge);
@@ -1070,9 +1150,8 @@ fn main() -> anyhow::Result<()> {
     }
     let actions_timer = multi_launcher::performance::Timer::start();
     let startup_actions = load_startup_actions("actions.json");
-    let mut actions_vec = startup_actions.actions;
+    let actions_vec = startup_actions.actions;
     let startup_actions_diagnostic = startup_actions.diagnostic;
-    let custom_len = actions_vec.len();
     tracing::debug!("{} actions loaded", actions_vec.len());
     if let Some(diagnostic) = startup_actions_diagnostic.as_ref() {
         tracing::error!(
@@ -1096,14 +1175,13 @@ fn main() -> anyhow::Result<()> {
     install_exclusive_wake(event_tx.clone());
 
     let index_timer = multi_launcher::performance::Timer::start();
-    if let Some(paths) = &settings.index_paths {
-        let options = indexer::IndexOptions::with_max_items(settings.max_indexed_items);
-        for batch in indexer::index_paths_batched(paths, options) {
-            actions_vec.extend(batch?);
-        }
-    }
+    let index_config = multi_launcher::indexer::coordinator::IndexConfig::new(
+        settings.index_paths.clone().unwrap_or_default(),
+        settings.max_indexed_items,
+    );
+    let (actions, custom_len, startup_indexing) =
+        startup_action_catalog(actions_vec, index_config)?;
     index_timer.finish("startup.action_indexing");
-    let actions = Arc::new(actions_vec);
     let screen_draw_recovery_bridge = Arc::new(ScreenDrawRecoveryBridge::default());
 
     let hotkey = settings.hotkey();
@@ -1291,6 +1369,7 @@ fn main() -> anyhow::Result<()> {
     let (gui_worker, visibility, restore_flag, help_flag, ctx, root_window_bridge) = spawn_gui(
         Arc::clone(&actions),
         custom_len,
+        startup_indexing,
         settings.clone(),
         "settings.json".to_string(),
         startup_settings_diagnostic,
@@ -3125,6 +3204,117 @@ fn hold_acceptance_prepare_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use multi_launcher::{plugin::Plugin, plugins::omni_search::OmniSearchPlugin};
+    use tempfile::tempdir;
+
+    #[test]
+    fn startup_index_returns_the_complete_catalog_and_acknowledges_before_transfer() {
+        let directory = tempdir().unwrap();
+        for name in ["one.txt", "two.txt", "three.txt"] {
+            std::fs::write(directory.path().join(name), name).unwrap();
+        }
+        let config = multi_launcher::indexer::coordinator::IndexConfig::new(
+            vec![directory.path().to_string_lossy().into_owned()],
+            Some(2),
+        );
+
+        let custom = Action {
+            label: "custom entry".into(),
+            desc: "custom entry description".into(),
+            action: "custom:entry".into(),
+            args: None,
+        };
+        let (catalog, custom_len, transfer) =
+            startup_action_catalog(vec![custom.clone()], config.clone()).unwrap();
+        assert_eq!(custom_len, 1);
+        assert_eq!(catalog[0], custom);
+        let indexed = &catalog[custom_len..];
+        assert_eq!(indexed.len(), 2);
+        assert!(indexed.iter().all(|action| {
+            action.args.is_none()
+                && action.label
+                    == std::path::Path::new(&action.action)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                && action.desc == action.action
+        }));
+        let transfer = transfer.expect("nonempty roots retain the coordinator");
+        assert_eq!(transfer.config, config);
+        assert_eq!(transfer.generation, 1);
+        transfer
+            .coordinator
+            .validate_acknowledged_result(transfer.generation, &transfer.config)
+            .unwrap();
+        assert!(matches!(
+            transfer
+                .coordinator
+                .validate_acknowledged_result(transfer.generation + 1, &transfer.config),
+            Err(multi_launcher::indexer::coordinator::CoordinatorError::Superseded { .. })
+        ));
+        assert!(
+            transfer.coordinator.take_result().is_none(),
+            "startup result is acknowledged exactly once before transfer"
+        );
+        let mut omni = OmniSearchPlugin::new(Arc::clone(&catalog));
+        omni.apply_settings(&serde_json::json!({
+            "include_apps": true,
+            "include_notes": false,
+            "include_todos": false,
+            "include_calendar": false,
+            "include_folders": false,
+            "include_bookmarks": false
+        }));
+        let indexed_sample = &indexed[0];
+        assert!(
+            omni.search(&format!("o {}", indexed_sample.label))
+                .iter()
+                .any(|action| action == indexed_sample)
+        );
+        assert!(
+            omni.search("o custom entry")
+                .iter()
+                .any(|action| action == &catalog[0])
+        );
+    }
+
+    #[test]
+    fn startup_index_skips_empty_roots_and_propagates_scan_failures() {
+        let (empty, transfer) = startup_indexed_actions(
+            multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), Some(25)),
+        )
+        .unwrap();
+        assert!(empty.is_empty());
+        assert!(transfer.is_none(), "empty startup roots create no worker");
+
+        let custom = Action {
+            label: "kept custom".into(),
+            desc: String::new(),
+            action: "custom:kept".into(),
+            args: None,
+        };
+        let (catalog, custom_len, transfer) = startup_action_catalog(
+            vec![custom.clone()],
+            multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), Some(25)),
+        )
+        .unwrap();
+        assert_eq!(custom_len, 1);
+        assert_eq!(catalog.as_slice(), &[custom]);
+        assert!(transfer.is_none());
+
+        let directory = tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let result =
+            startup_indexed_actions(multi_launcher::indexer::coordinator::IndexConfig::new(
+                vec![missing.to_string_lossy().into_owned()],
+                None,
+            ));
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("a missing startup root must propagate its scan failure"),
+        };
+        assert!(error.to_string().contains("startup index scan failed"));
+    }
 
     #[test]
     fn gui_worker_completion_wake_shuts_down_before_worker_tail_returns() {
