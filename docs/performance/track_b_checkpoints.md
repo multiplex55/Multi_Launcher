@@ -1,7 +1,7 @@
 # Track B checkpoint ledger
 
 Baseline: cargo-build-perf at 6a6be519685652a282f7d0a411008601f158d075.
-Branch: build-optimization. No push/merge.
+Branch: build-optimization. Final local HEAD: this closing B5-C commit (see execution state). No push/merge.
 
 | Checkpoint | State | Evidence / findings | Reviewer | Local commit SHA |
 | --- | --- | --- | --- | --- |
@@ -26,8 +26,8 @@ Branch: build-optimization. No push/merge.
 | B4-E | SKIPPED | No expensive warm dependency rebuild/removable feature established; graph unchanged | planner/final docs review approved | 47cef167 |
 | B4-F | PASS; analysis complete, extraction DEFERRED | Shared invalidation proven, no stable costed extraction boundary; no source migration | architecture/final docs review approved | 47cef167 |
 | B5-A | PASS | Frozen F4221c349; audited inputs/coverage/helpers; final active canonical build1.042136s Fresh; original PE/native passed | final empirical/documentation review approved | d31b17a0 |
-| B5-B | PASS | All-bin316.836231s; branch234.581312/232.882807s; iteration small27.062325/large31.349379s; phases/cache/limits explicit | final methodology review approved; table finding fixed | this checkpoint commit |
-| B5-C | pending |  |  | — |
+| B5-B | PASS | All-bin316.836231s; branch234.581312/232.882807s; iteration small27.062325/large31.349379s; phases/cache/limits explicit | final methodology review approved; table finding fixed | c4415f51 |
+| B5-C | PASS | All23closed; cumulative11-file scope/recipes/clean-state audit; local-only handoff | planner completion audit approved; private locator finding fixed | HEAD: this closing B5-C commit |
 
 ## Execution state
 
@@ -39,4 +39,4 @@ B5 gaps runner19238 terminated0 at2026-10-10T18:12:17UTC. target/track-b/b5-gaps
 
 Final check runner80125 terminated0: original preparation36.228948s excluded; three no-compile warm checks1.378059/0.946584/0.882092s. Final active-checkout canonical release command passed1.042136s Fresh at F; corrected evidence is outside the source worktree, as required by the existing helper. Original icon/PE comparison and bounded owned native startup/normal close passed with matching executableSHA9d78d3893fea30addc0221685d8675e2b52144319eb28be7faf1e50d8b3fc5e5. No Cargo or owned smoke remains active.
 
-B5-A is committed at d31b17a0818f77b4fcb720149d634387287908c7. B5-B final comparison review approved; its local commit and B5-C local handoff are being closed. Full-suite execution, ignored-case execution, non-Windows checks, manual debugger inspection, exact link duration, true peak RAM, runtime-performance equivalence and iteration branch-switch benchmarking were not performed; these limits do not imply missing conditional gates. The closest measured six-minute workload remains default all-bin edited release; the original user command is unknown.
+B5-A is committed at d31b17a0818f77b4fcb720149d634387287908c7; B5-B at c4415f51c8eb9c5249f3b833b70b22456224e699. Final methodology and completion audits approved; the table-formatting finding and private-evidence locator finding are fixed. All23checkpoints are closed, including justified conditional skips and completed extraction analysis. Final local branch HEAD is the B5-C commit containing this ledger; resolve it with git rev-parse HEAD, or git log --format=%H --grep="[B5-C]" --fixed-strings -1 after later work. The final handoff supplies its actual full SHA. No push or merge. Full-suite execution, ignored-case execution, non-Windows checks, manual debugger inspection, exact link duration, true peak RAM, runtime-performance equivalence and iteration branch-switch benchmarking were not performed; these limits do not imply missing conditional gates. The closest measured six-minute workload remains default all-bin edited release; the original user command is unknown.
