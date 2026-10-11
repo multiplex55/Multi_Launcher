@@ -3,6 +3,12 @@ use super::*;
 pub(crate) const NOTE_SEARCH_DEBOUNCE: Duration = Duration::from_secs(1);
 pub(crate) const COMPLETION_REBUILD_DEBOUNCE: Duration = Duration::from_millis(120);
 
+#[derive(Clone, Copy)]
+enum ScoredActionSource {
+    CatalogIndex(usize),
+    PluginOwned(usize),
+}
+
 #[cfg(test)]
 mod c2a_search_observer {
     use std::{cell::Cell, cell::RefCell, rc::Rc};
@@ -42,37 +48,6 @@ mod c2a_search_observer {
     }
 
     impl Receipt {
-        pub(super) fn arrays(self) -> [u64; 26] {
-            [
-                self.local_catalog_visits,
-                self.local_filter_passes,
-                self.local_score_attempts,
-                self.local_hits,
-                self.local_action_clones,
-                self.local_clone_logical_bytes,
-                self.local_clone_strings,
-                self.provider_input_actions,
-                self.provider_filter_rejections,
-                self.provider_actions_retained_moved,
-                self.provider_projection_strings,
-                self.provider_projection_bytes,
-                self.command_fallback_actions_visited,
-                self.command_fallback_hits_cloned,
-                self.command_fallback_clone_logical_bytes,
-                self.command_fallback_clone_strings,
-                self.sort_input_len,
-                self.sort_ns,
-                self.final_scored_entries_moved,
-                0, // Final materialization maps and moves the Action values.
-                self.empty_browse_command_cache_cloned,
-                self.empty_browse_catalog_materialized,
-                self.empty_browse_logical_bytes,
-                self.empty_browse_strings,
-                self.final_output_count,
-                self.outcome_state,
-            ]
-        }
-
         pub(super) fn materialization_arrays(self) -> [u64; 31] {
             [
                 self.local_catalog_visits,
@@ -747,13 +722,15 @@ impl LauncherApp {
         }
     }
 
-    fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
+    fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(ScoredActionSource, f32)> {
         let telemetry_enabled = crate::performance::enabled();
         #[cfg(test)]
         let c2a_observer = c2a_search_observer::current();
         #[cfg(test)]
         let c2a_observer_active = c2a_observer.is_some();
         let mut timer = crate::performance::track_c::Timer::start_if(
+            // Keep the historical phase identifier; this phase now measures
+            // candidate scoring only, with materialization counted below.
             crate::performance::track_c::Phase::SearchScoreAndCloneHits,
             telemetry_enabled,
         );
@@ -768,11 +745,8 @@ impl LauncherApp {
         #[cfg(test)]
         let (mut c2a_catalog_visits, mut c2a_filter_passes, mut c2a_score_attempts) =
             (0_u64, 0_u64, 0_u64);
-        #[cfg(test)]
-        let (mut c2a_clone_count, mut c2a_clone_bytes, mut c2a_clone_strings) =
-            (0_u64, 0_u64, 0_u64);
         if query.is_empty() {
-            for (i, a) in self.actions.iter().enumerate() {
+            for (i, _) in self.actions.iter().enumerate() {
                 #[cfg(test)]
                 if c2a_observer_active {
                     c2a_catalog_visits = c2a_catalog_visits.saturating_add(1);
@@ -781,14 +755,8 @@ impl LauncherApp {
                     #[cfg(test)]
                     if c2a_observer_active {
                         c2a_filter_passes = c2a_filter_passes.saturating_add(1);
-                        c2a_clone_count = c2a_clone_count.saturating_add(1);
-                        c2a_clone_bytes = c2a_clone_bytes
-                            .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                        c2a_clone_strings = c2a_clone_strings
-                            .saturating_add(c2a_search_observer::action_payload_strings(a));
                     }
-                    let cloned = a.clone();
-                    res.push((cloned, 0.0));
+                    res.push((ScoredActionSource::CatalogIndex(i), 0.0));
                 }
             }
         } else {
@@ -820,31 +788,16 @@ impl LauncherApp {
                     let action_match = cached.action_lc.contains(query_lc);
                     if label_match || desc_match || action_match || alias_match {
                         let score = if alias_match { 1.0 } else { 0.0 };
-                        #[cfg(test)]
-                        if c2a_observer_active {
-                            c2a_clone_count = c2a_clone_count.saturating_add(1);
-                            c2a_clone_bytes = c2a_clone_bytes
-                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                            c2a_clone_strings = c2a_clone_strings
-                                .saturating_add(c2a_search_observer::action_payload_strings(a));
-                        }
-                        let cloned = a.clone();
-                        res.push((cloned, score));
+                        res.push((ScoredActionSource::CatalogIndex(i), score));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, query);
                     let s2 = self.matcher.fuzzy_match(&a.desc, query);
                     if let Some(score) = s1.max(s2) {
-                        #[cfg(test)]
-                        if c2a_observer_active {
-                            c2a_clone_count = c2a_clone_count.saturating_add(1);
-                            c2a_clone_bytes = c2a_clone_bytes
-                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
-                            c2a_clone_strings = c2a_clone_strings
-                                .saturating_add(c2a_search_observer::action_payload_strings(a));
-                        }
-                        let cloned = a.clone();
-                        res.push((cloned, score as f32 * self.fuzzy_weight));
+                        res.push((
+                            ScoredActionSource::CatalogIndex(i),
+                            score as f32 * self.fuzzy_weight,
+                        ));
                     }
                 }
             }
@@ -864,21 +817,10 @@ impl LauncherApp {
                 c2a_score_attempts,
             );
             observer.add(c2a_search_observer::Metric::LocalHits, res.len() as u64);
-            observer.add(
-                c2a_search_observer::Metric::LocalActionClones,
-                c2a_clone_count,
-            );
-            observer.add(
-                c2a_search_observer::Metric::LocalCloneLogicalBytes,
-                c2a_clone_bytes,
-            );
-            observer.add(
-                c2a_search_observer::Metric::LocalCloneStrings,
-                c2a_clone_strings,
-            );
         }
         timer.set_work_units(self.actions.len());
-        timer.set_search_counts(candidates_scored, res.len());
+        // Catalog Actions are only materialized after the shared ranking sort.
+        timer.set_search_counts(candidates_scored, 0);
         timer.finish(crate::performance::track_c::Outcome::Completed);
         res
     }
@@ -1348,10 +1290,18 @@ impl LauncherApp {
         }
         #[cfg(test)]
         let c2a_provider_actions_retained_moved = plugin_results.len() as u64;
-        scored.extend(plugin_results);
+        // Keep provider-owned Actions separate from the small, sortable rank
+        // records. Their transformed payloads stay inside this owner interval
+        // and are moved into the output only after ranking.
+        let mut provider_actions = Vec::with_capacity(plugin_results.len());
+        for (action, score) in plugin_results {
+            let provider_index = provider_actions.len();
+            provider_actions.push(Some(action));
+            scored.push((ScoredActionSource::PluginOwned(provider_index), score));
+        }
         #[cfg(test)]
         let c2a_sort_input_len = scored.len() as u64;
-        self.apply_usage_weight(&mut scored);
+        self.apply_usage_weight(&mut scored, &provider_actions);
         #[cfg(test)]
         let c2a_sort_started = c2a_observer.as_ref().map(|_| std::time::Instant::now());
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -1362,15 +1312,45 @@ impl LauncherApp {
                 started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
             );
         }
-        let mut materialize_timer = crate::performance::track_c::Timer::start(
+        // The scored origins are small; catalog Action payloads are cloned
+        // only here, after stable ranking has selected their final order.
+        let telemetry_enabled = crate::performance::enabled();
+        let mut materialize_timer = crate::performance::track_c::Timer::start_if(
             crate::performance::track_c::Phase::SearchMoveResults,
+            telemetry_enabled,
         );
         let materialized = scored.len();
+        #[cfg(test)]
+        let c2a_observer_active = c2a_observer.is_some();
+        #[cfg(test)]
+        let (mut c2a_final_local_clones, mut c2a_final_local_bytes, mut c2a_final_local_strings) =
+            (0_u64, 0_u64, 0_u64);
+        let mut final_local_action_clones = 0_usize;
         let actions = scored
             .into_iter()
-            .map(|(action, _)| action)
+            .map(|(source, _)| match source {
+                ScoredActionSource::CatalogIndex(index) => {
+                    let action = &self.actions[index];
+                    if telemetry_enabled {
+                        final_local_action_clones = final_local_action_clones.saturating_add(1);
+                    }
+                    #[cfg(test)]
+                    if c2a_observer_active {
+                        c2a_final_local_clones = c2a_final_local_clones.saturating_add(1);
+                        c2a_final_local_bytes = c2a_final_local_bytes
+                            .saturating_add(c2a_search_observer::action_payload_bytes(action));
+                        c2a_final_local_strings = c2a_final_local_strings
+                            .saturating_add(c2a_search_observer::action_payload_strings(action));
+                    }
+                    action.clone()
+                }
+                ScoredActionSource::PluginOwned(index) => provider_actions[index]
+                    .take()
+                    .expect("each ranked provider Action is materialized once"),
+            })
             .collect::<Vec<_>>();
         materialize_timer.set_work_units(materialized);
+        materialize_timer.set_search_counts(0, final_local_action_clones);
         materialize_timer.finish(crate::performance::track_c::Outcome::Completed);
         let state = if provider_pending
             || start_revision != provider_revision
@@ -1394,14 +1374,20 @@ impl LauncherApp {
             );
             observer.set(
                 c2a_search_observer::Metric::FinalScoredEntriesMoved,
-                materialized as u64,
+                c2a_provider_actions_retained_moved,
             );
-            // Eager scoring already owns every hit Action. The final pass
-            // transfers those values into the result vector; it does not clone
-            // a catalog Action a second time.
-            observer.set(c2a_search_observer::Metric::FinalLocalActionClones, 0);
-            observer.set(c2a_search_observer::Metric::FinalLocalCloneLogicalBytes, 0);
-            observer.set(c2a_search_observer::Metric::FinalLocalCloneStrings, 0);
+            observer.set(
+                c2a_search_observer::Metric::FinalLocalActionClones,
+                c2a_final_local_clones,
+            );
+            observer.set(
+                c2a_search_observer::Metric::FinalLocalCloneLogicalBytes,
+                c2a_final_local_bytes,
+            );
+            observer.set(
+                c2a_search_observer::Metric::FinalLocalCloneStrings,
+                c2a_final_local_strings,
+            );
             observer.set(
                 c2a_search_observer::Metric::FinalOutputCount,
                 actions.len() as u64,
@@ -1430,9 +1416,20 @@ impl LauncherApp {
         self.search_read_only_outcome(raw_query).actions
     }
 
-    fn apply_usage_weight(&self, res: &mut Vec<(Action, f32)>) {
+    fn apply_usage_weight(
+        &self,
+        res: &mut [(ScoredActionSource, f32)],
+        provider_actions: &[Option<Action>],
+    ) {
         for (a, score) in res.iter_mut() {
-            *score += self.usage.get(&a.action).cloned().unwrap_or(0) as f32 * self.usage_weight;
+            let action = match *a {
+                ScoredActionSource::CatalogIndex(index) => &self.actions[index],
+                ScoredActionSource::PluginOwned(index) => provider_actions[index]
+                    .as_ref()
+                    .expect("provider Actions remain owned through ranking"),
+            };
+            *score +=
+                self.usage.get(&action.action).cloned().unwrap_or(0) as f32 * self.usage_weight;
         }
     }
 }
@@ -2155,15 +2152,18 @@ mod tests {
             }
         );
         assert_eq!(receipt.local_hits, expected_local_actions.len() as u64);
+        assert_eq!(receipt.local_action_clones, 0);
+        assert_eq!(receipt.local_clone_logical_bytes, 0);
+        assert_eq!(receipt.local_clone_strings, 0);
         assert_eq!(
-            receipt.local_action_clones,
+            receipt.final_local_action_clones,
             expected_local_actions.len() as u64
         );
-        assert_eq!(receipt.local_clone_logical_bytes, expected_local_bytes);
-        assert_eq!(receipt.local_clone_strings, expected_local_strings);
-        assert_eq!(receipt.final_local_action_clones, 0);
-        assert_eq!(receipt.final_local_clone_logical_bytes, 0);
-        assert_eq!(receipt.final_local_clone_strings, 0);
+        assert_eq!(
+            receipt.final_local_clone_logical_bytes,
+            expected_local_bytes
+        );
+        assert_eq!(receipt.final_local_clone_strings, expected_local_strings);
         assert_eq!(receipt.provider_input_actions, state.provider_input_actions);
         assert_eq!(receipt.provider_filter_rejections, 0);
         assert_eq!(
@@ -2195,7 +2195,7 @@ mod tests {
             if is_empty_browse {
                 0
             } else {
-                frozen.expected.actions.len() as u64
+                expected_provider_retained
             }
         );
         assert_eq!(
@@ -2243,100 +2243,9 @@ mod tests {
         let receipt = state.observer.receipt();
         track_c2a_validate_receipt(state, actual, receipt);
         crate::performance::track_c_workloads::OwnerObservation {
-            work_counters: receipt.arrays().to_vec(),
+            work_counters: receipt.materialization_arrays().to_vec(),
             ..observation
         }
-    }
-
-    fn emit_track_c2a_samples(
-        scenario: TrackCSearchCase,
-        count: usize,
-        fixture_signature: u64,
-        mode: crate::performance::track_c_workloads::BenchmarkMode,
-        samples: &[crate::performance::track_c_workloads::SampleRecord],
-    ) {
-        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
-
-        assert_eq!(samples.len(), MEASURED_SAMPLES);
-        assert!(
-            samples
-                .iter()
-                .all(|sample| sample.work_counters.len() == 26)
-        );
-        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
-            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_string());
-        let profile = std::env::var("ML_TRACK_C_PROFILE")
-            .unwrap_or_else(|_| "unspecified-profile".to_string());
-        for value in [&source, &profile] {
-            assert!(!value.bytes().any(|byte| byte.is_ascii_whitespace()));
-        }
-        let mode = match mode {
-            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
-            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
-        };
-        let array = |index: usize| {
-            samples
-                .iter()
-                .map(|sample| sample.work_counters[index].to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let elapsed = samples
-            .iter()
-            .map(|sample| sample.elapsed_nanos.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let complete_output_ids = samples
-            .iter()
-            .map(|sample| format!("{:016x}", sample.output_identity))
-            .collect::<Vec<_>>()
-            .join(",");
-        let structural_output_ids = samples
-            .iter()
-            .map(|sample| format!("{:016x}", sample.structural_signature))
-            .collect::<Vec<_>>()
-            .join(",");
-
-        eprintln!(
-            "C2A_SEARCH_RESULT schema=1 stage=eager_rank_attribution owner=search_read_only_outcome_with_plugin_snapshot fixture=synthetic_action_catalog_captured_provider source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 provider_scope=captured_snapshot_no_provider_invocation materialization_scope=local_hit_cloned_once_then_scored_entries_moved empty_browse_scope=command_cache_and_catalog_actions_materialized_provider_input_discarded payload_scope=logical_utf8_and_string_values_not_allocator_or_rss outcome_scope=noresults_0_results_1_pending_2 case={} count={} fixture_signature={:016x} elapsed_ns=[{}] local_catalog_visits=[{}] local_filter_passes=[{}] local_score_attempts=[{}] local_hits=[{}] local_action_clones=[{}] local_clone_logical_bytes=[{}] local_clone_strings=[{}] provider_input_actions=[{}] provider_filter_rejections=[{}] provider_actions_retained_moved=[{}] provider_projection_strings=[{}] provider_projection_bytes=[{}] command_fallback_actions_visited=[{}] command_fallback_hits_cloned=[{}] command_fallback_clone_logical_bytes=[{}] command_fallback_clone_strings=[{}] sort_input_len=[{}] sort_ns=[{}] final_scored_entries_moved=[{}] final_local_action_clones=[{}] empty_browse_command_cache_cloned=[{}] empty_browse_catalog_materialized=[{}] empty_browse_logical_bytes=[{}] empty_browse_strings=[{}] final_output_count=[{}] outcome_state=[{}] complete_output_ids=[{}] structural_output_ids=[{}]",
-            source,
-            profile,
-            mode,
-            WARMUPS,
-            samples.len(),
-            scenario.name(),
-            count,
-            fixture_signature,
-            elapsed,
-            array(0),
-            array(1),
-            array(2),
-            array(3),
-            array(4),
-            array(5),
-            array(6),
-            array(7),
-            array(8),
-            array(9),
-            array(10),
-            array(11),
-            array(12),
-            array(13),
-            array(14),
-            array(15),
-            array(16),
-            array(17),
-            array(18),
-            array(19),
-            array(20),
-            array(21),
-            array(22),
-            array(23),
-            array(24),
-            array(25),
-            complete_output_ids,
-            structural_output_ids,
-        );
     }
 
     fn emit_track_c2b_samples(
@@ -2390,7 +2299,7 @@ mod tests {
             .join(",");
 
         eprintln!(
-            "C2B_SEARCH_RESULT schema=1 stage=search_materialization materialization=eager owner=search_read_only_outcome_with_plugin_snapshot fixture=synthetic_action_catalog_captured_provider source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 provider_scope=captured_snapshot_no_provider_invocation materialization_scope=catalog_hit_copies_once_staged_provider_owned_moves_browse_separate empty_browse_scope=command_cache_and_catalog_actions_materialized_provider_input_discarded payload_scope=logical_utf8_and_string_values_not_allocator_or_rss outcome_scope=noresults_0_results_1_pending_2 case={} count={} provider_count={} rank_record_bytes={} fixture_signature={:016x} elapsed_ns=[{}] local_catalog_visits=[{}] local_filter_passes=[{}] local_score_attempts=[{}] local_hits=[{}] local_action_clones=[{}] local_clone_logical_bytes=[{}] local_clone_strings=[{}] provider_input_actions=[{}] provider_filter_rejections=[{}] provider_actions_retained_moved=[{}] provider_projection_strings=[{}] provider_projection_bytes=[{}] command_fallback_actions_visited=[{}] command_fallback_hits_cloned=[{}] command_fallback_clone_logical_bytes=[{}] command_fallback_clone_strings=[{}] sort_input_len=[{}] sort_ns=[{}] final_scored_entries_moved=[{}] final_local_action_clones=[{}] empty_browse_command_cache_cloned=[{}] empty_browse_catalog_materialized=[{}] empty_browse_logical_bytes=[{}] empty_browse_strings=[{}] final_output_count=[{}] outcome_state=[{}] final_local_clone_logical_bytes=[{}] final_local_clone_strings=[{}] hit_action_clone_total=[{}] hit_clone_logical_bytes_total=[{}] hit_clone_strings_total=[{}] complete_output_ids=[{}] structural_output_ids=[{}]",
+            "C2B_SEARCH_RESULT schema=1 stage=search_materialization materialization=deferred owner=search_read_only_outcome_with_plugin_snapshot fixture=synthetic_action_catalog_captured_provider source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 provider_scope=captured_snapshot_no_provider_invocation materialization_scope=catalog_hit_copies_once_staged_provider_owned_moves_browse_separate empty_browse_scope=command_cache_and_catalog_actions_materialized_provider_input_discarded payload_scope=logical_utf8_and_string_values_not_allocator_or_rss outcome_scope=noresults_0_results_1_pending_2 case={} count={} provider_count={} rank_record_bytes={} fixture_signature={:016x} elapsed_ns=[{}] local_catalog_visits=[{}] local_filter_passes=[{}] local_score_attempts=[{}] local_hits=[{}] local_action_clones=[{}] local_clone_logical_bytes=[{}] local_clone_strings=[{}] provider_input_actions=[{}] provider_filter_rejections=[{}] provider_actions_retained_moved=[{}] provider_projection_strings=[{}] provider_projection_bytes=[{}] command_fallback_actions_visited=[{}] command_fallback_hits_cloned=[{}] command_fallback_clone_logical_bytes=[{}] command_fallback_clone_strings=[{}] sort_input_len=[{}] sort_ns=[{}] final_scored_entries_moved=[{}] final_local_action_clones=[{}] empty_browse_command_cache_cloned=[{}] empty_browse_catalog_materialized=[{}] empty_browse_logical_bytes=[{}] empty_browse_strings=[{}] final_output_count=[{}] outcome_state=[{}] final_local_clone_logical_bytes=[{}] final_local_clone_strings=[{}] hit_action_clone_total=[{}] hit_clone_logical_bytes_total=[{}] hit_clone_strings_total=[{}] complete_output_ids=[{}] structural_output_ids=[{}]",
             source,
             profile,
             mode,
@@ -2399,7 +2308,7 @@ mod tests {
             case,
             count,
             provider_count,
-            std::mem::size_of::<(Action, f32)>(),
+            std::mem::size_of::<(ScoredActionSource, f32)>(),
             fixture_signature,
             elapsed,
             array(0),
@@ -2894,8 +2803,9 @@ mod tests {
                     state.app.actions.len() as u64
                 }
             );
-            assert_eq!(score.action_clones, state.expected_local_hits);
+            assert_eq!(score.action_clones, 0);
             assert_eq!(moved.work_units, actual.actions.len() as u64);
+            assert_eq!(moved.action_clones, state.expected_local_hits);
         }
         let structure =
             crate::performance::track_c_workloads::action_fixture_identity(&actual.actions);
@@ -2916,6 +2826,9 @@ mod tests {
             revision_receipts: revisions,
             viewport_receipt: None,
             work_units: score.candidates_scored + moved.work_units,
+            // Keep the frozen four-counter C0 shape. Its third value is the
+            // score-phase clone count (now zero); final clones are validated
+            // through the phase receipt and C2-B materialization receipt.
             work_counters: vec![
                 score.work_units,
                 score.candidates_scored,
@@ -3015,7 +2928,7 @@ mod tests {
             let actual = track_c2a_run_search_owner(&mut state);
             let observation = track_c2a_validate_search_state(&mut state, &actual, false);
             assert_eq!(state.frozen.fixture_signature, signature);
-            assert_eq!(observation.work_counters.len(), 26);
+            assert_eq!(observation.work_counters.len(), 31);
             assert_eq!(
                 observation.structural_signature,
                 crate::performance::track_c_workloads::action_fixture_identity(&actual.actions)
@@ -3326,43 +3239,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "opt-in C2-A search work attribution; uses only isolated synthetic catalog/provider state"]
-    fn track_c2a_benchmark_search_shared_owner_attribution() {
-        use crate::performance::track_c_workloads::{
-            BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
-        };
-
-        assert!(crate::performance::enabled());
-        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
-        let workspace = TrackCWorkspace::new();
-        for count in mode.action_sizes() {
-            let fixture = action_fixture(*count);
-            for scenario in [
-                TrackCSearchCase::SparseExact,
-                TrackCSearchCase::DenseExact,
-                TrackCSearchCase::DenseFuzzy,
-                TrackCSearchCase::EmptyBrowse,
-                TrackCSearchCase::PendingExact,
-            ] {
-                let fixture_state =
-                    track_c2a_prepare_search_state(workspace.root(), &fixture.values, scenario);
-                let fixture_signature = fixture_state.frozen.fixture_signature;
-                drop(fixture_state);
-                let samples = measure_owner(
-                    || track_c2a_prepare_search_state(workspace.root(), &fixture.values, scenario),
-                    track_c2a_run_search_owner,
-                    |state, actual| {
-                        assert_eq!(state.frozen.fixture_signature, fixture_signature);
-                        track_c2a_validate_search_state(state, actual, true)
-                    },
-                );
-                emit_track_c2a_samples(scenario, *count, fixture_signature, mode, &samples);
-            }
-        }
-        drop(workspace);
-    }
-
-    #[test]
     fn track_c2b_oracle_plugin_heavy_search_matches_c2a_reference() {
         use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
 
@@ -3394,21 +3270,25 @@ mod tests {
         assert_eq!(state.frozen.fixture_signature, signature);
         assert_eq!(actual.actions.len(), 1_128);
         assert_eq!(observation.work_counters.len(), 31);
-        assert_eq!(observation.work_counters[4], 1_000);
+        assert_eq!(observation.work_counters[4], 0);
+        assert_eq!(observation.work_counters[5], 0);
+        assert_eq!(observation.work_counters[6], 0);
         assert_eq!(observation.work_counters[7], 128);
         assert_eq!(observation.work_counters[8], 0);
         assert_eq!(observation.work_counters[9], 128);
         assert_eq!(observation.work_counters[10], 384);
         assert_eq!(observation.work_counters[11], 14_976);
         assert_eq!(observation.work_counters[16], 1_128);
-        assert_eq!(observation.work_counters[19], 0);
+        assert_eq!(observation.work_counters[19], 1_000);
+        assert_eq!(observation.work_counters[26], observation.work_counters[29]);
+        assert_eq!(observation.work_counters[27], observation.work_counters[30]);
         assert_eq!(observation.work_counters[28], 1_000);
         drop(state);
         drop(workspace);
     }
 
     #[test]
-    #[ignore = "opt-in C2-B eager materialization baseline; isolated synthetic catalog and captured provider actions only"]
+    #[ignore = "opt-in C2-B deferred materialization candidate; isolated synthetic catalog and captured provider actions only"]
     fn track_c2b_benchmark_search_materialization() {
         use crate::performance::track_c_workloads::{
             BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,

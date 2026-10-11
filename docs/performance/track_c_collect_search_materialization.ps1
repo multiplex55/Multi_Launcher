@@ -2,12 +2,14 @@ param(
  [Parameter(Mandatory=$true)][string]$LogPath,
  [Parameter(Mandatory=$true)][ValidatePattern('^(?:[0-9a-f]{40}|UNCOMMITTED_SOURCE)$')][string]$ExpectedSource,
  [Parameter(Mandatory=$true)][ValidateSet('Small','Full')][string]$ExpectedMode,
- [Parameter(Mandatory=$true)][ValidateSet('eager')][string]$ExpectedMaterialization,
+ [Parameter(Mandatory=$true)][ValidateSet('eager','deferred')][string]$ExpectedMaterialization,
  [Parameter(Mandatory=$true)][string]$OutputPath
 )
 $ErrorActionPreference='Stop'
 if(Test-Path -LiteralPath $OutputPath){throw 'Refuse existing output'}
 if($ExpectedMode -eq 'Full' -and $ExpectedSource -eq 'UNCOMMITTED_SOURCE'){throw 'Full requires committed source'}
+$deferred=$ExpectedMaterialization -ceq 'deferred'
+$expectedRecordBytes=if($deferred){24}else{104}
 $fixed=[ordered]@{
  schema='1';stage='search_materialization';materialization=$ExpectedMaterialization;owner='search_read_only_outcome_with_plugin_snapshot'
  fixture='synthetic_action_catalog_captured_provider';source=$ExpectedSource;profile='fast-dev';mode=$ExpectedMode.ToLowerInvariant()
@@ -54,7 +56,7 @@ foreach($line in Get-Content -LiteralPath $LogPath){
   if($n -ne 1000 -or $f.fixture_signature -cne 'd5a1cd254a205e24'){throw 'Heavy fixture mismatch'}
  }elseif(-not $fixtureIds.ContainsKey([string]$n) -or $f.fixture_signature -cne $fixtureIds[[string]$n][[array]::IndexOf($cases,$f.case)]){throw 'Frozen fixture mismatch'}
  $providers=if($heavy){128}else{1}
- if((UInt $f.provider_count) -ne $providers -or (UInt $f.rank_record_bytes) -ne 104){throw 'Provider count or eager rank record size mismatch'}
+ if((UInt $f.provider_count) -ne $providers -or (UInt $f.rank_record_bytes) -ne $expectedRecordBytes){throw 'Provider count or materialization rank record size mismatch'}
  $r=[ordered]@{};foreach($k in @($fixed.Keys)+$variable){$r[$k]=$f[$k]};$r['count']=$n
  foreach($k in $arrays){
   if($f[$k] -cnotmatch '^\[([^\[\] ]+)\]$'){throw 'Malformed array'}
@@ -76,9 +78,9 @@ foreach($line in Get-Content -LiteralPath $LogPath){
  $hitBytes=if($hits -eq $n){$payloadBytes[[string]$n][0]}elseif($hits -eq 3){$payloadBytes[[string]$n][1]}else{0}
  $expectedWork=@{
   local_catalog_visits=$visits;local_filter_passes=$visits;local_score_attempts=$attempts
-  local_hits=$hits;local_action_clones=$hits;provider_input_actions=$providers;provider_filter_rejections=0
-  provider_actions_retained_moved=$merged;sort_input_len=($hits+$merged);final_scored_entries_moved=($hits+$merged)
-  final_local_action_clones=0;final_local_clone_logical_bytes=0;final_local_clone_strings=0;hit_action_clone_total=$hits;hit_clone_logical_bytes_total=$hitBytes;hit_clone_strings_total=$hitStrings;empty_browse_command_cache_cloned=0
+  local_hits=$hits;local_action_clones=$(if($deferred){0}else{$hits});provider_input_actions=$providers;provider_filter_rejections=0
+  provider_actions_retained_moved=$merged;sort_input_len=($hits+$merged);final_scored_entries_moved=$(if($deferred){$merged}else{$hits+$merged})
+  final_local_action_clones=$(if($deferred){$hits}else{0});final_local_clone_logical_bytes=$(if($deferred){$hitBytes}else{0});final_local_clone_strings=$(if($deferred){$hitStrings}else{0});hit_action_clone_total=$hits;hit_clone_logical_bytes_total=$hitBytes;hit_clone_strings_total=$hitStrings;empty_browse_command_cache_cloned=0
   empty_browse_catalog_materialized=$(if($empty){$n}else{0});final_output_count=$out;outcome_state=$outcome
   command_fallback_actions_visited=0;command_fallback_hits_cloned=0;command_fallback_clone_logical_bytes=0;command_fallback_clone_strings=0
  }
@@ -90,7 +92,7 @@ foreach($line in Get-Content -LiteralPath $LogPath){
    if($r.empty_browse_logical_bytes[$i] -ne $payloadBytes[[string]$n][2] -or $r.empty_browse_strings[$i] -ne $allStrings){throw 'Missing empty browse materialization'}
   }else{
    foreach($k in @('empty_browse_logical_bytes','empty_browse_strings')){if($r[$k][$i] -ne 0){throw 'Nonempty performed browse work'}}
-   if($r.local_clone_logical_bytes[$i] -ne $hitBytes -or $r.local_clone_strings[$i] -ne $hitStrings){throw 'Missing local clone payload'}
+   if($r.local_clone_logical_bytes[$i] -ne $(if($deferred){0}else{$hitBytes}) -or $r.local_clone_strings[$i] -ne $(if($deferred){0}else{$hitStrings})){throw 'Missing local clone payload'}
   }
   $projectionStrings=if($heavy){384}else{3}
   $projectionBytes=if($heavy){14976}else{79}
@@ -105,6 +107,6 @@ $expected=@(foreach($n in $counts){foreach($case in $cases){"${case}:$n"}})
 $expected+=@('plugin-heavy-dense:1000')
 if($records.Count -ne $expected.Count){throw 'Incomplete inventory'}
 foreach($key in $expected){if(-not $seen.Contains($key)){throw "Missing $key"}}
-$bundle=[ordered]@{schema=1;status='COLLECTED_PENDING_REVIEW';source=$ExpectedSource;profile='fast-dev';mode=$ExpectedMode;production_optimization=$false;native_display='NOT MEASURED';allocator_and_process_ram='NOT MEASURED';records=@($records.ToArray())}
+$bundle=[ordered]@{schema=1;status='COLLECTED_PENDING_REVIEW';source=$ExpectedSource;profile='fast-dev';mode=$ExpectedMode;production_optimization=$deferred;native_display='NOT MEASURED';allocator_and_process_ram='NOT MEASURED';records=@($records.ToArray())}
 [IO.File]::WriteAllText($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath),(ConvertTo-Json -InputObject $bundle -Depth 20))
 Write-Output "Collected $($records.Count) C2B records; review pending"

@@ -78,3 +78,45 @@ Source1bc5204e9107e3137830a7f9994f9484936a62c8; exact clean source during run. O
 All measured tails retained, including fuzzy1kmax53.4920ms, browse1kp95.7223ms and pending10kmax11.8337ms. Baseline characterization only, no speedup claim. Eager104-byte sort-record type, earlyH/final0/totalH copies; provider and empty-browse work separate. No allocation/RSS/native/display measurements. Both benchmark sessions terminal; do not poll99143 or83121.
 
 Full staged eager baseline accepted independently; baseline evidence commit next. Runtime candidate may be separately dispatched only after that local commit, against its exact HEAD and with the already defined source ownership/oracle/work/timing/keep-or-revert gates. C2-B remains IN_PROGRESS,12/29closedLOCALONLY.
+
+Baseline evidence committed locally230f2996380619610305ac7a13ab214b38cca41e; cleanpostcommit. Separate runtimecandidate sourcehandoff authorized against that HEAD, solewritersearch.rs, fullgates asabove. Parentownscollector/docs/Cargo/Git. Original frozen search work-counter vector slot2 is early SearchScoreAndCloneHits.action_clones, expectedH→0 in candidate (not totalActioncopies); SearchMoveResults now owns finalHcatalogcopies, separately exposed in stagedschema. Other originalwork/identity fields and TrackA meanings remain stable. Candidate source/measurement review pending; C2-B IN_PROGRESS12/29closed.
+
+Candidate protocol/runners pre-source method reviewCLEAR: deferredearly0/finalH/totalH withmatchingpayload, final_scored_entries_movedP(vseagerH+P), browsezerosseparate; exact18semanticfilters/serialguards/envrestore valid. Original Smalladapter byte-equivalent to previouslyreviewedC2Aadapter. Deliberatecandidate-record-size placeholder mustbe replaced onlyafteractualstabletypeinspection; no source/evidenceapprovalimplied. Runtimewriteractive; noCargo.
+
+Candidate implementation boundary decision: original frozen owner work_counters stays fourfields (score.work_units,score.candidates_scored,score.action_clones,moved.work_units). The thirdfield becomes0truthfully; finalphase action_clones=H is asserted internally and fullyreported in stagedschema, avoiding unnecessary fifthfield/protocolshapechange. Do not claim fulloriginalworkvectorparity; compare stablefields and explicitlyaccount changedearlycopyphase. No additionalActioncopy reduction inferred.
+
+Parent inspected candidate sorttype ScoredActionSource::{Catalog(usize),Provider(usize)} plusf32, noActionpayload. Fixed64btargetexpected24bytes; emitteruses actualsize_of, so Smallstrictcollector willconfirm orreject that expectation. Deferredcollector bound24/eager104; parser-only2positives(eager+deferred)/6newdeferrednegativechecksPASS, previous27baseline negatives retained. These are fabricatedparserchecks, not compiler size measurements or runtime evidence. Originalfourslotownerworkprotocol retained.
+
+Stable runtimecandidate review inprogress. Pre-execution reviewer+parentfound FinalScoredEntriesMoved incorrectlystillH+P; approveddeferredscope requires actualPproviderActionmoves becauseHcatalogActions are nowcloned. Writerholdingconsolidatedfix forobserver+validator; SearchMoveResults.work_units andoriginalfourfieldshape remainfulloutputH+P. NoCargoexecutedcandidateyet; no performanceclaim.
+
+Assigned receiptfixcompletedandindependentlyverified: FinalScoredEntriesMoved actualP, validatorP(empty0); SearchMoveResults fullH+Pwork/finalHclones andoriginalfourfields intact. Source/isolationreview CLEARforexecution, bothimmutableoracles parent+reviewerchecked unchanged. Candidate exact18semanticrunstarted atrevieweduncommittedsearch.rs/base230f2996, fast-dev (rawcandidate-semantics.log). No measuredcandidateacceptanceyet.
+
+Candidate first semanticrun751b5bc4-5b55-4c8b-ad7f-20d3c9191068:17/18PASS, rootCPUframeoracle FAIL at render.rs6414 because fixturevalidator stillrequires earlyphasecatalogclonesH afterowner legitimatelymovedcopies tofinalphase. Build1m58/execution2.708s; rawfailurepreservedcandidate-semantics.log, all17searchsemanticspassed. AuthorizedadjacentTEST-ONLY rootvalidator migration (track_c_validate_root_query_frame): assert early0/finalH and preserve rootlocal-copyreceiptH/sevenfieldshape; no geometry/runtime/output/timingchange. Source scope nowsearch.rs plus thatsingle render.rstesthelper; solewriterunchanged. Afterfocusedreviewrerunonlyfailedrootoracle; no redundant17rerun orbroadsuite. ParentoriginalcomparisonrootworkvaluesremainH and SearchScoreearlyclonefield0explicit.
+
+## Reviewed candidate Small execution
+
+All18 distinct semantic cases PASS: initial run751b5bc4-5b55-4c8b-ad7f-20d3c9191068 had17PASS/1root stale-metric FAIL; after reviewed test-only root receipt migration, targeted root rerun ac21a1be-076d-455e-aa66-75d96bcdace3 PASS1/1 (build46.29s/execution.870s). Runtime search source unchanged across those runs; failure retained. Same three existing render-test warnings.
+
+Staged1/1 PASS run06f9562f-fe81-431e-8718-db5e6b8134cf build.89s/test8.834s/execution8.850s, sixrecords120samples. Original search+root2/2 PASS runf673892c-1071-4a0c-a431-68cbd43ad70c build.85s/root11.693s/execution19.028s, sixrecords120samples. Strict collectors accepted; actualcompiler sortrecord24bytes confirmed, early0/finalH/totalH, providerPmoves; rootsevenfieldcopyreceiptH preserved. All source UNCOMMITTED_SOURCE/Small/fast-dev; committed Full pending.
+
+| Staged case | N | Eager baseline p50/p95/max ms | Candidate p50/p95/max ms |
+|---|---:|---:|---:|
+| sparse-exact-alias-tie | 100 | 0.1240/0.1726/0.2025 | 0.1252/0.2157/0.2250 |
+| dense-exact-empty-term | 100 | 0.1075/0.1768/0.1848 | 0.1027/0.1943/0.2496 |
+| dense-fuzzy-usage-weighted | 100 | 3.9942/4.7236/5.2458 | 3.8756/3.9376/3.9616 |
+| empty-query-browse | 100 | 0.0493/0.0744/0.0981 | 0.0736/0.1145/0.1204 |
+| sparse-exact-pending-provider | 100 | 0.1390/0.2175/0.2273 | 0.1261/0.1637/0.3416 |
+| plugin-heavy-dense | 1000 | 0.7791/0.9048/0.9127 | 0.7562/0.9782/1.0888 |
+
+| Original owner/case | N | C2-A eager Small p50/p95/max ms | Candidate p50/p95/max ms |
+|---|---:|---:|---:|
+| query_event+egui_Context_run+LauncherApp::render_root_frame / app_prefix_exact_match_default_list / fresh_query_geometry_cold_warm_fonts | 100 | 2.7044/3.5360/3.7020 | 2.7236/3.3037/3.6162 |
+| LauncherApp::search_read_only_outcome_with_plugin_snapshot / exact-alias-collision-usage-tied / fresh-query-sparse-provider-result | 100 | 0.1373/0.3499/0.3816 | 0.1373/0.1871/0.2045 |
+| LauncherApp::search_read_only_outcome_with_plugin_snapshot / exact-empty-term-usage-weighted / fresh-query-dense-results | 100 | 0.1359/0.2121/0.2542 | 0.1273/0.1910/0.1949 |
+| LauncherApp::search_read_only_outcome_with_plugin_snapshot / fuzzy-mode-usage-weighted / fresh-query-dense-results | 100 | 3.9363/4.9639/5.3691 | 3.9661/4.5680/4.7454 |
+| LauncherApp::search_read_only_outcome_with_plugin_snapshot / empty-query-browse / fresh-query-complete-catalog | 100 | 0.0804/0.1040/0.1186 | 0.0523/0.0919/0.1329 |
+| LauncherApp::search_read_only_outcome_with_plugin_snapshot / exact-alias-collision-provider-pending / fresh-query-pending-provider-snapshot | 100 | 0.1877/0.3402/0.3746 | 0.1382/0.2917/0.3093 |
+
+All timing tails retained. Small results are mixed, including adverse browse/provider-heavy tails and some lower fuzzy timings; no noise attribution or optimization acceptance. Strict original work shape remains4fields with third earlyphasecopiesH→0; root7values unchanged with explicitfinalphase attribution. Parent original comparison initially used an unqualified owner literal, corrected to LauncherApp::search_read_only_outcome_with_plugin_snapshot; parser-only comparison correction, no source/Cargo rerun. Independent review pending before candidatecommit and matched Full.
+
+Independent Small evidence review CLEARforcandidatecommit: staged204arrays138scalars12timingtriplets +original42arrays114scalars6timingtriplets(18scalarstats); allrawvalues, sixstagedbaseline and sixeagerC2Aoriginal overlays and comparisonsverified. Rootsevenvaluesunchanged/searchthirdcounteronlyH→0, actual24byte record andearly0/finalH/totalH/Pmoves confirmed. Mixedtails retained. Originalcomparison G0fields nowexplicitg0_modeFull/context_only_fixture_matched_full_distribution; docsSmalltableuses matchedC2ASmall only. Sanitizedcandidate_small bundle REVIEWED_UNCOMMITTED_CANDIDATE_SMOKE_PENDING_FULL_GATE. This clearscommit, not optimizationacceptance. ExactsourceFullsameownersrequirednext.
