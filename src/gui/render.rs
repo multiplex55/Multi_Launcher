@@ -1790,6 +1790,10 @@ impl LauncherApp {
         self.root_list_geometry.invalidate_results();
     }
 
+    pub(super) fn queue_popup_cleanup_after_preserved_results(&mut self) {
+        self.root_list_geometry.queue_popup_cleanup();
+    }
+
     pub(super) fn invalidate_root_list_display_geometry(&mut self) {
         self.root_list_geometry.invalidate_geometry();
     }
@@ -6595,6 +6599,7 @@ mod tests {
 
     struct TrackC2CRefreshState {
         app: LauncherApp,
+        installation_observer: search::c2c_install_observer::Scope,
         ctx: egui::Context,
         case: TrackC2CRefreshCase,
         expected_actions: Vec<Action>,
@@ -6772,8 +6777,10 @@ mod tests {
         let geometry_before = app.root_list_geometry.test_observation();
         let result_generation_before = app.root_list_geometry.result_generation_for_test();
         crate::performance::track_c::reset();
+        let installation_observer = search::c2c_install_observer::Scope::install();
         TrackC2CRefreshState {
             app,
+            installation_observer,
             ctx,
             case,
             expected_actions,
@@ -6886,7 +6893,9 @@ mod tests {
         let result_generation = app.root_list_geometry.result_generation_for_test();
         let result_generation_delta =
             result_generation.saturating_sub(state.result_generation_before);
-        assert_eq!(result_generation_delta, expected_delta);
+        let expected_result_delta =
+            u64::from(state.case == TrackC2CRefreshCase::ChangedProviderNotification);
+        assert_eq!(result_generation_delta, expected_result_delta);
         assert_root_list_cache_matches_eager(
             &app.root_list_geometry,
             &state.eager,
@@ -6908,12 +6917,55 @@ mod tests {
         let measured_cells = after
             .measured_cells
             .saturating_sub(state.geometry_before.measured_cells);
-        assert_eq!(rebuilds, expected_delta);
+        assert_eq!(rebuilds, expected_result_delta);
         assert_eq!(
             measured_rows,
-            expected_delta.saturating_mul(state.expected_actions.len() as u64)
+            expected_result_delta.saturating_mul(state.expected_actions.len() as u64)
         );
         assert_eq!(measured_cells, 0, "this is the production list layout");
+
+        let installation = state.installation_observer.receipt();
+        match state.case {
+            TrackC2CRefreshCase::CachedRepeat => {
+                assert_eq!(installation.comparison_calls, 0);
+                assert_eq!(installation.comparison_ns, 0);
+                assert_eq!(installation.comparison_input_results, 0);
+                assert_eq!(installation.equal_reuses, 0);
+                assert_eq!(installation.discarded_incoming_actions, 0);
+                assert_eq!(installation.replacements, 0);
+                assert_eq!(installation.installed_actions, 0);
+                assert_eq!(installation.installation_ns, 0);
+            }
+            TrackC2CRefreshCase::EqualProviderNotification => {
+                assert_eq!(installation.comparison_calls, 1);
+                assert_eq!(
+                    installation.comparison_input_results,
+                    state.expected_actions.len() as u64
+                );
+                assert_eq!(installation.equal_reuses, 1);
+                assert_eq!(
+                    installation.discarded_incoming_actions,
+                    state.expected_actions.len() as u64
+                );
+                assert_eq!(installation.replacements, 0);
+                assert_eq!(installation.installed_actions, 0);
+            }
+            TrackC2CRefreshCase::ChangedProviderNotification => {
+                assert_eq!(installation.comparison_calls, 1);
+                assert_eq!(
+                    installation.comparison_input_results,
+                    state.expected_actions.len() as u64
+                );
+                assert_eq!(installation.equal_reuses, 0);
+                assert_eq!(installation.discarded_incoming_actions, 0);
+                assert_eq!(installation.replacements, 1);
+                assert_eq!(
+                    installation.installed_actions,
+                    state.expected_actions.len() as u64
+                );
+            }
+        }
+        assert!(installation.comparison_ns <= installation.installation_ns);
 
         let painted_rows = app.test_root_rendered_rows.len();
         let ids = &app.test_root_rendered_row_ids;
@@ -7053,7 +7105,7 @@ mod tests {
         } else {
             after.last_rebuild_nanos
         };
-        let work_counters = vec![
+        let mut work_counters = vec![
             app.results.len() as u64,
             state.provider_calls.load(Ordering::SeqCst) as u64,
             current_provider_generation.saturating_sub(state.provider_generation_before),
@@ -7073,6 +7125,7 @@ mod tests {
             app.selected.map_or(u64::MAX, |index| index as u64),
             app.suggestions.len() as u64,
         ];
+        work_counters.extend(installation.arrays());
         OwnerObservation {
             output_identity: complete_output_state_id,
             structural_signature: action_output_id,
@@ -7103,7 +7156,7 @@ mod tests {
             mode
         );
         for sample in samples {
-            assert_eq!(sample.work_counters.len(), 15);
+            assert_eq!(sample.work_counters.len(), 23);
             assert_eq!(sample.revision_receipts.len(), 11);
             assert!(sample.viewport_receipt.is_some());
         }
@@ -7165,7 +7218,7 @@ mod tests {
             crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
         };
         eprintln!(
-            "C2C_REFRESH_RESULT schema=1 stage=forced_refresh_invalidation installation=eager_reinstall owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=warm_egui_font_atlas settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=existing_test_observation_no_equality_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
+            "C2C_REUSE_RESULT schema=1 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=warm_egui_font_atlas settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=scoped_installation_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
             samples.len(),
             case.key(),
             numeric(0),
@@ -7183,11 +7236,19 @@ mod tests {
             numeric(12),
             numeric(13),
             numeric(14),
+            numeric(15),
+            numeric(16),
+            numeric(17),
+            numeric(18),
+            numeric(19),
+            numeric(20),
+            numeric(21),
+            numeric(22),
         );
     }
 
     #[test]
-    fn track_c2c_oracle_forced_refresh_baseline_contract() {
+    fn track_c2c_oracle_forced_refresh_reuse_contract() {
         use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
 
         let workspace = TrackCWorkspace::new();
@@ -7205,8 +7266,343 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "opt-in Track C forced provider refresh and real root geometry baseline"]
-    fn track_c2c_benchmark_forced_refresh_invalidation() {
+    fn track_c2c_equal_refresh_installation_semantics() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let mut state = track_c2c_prepare_state(
+            workspace.root(),
+            &fixture.values,
+            TrackC2CRefreshCase::EqualProviderNotification,
+        );
+
+        state.app.selected = Some(0);
+        state.app.suggestions = vec!["stale setup suggestion".into()];
+        let generation_before = state.app.root_list_geometry.result_generation_for_test();
+        let geometry_before = state.app.root_list_geometry.test_observation();
+        let _ = track_c2c_run_owner(&mut state);
+        assert_eq!(state.app.results, state.expected_actions);
+        assert_eq!(state.app.selected, None);
+        assert_eq!(state.app.suggestions, state.expected_suggestions);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            generation_before,
+            "equal current-query output retains the installed results generation"
+        );
+        assert_eq!(
+            state
+                .app
+                .root_list_geometry
+                .test_observation()
+                .rebuild_count,
+            geometry_before.rebuild_count,
+            "equal current-query output preserves settled geometry"
+        );
+
+        let mut current_provider_action = state.provider_action.lock().unwrap().clone();
+        let expected_catalog = fixture.values.clone();
+        for field in 0..6 {
+            match field {
+                0 => current_provider_action.label.push_str(" changed"),
+                1 => current_provider_action.desc.push_str(" changed"),
+                2 => current_provider_action.action.push_str(":changed"),
+                3 => current_provider_action.args = None,
+                4 => current_provider_action.args = Some(String::new()),
+                5 => current_provider_action.args = Some("payload".into()),
+                _ => unreachable!(),
+            }
+            *state.provider_action.lock().unwrap() = current_provider_action.clone();
+            state.app.selected = Some(0);
+            let generation_before = state.app.root_list_geometry.result_generation_for_test();
+            let provider_generation_before = state.app.plugins.search_generation();
+            let output = track_c2c_run_owner(&mut state);
+            let mut expected = expected_catalog.clone();
+            expected.push(current_provider_action.clone());
+            assert_eq!(state.app.results, expected, "Action field case {field}");
+            assert_eq!(
+                state.app.selected, None,
+                "selection clears for field {field}"
+            );
+            assert_eq!(
+                state.app.root_list_geometry.result_generation_for_test(),
+                generation_before + 1,
+                "a changed complete Action replaces results for field {field}"
+            );
+            assert_eq!(
+                state.app.plugins.search_generation(),
+                provider_generation_before + 1
+            );
+            assert_eq!(state.app.last_search_query, TRACK_C2C_QUERY);
+            assert!(state.app.last_results_valid);
+            assert_eq!(
+                state
+                    .app
+                    .root_list_geometry
+                    .test_observation()
+                    .rebuild_count,
+                geometry_before.rebuild_count + 1 + field as u64,
+                "changed Action field invalidates geometry"
+            );
+            drop(output);
+        }
+
+        let reordered = expected_catalog.iter().cloned().rev().collect::<Vec<_>>();
+        state.app.actions = Arc::new(reordered.clone());
+        state.app.update_action_cache();
+        let before_order_refresh = state.app.root_list_geometry.result_generation_for_test();
+        let output = track_c2c_run_owner(&mut state);
+        let mut reordered_expected = reordered.clone();
+        reordered_expected.push(current_provider_action.clone());
+        assert_eq!(state.app.results, reordered_expected);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            before_order_refresh + 1,
+            "a changed ordered result vector is replaced"
+        );
+        drop(output);
+
+        let before_text_edit = state.app.root_list_geometry.result_generation_for_test();
+        let same_output = state.app.results.clone();
+        state.app.selected = Some(0);
+        state.app.query = format!("{TRACK_C2C_QUERY} ");
+        state.app.handle_query_text_changed();
+        assert_eq!(state.app.results, same_output);
+        assert_eq!(state.app.last_search_query, state.app.query);
+        assert_eq!(state.app.selected, None);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            before_text_edit + 1,
+            "a real query text change replaces equal output because the raw query differs"
+        );
+
+        let before_empty_query = state.app.root_list_geometry.result_generation_for_test();
+        let observer_before_empty_query = state.installation_observer.receipt();
+        state.app.query.clear();
+        state.app.selected = Some(0);
+        state.app.handle_query_text_changed();
+        let mut expected_empty_browse = state.app.command_cache.clone();
+        expected_empty_browse.extend(reordered.iter().map(|action| Action {
+            label: format!("app {}", action.label),
+            desc: action.desc.clone(),
+            action: action.action.clone(),
+            args: action.args.clone(),
+        }));
+        assert_eq!(state.app.results, expected_empty_browse);
+        assert_eq!(state.app.suggestions, Vec::<String>::new());
+        assert_eq!(state.app.selected, None);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            before_empty_query + 1,
+            "empty browse still follows its established replacement path"
+        );
+        assert_eq!(
+            state.installation_observer.receipt(),
+            observer_before_empty_query,
+            "empty browse remains outside the nonempty-result installation observer"
+        );
+
+        let receipt = state.installation_observer.receipt();
+        assert_eq!(receipt.equal_reuses, 1);
+        assert_eq!(
+            receipt.discarded_incoming_actions,
+            fixture.values.len() as u64 + 1
+        );
+        assert_eq!(receipt.replacements, 8);
+        assert_eq!(
+            receipt.installed_actions,
+            8 * (fixture.values.len() as u64 + 1)
+        );
+        assert_eq!(receipt.comparison_calls, 8);
+        assert_eq!(
+            receipt.comparison_input_results,
+            8 * (fixture.values.len() as u64 + 1)
+        );
+        drop(state);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2c_equal_refresh_updates_capacity_deferral_and_resumes() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, fixture.values.clone(), workspace.root());
+        app.update_action_cache();
+        app.query = TRACK_C2C_QUERY.into();
+        app.handle_query_text_changed();
+        assert_eq!(app.results, fixture.values);
+        let expected = app.results.clone();
+        let generation_before = app.root_list_geometry.result_generation_for_test();
+        let provider_generation = app.plugins.search_generation();
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let _capacity = app
+            .radial_provider_search_capacity
+            .try_acquire()
+            .expect("test owns the provider-capacity slot");
+        app.last_results_valid = false;
+        let observer = search::c2c_install_observer::Scope::install();
+
+        app.search();
+
+        assert_eq!(app.results, expected);
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            generation_before
+        );
+        assert!(app.last_search_pending);
+        assert!(!app.last_results_valid);
+        assert_eq!(app.last_search_provider_revision, provider_generation);
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+        assert!(!app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::Capacity
+        );
+        assert_eq!(observer.receipt().equal_reuses, 1);
+        assert_eq!(
+            observer.receipt().discarded_incoming_actions,
+            expected.len() as u64
+        );
+
+        drop(_capacity);
+        app.resume_capacity_deferred_search();
+        assert_eq!(app.results, expected);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert_eq!(app.last_search_provider_revision, provider_generation);
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            generation_before
+        );
+        assert_eq!(observer.receipt().comparison_calls, 2);
+        assert_eq!(observer.receipt().equal_reuses, 2);
+        assert_eq!(observer.receipt().replacements, 0);
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2c_equal_refresh_queues_popup_cleanup_and_preserves_display_invalidation() {
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let results = (0..120).map(root_list_action).collect::<Vec<_>>();
+        let mut app = root_list_app_at(&ctx, results, workspace.root());
+        app.update_action_cache();
+        app.query = TRACK_C2C_QUERY.into();
+        app.handle_query_text_changed();
+
+        let mut frame = 0;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        let row_zero = app
+            .test_root_rendered_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 0).then_some(*rect))
+            .expect("the settled viewport contains the popup target");
+        let pointer = row_zero.center();
+        let pressed = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+        frame += 1;
+        let released = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+        frame += 1;
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+
+        let scroll_id = app.test_root_scroll_area_id.unwrap();
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
+        scroll_state.offset.y = app.root_list_geometry.row_tops[25];
+        scroll_state.store(&ctx, scroll_id);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the root list records its actual viewport");
+        let owner_rect = app
+            .test_root_rendered_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 0).then_some(*rect))
+            .expect("the popup retains its absolute owner row");
+        assert!(
+            !viewport.intersects(owner_rect),
+            "the retained popup owner is outside the visible viewport"
+        );
+
+        let result_generation = app.root_list_geometry.result_generation_for_test();
+        app.last_results_valid = false;
+        app.search();
+        assert!(
+            ctx.is_context_menu_open(),
+            "equal refresh queues, not closes, the popup"
+        );
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            result_generation
+        );
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert!(
+            !ctx.is_context_menu_open(),
+            "the next frame applies queued cleanup"
+        );
+        assert_eq!(app.root_list_geometry.popup_owner(), None);
+
+        app.invalidate_root_list_display_geometry();
+        let geometry_before = app.root_list_geometry.test_observation();
+        app.last_results_valid = false;
+        app.search();
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            result_generation
+        );
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        let geometry_after = app.root_list_geometry.test_observation();
+        assert_eq!(
+            geometry_after.rebuild_count,
+            geometry_before.rebuild_count + 1,
+            "result reuse leaves an independent display invalidation effective"
+        );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C forced provider refresh and equal-result reuse"]
+    fn track_c2c_benchmark_equal_refresh_reuse() {
         use crate::performance::track_c_workloads::{
             BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
         };

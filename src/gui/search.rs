@@ -4,6 +4,132 @@ pub(crate) const NOTE_SEARCH_DEBOUNCE: Duration = Duration::from_secs(1);
 pub(crate) const COMPLETION_REBUILD_DEBOUNCE: Duration = Duration::from_millis(120);
 
 #[cfg(test)]
+pub(super) mod c2c_install_observer {
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(in crate::gui) struct Receipt {
+        pub(in crate::gui) comparison_calls: u64,
+        pub(in crate::gui) comparison_ns: u64,
+        pub(in crate::gui) comparison_input_results: u64,
+        pub(in crate::gui) equal_reuses: u64,
+        pub(in crate::gui) discarded_incoming_actions: u64,
+        pub(in crate::gui) replacements: u64,
+        pub(in crate::gui) installed_actions: u64,
+        pub(in crate::gui) installation_ns: u64,
+    }
+
+    impl Receipt {
+        pub(in crate::gui) fn arrays(self) -> [u64; 8] {
+            [
+                self.comparison_calls,
+                self.comparison_ns,
+                self.comparison_input_results,
+                self.equal_reuses,
+                self.discarded_incoming_actions,
+                self.replacements,
+                self.installed_actions,
+                self.installation_ns,
+            ]
+        }
+    }
+
+    #[derive(Default)]
+    struct Counters {
+        values: [Cell<u64>; 8],
+    }
+
+    #[derive(Clone, Copy)]
+    #[repr(usize)]
+    pub(super) enum Counter {
+        ComparisonCalls,
+        ComparisonNanoseconds,
+        ComparisonInputResults,
+        EqualReuses,
+        DiscardedIncomingActions,
+        Replacements,
+        InstalledActions,
+        InstallationNanoseconds,
+    }
+
+    impl Counters {
+        fn add(&self, counter: Counter, amount: u64) {
+            let value = &self.values[counter as usize];
+            value.set(value.get().saturating_add(amount));
+        }
+
+        fn receipt(&self) -> Receipt {
+            let values = &self.values;
+            Receipt {
+                comparison_calls: values[Counter::ComparisonCalls as usize].get(),
+                comparison_ns: values[Counter::ComparisonNanoseconds as usize].get(),
+                comparison_input_results: values[Counter::ComparisonInputResults as usize].get(),
+                equal_reuses: values[Counter::EqualReuses as usize].get(),
+                discarded_incoming_actions: values[Counter::DiscardedIncomingActions as usize]
+                    .get(),
+                replacements: values[Counter::Replacements as usize].get(),
+                installed_actions: values[Counter::InstalledActions as usize].get(),
+                installation_ns: values[Counter::InstallationNanoseconds as usize].get(),
+            }
+        }
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Rc<Counters>>> = const { RefCell::new(None) };
+    }
+
+    pub(in crate::gui) struct Scope {
+        counters: Rc<Counters>,
+        previous: Option<Rc<Counters>>,
+    }
+
+    impl Scope {
+        pub(in crate::gui) fn install() -> Self {
+            let counters = Rc::new(Counters::default());
+            let previous = ACTIVE.with(|active| active.replace(Some(Rc::clone(&counters))));
+            Self { counters, previous }
+        }
+
+        pub(in crate::gui) fn receipt(&self) -> Receipt {
+            self.counters.receipt()
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| {
+                let current = active.replace(self.previous.take());
+                debug_assert!(
+                    current.is_some_and(|current| Rc::ptr_eq(&current, &self.counters)),
+                    "C2-C installation observers must be restored in stack order"
+                );
+            });
+        }
+    }
+
+    #[derive(Clone)]
+    pub(super) struct Handle(Rc<Counters>);
+
+    impl Handle {
+        pub(super) fn add(&self, counter: Counter, amount: u64) {
+            self.0.add(counter, amount);
+        }
+    }
+
+    pub(super) fn current() -> Option<Handle> {
+        ACTIVE.with(|active| {
+            active
+                .borrow()
+                .as_ref()
+                .map(|counters| Handle(Rc::clone(counters)))
+        })
+    }
+}
+
+#[cfg(test)]
 mod c2a_search_observer {
     use std::{cell::Cell, cell::RefCell, rc::Rc};
 
@@ -704,8 +830,71 @@ impl LauncherApp {
         self.last_search_result_catalog_versions = outcome.result_catalog_versions;
         self.last_search_result_catalog_versions_stable = outcome.result_catalog_versions_stable;
         self.last_search_provider_deferral = outcome.provider_deferral;
-        self.results = outcome.actions;
-        self.invalidate_root_list_results();
+
+        #[cfg(test)]
+        let c2c_install_observer = c2c_install_observer::current();
+        #[cfg(test)]
+        let installation_started = c2c_install_observer.as_ref().map(|_| Instant::now());
+        let same_raw_query = self.query == self.last_search_query;
+        let can_reuse_results =
+            same_raw_query && !self.results.is_empty() && !outcome.actions.is_empty();
+        #[cfg(test)]
+        let incoming_actions = outcome.actions.len();
+        let results_are_equal = if can_reuse_results {
+            #[cfg(test)]
+            let comparison_started = c2c_install_observer.as_ref().map(|_| Instant::now());
+            let equal = self.results == outcome.actions;
+            #[cfg(test)]
+            if let (Some(observer), Some(started)) =
+                (c2c_install_observer.as_ref(), comparison_started)
+            {
+                observer.add(c2c_install_observer::Counter::ComparisonCalls, 1);
+                observer.add(
+                    c2c_install_observer::Counter::ComparisonInputResults,
+                    incoming_actions as u64,
+                );
+                observer.add(
+                    c2c_install_observer::Counter::ComparisonNanoseconds,
+                    started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                );
+            }
+            equal
+        } else {
+            false
+        };
+
+        if results_are_equal {
+            drop(outcome.actions);
+            self.queue_popup_cleanup_after_preserved_results();
+            #[cfg(test)]
+            if let Some(observer) = c2c_install_observer.as_ref() {
+                observer.add(c2c_install_observer::Counter::EqualReuses, 1);
+                observer.add(
+                    c2c_install_observer::Counter::DiscardedIncomingActions,
+                    incoming_actions as u64,
+                );
+            }
+        } else {
+            self.results = outcome.actions;
+            self.invalidate_root_list_results();
+            #[cfg(test)]
+            if let Some(observer) = c2c_install_observer.as_ref() {
+                observer.add(c2c_install_observer::Counter::Replacements, 1);
+                observer.add(
+                    c2c_install_observer::Counter::InstalledActions,
+                    incoming_actions as u64,
+                );
+            }
+        }
+        #[cfg(test)]
+        if let (Some(observer), Some(started)) =
+            (c2c_install_observer.as_ref(), installation_started)
+        {
+            observer.add(
+                c2c_install_observer::Counter::InstallationNanoseconds,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            );
+        }
         self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
         self.last_results_valid = outcome.provider_deferral == ProviderSearchDeferral::None;
