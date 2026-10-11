@@ -1,6 +1,6 @@
 # Track C C1-F action ID projection gate
 
-Status IN_PROGRESS;9/29closed. Base1ecdce51c5ef4933bc442d31033c1a9a0b7a77c1, C1-E source508bcf47a006729c064f62adb66609616ccbcaf0. LOCAL ONLY. Parent owns evidence, collectors, Cargo, Git and ledger; c0_docs sole source writer; c0_recon planner and c0_boundary_review independent reviewer. No C1-F tests or optimized measurements yet.
+Status PASS;10/29closed. Base1ecdce51c5ef4933bc442d31033c1a9a0b7a77c1, C1-E source508bcf47a006729c064f62adb66609616ccbcaf0. LOCAL ONLY. Parent owns evidence, collectors, Cargo, Git and ledger; c0_docs sole source writer; c0_recon planner and c0_boundary_review independent reviewer. No C1-F tests or optimized measurements yet.
 
 ## Reviewed trigger and decision
 
@@ -39,3 +39,44 @@ Exact ordinary verification PASS10/10, Nextest8a2af4ba-ac1c-4c9a-a288-ea4a68c62d
 Non-test cargo check --lib --profile fast-dev PASS1m07s. Small ignored benchmark PASS1/1 Nextestbf4b7442-6c21-45ff-8888-f846ec408a88,build0.89s,test7.466s,execution7.481s,5179skipped; strictcollector5records100samples. All five fixture/output identities match C1-E Small. Small owner p50/p95/maxms: changed6.3140/9.9594/10.3636; equal6.1325/11.4704/12.0811; malformed0.3906/0.4871/0.4907; missing0.3611/0.5893/0.6087; index0.3632/0.4452/0.4575. Publishing100actualkeys,99retainedIDs,6382selectedkeybytes,structuralzeroActionbodycopies. No-op/errors0keys/0selectedbytes. SourceUNCOMMITTED_SOURCE; Small is smoke only, no acceptance or speedup claim. Independent actualSmallnumericreview pending, exactsourceFull notrun.
 
 Independent Small evidence CLEAR: every scalar/hash and230arrays exact to raw lines, all75timingtriplets recomputed;100samples pass receipts/nesting/exclusive sums, identities and privacy. Candidate source commit authorized for exact-source Full, acceptance still PENDING. Contrary Small p95/maxms preserved against C1-E Small: changed8.4233/9.5959→9.9594/10.3636; missing0.4931/0.5148→0.5893/0.6087; acceptedindex0.4316/0.4561→0.4452/0.4575. No speedup claim from Small. Source unchanged since ordinary/Small; originalG0/C1Aartifact hashes unchanged; cumulative diff reviewed, no unintended files.
+
+Reviewed candidate source commit ccebeef374ec3f8063e264c0c5df60a827db835f, clean immediately aftercommit. ExactsourceFull started runa4af4ca5-016b-4096-89b1-0f316e60c75a/session45959, build0.87s, ignored rawc1-f/full-1.log; no Full result yet. Source frozen during run, no concurrentCargo. Candidate acceptance remains PENDING,9/29closed.
+
+## Exact-source Full results (reviewed)
+
+Source ccebeef374ec3f8063e264c0c5df60a827db835f; baseline508bcf47a006729c064f62adb66609616ccbcaf0. Nextest a4af4ca5-016b-4096-89b1-0f316e60c75a PASS1/1, build0.87s, test641.278s, execution641.300s,5179skipped. Strictcollector20records400samples;5warmups20retained0excluded. Everyfixture/output signature matches baseline. Runtime includes fixture/oracle work outside handler timing. AllCargo terminal, source unchanged.
+
+Handler timings below are p50/p95/max in milliseconds.
+
+| Case | Actions | C1-E owner | C1-F owner | Median change | C1-F ID construction |
+|---|---:|---|---|---:|---|
+| custom_changed | 100 | 6.3093/8.0909/10.0437 | 6.5134/7.3434/7.5148 | 3.23% | 0.0540/0.0869/0.0914 |
+| custom_equal | 100 | 10.7080/11.9270/12.9692 | 11.0685/11.8410/12.0902 | 3.37% | 0.0000/0.0000/0.0000 |
+| custom_malformed | 100 | 0.3901/0.5113/0.5601 | 0.3861/0.5606/0.5945 | -1.03% | 0.0000/0.0000/0.0000 |
+| custom_missing | 100 | 0.3345/0.4865/0.5878 | 0.3375/0.3865/0.4280 | 0.9% | 0.0000/0.0000/0.0000 |
+| index_accepted_changed | 100 | 0.3929/0.4557/0.4715 | 0.3758/0.4539/0.6624 | -4.35% | 0.0525/0.0627/0.0803 |
+| custom_changed | 1000 | 4.9410/5.2145/5.3698 | 4.4555/4.8567/6.2120 | -9.83% | 0.4319/0.4664/0.4680 |
+| custom_equal | 1000 | 1.5839/1.8847/2.0314 | 1.5947/1.6693/1.7894 | 0.68% | 0.0000/0.0000/0.0000 |
+| custom_malformed | 1000 | 0.4703/0.5447/0.7374 | 0.4804/0.5378/0.6426 | 2.15% | 0.0000/0.0000/0.0000 |
+| custom_missing | 1000 | 0.4001/0.5103/0.5641 | 0.4555/0.5277/0.5970 | 13.85% | 0.0000/0.0000/0.0000 |
+| index_accepted_changed | 1000 | 3.5229/5.7634/6.6007 | 2.9813/3.4514/4.2919 | -15.37% | 0.4302/0.4821/0.6553 |
+| custom_changed | 10000 | 47.7038/56.5249/62.2670 | 43.8495/56.8456/65.4500 | -8.08% | 4.8708/5.5323/6.4084 |
+| custom_equal | 10000 | 14.1475/15.3865/20.0922 | 14.2150/16.8506/18.8653 | 0.48% | 0.0000/0.0000/0.0000 |
+| custom_malformed | 10000 | 0.5015/0.5806/1.0075 | 0.5333/0.6286/0.7276 | 6.34% | 0.0000/0.0000/0.0000 |
+| custom_missing | 10000 | 0.4242/0.5031/0.5939 | 0.4334/0.5593/0.6057 | 2.17% | 0.0000/0.0000/0.0000 |
+| index_accepted_changed | 10000 | 35.8054/44.1261/48.9291 | 30.2469/31.6692/31.6753 | -15.52% | 4.7274/5.1211/5.2737 |
+| custom_changed | 20000 | 95.3291/102.8852/108.1373 | 84.0773/92.6266/111.3324 | -11.8% | 9.6286/13.0668/13.7298 |
+| custom_equal | 20000 | 29.2355/34.9968/44.9636 | 28.1605/29.2733/29.3077 | -3.68% | 0.0000/0.0000/0.0000 |
+| custom_malformed | 20000 | 0.5260/0.8406/17.3050 | 0.5177/0.6778/0.7633 | -1.58% | 0.0000/0.0000/0.0000 |
+| custom_missing | 20000 | 0.4445/0.6046/0.8943 | 0.4359/0.5782/0.6208 | -1.93% | 0.0000/0.0000/0.0000 |
+| index_accepted_changed | 20000 | 73.6367/85.6836/100.9051 | 61.7502/70.9935/71.3449 | -16.14% | 9.6061/11.0454/13.1026 |
+
+Actual key-copy/insertion attempts on publishing routes are100/1000/10000/20000, with99/999/9999/19999retainedIDs. Precomputed associated logical key-only UTF-8 bytes are6382/63082/630082/1260082. Full ID Action-body copies are structurally zero by the shared constructor; this is not a global clone interceptor. No-op/error receipts remain0keys/0keybytes with retained catalog/version. Search/filter/completion/result cardinalities and full Action values/args remain equal. No per-action clocks, extra byte scan in owner, worker or historical-generation retention introduced.
+
+Parent recommendation: accept the bounded ID projection, subject to independent final review. Both routes improve complete-owner medians at10k/20k (8.08%/11.80%custom;15.52%/16.14%index), with20k p95 improvements9.97%/17.14%. This is owner-only evidence, not an application-wide or native-display speedup. Old catalog disposal moved from assembly into lookup replacement inside the owner; ID construction timing alone is not the acceptance boundary.
+
+Contrary evidence remains:10kcustom p95+0.57%,max62.2670→65.4500ms;20kcustom max108.1373→111.3324ms;100index max0.4715→0.6624ms;100custom/equal medians+3.23%/+3.37%;1kmissing median0.4001→0.4555ms;10kequal p9515.3865→16.8506ms. Small contrary observations above remain. All20rows retained; causes of run-to-run variability are not proven. No universal p95/max improvement claim; unchanged no-op/error branches still execute no projection work. The material large-catalog median gains and explicit body-copy removal support the narrow hypothesis without adding concurrency risk.
+
+Native input/display, allocator bytes/RSS, end-to-end stale-result time and deferred completion rebuild are NOT MEASURED here. Request/scanner waits stay separate. Original frozen C0Full note/action comparison remains C1-G work.
+
+Final independent review CLEAR and ACCEPT: all920arrays/300nearest-ranktriplets/460scalarfields exact to rawFull; all20baseline and5Small identities match. All400samples satisfy work/nesting/exclusive sums/version/Arc/consumer/privacy invariants. Qualified acceptance: large-catalog complete-owner gains on bothroutes and structural body-copy removal outweigh retained mixed tails for this bounded gate. This is not proof that every latency statistic improves, nor an explanation of variability. No source findings or additional rerun required. Parent accepts same disposition. C1-F CLOSED PASS,10/29closed; nextC1G executes only after localclosurecommit.
