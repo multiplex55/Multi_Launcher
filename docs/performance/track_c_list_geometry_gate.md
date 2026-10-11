@@ -189,3 +189,73 @@ Frozen render.rs SHA256 F3AD0F57A99FF870AF2D944384525A7C9C287E9B968087777965DC49
 Adverse 5% prefix, first-wide, full-path, wrap, ppp, viewport and warm tails remain in the evidence. Args-only and last-row reuse are favorable conditional cases, insufficient by themselves for KEEP. Partial capacity excludes transient suffix WidgetText/galley allocations, key/Arc/control blocks, allocator overhead and RSS; it is not total peak memory. Geometry/viewport correctness comes from executed frozen eager assertions, not independent font-metric regeneration. Native composition NOT MEASURED. LOCAL ONLY.
 
 Independent actual Small evidence review CLEAR for sanitized smoke, local candidate source commit and exact-source Full, not KEEP: all420arrays8400entries/228scalars/24nearest-rank triplets match raw; all96 unchanged domains match frozen FULL N100. Source SHA256 F3AD0F57A99FF870AF2D944384525A7C9C287E9B968087777965DC49FF4443B6 matches. Work/rejection/overlap equations exact. Partial after storage ~21–24KB at100; max overlap47,021bytes. Shared full-prefix geometry2,400bytes counted once. Above comparison denominator is frozen FULL N100, not earlier Small; versus earlier Small warm p95+35.30% and prefix5+24.82%, also adverse. Sanitized privacy CLEAR. Full pending;14/29closed, LOCAL ONLY.
+
+Reviewed candidate source/Small commit db38424655f0aa1218ec7d6ddece09d8ec5f88b2, clean at dispatch. Exact-source Full owner now RUNNING session18382/run1f8a35dc-f9b6-46c1-b9f8-969b7e9577dd, build0.86s;36recipes720samples expected, result pending. Source and HEAD frozen; docs only may change. No concurrent Cargo, no C2-E implementation until C2-D closes.14/29closed LOCAL ONLY.
+
+## Candidate scoped verification and reproduction
+
+Ordinary run0806843c-8f41-4f04-8b4d-74224333489e executed exactly ten tests, all PASS (build2m24, execution18.106s,5185skipped): root_list_context_menu_owner_stays_with_its_absolute_row_offscreen; root_list_geometry_matches_eager_selectable_label_layout; root_list_geometry_rebuilds_only_when_layout_or_display_inputs_change; root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection; track_c2c_oracle_forced_refresh_reuse_contract; track_c2d_incremental_root_list_edge_cases; track_c2d_incremental_root_list_reuse_contract; track_c2d_inert_list_keyboard_navigation_keeps_rows_visible; track_c_oracle_root_grid_frame_matches_frozen_eager_geometry; track_c_oracle_root_list_frame_matches_frozen_eager_geometry. All names are under gui::render::tests. The real click uses the Drop-reset test execution hook before headless execution; no synthetic Action launches a process. Non-test `cargo check --lib --profile fast-dev` PASS23.68s.
+
+For the candidate source commit only, reproduce the ignored owner serially with process-local MULTI_LAUNCHER_PERF=1, ML_SKIP_CLIPBOARD_SYNC=1, ML_TRACK_C_PROFILE=fast-dev, ML_TRACK_C_BENCH_MODE=full and ML_TRACK_C_SOURCE_SHA=db38424655f0aa1218ec7d6ddece09d8ec5f88b2, preserving/restoring prior environment values:
+
+```text
+cargo nextest run --lib --cargo-profile fast-dev --test-threads 1 --no-fail-fast --success-output immediate --run-ignored only -E 'test(=gui::render::tests::track_c2d_benchmark_root_list_incremental_geometry)'
+pwsh -NoProfile -ExecutionPolicy Bypass -File docs/performance/track_c_collect_list_geometry_reuse.ps1 -LogPath <owned-raw-log> -ExpectedSource db38424655f0aa1218ec7d6ddece09d8ec5f88b2 -ExpectedMode Full -OutputPath <owned-collected-json>
+```
+
+Full is still pending. Do not use UNCOMMITTED_SOURCE for comparable Full evidence; require clean exact source/HEAD and no concurrent Cargo. Raw logs stay ignored; only sanitized summaries are committed. No full suite, release, native campaign, production overlap sampling or allocator instrumentation ran for this checkpoint.
+
+Pre-Full-result gate interpretation fixed by parent and independent reviewer: both5% and20% ordered-prefix recipes must improve complete-owner p95 at each measured100/1k/10k size (six comparisons), plus no material warm regression. No favorable-size subset or args-only/last-row substitution. Full output not inspected when this interpretation was confirmed.
+
+## Exact-source candidate Full — terminal, independent gate review pending
+
+Source db38424655f0aa1218ec7d6ddece09d8ec5f88b2; run1f8a35dc-f9b6-46c1-b9f8-969b7e9577dd; build0.86s/test989.182s/Nextest989.217s;1/1PASS,5194skipped,36records720samples,5warmups20samples0exclusions. Source/HEAD guards PASS. Strict collection PASS; independent720semantic hashes/72nearest-rank timing triplets PASS; all288 unchanged fixture/output/Action/presentation/geometry/viewport/transition/paint/prefix arrays match frozen Full eager baseline. Independent actual-evidence review pending.
+
+All timing triplets below are p50/p95/max milliseconds; p95 change uses the frozen FULL eager baseline at the same size/case. Galley rows are actual suffix measurements. Storage columns are partial retained checkpoint+geometry capacities, not total memory.
+
+| N | Case | Eager full owner | Candidate full owner | Candidate geometry | Owner p95 change | Galley rows | After / overlap capacity bytes |
+|---|---|---|---|---|---|---|---|
+| 100 | fresh_context_first_open | 15.0359/21.3780/22.6060 | 15.6668/19.0883/24.4251 | 6.0342/7.6708/8.5728 | -10.71% | 100 | 23300 / 23300 |
+| 100 | shared_prefix_5_percent | 6.9356/7.9522/8.4348 | 7.0613/10.1595/10.9252 | 6.0336/8.7324/9.4440 | +27.76% | 95 | 21360 / 44660 |
+| 100 | shared_prefix_20_percent | 6.0069/8.1545/8.2827 | 6.3211/9.0102/9.0826 | 5.2481/7.5893/7.6744 | +10.49% | 80 | 21644 / 44944 |
+| 100 | identical_presentation_new_generation | 5.3144/7.5893/8.0235 | 1.0695/1.3030/1.3048 | 0.0523/0.0655/0.0664 | -82.83% | 0 | 23300 / 44200 |
+| 100 | last_row_text_edit | 5.2871/7.3917/8.5755 | 1.2076/1.7537/2.1576 | 0.1201/0.2031/0.2182 | -76.27% | 1 | 23300 / 46600 |
+| 100 | first_row_width_expansion_no_wrap | 5.2027/6.0846/6.3408 | 5.1322/6.5353/6.9064 | 3.9378/5.1006/5.4904 | +7.41% | 100 | 23721 / 47021 |
+| 100 | full_paths_toggle | 5.3826/6.1948/6.3772 | 5.1996/6.5141/6.5778 | 4.2100/5.3066/5.3421 | +5.15% | 100 | 23300 / 46006 |
+| 100 | wrap_change | 6.1489/6.8629/9.4290 | 6.2537/8.0003/8.0605 | 4.9729/6.1277/6.5304 | +16.57% | 100 | 23300 / 46600 |
+| 100 | font_atlas_replacement | 13.7910/18.1080/18.9938 | 14.6858/21.2494/22.3013 | 5.8253/7.6097/8.3883 | +17.35% | 100 | 23300 / 46600 |
+| 100 | pixels_per_point_change | 14.3893/17.4319/18.9928 | 15.3254/17.0481/18.8750 | 5.9829/6.9815/7.0904 | -2.20% | 100 | 23300 / 46600 |
+| 100 | viewport_width_change | 6.3110/7.6116/8.0185 | 7.6927/9.7335/9.8407 | 6.6547/8.3176/8.4043 | +27.88% | 100 | 23300 / 46600 |
+| 100 | warm_repeat | 1.0446/1.2410/1.2816 | 0.9956/1.3164/1.3241 | 0.0000/0.0000/0.0000 | +6.08% | 0 | 23300 / 23300 |
+| 1000 | fresh_context_first_open | 65.8638/77.0927/92.7477 | 66.5658/87.7695/115.6464 | 53.3986/69.8929/97.4249 | +13.85% | 1000 | 235120 / 235120 |
+| 1000 | shared_prefix_5_percent | 61.7244/69.2664/69.4899 | 60.5304/70.1377/79.7377 | 58.9079/68.7833/77.9393 | +1.26% | 950 | 215720 / 450840 |
+| 1000 | shared_prefix_20_percent | 60.1792/66.7475/72.9068 | 50.3569/58.8513/59.4101 | 48.9764/57.1246/57.8631 | -11.83% | 800 | 218772 / 453892 |
+| 1000 | identical_presentation_new_generation | 53.7778/59.5942/62.9444 | 1.8466/2.8374/3.0845 | 0.4293/0.8529/0.8768 | -95.24% | 0 | 235120 / 446240 |
+| 1000 | last_row_text_edit | 53.6438/63.1035/64.3137 | 1.9033/2.4887/2.6068 | 0.5263/0.6759/0.7607 | -96.06% | 1 | 235120 / 470240 |
+| 1000 | first_row_width_expansion_no_wrap | 49.3637/50.8247/53.7297 | 51.1683/62.5307/174.1354 | 49.5593/60.7941/171.8886 | +23.03% | 1000 | 235541 / 470661 |
+| 1000 | full_paths_toggle | 54.8761/58.6501/61.7303 | 53.3561/57.0595/57.5253 | 52.2928/55.9459/56.2932 | -2.71% | 1000 | 235120 / 462014 |
+| 1000 | wrap_change | 50.8487/58.7502/59.1593 | 49.3494/57.4474/65.7032 | 48.2205/56.3456/64.1145 | -2.22% | 1000 | 235120 / 470240 |
+| 1000 | font_atlas_replacement | 61.8384/68.6881/79.2295 | 60.0694/73.9901/74.8189 | 52.3903/64.0411/64.5133 | +7.72% | 1000 | 235120 / 470240 |
+| 1000 | pixels_per_point_change | 62.2897/70.4497/86.0640 | 62.3025/71.3715/72.2499 | 53.0516/58.8522/60.3609 | +1.31% | 1000 | 235120 / 470240 |
+| 1000 | viewport_width_change | 54.0588/60.5037/65.2137 | 54.8591/59.9930/60.0070 | 53.6053/58.5063/58.9732 | -0.84% | 1000 | 235120 / 470240 |
+| 1000 | warm_repeat | 1.0027/1.3132/1.3140 | 1.0622/1.3126/1.4797 | 0.0000/0.0000/0.0000 | -0.05% | 0 | 235120 / 235120 |
+| 10000 | fresh_context_first_open | 604.8952/729.1262/820.5416 | 580.4893/669.7162/671.2068 | 539.1578/602.3290/608.7007 | -8.15% | 10000 | 2357560 / 2357560 |
+| 10000 | shared_prefix_5_percent | 628.1134/651.4424/765.8397 | 598.7810/736.6873/777.0030 | 594.2252/732.0060/772.3047 | +13.09% | 9500 | 2163560 / 4521120 |
+| 10000 | shared_prefix_20_percent | 621.6263/677.3523/704.4039 | 503.0102/536.7158/538.3633 | 497.5644/532.1031/533.2726 | -20.76% | 8000 | 2194186 / 4551746 |
+| 10000 | identical_presentation_new_generation | 551.6320/598.8862/616.5687 | 9.0751/10.0087/11.0575 | 4.5349/5.0407/6.2398 | -98.33% | 0 | 2357560 / 4475120 |
+| 10000 | last_row_text_edit | 557.1789/598.7135/619.2397 | 9.5805/16.4364/26.5771 | 4.8516/9.7422/13.4584 | -97.25% | 1 | 2357560 / 4715120 |
+| 10000 | first_row_width_expansion_no_wrap | 499.4731/573.6285/579.9358 | 517.7851/597.5927/606.7320 | 512.6384/593.0763/601.6969 | +4.18% | 10000 | 2357981 / 4715541 |
+| 10000 | full_paths_toggle | 561.3349/609.7567/621.3020 | 541.5901/594.6266/594.6953 | 540.5147/593.5408/593.5801 | -2.48% | 10000 | 2357560 / 4632164 |
+| 10000 | wrap_change | 498.9457/518.8426/530.3989 | 512.6469/534.7238/561.6992 | 511.1862/533.2266/560.4748 | +3.06% | 10000 | 2357560 / 4715120 |
+| 10000 | font_atlas_replacement | 558.9813/600.6273/718.2097 | 547.4609/599.7322/630.7304 | 539.0779/590.9240/601.7193 | -0.15% | 10000 | 2357560 / 4715120 |
+| 10000 | pixels_per_point_change | 560.0683/576.9729/583.1194 | 555.4186/633.6439/824.5538 | 546.8867/625.4849/812.1823 | +9.82% | 10000 | 2357560 / 4715120 |
+| 10000 | viewport_width_change | 551.8365/617.4324/630.6484 | 542.8580/709.2016/750.6759 | 541.7266/707.6158/748.8316 | +14.86% | 10000 | 2357560 / 4715120 |
+| 10000 | warm_repeat | 1.0519/1.5997/1.7189 | 1.0173/1.3765/1.6964 | 0.0000/0.0000/0.0000 | -13.95% | 0 | 2357560 / 2357560 |
+
+Parent proposed measured SKIP: four of six pre-fixed shared-prefix comparisons fail (5% at all three sizes and20% at100). Warm p95 changes +6.08%/-0.05%/-13.95% at100/1k/10k do not rescue the failed cold gate. Favorable args-only/last-row and20%-large results remain visible, without narrowing the gate after measurement. Adverse first-wide1k max174.1354ms andppp10k max824.5538ms retained. Full wall time includes untimed setup/oracles; native composition/production overlap/allocator/RSS remain NOT MEASURED. Pending independent gate approval, restore exact pre-candidate render.rs from9e9863922a94396e7a165cad659abdc8b11fb874, retain historical candidate commit/all evidence/collector, and reuse previously verified exact eager source without redundant Cargo. LOCAL ONLY.
+
+Independent Full evidence disposition CLEAR and runtime gate SKIP: raw/JSON all1260arrays25200entries/684scalars/72triplets;720independently recomputed semantic hashes;288 exact baseline-domain arrays;396Small non-timing arrays/204scalars overlap; source/profile/fixture/work/reasons/overlap/privacy PASS. Maximum partial checkpoint+geometry overlaps100/1k/10k=47,021/470,661/4,715,541bytes. Four of six required prefix p95 comparisons fail. Parent accepts measured SKIP and assigns exact render.rs restoration from9e9863922a94396e7a165cad659abdc8b11fb874. No extra tests required for byte-identical return to the already verified eager source; restoration verification pending. Candidate commit db384246 remains historical, not accepted runtime.
+
+## C2-D closed — SKIPPED (measured gate)
+
+Sole writer restored render.rs exactly from9e9863922a94396e7a165cad659abdc8b11fb874, baseline blob b2f7a16edd599312077af6af2c0505e072ad2f18, SHA25651CEFB9870677AFE0CAD97FC6AF42D5860C95F8F3D1931733B9A39304402B069. Parent verifies exact blob and zero diff against that baseline. Candidate runtime/test additions removed together, original reviewed eager C2-D harness and accepted C2-C remain. Previously executed baseline6ordinary/Full36records720samples apply to identical source; no new Cargo run claimed. Historical candidate db384246 and sanitized Small/Full evidence plus distinct strict collector retained.15/29closed; next bounded C2-E grid characterization, no runtime prototype authorized. LOCAL ONLY.

@@ -29,13 +29,11 @@ struct RootListGeometryKey {
 
 /// Cached actual SelectableLabel row geometry for the root list.
 ///
-/// Retains one exact formatted list presentation beside its geometry so a
-/// later result generation can reuse only a proven ordered prefix. Actions
-/// themselves are not retained, and display-setting changes invalidate the
-/// geometry key separately.
+/// Result contents are intentionally not retained here: a generation bump is
+/// the invalidation contract for action replacement, and display-setting
+/// changes invalidate the geometry key separately.
 pub(super) struct RootListGeometryCache {
     key: Option<RootListGeometryKey>,
-    presentation_rows: Option<Vec<String>>,
     row_tops: Vec<f32>,
     row_heights: Vec<f32>,
     row_x_offsets: Vec<f32>,
@@ -69,112 +67,6 @@ pub(super) struct RootListGeometryCache {
     measured_cells: u64,
     #[cfg(test)]
     last_rebuild_nanos: u64,
-    #[cfg(test)]
-    presentation_utf8_bytes: u64,
-    #[cfg(test)]
-    presentation_string_capacity_bytes: u64,
-    #[cfg(test)]
-    presentation_storage_observed: bool,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct RootListReuseReceipt {
-    presentation_formatted_rows: u64,
-    presentation_formatted_utf8_bytes: u64,
-    presentation_compared_rows: u64,
-    presentation_compared_input_utf8_bytes: u64,
-    presentation_prefix_rows_reused: u64,
-    geometry_commits: u64,
-    environment_rejections: u64,
-    atlas_rejections: u64,
-    checkpoint_misses: u64,
-    presentation_checkpoint_utf8_bytes_before: u64,
-    presentation_checkpoint_utf8_bytes_after: u64,
-    presentation_checkpoint_string_capacity_bytes_before: u64,
-    presentation_checkpoint_string_capacity_bytes_after: u64,
-    presentation_checkpoint_vec_capacity_bytes_before: u64,
-    presentation_checkpoint_vec_capacity_bytes_after: u64,
-    geometry_checkpoint_logical_bytes_before: u64,
-    geometry_checkpoint_logical_bytes_after: u64,
-    projection_geometry_capacity_bytes_before: u64,
-    projection_geometry_capacity_bytes_after: u64,
-    projection_geometry_overlap_peak_capacity_bytes: u64,
-}
-
-#[cfg(test)]
-impl RootListReuseReceipt {
-    fn values(self) -> [u64; 20] {
-        [
-            self.presentation_formatted_rows,
-            self.presentation_formatted_utf8_bytes,
-            self.presentation_compared_rows,
-            self.presentation_compared_input_utf8_bytes,
-            self.presentation_prefix_rows_reused,
-            self.geometry_commits,
-            self.environment_rejections,
-            self.atlas_rejections,
-            self.checkpoint_misses,
-            self.presentation_checkpoint_utf8_bytes_before,
-            self.presentation_checkpoint_utf8_bytes_after,
-            self.presentation_checkpoint_string_capacity_bytes_before,
-            self.presentation_checkpoint_string_capacity_bytes_after,
-            self.presentation_checkpoint_vec_capacity_bytes_before,
-            self.presentation_checkpoint_vec_capacity_bytes_after,
-            self.geometry_checkpoint_logical_bytes_before,
-            self.geometry_checkpoint_logical_bytes_after,
-            self.projection_geometry_capacity_bytes_before,
-            self.projection_geometry_capacity_bytes_after,
-            self.projection_geometry_overlap_peak_capacity_bytes,
-        ]
-    }
-}
-
-#[cfg(test)]
-std::thread_local! {
-    static ROOT_LIST_REUSE_OBSERVER: std::cell::Cell<Option<RootListReuseReceipt>> = const {
-        std::cell::Cell::new(None)
-    };
-}
-
-#[cfg(test)]
-struct RootListReuseObserverScope {
-    previous: Option<RootListReuseReceipt>,
-}
-
-#[cfg(test)]
-impl RootListReuseObserverScope {
-    fn begin() -> Self {
-        let previous = ROOT_LIST_REUSE_OBSERVER.with(|observer| {
-            let previous = observer.get();
-            observer.set(Some(RootListReuseReceipt::default()));
-            previous
-        });
-        Self { previous }
-    }
-
-    fn reset(&self) {
-        ROOT_LIST_REUSE_OBSERVER.with(|observer| {
-            assert!(
-                observer.get().is_some(),
-                "reuse observation scope is active"
-            );
-            observer.set(Some(RootListReuseReceipt::default()));
-        });
-    }
-
-    fn receipt(&self) -> RootListReuseReceipt {
-        ROOT_LIST_REUSE_OBSERVER
-            .with(std::cell::Cell::get)
-            .expect("reuse observation scope is active")
-    }
-}
-
-#[cfg(test)]
-impl Drop for RootListReuseObserverScope {
-    fn drop(&mut self) {
-        ROOT_LIST_REUSE_OBSERVER.with(|observer| observer.set(self.previous));
-    }
 }
 
 #[cfg(test)]
@@ -190,7 +82,6 @@ impl Default for RootListGeometryCache {
     fn default() -> Self {
         Self {
             key: None,
-            presentation_rows: None,
             row_tops: Vec::new(),
             row_heights: Vec::new(),
             row_x_offsets: Vec::new(),
@@ -224,48 +115,13 @@ impl Default for RootListGeometryCache {
             measured_cells: 0,
             #[cfg(test)]
             last_rebuild_nanos: 0,
-            #[cfg(test)]
-            presentation_utf8_bytes: 0,
-            #[cfg(test)]
-            presentation_string_capacity_bytes: 0,
-            #[cfg(test)]
-            presentation_storage_observed: false,
         }
     }
-}
-
-fn same_root_list_geometry_environment(
-    previous: &RootListGeometryKey,
-    next: &RootListGeometryKey,
-) -> bool {
-    !previous.is_grid
-        && !next.is_grid
-        && previous.width_bits == next.width_bits
-        && previous.pixels_per_point_bits == next.pixels_per_point_bits
-        && previous.button_font == next.button_font
-        && previous.wrap == next.wrap
-        && previous.button_padding_x_bits == next.button_padding_x_bits
-        && previous.button_padding_y_bits == next.button_padding_y_bits
-        && previous.interaction_height_bits == next.interaction_height_bits
-        && previous.interaction_width_bits == next.interaction_width_bits
-        && previous.item_spacing_y_bits == next.item_spacing_y_bits
-        && previous.show_full_paths == next.show_full_paths
-        && previous.grid_columns == next.grid_columns
-        && previous.grid_nominal_width_bits == next.grid_nominal_width_bits
-        && previous.grid_spacing_x_bits == next.grid_spacing_x_bits
-        && previous.grid_spacing_y_bits == next.grid_spacing_y_bits
 }
 
 impl RootListGeometryCache {
     fn invalidate_geometry(&mut self) {
         self.key = None;
-        self.presentation_rows = None;
-        #[cfg(test)]
-        {
-            self.presentation_utf8_bytes = 0;
-            self.presentation_string_capacity_bytes = 0;
-            self.presentation_storage_observed = false;
-        }
         self.row_tops.clear();
         self.row_heights.clear();
         self.row_x_offsets.clear();
@@ -290,12 +146,7 @@ impl RootListGeometryCache {
     fn invalidate_results(&mut self) {
         self.result_generation = self.result_generation.wrapping_add(1);
         self.queue_popup_cleanup();
-        let has_list_checkpoint = self.key.as_ref().is_some_and(|key| !key.is_grid)
-            && self.presentation_rows.is_some()
-            && self.font_atlas.is_some();
-        if !has_list_checkpoint {
-            self.invalidate_geometry();
-        }
+        self.invalidate_geometry();
     }
 
     #[cfg(test)]
@@ -348,36 +199,6 @@ impl RootListGeometryCache {
         }
     }
 
-    #[cfg(test)]
-    fn test_geometry_capacity_bytes(&self) -> u64 {
-        [
-            self.row_tops.capacity(),
-            self.row_heights.capacity(),
-            self.row_x_offsets.capacity(),
-            self.row_response_x_offsets.capacity(),
-            self.row_widths.capacity(),
-            self.row_response_widths.capacity(),
-        ]
-        .into_iter()
-        .map(|capacity| capacity.saturating_mul(std::mem::size_of::<f32>()) as u64)
-        .fold(0, u64::saturating_add)
-    }
-
-    #[cfg(test)]
-    fn test_geometry_logical_bytes(&self) -> u64 {
-        [
-            self.row_tops.len(),
-            self.row_heights.len(),
-            self.row_x_offsets.len(),
-            self.row_response_x_offsets.len(),
-            self.row_widths.len(),
-            self.row_response_widths.len(),
-        ]
-        .into_iter()
-        .map(|len| len.saturating_mul(std::mem::size_of::<f32>()) as u64)
-        .fold(0, u64::saturating_add)
-    }
-
     fn ensure(
         &mut self,
         ui: &egui::Ui,
@@ -419,128 +240,13 @@ impl RootListGeometryCache {
                 .as_ref()
                 .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
         {
-            #[cfg(test)]
-            ROOT_LIST_REUSE_OBSERVER.with(|observer| {
-                if observer.get().is_some() {
-                    assert!(
-                        self.presentation_storage_observed,
-                        "observed list projection storage was not prepared in the same observer scope"
-                    );
-                    let presentation_utf8_bytes = self.presentation_utf8_bytes;
-                    let presentation_string_capacity_bytes =
-                        self.presentation_string_capacity_bytes;
-                    let presentation_vec_capacity_bytes = self
-                        .presentation_rows
-                        .as_ref()
-                        .map_or(0, |rows| {
-                            rows.capacity()
-                                .saturating_mul(std::mem::size_of::<String>()) as u64
-                        });
-                    let geometry_capacity_bytes = self.test_geometry_capacity_bytes();
-                    let geometry_logical_bytes = self.test_geometry_logical_bytes();
-                    let projection_geometry_capacity_bytes =
-                        presentation_string_capacity_bytes
-                            .saturating_add(presentation_vec_capacity_bytes)
-                            .saturating_add(geometry_capacity_bytes);
-                    observer.set(Some(RootListReuseReceipt {
-                        presentation_checkpoint_utf8_bytes_before: presentation_utf8_bytes,
-                        presentation_checkpoint_utf8_bytes_after: presentation_utf8_bytes,
-                        presentation_checkpoint_string_capacity_bytes_before:
-                            presentation_string_capacity_bytes,
-                        presentation_checkpoint_string_capacity_bytes_after:
-                            presentation_string_capacity_bytes,
-                        presentation_checkpoint_vec_capacity_bytes_before:
-                            presentation_vec_capacity_bytes,
-                        presentation_checkpoint_vec_capacity_bytes_after:
-                            presentation_vec_capacity_bytes,
-                        geometry_checkpoint_logical_bytes_before: geometry_logical_bytes,
-                        geometry_checkpoint_logical_bytes_after: geometry_logical_bytes,
-                        projection_geometry_capacity_bytes_before:
-                            projection_geometry_capacity_bytes,
-                        projection_geometry_capacity_bytes_after:
-                            projection_geometry_capacity_bytes,
-                        projection_geometry_overlap_peak_capacity_bytes:
-                            projection_geometry_capacity_bytes,
-                        ..RootListReuseReceipt::default()
-                    }));
-                }
-            });
             return;
-        }
-
-        #[cfg(test)]
-        let observe_reuse = ROOT_LIST_REUSE_OBSERVER.with(|observer| observer.get().is_some());
-
-        let previous_presentation = self.presentation_rows.as_deref();
-        let previous_key = self.key.as_ref();
-        let has_checkpoint = !is_grid
-            && previous_key.is_some()
-            && previous_presentation.is_some()
-            && self.font_atlas.is_some();
-        let environment_matches = has_checkpoint
-            && same_root_list_geometry_environment(
-                previous_key.expect("checkpoint key was checked"),
-                &key,
-            );
-        let atlas_matches = environment_matches
-            && self
-                .font_atlas
-                .as_ref()
-                .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas));
-        let reuse_eligible = atlas_matches;
-
-        #[cfg(test)]
-        let mut receipt = RootListReuseReceipt {
-            checkpoint_misses: u64::from(!has_checkpoint),
-            environment_rejections: u64::from(has_checkpoint && !environment_matches),
-            atlas_rejections: u64::from(environment_matches && !atlas_matches),
-            ..RootListReuseReceipt::default()
-        };
-
-        #[cfg(test)]
-        let (
-            checkpoint_utf8_before,
-            checkpoint_string_capacity_before,
-            checkpoint_vec_capacity_before,
-            geometry_logical_before,
-            geometry_capacity_before,
-        ) = if observe_reuse {
-            if self.presentation_rows.is_some() {
-                assert!(
-                    self.presentation_storage_observed,
-                    "observed list projection storage was not prepared in the same observer scope"
-                );
-            }
-            (
-                self.presentation_utf8_bytes,
-                self.presentation_string_capacity_bytes,
-                self.presentation_rows.as_ref().map_or(0, |rows| {
-                    rows.capacity()
-                        .saturating_mul(std::mem::size_of::<String>()) as u64
-                }),
-                self.test_geometry_logical_bytes(),
-                self.test_geometry_capacity_bytes(),
-            )
-        } else {
-            (0, 0, 0, 0, 0)
-        };
-
-        #[cfg(test)]
-        {
-            receipt.presentation_checkpoint_utf8_bytes_before = checkpoint_utf8_before;
-            receipt.presentation_checkpoint_string_capacity_bytes_before =
-                checkpoint_string_capacity_before;
-            receipt.presentation_checkpoint_vec_capacity_bytes_before =
-                checkpoint_vec_capacity_before;
-            receipt.geometry_checkpoint_logical_bytes_before = geometry_logical_before;
-            receipt.projection_geometry_capacity_bytes_before = checkpoint_string_capacity_before
-                .saturating_add(checkpoint_vec_capacity_before)
-                .saturating_add(geometry_capacity_before);
         }
 
         let mut track_c_timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::RootGeometryCold,
         );
+        track_c_timer.set_work_units(results.len());
 
         #[cfg(test)]
         let started = std::time::Instant::now();
@@ -549,141 +255,17 @@ impl RootListGeometryCache {
         let padding = spacing.button_padding;
         let interaction_height = spacing.interact_size.y;
         let wrap = key.wrap;
-        let mut presentation_rows = Vec::with_capacity(results.len());
-        #[cfg(test)]
-        let mut formatted_utf8_bytes = 0_u64;
-        #[cfg(test)]
-        let mut formatted_string_capacity_bytes = 0_u64;
-        #[cfg(test)]
-        let mut formatted_rows = 0_u64;
-        let mut prefix_rows = 0_usize;
-        let mut comparing = reuse_eligible;
+        let mut row_tops = Vec::with_capacity(results.len());
+        let mut row_heights = Vec::with_capacity(results.len());
+        let mut row_x_offsets = Vec::with_capacity(results.len());
+        let mut row_response_x_offsets = Vec::with_capacity(results.len());
+        let mut row_widths = Vec::with_capacity(results.len());
+        let mut row_response_widths = Vec::with_capacity(results.len());
+        let mut cursor_y = 0.0_f32;
+        let mut content_x_offset = 0.0_f32;
+        let mut content_width = width;
 
         for (index, action) in results.iter().enumerate() {
-            let display = root_list_display_text(action, folder_aliases, show_full_paths);
-            let text = display.into_owned();
-            #[cfg(test)]
-            if observe_reuse {
-                formatted_rows = formatted_rows.saturating_add(1);
-                formatted_utf8_bytes = formatted_utf8_bytes.saturating_add(text.len() as u64);
-                formatted_string_capacity_bytes =
-                    formatted_string_capacity_bytes.saturating_add(text.capacity() as u64);
-            }
-
-            if comparing {
-                if let Some(previous) = previous_presentation.and_then(|rows| rows.get(index)) {
-                    #[cfg(test)]
-                    if observe_reuse {
-                        receipt.presentation_compared_rows =
-                            receipt.presentation_compared_rows.saturating_add(1);
-                        receipt.presentation_compared_input_utf8_bytes = receipt
-                            .presentation_compared_input_utf8_bytes
-                            .saturating_add(previous.len() as u64)
-                            .saturating_add(text.len() as u64);
-                    }
-                    if previous == &text {
-                        prefix_rows += 1;
-                    } else {
-                        comparing = false;
-                    }
-                } else {
-                    comparing = false;
-                }
-            }
-            presentation_rows.push(text);
-        }
-
-        let suffix_start = if reuse_eligible { prefix_rows } else { 0 };
-        let reuses_geometry_in_place = reuse_eligible && suffix_start == results.len();
-
-        let (
-            mut row_tops,
-            mut row_heights,
-            mut row_x_offsets,
-            mut row_response_x_offsets,
-            mut row_widths,
-            mut row_response_widths,
-            mut cursor_y,
-            mut content_x_offset,
-            mut content_width,
-        ) = if reuses_geometry_in_place {
-            self.row_tops.truncate(results.len());
-            self.row_heights.truncate(results.len());
-            self.row_x_offsets.truncate(results.len());
-            self.row_response_x_offsets.truncate(results.len());
-            self.row_widths.truncate(results.len());
-            self.row_response_widths.truncate(results.len());
-            if results.is_empty() {
-                (
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    0.0,
-                    0.0,
-                    width,
-                )
-            } else {
-                let last = results.len() - 1;
-                (
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    self.row_tops[last] + self.row_heights[last],
-                    self.row_response_x_offsets[last],
-                    self.row_response_widths[last],
-                )
-            }
-        } else {
-            let mut row_tops = Vec::with_capacity(results.len());
-            let mut row_heights = Vec::with_capacity(results.len());
-            let mut row_x_offsets = Vec::with_capacity(results.len());
-            let mut row_response_x_offsets = Vec::with_capacity(results.len());
-            let mut row_widths = Vec::with_capacity(results.len());
-            let mut row_response_widths = Vec::with_capacity(results.len());
-            if suffix_start > 0 {
-                row_tops.extend_from_slice(&self.row_tops[..suffix_start]);
-                row_heights.extend_from_slice(&self.row_heights[..suffix_start]);
-                row_x_offsets.extend_from_slice(&self.row_x_offsets[..suffix_start]);
-                row_response_x_offsets
-                    .extend_from_slice(&self.row_response_x_offsets[..suffix_start]);
-                row_widths.extend_from_slice(&self.row_widths[..suffix_start]);
-                row_response_widths.extend_from_slice(&self.row_response_widths[..suffix_start]);
-            }
-            let cursor_y = if suffix_start == 0 {
-                0.0
-            } else {
-                self.row_tops[suffix_start - 1] + self.row_heights[suffix_start - 1]
-            };
-            let content_x_offset = if suffix_start == 0 {
-                0.0
-            } else {
-                self.row_response_x_offsets[suffix_start - 1]
-            };
-            let content_width = if suffix_start == 0 {
-                width
-            } else {
-                self.row_response_widths[suffix_start - 1]
-            };
-            (
-                row_tops,
-                row_heights,
-                row_x_offsets,
-                row_response_x_offsets,
-                row_widths,
-                row_response_widths,
-                cursor_y,
-                content_x_offset,
-                content_width,
-            )
-        };
-
-        for (index, text) in presentation_rows.iter().enumerate().skip(suffix_start) {
             if index != 0 {
                 cursor_y += spacing_y;
             }
@@ -691,7 +273,8 @@ impl RootListGeometryCache {
             row_x_offsets.push(content_x_offset);
             row_widths.push(content_width);
 
-            let galley = egui::WidgetText::from(text.clone()).into_galley_impl(
+            let text = root_list_display_text(action, folder_aliases, show_full_paths);
+            let galley = egui::WidgetText::from(text).into_galley_impl(
                 ui.ctx(),
                 ui.style(),
                 wrap,
@@ -709,88 +292,12 @@ impl RootListGeometryCache {
             cursor_y += row_height;
         }
 
-        #[cfg(test)]
-        let new_geometry_capacity_bytes = if reuses_geometry_in_place {
-            0
-        } else {
-            [
-                row_tops.capacity(),
-                row_heights.capacity(),
-                row_x_offsets.capacity(),
-                row_response_x_offsets.capacity(),
-                row_widths.capacity(),
-                row_response_widths.capacity(),
-            ]
-            .into_iter()
-            .map(|capacity| capacity.saturating_mul(std::mem::size_of::<f32>()) as u64)
-            .fold(0, u64::saturating_add)
-        };
-
-        #[cfg(test)]
-        let presentation_vec_capacity_bytes = presentation_rows
-            .capacity()
-            .saturating_mul(std::mem::size_of::<String>())
-            as u64;
-        #[cfg(test)]
-        let geometry_capacity_after_bytes = if reuses_geometry_in_place {
-            self.test_geometry_capacity_bytes()
-        } else {
-            new_geometry_capacity_bytes
-        };
-        #[cfg(test)]
-        let geometry_logical_after_bytes = results
-            .len()
-            .saturating_mul(6)
-            .saturating_mul(std::mem::size_of::<f32>())
-            as u64;
-        #[cfg(test)]
-        if observe_reuse {
-            let new_projection_capacity_bytes =
-                formatted_string_capacity_bytes.saturating_add(presentation_vec_capacity_bytes);
-            let peak_geometry_capacity = if reuses_geometry_in_place {
-                geometry_capacity_before
-            } else {
-                geometry_capacity_before.saturating_add(new_geometry_capacity_bytes)
-            };
-            receipt.presentation_formatted_rows = formatted_rows;
-            receipt.presentation_formatted_utf8_bytes = formatted_utf8_bytes;
-            receipt.presentation_prefix_rows_reused = suffix_start as u64;
-            receipt.geometry_commits = 1;
-            receipt.presentation_checkpoint_utf8_bytes_after = formatted_utf8_bytes;
-            receipt.presentation_checkpoint_string_capacity_bytes_after =
-                formatted_string_capacity_bytes;
-            receipt.presentation_checkpoint_vec_capacity_bytes_after =
-                presentation_vec_capacity_bytes;
-            receipt.geometry_checkpoint_logical_bytes_after = geometry_logical_after_bytes;
-            receipt.projection_geometry_capacity_bytes_after =
-                new_projection_capacity_bytes.saturating_add(geometry_capacity_after_bytes);
-            receipt.projection_geometry_overlap_peak_capacity_bytes =
-                checkpoint_string_capacity_before
-                    .saturating_add(checkpoint_vec_capacity_before)
-                    .saturating_add(geometry_capacity_before)
-                    .saturating_add(new_projection_capacity_bytes)
-                    .saturating_add(if reuses_geometry_in_place {
-                        0
-                    } else {
-                        new_geometry_capacity_bytes
-                    });
-            debug_assert_eq!(
-                receipt.projection_geometry_overlap_peak_capacity_bytes,
-                checkpoint_string_capacity_before
-                    .saturating_add(checkpoint_vec_capacity_before)
-                    .saturating_add(peak_geometry_capacity)
-                    .saturating_add(new_projection_capacity_bytes)
-            );
-        }
-
-        if !reuses_geometry_in_place {
-            self.row_tops = std::mem::take(&mut row_tops);
-            self.row_heights = std::mem::take(&mut row_heights);
-            self.row_x_offsets = std::mem::take(&mut row_x_offsets);
-            self.row_response_x_offsets = std::mem::take(&mut row_response_x_offsets);
-            self.row_widths = std::mem::take(&mut row_widths);
-            self.row_response_widths = std::mem::take(&mut row_response_widths);
-        }
+        self.row_tops = row_tops;
+        self.row_heights = row_heights;
+        self.row_x_offsets = row_x_offsets;
+        self.row_response_x_offsets = row_response_x_offsets;
+        self.row_widths = row_widths;
+        self.row_response_widths = row_response_widths;
         self.total_height = cursor_y;
         self.content_x_offset = content_x_offset;
         self.content_width = content_width;
@@ -806,31 +313,14 @@ impl RootListGeometryCache {
         self.grid_visual_max_end_tree.clear();
         self.key = Some(key);
         self.font_atlas = Some(font_atlas);
-        self.presentation_rows = (!is_grid).then_some(presentation_rows);
-        #[cfg(test)]
-        {
-            if observe_reuse {
-                self.presentation_utf8_bytes = formatted_utf8_bytes;
-                self.presentation_string_capacity_bytes = formatted_string_capacity_bytes;
-                self.presentation_storage_observed = true;
-            } else {
-                self.presentation_storage_observed = false;
-            }
-        }
-        track_c_timer.set_work_units(results.len() - suffix_start);
         track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
             self.rebuild_count = self.rebuild_count.saturating_add(1);
-            self.measured_rows = self.measured_rows.saturating_add(
-                (results.len() - suffix_start)
-                    .try_into()
-                    .unwrap_or(u64::MAX),
-            );
+            self.measured_rows = self
+                .measured_rows
+                .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
             self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-            if observe_reuse {
-                ROOT_LIST_REUSE_OBSERVER.with(|observer| observer.set(Some(receipt)));
-            }
         }
     }
 
@@ -988,13 +478,6 @@ impl RootListGeometryCache {
         self.grid_visual_row_tops = grid_visual_row_tops;
         self.grid_visual_row_bottoms = grid_visual_row_bottoms;
         self.grid_visual_max_end_tree = grid_visual_max_end_tree;
-        self.presentation_rows = None;
-        #[cfg(test)]
-        {
-            self.presentation_utf8_bytes = 0;
-            self.presentation_string_capacity_bytes = 0;
-            self.presentation_storage_observed = false;
-        }
         // An empty egui Grid still lays out its centered horizontal row shell.
         self.total_height = if empty_grid {
             interaction_height * 0.5
@@ -6276,7 +5759,6 @@ mod tests {
     }
 
     struct TrackC2DListState {
-        reuse_observer: RootListReuseObserverScope,
         app: LauncherApp,
         ctx: egui::Context,
         recipe: TrackC2DRecipe,
@@ -6299,10 +5781,6 @@ mod tests {
         old_geometry: RootListGeometryObservation,
         old_result_generation: u64,
         old_capacity_bytes: u64,
-        old_presentation_utf8_bytes: u64,
-        old_presentation_string_capacity_bytes: u64,
-        old_presentation_vec_capacity_bytes: u64,
-        old_geometry_logical_bytes: u64,
         old_first_response_width: f32,
         old_next_row_width: f32,
         old_next_row_x_offset: f32,
@@ -6383,7 +5861,6 @@ mod tests {
     ) -> TrackC2DListState {
         use crate::performance::track_c_workloads::action_fixture_identity;
 
-        let reuse_observer = RootListReuseObserverScope::begin();
         let old_actions = source_actions.to_vec();
         let new_actions = track_c2d_expected_actions(source_actions, recipe);
         let aliases = track_c2d_aliases(source_actions, recipe);
@@ -6450,18 +5927,6 @@ mod tests {
             .as_ref()
             .map(Arc::downgrade);
         let old_capacity_bytes = track_c2d_geometry_capacity_bytes(&app.root_list_geometry);
-        let old_presentation_utf8_bytes = app.root_list_geometry.presentation_utf8_bytes;
-        let old_presentation_string_capacity_bytes =
-            app.root_list_geometry.presentation_string_capacity_bytes;
-        let old_presentation_vec_capacity_bytes = app
-            .root_list_geometry
-            .presentation_rows
-            .as_ref()
-            .map_or(0, |rows| {
-                rows.capacity()
-                    .saturating_mul(std::mem::size_of::<String>()) as u64
-            });
-        let old_geometry_logical_bytes = app.root_list_geometry.test_geometry_logical_bytes();
         let (
             old_first_response_width,
             old_next_row_width,
@@ -6550,10 +6015,8 @@ mod tests {
                 .take_while(|(old, new)| old == new)
                 .count()
         };
-        reuse_observer.reset();
 
         TrackC2DListState {
-            reuse_observer,
             app,
             ctx,
             recipe,
@@ -6574,10 +6037,6 @@ mod tests {
             old_geometry,
             old_result_generation,
             old_capacity_bytes,
-            old_presentation_utf8_bytes,
-            old_presentation_string_capacity_bytes,
-            old_presentation_vec_capacity_bytes,
-            old_geometry_logical_bytes,
             old_first_response_width,
             old_next_row_width,
             old_next_row_x_offset,
@@ -6667,171 +6126,6 @@ mod tests {
             signature.number(u64::from(value.to_bits()));
         }
         signature.finish()
-    }
-
-    fn track_c2d_validate_reuse_receipt(
-        state: &TrackC2DListState,
-        new_presentation: &[String],
-        expected_prefix: usize,
-    ) -> RootListReuseReceipt {
-        let receipt = state.reuse_observer.receipt();
-        let cache = &state.app.root_list_geometry;
-        let new_key = cache.key.as_ref();
-        let has_checkpoint =
-            state.old_key.as_ref().is_some_and(|key| !key.is_grid) && state.old_atlas.is_some();
-        let environment_matches = match (state.old_key.as_ref(), new_key) {
-            (Some(old), Some(new)) => same_root_list_geometry_environment(old, new),
-            _ => false,
-        };
-        let atlas_matches = match (state.old_atlas.as_ref(), cache.font_atlas.as_ref()) {
-            (Some(old), Some(new)) => std::sync::Weak::ptr_eq(old, &Arc::downgrade(new)),
-            _ => false,
-        };
-        let eligible = has_checkpoint && environment_matches && atlas_matches;
-        let fast_path = state.old_key.as_ref() == new_key && atlas_matches;
-        let expected_miss = u64::from(!has_checkpoint);
-        let expected_environment_rejection = u64::from(has_checkpoint && !environment_matches);
-        let expected_atlas_rejection =
-            u64::from(has_checkpoint && environment_matches && !atlas_matches);
-
-        assert_eq!(receipt.checkpoint_misses, expected_miss);
-        assert_eq!(
-            receipt.environment_rejections,
-            expected_environment_rejection
-        );
-        assert_eq!(receipt.atlas_rejections, expected_atlas_rejection);
-        assert_eq!(
-            expected_miss + expected_environment_rejection + expected_atlas_rejection,
-            u64::from(!eligible),
-            "eligible checkpoints have no rejection; ineligible checkpoints have one mutually exclusive reason"
-        );
-
-        let expected_formatted_rows = if fast_path {
-            0
-        } else {
-            new_presentation.len() as u64
-        };
-        let expected_formatted_bytes = if fast_path {
-            0
-        } else {
-            new_presentation.iter().map(|text| text.len() as u64).sum()
-        };
-        let expected_compared_rows = if fast_path || !eligible {
-            0
-        } else {
-            expected_prefix + usize::from(expected_prefix < new_presentation.len())
-        };
-        let old_presentation =
-            track_c2d_frame_texts(&state.old_actions, &state.aliases, state.old_full_paths);
-        let expected_compared_bytes = old_presentation
-            .iter()
-            .zip(new_presentation)
-            .take(expected_compared_rows)
-            .map(|(old, new)| (old.len() + new.len()) as u64)
-            .sum::<u64>();
-        let expected_prefix_reused = if eligible && !fast_path {
-            expected_prefix as u64
-        } else {
-            0
-        };
-        let cold = state.recipe.expects_cold_geometry();
-        assert_eq!(receipt.presentation_formatted_rows, expected_formatted_rows);
-        assert_eq!(
-            receipt.presentation_formatted_utf8_bytes,
-            expected_formatted_bytes
-        );
-        assert_eq!(
-            receipt.presentation_compared_rows,
-            expected_compared_rows as u64
-        );
-        assert_eq!(
-            receipt.presentation_compared_input_utf8_bytes,
-            expected_compared_bytes
-        );
-        assert_eq!(
-            receipt.presentation_prefix_rows_reused,
-            expected_prefix_reused
-        );
-        assert_eq!(receipt.geometry_commits, u64::from(cold));
-
-        let expected_old_presentation_bytes = state.old_presentation_utf8_bytes;
-        let expected_new_presentation_bytes = if cold {
-            new_presentation.iter().map(|text| text.len() as u64).sum()
-        } else {
-            expected_old_presentation_bytes
-        };
-        assert_eq!(
-            receipt.presentation_checkpoint_utf8_bytes_before,
-            expected_old_presentation_bytes
-        );
-        assert_eq!(
-            receipt.presentation_checkpoint_utf8_bytes_after,
-            expected_new_presentation_bytes
-        );
-        assert_eq!(
-            receipt.presentation_checkpoint_string_capacity_bytes_before,
-            state.old_presentation_string_capacity_bytes
-        );
-        assert_eq!(
-            receipt.presentation_checkpoint_vec_capacity_bytes_before,
-            state.old_presentation_vec_capacity_bytes
-        );
-        assert_eq!(
-            receipt.geometry_checkpoint_logical_bytes_before,
-            state.old_geometry_logical_bytes
-        );
-        let expected_after_string_capacity = cache.presentation_string_capacity_bytes;
-        let expected_after_vec_capacity = cache.presentation_rows.as_ref().map_or(0, |rows| {
-            rows.capacity()
-                .saturating_mul(std::mem::size_of::<String>()) as u64
-        });
-        let expected_after_geometry_logical = cache.test_geometry_logical_bytes();
-        let expected_after_geometry_capacity = cache.test_geometry_capacity_bytes();
-        assert_eq!(
-            receipt.presentation_checkpoint_string_capacity_bytes_after,
-            expected_after_string_capacity
-        );
-        assert_eq!(
-            receipt.presentation_checkpoint_vec_capacity_bytes_after,
-            expected_after_vec_capacity
-        );
-        assert_eq!(
-            receipt.geometry_checkpoint_logical_bytes_after,
-            expected_after_geometry_logical
-        );
-        let old_projection_geometry_capacity = state
-            .old_presentation_string_capacity_bytes
-            .saturating_add(state.old_presentation_vec_capacity_bytes)
-            .saturating_add(state.old_capacity_bytes);
-        let new_projection_geometry_capacity = expected_after_string_capacity
-            .saturating_add(expected_after_vec_capacity)
-            .saturating_add(expected_after_geometry_capacity);
-        assert_eq!(
-            receipt.projection_geometry_capacity_bytes_before,
-            old_projection_geometry_capacity
-        );
-        assert_eq!(
-            receipt.projection_geometry_capacity_bytes_after,
-            new_projection_geometry_capacity
-        );
-        let expected_peak = if fast_path {
-            new_projection_geometry_capacity
-        } else if eligible && expected_prefix == new_presentation.len() {
-            state
-                .old_presentation_string_capacity_bytes
-                .saturating_add(state.old_presentation_vec_capacity_bytes)
-                .saturating_add(expected_after_string_capacity)
-                .saturating_add(expected_after_vec_capacity)
-                .saturating_add(state.old_capacity_bytes)
-        } else {
-            old_projection_geometry_capacity.saturating_add(new_projection_geometry_capacity)
-        };
-        assert_eq!(
-            receipt.projection_geometry_overlap_peak_capacity_bytes,
-            expected_peak
-        );
-        assert!(cache.presentation_storage_observed);
-        receipt
     }
 
     fn track_c2d_viewport_signature(app: &LauncherApp) -> (u64, usize) {
@@ -7031,8 +6325,10 @@ mod tests {
                 rebuilds, 1,
                 "one changed or first-open recipe rebuilds once"
             );
+            assert_eq!(measured_rows, state.expected_actions.len() as u64);
         } else {
             assert_eq!(rebuilds, 0, "warm repeat reuses the list geometry");
+            assert_eq!(measured_rows, 0);
         }
         assert_eq!(measured_cells, 0, "list recipes do not measure grid cells");
         let actual_action_id = action_fixture_identity(&state.app.results);
@@ -7052,19 +6348,6 @@ mod tests {
                 .count()
         };
         assert_eq!(prefix_len, state.prefix_len);
-        let reuse_receipt = track_c2d_validate_reuse_receipt(state, &presentation, prefix_len);
-        let expected_measured_rows = match state.recipe {
-            TrackC2DRecipe::SharedPrefixFivePercent
-            | TrackC2DRecipe::SharedPrefixTwentyPercent
-            | TrackC2DRecipe::IdenticalPresentationNewGeneration
-            | TrackC2DRecipe::LastRowTextEdit
-            | TrackC2DRecipe::FirstRowWidthExpansionNoWrap => {
-                state.expected_actions.len().saturating_sub(prefix_len) as u64
-            }
-            TrackC2DRecipe::WarmRepeat => 0,
-            _ => state.expected_actions.len() as u64,
-        };
-        assert_eq!(measured_rows, expected_measured_rows);
         if state.recipe == TrackC2DRecipe::FullPathsToggle {
             assert_ne!(
                 track_c2d_frame_signature("track-c2d-presentation", &old_presentation),
@@ -7228,7 +6511,7 @@ mod tests {
         };
         let capacity_after = track_c2d_geometry_capacity_bytes(cache);
         let painted_rows = state.app.test_root_rendered_rows.len();
-        let mut counters = vec![
+        let counters = vec![
             rebuilds,
             measured_rows,
             measured_cells,
@@ -7240,7 +6523,6 @@ mod tests {
             presentation_id,
             actual_action_id,
         ];
-        counters.extend(reuse_receipt.values());
         assert_eq!(transitions.len(), 24);
         crate::performance::track_c_workloads::OwnerObservation {
             output_identity: output.finish(),
@@ -7281,7 +6563,7 @@ mod tests {
             samples
                 .iter()
                 .map(|sample| {
-                    assert_eq!(sample.work_counters.len(), 30);
+                    assert_eq!(sample.work_counters.len(), 10);
                     sample.work_counters[index].to_string()
                 })
                 .collect::<Vec<_>>()
@@ -7291,7 +6573,7 @@ mod tests {
             samples
                 .iter()
                 .map(|sample| {
-                    assert_eq!(sample.work_counters.len(), 30);
+                    assert_eq!(sample.work_counters.len(), 10);
                     format!("{:016x}", sample.work_counters[index])
                 })
                 .collect::<Vec<_>>()
@@ -7334,36 +6616,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join(",");
-        let reuse_fields = [
-            ("presentation_formatted_rows", 10),
-            ("presentation_formatted_utf8_bytes", 11),
-            ("presentation_compared_rows", 12),
-            ("presentation_compared_input_utf8_bytes", 13),
-            ("presentation_prefix_rows_reused", 14),
-            ("geometry_commits", 15),
-            ("environment_rejections", 16),
-            ("atlas_rejections", 17),
-            ("checkpoint_misses", 18),
-            ("presentation_checkpoint_utf8_bytes_before", 19),
-            ("presentation_checkpoint_utf8_bytes_after", 20),
-            ("presentation_checkpoint_string_capacity_bytes_before", 21),
-            ("presentation_checkpoint_string_capacity_bytes_after", 22),
-            ("presentation_checkpoint_vec_capacity_bytes_before", 23),
-            ("presentation_checkpoint_vec_capacity_bytes_after", 24),
-            ("geometry_checkpoint_logical_bytes_before", 25),
-            ("geometry_checkpoint_logical_bytes_after", 26),
-            ("projection_geometry_capacity_bytes_before", 27),
-            ("projection_geometry_capacity_bytes_after", 28),
-            ("projection_geometry_overlap_peak_capacity_bytes", 29),
-        ]
-        .into_iter()
-        .map(|(name, index)| format!("{name}=[{}]", counters(index)))
-        .collect::<Vec<_>>()
-        .join(" ");
         let case = recipe.token();
         assert!(!case.bytes().any(|byte| byte.is_ascii_whitespace()));
         eprintln!(
-            "C2D_REUSE_RESULT schema=1 stage=incremental_list_geometry installation=exact_ordered_text_prefix_checkpoint owner=RootListGeometryCache::ensure reuse_gate=exact_environment_and_retained_atlas measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame storage_scope=partial_string_utf8_string_capacity_vec_capacity_and_six_f32_vectors_excludes_allocator_rss fixture=synthetic_root_list_geometry source={source} profile={profile} mode={mode} telemetry_enabled=true observer_enabled=true warmups={WARMUPS} samples={} exclusions=0 case={case} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] presentation_prefix_len=[{}] geometry_capacity_before_bytes=[{}] geometry_capacity_after_bytes=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{viewport_receipts}] transition_receipts=[{transition_receipts}] {reuse_fields}",
+            "C2D_LIST_RESULT schema=1 stage=cold_list_geometry_characterization installation=eager_list_geometry owner=RootListGeometryCache::ensure measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_root_list_geometry source={source} profile={profile} mode={mode} telemetry_enabled=true observer_enabled=false warmups={WARMUPS} samples={} exclusions=0 case={case} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] presentation_prefix_len=[{}] geometry_capacity_before_bytes=[{}] geometry_capacity_after_bytes=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{viewport_receipts}] transition_receipts=[{transition_receipts}]",
             samples.len(),
             counters(0),
             counters(1),
@@ -7409,213 +6665,8 @@ mod tests {
         }
     }
 
-    fn track_c2d_run_direct_cache_frame(
-        ctx: &egui::Context,
-        cache: &mut RootListGeometryCache,
-        actions: &[Action],
-        aliases: &HashMap<String, Option<String>>,
-        width: f32,
-        wrap: bool,
-    ) {
-        let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1_000_000.0));
-        let layer = egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("track-c2d-incremental-edge-cache"),
-        );
-        let _ = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(outer),
-                ..Default::default()
-            },
-            |ctx| {
-                let mut ui = egui::Ui::new(
-                    ctx.clone(),
-                    layer,
-                    egui::Id::new("track-c2d-incremental-edge-ui"),
-                    outer,
-                    outer,
-                );
-                let mut style = ui.style().as_ref().clone();
-                style.wrap = Some(wrap);
-                ui.set_style(style);
-                cache.ensure(&ui, actions, aliases, false, false);
-            },
-        );
-    }
-
-    fn track_c2d_assert_direct_cache_matches_eager(
-        cache: &RootListGeometryCache,
-        actions: &[Action],
-        aliases: &HashMap<String, Option<String>>,
-        width: f32,
-        wrap: bool,
-    ) {
-        if actions.is_empty() {
-            assert!(cache.row_tops.is_empty());
-            assert!(cache.row_heights.is_empty());
-            assert!(cache.row_x_offsets.is_empty());
-            assert!(cache.row_response_x_offsets.is_empty());
-            assert!(cache.row_widths.is_empty());
-            assert!(cache.row_response_widths.is_empty());
-            assert_eq!(cache.total_height, 0.0);
-            assert_eq!(cache.content_x_offset, 0.0);
-            assert_eq!(cache.content_width, width);
-            assert_eq!(cache.presentation_rows.as_ref().map(Vec::len), Some(0));
-            return;
-        }
-        let oracle_ctx = egui::Context::default();
-        let mut style = oracle_ctx.style().as_ref().clone();
-        style.wrap = Some(wrap);
-        oracle_ctx.set_style(style.clone());
-        let (outer, eager) = track_c_eager_root_list_layout(
-            &oracle_ctx,
-            actions,
-            aliases,
-            false,
-            width,
-            &style,
-            1.0,
-        );
-        assert_root_list_cache_matches_eager(
-            cache,
-            &eager,
-            outer,
-            "C2-D empty/single/multiline/large-label eager oracle",
-        );
-    }
-
-    fn track_c2d_incremental_edge_contract() {
-        let scope = RootListReuseObserverScope::begin();
-        let ctx = egui::Context::default();
-        let aliases = HashMap::new();
-        let mut cache = RootListGeometryCache::default();
-        let empty = Vec::new();
-
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &empty, &aliases, 360.0, true);
-        let empty_receipt = scope.receipt();
-        assert_eq!(empty_receipt.checkpoint_misses, 1);
-        assert_eq!(empty_receipt.geometry_commits, 1);
-        assert_eq!(empty_receipt.presentation_formatted_rows, 0);
-        assert_eq!(empty_receipt.presentation_compared_rows, 0);
-        track_c2d_assert_direct_cache_matches_eager(&cache, &empty, &aliases, 360.0, true);
-
-        let single = vec![Action {
-            label: "Single row".into(),
-            desc: "A short description".into(),
-            action: "fixture:single".into(),
-            args: None,
-        }];
-        cache.invalidate_results();
-        scope.reset();
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &single, &aliases, 360.0, true);
-        let single_receipt = scope.receipt();
-        assert_eq!(single_receipt.checkpoint_misses, 0);
-        assert_eq!(single_receipt.presentation_compared_rows, 0);
-        assert_eq!(single_receipt.presentation_prefix_rows_reused, 0);
-        assert_eq!(single_receipt.presentation_formatted_rows, 1);
-        assert_eq!(cache.test_observation().measured_rows, 1);
-        track_c2d_assert_direct_cache_matches_eager(&cache, &single, &aliases, 360.0, true);
-
-        let mut rows = single.clone();
-        rows.extend([
-            Action {
-                label: "Explicit first line\nsecond line λ🙂".into(),
-                desc: "A multiline row with a wrapped description".into(),
-                action: "fixture:multiline".into(),
-                args: Some(String::new()),
-            },
-            Action {
-                label: "Large label ".repeat(256),
-                desc: "Large description ".repeat(128),
-                action: "fixture:large".into(),
-                args: Some("payload".into()),
-            },
-        ]);
-        cache.invalidate_results();
-        scope.reset();
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &rows, &aliases, 360.0, true);
-        let append_receipt = scope.receipt();
-        assert_eq!(append_receipt.presentation_prefix_rows_reused, 1);
-        assert_eq!(append_receipt.presentation_compared_rows, 1);
-        assert_eq!(append_receipt.presentation_formatted_rows, 3);
-        assert_eq!(
-            cache.test_observation().measured_rows,
-            3,
-            "an append retains the common first row and measures only two new rows"
-        );
-        track_c2d_assert_direct_cache_matches_eager(&cache, &rows, &aliases, 360.0, true);
-
-        rows[2].desc.push_str(" changed at the final row");
-        cache.invalidate_results();
-        scope.reset();
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &rows, &aliases, 360.0, true);
-        let last_edit_receipt = scope.receipt();
-        assert_eq!(last_edit_receipt.presentation_prefix_rows_reused, 2);
-        assert_eq!(last_edit_receipt.presentation_compared_rows, 3);
-        assert_eq!(last_edit_receipt.presentation_formatted_rows, 3);
-        assert_eq!(
-            cache.test_observation().measured_rows,
-            4,
-            "the changed final row alone is measured"
-        );
-        track_c2d_assert_direct_cache_matches_eager(&cache, &rows, &aliases, 360.0, true);
-
-        let generation = cache.result_generation_for_test();
-        cache.invalidate_results();
-        cache.invalidate_results();
-        assert_eq!(cache.result_generation_for_test(), generation + 2);
-        scope.reset();
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &rows, &aliases, 360.0, true);
-        let repeated_invalidation_receipt = scope.receipt();
-        assert_eq!(
-            repeated_invalidation_receipt.presentation_prefix_rows_reused,
-            3
-        );
-        assert_eq!(repeated_invalidation_receipt.presentation_compared_rows, 3);
-        assert_eq!(repeated_invalidation_receipt.geometry_commits, 1);
-        assert_eq!(
-            cache.test_observation().measured_rows,
-            4,
-            "repeated pre-frame result invalidation retains one useful full presentation"
-        );
-        track_c2d_assert_direct_cache_matches_eager(&cache, &rows, &aliases, 360.0, true);
-
-        cache.invalidate_results();
-        scope.reset();
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &single, &aliases, 360.0, true);
-        let shrink_to_single_receipt = scope.receipt();
-        assert_eq!(shrink_to_single_receipt.presentation_prefix_rows_reused, 1);
-        assert_eq!(shrink_to_single_receipt.presentation_compared_rows, 1);
-        assert_eq!(shrink_to_single_receipt.geometry_commits, 1);
-        assert_eq!(cache.test_observation().measured_rows, 4);
-        track_c2d_assert_direct_cache_matches_eager(&cache, &single, &aliases, 360.0, true);
-
-        cache.invalidate_results();
-        scope.reset();
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &empty, &aliases, 360.0, true);
-        let shrink_to_empty_receipt = scope.receipt();
-        assert_eq!(shrink_to_empty_receipt.presentation_prefix_rows_reused, 0);
-        assert_eq!(shrink_to_empty_receipt.geometry_commits, 1);
-        assert_eq!(cache.test_observation().measured_rows, 4);
-        track_c2d_assert_direct_cache_matches_eager(&cache, &empty, &aliases, 360.0, true);
-
-        cache.invalidate_geometry();
-        scope.reset();
-        track_c2d_run_direct_cache_frame(&ctx, &mut cache, &rows, &aliases, 360.0, true);
-        let explicit_purge_receipt = scope.receipt();
-        assert_eq!(explicit_purge_receipt.checkpoint_misses, 1);
-        assert_eq!(explicit_purge_receipt.presentation_compared_rows, 0);
-        assert_eq!(explicit_purge_receipt.presentation_prefix_rows_reused, 0);
-        assert_eq!(
-            cache.test_observation().measured_rows,
-            7,
-            "explicit display-geometry invalidation discards the prior projection"
-        );
-        track_c2d_assert_direct_cache_matches_eager(&cache, &rows, &aliases, 360.0, true);
-    }
-
     #[test]
-    fn track_c2d_incremental_root_list_reuse_contract() {
+    fn track_c2d_oracle_root_list_recipes_match_frozen_eager_geometry() {
         use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
 
         let workspace = TrackCWorkspace::new();
@@ -7631,141 +6682,8 @@ mod tests {
     }
 
     #[test]
-    fn track_c2d_incremental_root_list_edge_cases() {
-        track_c2d_incremental_edge_contract();
-    }
-
-    #[test]
-    fn track_c2d_inert_list_keyboard_navigation_keeps_rows_visible() {
-        let _lock = MACRO_ACTIVATION_TEST_MUTEX.lock().unwrap();
-        let executions = Arc::new(AtomicUsize::new(0));
-        let observed = Arc::clone(&executions);
-        set_execute_action_hook(Some(Box::new(move |_| {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })));
-        struct ResetExecuteHook;
-        impl Drop for ResetExecuteHook {
-            fn drop(&mut self) {
-                set_execute_action_hook(None);
-            }
-        }
-        let _reset_hook = ResetExecuteHook;
-
-        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
-        let ctx = egui::Context::default();
-        let mut actions = (0..4)
-            .map(|index| {
-                let mut action = root_list_action(index);
-                action.action = format!("exec:track-c2d-click-{index}");
-                action
-            })
-            .collect::<Vec<_>>();
-        let mut app = root_list_app_at(&ctx, actions.clone(), workspace.root());
-        app.clear_query_after_run = false;
-        app.hide_after_run = false;
-        app.visible_flag.store(true, Ordering::SeqCst);
-
-        let _ = run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new());
-        app.dashboard_data_cache.wait_for_refresh();
-
-        let before = app.root_list_geometry.test_observation();
-        let prefix_tops = app.root_list_geometry.row_tops[..3].to_vec();
-        let prefix_heights = app.root_list_geometry.row_heights[..3].to_vec();
-        actions[3]
-            .desc
-            .push_str(" changed after the shared three-row prefix");
-        app.actions = Arc::new(actions.clone());
-        app.results = actions.clone();
-        app.invalidate_root_list_results();
-        let _ = run_root_list_frame(&ctx, &mut app, 1, 960.0, 640.0, Vec::new());
-        let after = app.root_list_geometry.test_observation();
-        assert_eq!(after.rebuild_count, before.rebuild_count + 1);
-        assert_eq!(after.measured_rows, before.measured_rows + 1);
-        assert_eq!(&app.root_list_geometry.row_tops[..3], &prefix_tops);
-        assert_eq!(&app.root_list_geometry.row_heights[..3], &prefix_heights);
-        for (actual, expected) in app.results.iter().zip(&actions) {
-            assert_eq!(actual.label, expected.label);
-            assert_eq!(actual.desc, expected.desc);
-            assert_eq!(actual.action, expected.action);
-            assert_eq!(actual.args, expected.args);
-        }
-
-        app.selected = Some(0);
-        app.handle_key(egui::Key::ArrowDown);
-        assert_eq!(app.selected, Some(1));
-        let _ = run_root_list_frame(&ctx, &mut app, 2, 960.0, 640.0, Vec::new());
-        let selected_rect = app
-            .test_root_rendered_row_rects
-            .iter()
-            .find_map(|(index, rect)| (*index == 1).then_some(*rect))
-            .expect("keyboard-selected row remains painted");
-        assert!(
-            app.test_root_scroll_viewport_rect
-                .expect("the actual list records its viewport")
-                .contains_rect(selected_rect)
-        );
-        assert_eq!(app.test_root_rendered_row_ids[1].0, 1);
-        assert_eq!(
-            app.results[1].action, actions[1].action,
-            "navigation preserves the selected row's absolute action identity"
-        );
-
-        let selected_action = app.results[1].clone();
-        app.selected = None;
-        let pointer = selected_rect.center();
-        let _ = run_root_list_frame(
-            &ctx,
-            &mut app,
-            3,
-            960.0,
-            640.0,
-            vec![egui::Event::PointerMoved(pointer)],
-        );
-        let _ = run_root_list_frame(
-            &ctx,
-            &mut app,
-            4,
-            960.0,
-            640.0,
-            vec![egui::Event::PointerButton {
-                pos: pointer,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            }],
-        );
-        let _ = run_root_list_frame(
-            &ctx,
-            &mut app,
-            5,
-            960.0,
-            640.0,
-            vec![egui::Event::PointerButton {
-                pos: pointer,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
-        );
-        let (activated, source) = app
-            .test_last_activation
-            .as_ref()
-            .expect("the actual list primary click reaches activation");
-        assert_eq!(activated.label, selected_action.label);
-        assert_eq!(activated.desc, selected_action.desc);
-        assert_eq!(activated.action, selected_action.action);
-        assert_eq!(activated.args, selected_action.args);
-        assert_eq!(*source, ActivationSource::Click);
-        assert_eq!(executions.load(Ordering::SeqCst), 1);
-
-        drop(app);
-        drop(workspace);
-    }
-
-    #[test]
     #[ignore = "bounded Track C2-D owner characterization; run through the explicit Track C runner"]
-    fn track_c2d_benchmark_root_list_incremental_geometry() {
+    fn track_c2d_benchmark_root_list_cold_geometry_recipes() {
         use crate::performance::track_c_workloads::{
             BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
         };
@@ -9192,8 +8110,8 @@ mod tests {
             .saturating_sub(state.geometry_before.measured_cells);
         assert_eq!(rebuilds, expected_result_delta);
         assert_eq!(
-            measured_rows, 0,
-            "an args-only provider change retains the exact display projection and remeasures no galleys"
+            measured_rows,
+            expected_result_delta.saturating_mul(state.expected_actions.len() as u64)
         );
         assert_eq!(measured_cells, 0, "this is the production list layout");
 
@@ -9491,7 +8409,7 @@ mod tests {
             crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
         };
         eprintln!(
-            "C2C_REUSE_RESULT schema=2 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=warm_egui_font_atlas settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=exact_ordered_text_prefix_checkpoint case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
+            "C2C_REUSE_RESULT schema=1 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=warm_egui_font_atlas settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=scoped_installation_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
             samples.len(),
             case.key(),
             numeric(0),
