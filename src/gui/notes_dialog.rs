@@ -30,14 +30,12 @@ mod c2f_observation {
         pub metadata_backlink_queries: u64,
         pub metadata_checkbox_lines: u64,
         pub metadata_preview_builds: u64,
-        pub metadata_rows_compared: u64,
         pub projection_calls: u64,
         pub projection_entries_scanned: u64,
         pub projection_indices_materialized: u64,
         pub geometry_ensure_calls: u64,
         pub geometry_rebuilds: u64,
         pub geometry_rows_measured: u64,
-        pub geometry_rows_reused: u64,
         pub geometry_identity_entries: u64,
         pub geometry_overlap_old_bytes: u64,
         pub geometry_overlap_new_bytes: u64,
@@ -419,33 +417,6 @@ struct NotesGeometryKey {
     interact_height: u32,
 }
 
-impl NotesGeometryKey {
-    fn same_layout_environment(&self, other: &Self) -> bool {
-        self.viewport_width == other.viewport_width
-            && self.pixels_per_point == other.pixels_per_point
-            && self.title_font == other.title_font
-            && self.small_font == other.small_font
-            && self.wrap == other.wrap
-            && self.spacing_x == other.spacing_x
-            && self.spacing_y == other.spacing_y
-            && self.interact_width == other.interact_width
-            && self.interact_height == other.interact_height
-    }
-}
-
-#[derive(Clone, Debug)]
-struct NotesGeometryPrefixProof {
-    source_key: NotesGeometryKey,
-    destination_entries_generation: u64,
-    destination_metadata_generation: u64,
-    destination_projection_generation: u64,
-    metadata_prefix_len: usize,
-}
-
-fn next_generation(generation: u64) -> u64 {
-    generation.wrapping_add(1).max(1)
-}
-
 #[derive(Clone, Debug)]
 struct NoteRowGeometry {
     original_index: usize,
@@ -560,14 +531,6 @@ fn galley_size(
     .size()
 }
 
-struct NotesGeometryBuild {
-    geometry: NotesGeometry,
-    #[cfg(test)]
-    measured_rows: usize,
-    #[cfg(test)]
-    reused_rows: usize,
-}
-
 fn measure_notes_geometry(
     ctx: &egui::Context,
     style: &egui::Style,
@@ -579,33 +542,6 @@ fn measure_notes_geometry(
     metadata_generation: u64,
     projection_generation: u64,
 ) -> NotesGeometry {
-    measure_notes_geometry_with_prefix(
-        ctx,
-        style,
-        viewport_width,
-        entries,
-        metadata,
-        filtered_indices,
-        entries_generation,
-        metadata_generation,
-        projection_generation,
-        None,
-    )
-    .geometry
-}
-
-fn measure_notes_geometry_with_prefix(
-    ctx: &egui::Context,
-    style: &egui::Style,
-    viewport_width: f32,
-    entries: &[Note],
-    metadata: &[NoteRowMetadata],
-    filtered_indices: &[usize],
-    entries_generation: u64,
-    metadata_generation: u64,
-    projection_generation: u64,
-    previous: Option<(&NotesGeometry, usize)>,
-) -> NotesGeometryBuild {
     #[cfg(test)]
     let started = std::time::Instant::now();
     let font_atlas = ctx.fonts(|fonts| fonts.texture_atlas());
@@ -631,36 +567,7 @@ fn measure_notes_geometry_with_prefix(
     #[cfg(test)]
     let mut map_key_capacity_bytes = 0_u64;
 
-    let reused_rows = previous.map_or(0, |(previous, prefix_len)| {
-        prefix_len
-            .min(filtered_indices.len())
-            .min(previous.rows.len())
-    });
-    if let Some((previous, _)) = previous {
-        for previous_row in previous.rows.iter().take(reused_rows) {
-            let row = previous_row.clone();
-            let map_key = row.identity.clone();
-            #[cfg(test)]
-            {
-                row_identity_capacity_bytes =
-                    row_identity_capacity_bytes.saturating_add(row.identity.capacity() as u64);
-                map_key_capacity_bytes =
-                    map_key_capacity_bytes.saturating_add(map_key.capacity() as u64);
-            }
-            row_by_identity.insert(map_key, rows.len());
-            rows.push(row);
-        }
-        if let Some(last) = rows.last() {
-            prefix_width = last.width_after;
-            content_height = last.visual_bottom;
-            top = last.visual_bottom + spacing_y;
-        }
-    }
-
-    #[cfg(test)]
-    let mut measured_rows = 0;
-
-    for &original_index in filtered_indices.iter().skip(reused_rows) {
+    for &original_index in filtered_indices {
         let (Some(entry), Some(metadata)) = (
             entries.get(original_index),
             metadata
@@ -750,39 +657,29 @@ fn measure_notes_geometry_with_prefix(
             width_before,
             width_after: prefix_width,
         });
-        #[cfg(test)]
-        {
-            measured_rows += 1;
-        }
         top = content_height + spacing_y;
     }
 
     #[cfg(test)]
     let rebuild_nanos = started.elapsed().as_nanos();
-    NotesGeometryBuild {
-        geometry: NotesGeometry {
-            key,
-            rows,
-            row_by_identity,
-            content_size: if filtered_indices.is_empty() {
-                egui::Vec2::ZERO
-            } else {
-                egui::vec2(prefix_width, content_height)
-            },
-            font_atlas,
-            #[cfg(test)]
-            measured_rows: filtered_indices.len(),
-            #[cfg(test)]
-            rebuild_nanos,
-            #[cfg(test)]
-            row_identity_capacity_bytes,
-            #[cfg(test)]
-            map_key_capacity_bytes,
+    NotesGeometry {
+        key,
+        rows,
+        row_by_identity,
+        content_size: if filtered_indices.is_empty() {
+            egui::Vec2::ZERO
+        } else {
+            egui::vec2(prefix_width, content_height)
         },
+        font_atlas,
         #[cfg(test)]
-        measured_rows,
+        measured_rows: filtered_indices.len(),
         #[cfg(test)]
-        reused_rows,
+        rebuild_nanos,
+        #[cfg(test)]
+        row_identity_capacity_bytes,
+        #[cfg(test)]
+        map_key_capacity_bytes,
     }
 }
 
@@ -913,7 +810,6 @@ pub struct NotesDialog {
     filtered_indices: Vec<usize>,
     projection_key: Option<ProjectionKey>,
     notes_geometry: Option<NotesGeometry>,
-    notes_geometry_prefix_proof: Option<NotesGeometryPrefixProof>,
     menu_owner: Option<NoteMenuOwner>,
     refresh_retry: Option<RefreshRetry>,
     edit_idx: Option<usize>,
@@ -1185,143 +1081,6 @@ impl NotesDialog {
         result
     }
 
-    fn prepare_geometry_prefix_proof(
-        &self,
-        entries: &[Note],
-        metadata: &[NoteRowMetadata],
-        backlinks_enabled: bool,
-        task_lists_enabled: bool,
-    ) -> Option<NotesGeometryPrefixProof> {
-        if self.entries.len() != entries.len() || self.row_metadata.len() != metadata.len() {
-            return None;
-        }
-        let source_revision = self.entries_revision?;
-        let source_metadata_key = self.metadata_key.as_ref()?;
-        if source_metadata_key.entries_generation != self.entries_generation
-            || source_metadata_key.note_revision != source_revision
-            || source_metadata_key.backlinks_enabled != backlinks_enabled
-            || source_metadata_key.task_lists_enabled != task_lists_enabled
-        {
-            return None;
-        }
-        let source_projection_key = self.projection_key.as_ref()?;
-        if source_projection_key.entries_generation != self.entries_generation
-            || source_projection_key.raw_search != self.search
-        {
-            return None;
-        }
-        let source_geometry = self.notes_geometry.as_ref()?;
-        if source_geometry.key.entries_generation != self.entries_generation
-            || source_geometry.key.metadata_generation != self.metadata_generation
-            || source_geometry.key.projection_generation != self.projection_generation
-            || source_geometry.rows.len() != self.filtered_indices.len()
-        {
-            return None;
-        }
-
-        #[cfg(test)]
-        let observing = c2f_observation::active();
-        #[cfg(test)]
-        let mut compared = 0_u64;
-        let mut metadata_prefix_len = 0;
-        for (old, new) in self.row_metadata.iter().zip(metadata) {
-            #[cfg(test)]
-            {
-                compared = compared.saturating_add(1);
-            }
-            if old != new {
-                break;
-            }
-            metadata_prefix_len += 1;
-        }
-        #[cfg(test)]
-        if observing {
-            c2f_observation::with_snapshot(|snapshot| {
-                snapshot.metadata_rows_compared =
-                    snapshot.metadata_rows_compared.saturating_add(compared);
-            });
-        }
-        if metadata_prefix_len == 0 {
-            return None;
-        }
-
-        Some(NotesGeometryPrefixProof {
-            source_key: source_geometry.key.clone(),
-            destination_entries_generation: next_generation(self.entries_generation),
-            destination_metadata_generation: next_generation(self.metadata_generation),
-            destination_projection_generation: next_generation(self.projection_generation),
-            metadata_prefix_len,
-        })
-    }
-
-    fn validated_geometry_prefix_len(
-        &self,
-        proof: &NotesGeometryPrefixProof,
-        key: &NotesGeometryKey,
-        font_atlas: &std::sync::Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>,
-        style: &egui::Style,
-    ) -> usize {
-        let Some(previous) = self.notes_geometry.as_ref() else {
-            return 0;
-        };
-        if previous.key != proof.source_key
-            || proof.destination_entries_generation != key.entries_generation
-            || proof.destination_metadata_generation != key.metadata_generation
-            || proof.destination_projection_generation != key.projection_generation
-            || !proof.source_key.same_layout_environment(key)
-            || !std::sync::Arc::ptr_eq(&previous.font_atlas, font_atlas)
-            || previous.rows.len() != self.filtered_indices.len()
-            || proof.metadata_prefix_len > self.row_metadata.len()
-        {
-            return 0;
-        }
-
-        let spacing_y = style.spacing.item_spacing.y;
-        let mut expected_top = 0.0_f32;
-        let mut expected_width = f32::from_bits(key.viewport_width).max(0.0);
-        let limit = proof
-            .metadata_prefix_len
-            .min(self.filtered_indices.len())
-            .min(previous.rows.len());
-        let mut reusable = 0;
-        for position in 0..limit {
-            let original_index = self.filtered_indices[position];
-            let Some(entry) = self.entries.get(original_index) else {
-                break;
-            };
-            let Some(metadata) = self
-                .row_metadata
-                .get(original_index)
-                .filter(|metadata| metadata.original_index == original_index)
-            else {
-                break;
-            };
-            let row = &previous.rows[position];
-            let identity_matches = if entry.slug.is_empty() {
-                row.identity == format!("#unsaved:{original_index}")
-            } else {
-                row.identity == entry.slug
-            };
-            if original_index >= proof.metadata_prefix_len
-                || row.original_index != original_index
-                || row.identity.is_empty() && !entry.slug.is_empty()
-                || !identity_matches
-                || metadata.original_index != original_index
-                || row.top.to_bits() != expected_top.to_bits()
-                || row.width_before.to_bits() != expected_width.to_bits()
-                || row.width_after.to_bits() != row.width_before.max(row.body_width).to_bits()
-                || row.separator_top.to_bits() != (row.top + row.body_height + spacing_y).to_bits()
-                || row.visual_bottom.to_bits() != (row.separator_top + 6.0).to_bits()
-            {
-                break;
-            }
-            reusable += 1;
-            expected_width = row.width_after;
-            expected_top = row.visual_bottom + spacing_y;
-        }
-        reusable
-    }
-
     fn install_candidate(
         &mut self,
         revision: u64,
@@ -1329,7 +1088,6 @@ impl NotesDialog {
         index: Vec<String>,
         metadata: Vec<NoteRowMetadata>,
         settings: Option<(bool, bool)>,
-        geometry_prefix_proof: Option<NotesGeometryPrefixProof>,
     ) {
         self.entries = entries;
         self.index = index;
@@ -1346,7 +1104,6 @@ impl NotesDialog {
         });
         self.filtered_indices.clear();
         self.projection_key = None;
-        self.notes_geometry_prefix_proof = geometry_prefix_proof;
         self.refresh_retry = None;
         #[cfg(test)]
         if self.metadata_key.is_some() {
@@ -1400,7 +1157,6 @@ impl NotesDialog {
         settings: &crate::settings::NoteSettings,
     ) {
         if self.edit_idx.is_some() {
-            self.notes_geometry_prefix_proof = None;
             return;
         }
 
@@ -1459,12 +1215,6 @@ impl NotesDialog {
             let forced_race = std::mem::take(&mut self.test_race_after_candidate);
             #[cfg(not(test))]
             let forced_race = false;
-            let geometry_prefix_proof = self.prepare_geometry_prefix_proof(
-                &entries,
-                &metadata,
-                backlinks_enabled,
-                task_lists_enabled,
-            );
             if note_version() != revision || forced_race {
                 self.mark_retry(ctx, note_version(), backlinks_enabled, task_lists_enabled);
                 return;
@@ -1475,7 +1225,6 @@ impl NotesDialog {
                 index,
                 metadata,
                 Some((backlinks_enabled, task_lists_enabled)),
-                geometry_prefix_proof,
             );
         } else if !metadata_matches {
             let metadata =
@@ -1499,7 +1248,6 @@ impl NotesDialog {
                 self.mark_retry(ctx, note_version(), backlinks_enabled, task_lists_enabled);
                 return;
             }
-            self.notes_geometry_prefix_proof = None;
             self.row_metadata = metadata;
             self.metadata_key = Some(MetadataKey {
                 entries_generation: self.entries_generation,
@@ -1519,15 +1267,6 @@ impl NotesDialog {
         }
 
         self.rebuild_projection_if_needed();
-        if self
-            .notes_geometry_prefix_proof
-            .as_ref()
-            .is_some_and(|proof| {
-                proof.destination_projection_generation != self.projection_generation
-            })
-        {
-            self.notes_geometry_prefix_proof = None;
-        }
     }
 
     fn rebuild_projection_if_needed(&mut self) {
@@ -1560,7 +1299,6 @@ impl NotesDialog {
         self.metadata_key = None;
         self.filtered_indices.clear();
         self.projection_key = None;
-        self.notes_geometry_prefix_proof = None;
     }
 
     fn ensure_notes_geometry(
@@ -1599,18 +1337,7 @@ impl NotesDialog {
             crate::performance::track_c::Phase::NotesGeometryCold,
         );
         track_c_timer.set_work_units(self.filtered_indices.len());
-        let proof = self.notes_geometry_prefix_proof.take();
-        let reusable_prefix_len = proof.as_ref().map_or(0, |proof| {
-            self.validated_geometry_prefix_len(proof, &key, &font_atlas, style)
-        });
-        let previous = if reusable_prefix_len == 0 {
-            None
-        } else {
-            self.notes_geometry
-                .as_ref()
-                .map(|previous| (previous, reusable_prefix_len))
-        };
-        let build = measure_notes_geometry_with_prefix(
+        let geometry = measure_notes_geometry(
             ctx,
             style,
             viewport_width,
@@ -1620,13 +1347,7 @@ impl NotesDialog {
             self.entries_generation,
             self.metadata_generation,
             self.projection_generation,
-            previous,
         );
-        #[cfg(test)]
-        let measured_rows = build.measured_rows;
-        #[cfg(test)]
-        let reused_rows = build.reused_rows;
-        let geometry = build.geometry;
         #[cfg(test)]
         {
             self.test_geometry_rebuilds = self.test_geometry_rebuilds.saturating_add(1);
@@ -1642,13 +1363,10 @@ impl NotesDialog {
                     snapshot.geometry_rebuilds = snapshot.geometry_rebuilds.saturating_add(1);
                     snapshot.geometry_rows_measured = snapshot
                         .geometry_rows_measured
-                        .saturating_add(measured_rows as u64);
-                    snapshot.geometry_rows_reused = snapshot
-                        .geometry_rows_reused
-                        .saturating_add(reused_rows as u64);
+                        .saturating_add(geometry.rows.len() as u64);
                     snapshot.geometry_identity_entries = snapshot
                         .geometry_identity_entries
-                        .saturating_add(geometry.rows.len() as u64);
+                        .saturating_add(geometry.row_by_identity.len() as u64);
                 });
             }
         }
@@ -1740,7 +1458,7 @@ impl NotesDialog {
         };
         let index = build_search_index(&entries);
         if note_version() == revision {
-            self.install_candidate(revision, entries, index, Vec::new(), None, None);
+            self.install_candidate(revision, entries, index, Vec::new(), None);
         }
     }
 
@@ -1762,7 +1480,6 @@ impl NotesDialog {
 
     pub fn open_edit(&mut self, idx: usize) {
         self.ensure_entries_for_edit();
-        self.notes_geometry_prefix_proof = None;
         if idx < self.entries.len() {
             self.text = self.entries[idx].content.clone();
         } else {
@@ -5212,15 +4929,6 @@ mod tests {
                     .expect("synthetic first note starts with a Markdown heading");
                 first.content = format!("# {title}\n{remainder}");
             }
-            TrackC2FRecipe::BacklinkEarlier => {
-                let target = notes
-                    .first()
-                    .expect("synthetic fixture is nonempty")
-                    .slug
-                    .clone();
-                let source = notes.last_mut().expect("synthetic fixture is nonempty");
-                source.content.push_str(&format!("\n[[{target}]]"));
-            }
             _ => {}
         }
         notes
@@ -5336,7 +5044,6 @@ mod tests {
         EarlyWideUnicode,
         Width960To300,
         AtlasReplacement,
-        BacklinkEarlier,
     }
 
     impl TrackC2FRecipe {
@@ -5351,7 +5058,6 @@ mod tests {
                 Self::EarlyWideUnicode => "early_wide_unicode",
                 Self::Width960To300 => "width_960_to_300",
                 Self::AtlasReplacement => "atlas_replacement",
-                Self::BacklinkEarlier => "backlink_earlier",
             }
         }
 
@@ -5394,8 +5100,6 @@ mod tests {
         metadata_id: u64,
         projection_id: u64,
         projection_selected_indices: u64,
-        metadata_rows_compared: u64,
-        geometry_rows_reused: u64,
         geometry_id: u64,
         viewport_id: u64,
         complete_output_id: u64,
@@ -5753,92 +5457,6 @@ mod tests {
         }
     }
 
-    fn track_c2f_publish_notes(state: &mut TrackC2FState, notes: Vec<Note>) -> (u64, Vec<Note>) {
-        drop(state.cache_guard.take());
-        state.cache_guard = Some(crate::plugins::note::publish_note_cache_for_test(notes));
-        crate::plugins::note::note_cache_snapshot_with_version()
-            .expect("the owned candidate cache is healthy")
-    }
-
-    fn track_c2f_refresh_pending_revision(state: &mut TrackC2FState) -> (u64, Vec<Note>) {
-        state.dialog.refresh_requested = true;
-        state.dialog.refresh_retry = None;
-        state
-            .dialog
-            .maybe_refresh_derived(&state.ctx, &state.app.note_settings);
-        let (revision, notes) = crate::plugins::note::note_cache_snapshot_with_version()
-            .expect("the current candidate cache is healthy");
-        assert_eq!(state.dialog.entries_revision, Some(revision));
-        assert_eq!(state.dialog.entries, notes);
-        state.expected_revision = revision;
-        state.expected_notes = notes.clone();
-        state.expected_index = track_c2f_reference_search_index(&notes);
-        state.expected_metadata = track_c2f_reference_metadata(
-            &notes,
-            state.app.note_settings.backlinks_enabled,
-            state.app.note_settings.task_lists_enabled,
-        );
-        state.expected_indices = track_c2f_reference_indices(&notes, &state.dialog.search);
-        state.expected_backlinks = state.app.note_settings.backlinks_enabled;
-        let oracle_ctx = egui::Context::default();
-        state.eager = eager_notes_geometry_for_projection(
-            &oracle_ctx,
-            &notes,
-            &state.expected_indices,
-            state.target_viewport,
-            state.ctx.style().as_ref(),
-            state.expected_backlinks,
-            state.initial_tasks,
-        );
-        (revision, notes)
-    }
-
-    fn track_c2f_render_current_and_assert(
-        state: &mut TrackC2FState,
-        frame: usize,
-        expected_reused_rows: u64,
-    ) -> super::c2f_observation::Snapshot {
-        let mut observer = super::c2f_observation::Scope::begin();
-        let output = track_c2f_run_owner(state, frame);
-        drop(output);
-        let observation = observer.finish();
-
-        let dialog = &state.dialog;
-        assert_eq!(dialog.entries, state.expected_notes);
-        assert_eq!(dialog.entries_revision, Some(state.expected_revision));
-        assert_eq!(dialog.index, state.expected_index);
-        assert_eq!(dialog.row_metadata, state.expected_metadata);
-        assert_eq!(dialog.filtered_indices, state.expected_indices);
-        assert_eq!(
-            dialog.row_metadata,
-            track_c2f_reference_metadata(
-                &state.expected_notes,
-                state.expected_backlinks,
-                state.initial_tasks,
-            )
-        );
-        let geometry = dialog
-            .notes_geometry
-            .as_ref()
-            .expect("the current projection has measured geometry");
-        assert_quick_notes_geometry_matches_eager(dialog, &state.eager, &state.expected_indices);
-        track_c2f_assert_actual_widgets_match_eager(dialog, &state.eager, &state.expected_indices);
-        assert_eq!(geometry.rows.len(), state.expected_indices.len());
-        assert_eq!(geometry.row_by_identity.len(), geometry.rows.len());
-        assert_eq!(observation.geometry_rebuilds, 1);
-        assert_eq!(observation.geometry_rows_reused, expected_reused_rows);
-        assert_eq!(
-            observation.geometry_rows_measured + observation.geometry_rows_reused,
-            geometry.rows.len() as u64
-        );
-        assert_eq!(
-            observation.geometry_identity_entries,
-            geometry.rows.len() as u64
-        );
-        assert!(dialog.notes_geometry_prefix_proof.is_none());
-        observation
-    }
-
     fn track_c2f_run_owner(state: &mut TrackC2FState, frame: usize) -> egui::FullOutput {
         match state.recipe {
             TrackC2FRecipe::MetadataSettingsOnly => {
@@ -5854,8 +5472,7 @@ mod tests {
             | TrackC2FRecipe::WarmRepeat
             | TrackC2FRecipe::EarlyWideUnicode
             | TrackC2FRecipe::Width960To300
-            | TrackC2FRecipe::AtlasReplacement
-            | TrackC2FRecipe::BacklinkEarlier => {}
+            | TrackC2FRecipe::AtlasReplacement => {}
         }
         run_track_c_notes_frame(
             &state.ctx,
@@ -6180,45 +5797,10 @@ mod tests {
             observation.geometry_overlap_new_map_key_bytes,
             observation.geometry_overlap_new_entries,
         ];
-        let expected_metadata_rows_compared = match state.recipe {
-            TrackC2FRecipe::RevisionFinalPreview => state.expected_notes.len() as u64,
-            TrackC2FRecipe::EarlyWideUnicode | TrackC2FRecipe::BacklinkEarlier => 1,
-            _ => 0,
-        };
-        let expected_geometry_rows_reused = if state.recipe == TrackC2FRecipe::RevisionFinalPreview
-        {
-            state.expected_indices.len().saturating_sub(1) as u64
-        } else {
-            0
-        };
-        assert_eq!(
-            observation.metadata_rows_compared,
-            expected_metadata_rows_compared,
-            "metadata prefix comparisons for recipe {}",
-            state.recipe.token()
-        );
-        assert_eq!(
-            observation.geometry_rows_reused,
-            expected_geometry_rows_reused,
-            "reused geometry rows for recipe {}",
-            state.recipe.token()
-        );
-        if observation.geometry_rebuilds != 0 {
-            assert_eq!(
-                observation.geometry_rows_measured + observation.geometry_rows_reused,
-                geometry.rows.len() as u64,
-                "measured and reused rows cover the complete projection"
-            );
-        }
-        assert!(
-            dialog.notes_geometry_prefix_proof.is_none(),
-            "a geometry prefix proof is consumed by the cold ensure"
-        );
         assert_eq!(
             observation.geometry_rebuilds,
             match state.recipe {
                 TrackC2FRecipe::RevisionFinalPreview
-                | TrackC2FRecipe::BacklinkEarlier
                 | TrackC2FRecipe::MetadataSettingsOnly
                 | TrackC2FRecipe::SearchSparse
                 | TrackC2FRecipe::GeometryCold
@@ -6232,18 +5814,14 @@ mod tests {
             observation.snapshot_successes,
             u64::from(matches!(
                 state.recipe,
-                TrackC2FRecipe::RevisionFinalPreview
-                    | TrackC2FRecipe::EarlyWideUnicode
-                    | TrackC2FRecipe::BacklinkEarlier
+                TrackC2FRecipe::RevisionFinalPreview | TrackC2FRecipe::EarlyWideUnicode
             ))
         );
         assert_eq!(
             observation.index_build_calls,
             u64::from(matches!(
                 state.recipe,
-                TrackC2FRecipe::RevisionFinalPreview
-                    | TrackC2FRecipe::EarlyWideUnicode
-                    | TrackC2FRecipe::BacklinkEarlier
+                TrackC2FRecipe::RevisionFinalPreview | TrackC2FRecipe::EarlyWideUnicode
             ))
         );
         assert_eq!(
@@ -6252,7 +5830,6 @@ mod tests {
                 state.recipe,
                 TrackC2FRecipe::RevisionFinalPreview
                     | TrackC2FRecipe::EarlyWideUnicode
-                    | TrackC2FRecipe::BacklinkEarlier
                     | TrackC2FRecipe::MetadataSettingsOnly
             )),
             "unexpected metadata build work for recipe {}",
@@ -6298,8 +5875,6 @@ mod tests {
             metadata_id,
             projection_id,
             projection_selected_indices: state.expected_indices.len() as u64,
-            metadata_rows_compared: observation.metadata_rows_compared,
-            geometry_rows_reused: observation.geometry_rows_reused,
             geometry_id,
             viewport_id,
             complete_output_id,
@@ -6466,8 +6041,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join(";");
         let fields = vec![
-            "schema=2".to_owned(),
-            "stage=quick_notes_prefix_candidate".to_owned(),
+            "schema=1".to_owned(),
+            "stage=quick_notes_refresh_characterization".to_owned(),
             "owner=egui_Context_run+NotesDialog::ui".to_owned(),
             format!("source={source}"),
             format!("profile={profile}"),
@@ -6488,10 +6063,6 @@ mod tests {
             format!("viewport={viewport}"),
             format!("settings={settings}"),
             format!("fixture_signature={:016x}", samples[0].fixture_id),
-            format!(
-                "reuse_proof_size_bytes={}",
-                std::mem::size_of::<Option<super::NotesGeometryPrefixProof>>()
-            ),
             format!("fixture_ids=[{}]", ids(|s| s.fixture_id)),
             format!("canonical_ids=[{}]", ids(|s| s.canonical_id)),
             format!("search_index_ids=[{}]", ids(|s| s.index_id)),
@@ -6611,14 +6182,6 @@ mod tests {
             format!(
                 "geometry_rows_measured=[{}]",
                 work(|s| s.observation.geometry_rows_measured)
-            ),
-            format!(
-                "metadata_rows_compared=[{}]",
-                work(|s| s.metadata_rows_compared)
-            ),
-            format!(
-                "geometry_rows_reused=[{}]",
-                work(|s| s.geometry_rows_reused)
             ),
             format!(
                 "geometry_identity_entries=[{}]",
@@ -6849,326 +6412,8 @@ mod tests {
     }
 
     #[test]
-    fn track_c2f_oracle_quick_notes_prefix_candidate_contract() {
-        use crate::performance::track_c_workloads::{TrackCWorkspace, note_fixture};
-
-        let _lock = TEST_MUTEX.lock().unwrap();
-        let workspace = TrackCWorkspace::new();
-        eprintln!(
-            "TRACK_C2F_PREFIX_PROOF_SIZE_BYTES={}",
-            std::mem::size_of::<Option<super::NotesGeometryPrefixProof>>()
-        );
-
-        let fixture = note_fixture(100);
-        let mut backlink_state = track_c2f_prepare_state(
-            workspace.root(),
-            &fixture.values,
-            TrackC2FRecipe::BacklinkEarlier,
-            640.0,
-        );
-        let old_first_metadata =
-            track_c2f_reference_metadata(&backlink_state.dialog.entries, true, true)[0].clone();
-        let backlink_sample = track_c2f_sample(&mut backlink_state, 0);
-        assert_eq!(backlink_sample.metadata_rows_compared, 1);
-        assert_eq!(backlink_sample.geometry_rows_reused, 0);
-        assert_eq!(backlink_sample.observation.geometry_rows_measured, 100);
-        assert_ne!(old_first_metadata, backlink_state.expected_metadata[0]);
-        assert!(
-            backlink_state.expected_metadata[0]
-                .meta
-                .contains("backlinks")
-        );
-        assert!(
-            backlink_state.expected_notes[99]
-                .links
-                .iter()
-                .any(|target| target == &backlink_state.expected_notes[0].slug)
-        );
-        drop(backlink_state);
-
-        let mut gate_state = track_c2f_prepare_state(
-            workspace.root(),
-            &fixture.values,
-            TrackC2FRecipe::WarmRepeat,
-            640.0,
-        );
-        let first_revision = track_c2f_expected_values(
-            &gate_state.expected_notes,
-            TrackC2FRecipe::RevisionFinalPreview,
-        );
-        let _ = track_c2f_publish_notes(&mut gate_state, first_revision);
-        let _ = track_c2f_refresh_pending_revision(&mut gate_state);
-        let proof = gate_state
-            .dialog
-            .notes_geometry_prefix_proof
-            .clone()
-            .expect("the accepted final-note change proves its unchanged prefix");
-        assert_eq!(proof.metadata_prefix_len, 99);
-        assert_eq!(
-            proof.destination_entries_generation,
-            gate_state.dialog.entries_generation
-        );
-        assert_eq!(
-            proof.destination_metadata_generation,
-            gate_state.dialog.metadata_generation
-        );
-        assert_eq!(
-            proof.destination_projection_generation,
-            gate_state.dialog.projection_generation
-        );
-
-        let style = gate_state.ctx.style();
-        let source_geometry = gate_state
-            .dialog
-            .notes_geometry
-            .as_ref()
-            .expect("the accepted predecessor geometry remains installed");
-        let width = f32::from_bits(source_geometry.key.viewport_width);
-        let current_key = super::geometry_key(
-            gate_state.dialog.entries_generation,
-            gate_state.dialog.metadata_generation,
-            gate_state.dialog.projection_generation,
-            width,
-            gate_state.ctx.pixels_per_point(),
-            style.as_ref(),
-        );
-        let current_atlas = gate_state.ctx.fonts(|fonts| fonts.texture_atlas());
-        assert_eq!(
-            gate_state.dialog.validated_geometry_prefix_len(
-                &proof,
-                &current_key,
-                &current_atlas,
-                style.as_ref(),
-            ),
-            99
-        );
-
-        let width_mismatch = super::geometry_key(
-            gate_state.dialog.entries_generation,
-            gate_state.dialog.metadata_generation,
-            gate_state.dialog.projection_generation,
-            width + 1.0,
-            gate_state.ctx.pixels_per_point(),
-            style.as_ref(),
-        );
-        assert_eq!(
-            gate_state.dialog.validated_geometry_prefix_len(
-                &proof,
-                &width_mismatch,
-                &current_atlas,
-                style.as_ref(),
-            ),
-            0,
-            "a real viewport-key change rejects the otherwise valid prefix"
-        );
-
-        let foreign_ctx = egui::Context::default();
-        let _ = foreign_ctx.run(egui::RawInput::default(), |_| {});
-        let foreign_atlas = foreign_ctx.fonts(|fonts| fonts.texture_atlas());
-        assert!(!Arc::ptr_eq(&current_atlas, &foreign_atlas));
-        assert_eq!(
-            gate_state.dialog.validated_geometry_prefix_len(
-                &proof,
-                &current_key,
-                &foreign_atlas,
-                style.as_ref(),
-            ),
-            0,
-            "a different retained atlas rejects the otherwise valid prefix"
-        );
-
-        let first_identity = gate_state.dialog.notes_geometry.as_mut().unwrap().rows[0]
-            .identity
-            .clone();
-        gate_state.dialog.notes_geometry.as_mut().unwrap().rows[0].identity =
-            "changed-leading-identity".to_owned();
-        assert_eq!(
-            gate_state.dialog.validated_geometry_prefix_len(
-                &proof,
-                &current_key,
-                &current_atlas,
-                style.as_ref(),
-            ),
-            0,
-            "a leading original-row identity mismatch terminates reuse"
-        );
-        gate_state.dialog.notes_geometry.as_mut().unwrap().rows[0].identity = first_identity;
-
-        let mut reindexed = NotesDialog::default();
-        reindexed.notes_geometry_prefix_proof = Some(proof.clone());
-        reindexed.rebuild_index();
-        assert!(reindexed.notes_geometry_prefix_proof.is_none());
-
-        let mut edit = NotesDialog::default();
-        edit.notes_geometry_prefix_proof = Some(proof.clone());
-        edit.open_edit(0);
-        assert!(edit.notes_geometry_prefix_proof.is_none());
-
-        let mut empty_metadata = NotesDialog::default();
-        empty_metadata.notes_geometry_prefix_proof = Some(proof.clone());
-        empty_metadata.ensure_entries_for_edit();
-        assert!(empty_metadata.notes_geometry_prefix_proof.is_none());
-        assert!(empty_metadata.row_metadata.is_empty());
-
-        drop(gate_state.dialog.notes_geometry.take());
-        assert!(gate_state.dialog.notes_geometry_prefix_proof.is_some());
-        let missing_geometry = track_c2f_render_current_and_assert(&mut gate_state, 1, 0);
-        assert_eq!(missing_geometry.geometry_rows_measured, 100);
-        assert_eq!(missing_geometry.geometry_rows_reused, 0);
-
-        let mut unchained = track_c2f_prepare_state(
-            workspace.root(),
-            &fixture.values,
-            TrackC2FRecipe::WarmRepeat,
-            640.0,
-        );
-        let first_target = track_c2f_expected_values(
-            &unchained.expected_notes,
-            TrackC2FRecipe::RevisionFinalPreview,
-        );
-        let _ = track_c2f_publish_notes(&mut unchained, first_target);
-        let (accepted_revision, accepted_notes) =
-            track_c2f_refresh_pending_revision(&mut unchained);
-        assert!(unchained.dialog.notes_geometry_prefix_proof.is_some());
-        let stale_geometry_generation = unchained
-            .dialog
-            .notes_geometry
-            .as_ref()
-            .unwrap()
-            .key
-            .entries_generation;
-
-        let mut second_target = accepted_notes;
-        second_target
-            .last_mut()
-            .expect("synthetic fixture is nonempty")
-            .content
-            .push_str("\nsecond accepted revision before geometry ensure");
-        let _ = track_c2f_publish_notes(&mut unchained, second_target);
-        let (second_revision, _) = track_c2f_refresh_pending_revision(&mut unchained);
-        assert_ne!(accepted_revision, second_revision);
-        assert_eq!(
-            unchained
-                .dialog
-                .notes_geometry
-                .as_ref()
-                .unwrap()
-                .key
-                .entries_generation,
-            stale_geometry_generation
-        );
-        assert!(unchained.dialog.entries_generation != stale_geometry_generation);
-        assert!(unchained.dialog.notes_geometry_prefix_proof.is_none());
-        let unchained_observation = track_c2f_render_current_and_assert(&mut unchained, 2, 0);
-        assert_eq!(unchained_observation.metadata_rows_compared, 0);
-        assert_eq!(unchained_observation.geometry_rows_measured, 100);
-        assert_eq!(unchained_observation.geometry_rows_reused, 0);
-        drop(unchained);
-
-        let mut settings_state = track_c2f_prepare_state(
-            workspace.root(),
-            &fixture.values,
-            TrackC2FRecipe::WarmRepeat,
-            640.0,
-        );
-        let settings_target = track_c2f_expected_values(
-            &settings_state.expected_notes,
-            TrackC2FRecipe::RevisionFinalPreview,
-        );
-        let _ = track_c2f_publish_notes(&mut settings_state, settings_target);
-        let _ = track_c2f_refresh_pending_revision(&mut settings_state);
-        assert!(settings_state.dialog.notes_geometry_prefix_proof.is_some());
-        settings_state.app.note_settings.backlinks_enabled = false;
-        settings_state
-            .dialog
-            .maybe_refresh_derived(&settings_state.ctx, &settings_state.app.note_settings);
-        assert!(settings_state.dialog.notes_geometry_prefix_proof.is_none());
-        settings_state.expected_backlinks = false;
-        settings_state.expected_metadata = track_c2f_reference_metadata(
-            &settings_state.expected_notes,
-            false,
-            settings_state.initial_tasks,
-        );
-        let oracle_ctx = egui::Context::default();
-        settings_state.eager = eager_notes_geometry_for_projection(
-            &oracle_ctx,
-            &settings_state.expected_notes,
-            &settings_state.expected_indices,
-            settings_state.target_viewport,
-            settings_state.ctx.style().as_ref(),
-            false,
-            settings_state.initial_tasks,
-        );
-        let settings_observation = track_c2f_render_current_and_assert(&mut settings_state, 3, 0);
-        assert_eq!(settings_observation.metadata_rows_compared, 0);
-        assert_eq!(settings_observation.geometry_rows_measured, 100);
-        drop(settings_state);
-
-        let mut failed = track_c2f_prepare_state(
-            workspace.root(),
-            &fixture.values,
-            TrackC2FRecipe::WarmRepeat,
-            640.0,
-        );
-        let old_entries = failed.dialog.entries.clone();
-        let old_index = failed.dialog.index.clone();
-        let old_metadata = failed.dialog.row_metadata.clone();
-        let old_metadata_key = failed.dialog.metadata_key.clone();
-        let old_projection = failed.dialog.filtered_indices.clone();
-        let old_projection_key = failed.dialog.projection_key.clone();
-        let old_geometry_key = failed.dialog.notes_geometry.as_ref().unwrap().key.clone();
-        let old_geometry_id =
-            track_c2f_geometry_identity(failed.dialog.notes_geometry.as_ref().unwrap());
-        let failed_target =
-            track_c2f_expected_values(&failed.expected_notes, TrackC2FRecipe::RevisionFinalPreview);
-        let _ = track_c2f_publish_notes(&mut failed, failed_target);
-        failed.dialog.refresh_requested = true;
-        failed.dialog.test_fail_next_snapshot = true;
-        failed
-            .dialog
-            .maybe_refresh_derived(&failed.ctx, &failed.app.note_settings);
-        assert_eq!(failed.dialog.entries, old_entries);
-        assert_eq!(failed.dialog.index, old_index);
-        assert_eq!(failed.dialog.row_metadata, old_metadata);
-        assert_eq!(failed.dialog.metadata_key, old_metadata_key);
-        assert_eq!(failed.dialog.filtered_indices, old_projection);
-        assert_eq!(failed.dialog.projection_key, old_projection_key);
-        assert_eq!(
-            failed.dialog.notes_geometry.as_ref().unwrap().key,
-            old_geometry_key
-        );
-        assert_eq!(
-            track_c2f_geometry_identity(failed.dialog.notes_geometry.as_ref().unwrap()),
-            old_geometry_id
-        );
-        assert!(failed.dialog.notes_geometry_prefix_proof.is_none());
-
-        failed.dialog.refresh_retry = None;
-        failed.dialog.test_race_after_candidate = true;
-        failed
-            .dialog
-            .maybe_refresh_derived(&failed.ctx, &failed.app.note_settings);
-        assert_eq!(failed.dialog.entries, old_entries);
-        assert_eq!(failed.dialog.index, old_index);
-        assert_eq!(failed.dialog.row_metadata, old_metadata);
-        assert_eq!(failed.dialog.metadata_key, old_metadata_key);
-        assert_eq!(failed.dialog.filtered_indices, old_projection);
-        assert_eq!(failed.dialog.projection_key, old_projection_key);
-        assert_eq!(
-            failed.dialog.notes_geometry.as_ref().unwrap().key,
-            old_geometry_key
-        );
-        assert_eq!(
-            track_c2f_geometry_identity(failed.dialog.notes_geometry.as_ref().unwrap()),
-            old_geometry_id
-        );
-        assert!(failed.dialog.notes_geometry_prefix_proof.is_none());
-        drop(failed);
-    }
-
-    #[test]
-    #[ignore = "opt-in C2-F Quick Notes geometry-prefix candidate; owned synthetic fixtures only"]
-    fn track_c2f_benchmark_quick_notes_prefix_candidate() {
+    #[ignore = "opt-in C2-F Quick Notes characterization; owned synthetic fixtures only"]
+    fn track_c2f_benchmark_quick_notes_characterization() {
         use crate::performance::track_c_workloads::{BenchmarkMode, TrackCWorkspace, note_fixture};
 
         let source = std::env::var("ML_TRACK_C_SOURCE_SHA")

@@ -1,6 +1,7 @@
 # C2-F Quick Notes prefix candidate execution
 
-State: candidate verification IN_PROGRESS; runtime acceptance PENDING. LOCAL ONLY.
+State: SKIPPED (measured gate); runtime candidate REJECTED and exact accepted
+characterization source restored. LOCAL ONLY.
 The frozen contract is `track_c_quick_notes_prefix_gate.md` and its JSON. The
 reviewed characterization source is804d221cdb4c6f0145213ac52f2ef7b2cb4b77c6;
 baseline/contract authorization isfe9f2f885699e85f853b6fbc0727869c0c619c22.
@@ -8,7 +9,8 @@ The original baseline collector and collected baseline JSON remain unchanged.
 
 ## Implementation and source review
 
-Only `src/gui/notes_dialog.rs` owns the runtime experiment. One optional private
+The rejected557c7e8a1cdeb50d35e70127e7542e733706e985 candidate changed
+only `src/gui/notes_dialog.rs` for the runtime experiment. One optional private
 proof binds predecessor geometry, accepted destination generations and the complete
 unchanged metadata prefix. All snapshot/index/metadata preparation remains complete.
 The comparison runs before the final revision recheck. A shared geometry builder
@@ -64,11 +66,48 @@ frozen Full gates. For100 notes, final-note refresh owner p50/p95 decreased from
 No exclusions, threshold changes or performance reruns are
 authorized to obtain acceptance.
 
-## Remaining gate
+## Full decision and restoration
 
-After independent Small review, commit the reviewed candidate locally and execute
-Full30 records/600 samples on that exact clean SHA. All32 frozen numeric gates,
-complete semantic/eager/work parity, bounded ownership and independent review
-must pass. Otherwise restore the exact accepted804d source while preserving the
-rejected candidate history and evidence. Native display, production frequency,
-allocator traffic and process RAM are NOT MEASURED.
+Exact clean candidate557c7e8a1cdeb50d35e70127e7542e733706e985 Full owner PASS:
+1176.481s,30 records/600 retained samples, zero exclusions. Strict collection and
+independent evidence review CLEAR:1,530 arrays/30,600 entries,600 scalars,300 timing
+triplets,1,110 baseline common arrays,400 Small common arrays and4,800 identity
+values. All work, phase arithmetic, eager geometry, receipts and privacy checks pass.
+
+Only23/32 frozen numeric gates pass. All4 material-benefit gates pass:
+
+| Final-revision count | Baseline p50/p95/max ms | Candidate p50/p95/max ms |
+|---|---|---|
+| 1,000 | 144.7888/155.7158/162.4558 | 41.2693/58.4184/62.0571 |
+| 5,000 | 740.4442/781.9052/816.4360 | 206.0623/265.5775/295.0022 |
+
+Nine of28 control p95 gates exceed the105% ceiling:
+
+| Control/count/height | Baseline p95 ms | Candidate p95 ms | Change |
+|---|---:|---:|---:|
+| case-only/100/640 | 0.4910 | 0.6962 | +41.79% |
+| warm/100/180 | 0.6068 | 0.6718 | +10.71% |
+| width/100/640 | 12.4725 | 13.5475 | +8.62% |
+| metadata-only/1,000/640 | 129.7324 | 145.4112 | +12.09% |
+| case-only/5,000/640 | 0.5311 | 0.6032 | +13.58% |
+| cold/5,000/640 | 559.8161 | 595.2369 | +6.33% |
+| warm/5,000/640 | 0.8455 | 0.9129 | +7.97% |
+| warm/5,000/180 | 0.8467 | 0.9158 | +8.16% |
+| width/5,000/640 | 559.2522 | 605.6645 | +8.30% |
+
+All30 distributions remain in `track_c_quick_notes_prefix_candidate_full.json`;
+all32 exact integer comparisons remain in `track_c_quick_notes_prefix_decision.json`.
+Retain contrary5k early-wide max897.3549ms and cold640 max668.1567ms. The actual
+geometry-pair partial endpoint maximum is1,200,000bytes, excluding map buckets,
+control blocks, galleys, other derived overlap, allocator traffic and RSS.
+
+Independent disposition: measured SKIP; no rerun, noise waiver, second candidate
+or metadata expansion. Restored ONLY `src/gui/notes_dialog.rs` exactly to accepted
+804d221cdb4c6f0145213ac52f2ef7b2cb4b77c6 blob595e29619440fdd934919d1343cd03718e604369.
+Complete source diff to804d is empty and all18 protected bodies match. Reuse the
+already passed identical-source baseline ordinary/check evidence; no redundant
+Cargo run for restoration. Baseline schema1/characterization owner is current;
+schema2/candidate owner exists historically at557c and its measurements are rejected.
+Companion tooling and candidate history/evidence remain preserved. Accepted C2-C,
+Track A/B, profiles, persistence and other source owners are unchanged. Native display,
+production frequency, allocator traffic and process RAM are NOT MEASURED.
