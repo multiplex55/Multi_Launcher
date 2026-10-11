@@ -120,3 +120,51 @@ Staged1/1 PASS run06f9562f-fe81-431e-8718-db5e6b8134cf build.89s/test8.834s/exec
 All timing tails retained. Small results are mixed, including adverse browse/provider-heavy tails and some lower fuzzy timings; no noise attribution or optimization acceptance. Strict original work shape remains4fields with third earlyphasecopiesH→0; root7values unchanged with explicitfinalphase attribution. Parent original comparison initially used an unqualified owner literal, corrected to LauncherApp::search_read_only_outcome_with_plugin_snapshot; parser-only comparison correction, no source/Cargo rerun. Independent review pending before candidatecommit and matched Full.
 
 Independent Small evidence review CLEARforcandidatecommit: staged204arrays138scalars12timingtriplets +original42arrays114scalars6timingtriplets(18scalarstats); allrawvalues, sixstagedbaseline and sixeagerC2Aoriginal overlays and comparisonsverified. Rootsevenvaluesunchanged/searchthirdcounteronlyH→0, actual24byte record andearly0/finalH/totalH/Pmoves confirmed. Mixedtails retained. Originalcomparison G0fields nowexplicitg0_modeFull/context_only_fixture_matched_full_distribution; docsSmalltableuses matchedC2ASmall only. Sanitizedcandidate_small bundle REVIEWED_UNCOMMITTED_CANDIDATE_SMOKE_PENDING_FULL_GATE. This clearscommit, not optimizationacceptance. ExactsourceFullsameownersrequirednext.
+
+## Exact-source candidate Full execution
+
+Candidate source `ac7e43db2762f44d6398e2101607938ba9866239`, fast-dev, clean source throughout both serial runs. Staged1/1 PASS runed2acd2d-d9dd-4e8f-9145-2890155a1db9 build.84s/execution64.061s; original2/2 PASS run5623373f-ad78-409d-b73e-399c6526c20b build.85s/execution104.938s. Full34records680samples, fivewarmups/twentyretained/zeroexclusions each. Strict collectors and comparisons accepted; independent review pending. No native/display/allocator measurements.
+
+| Staged case | N | Eager p50/p95/max ms | Candidate p50/p95/max ms |
+|---|---:|---:|---:|
+| sparse-exact-alias-tie | 100 | 0.1228/0.1416/0.1482 | 0.1234/0.2220/0.2414 |
+| dense-exact-empty-term | 100 | 0.0985/0.1299/0.1823 | 0.1146/0.1441/0.1444 |
+| dense-fuzzy-usage-weighted | 100 | 3.9416/4.5223/4.8793 | 3.9046/4.3440/4.4221 |
+| empty-query-browse | 100 | 0.0510/0.0715/0.1239 | 0.0598/0.0837/0.1013 |
+| sparse-exact-pending-provider | 100 | 0.1577/0.1935/0.2192 | 0.1335/0.1959/0.2373 |
+| sparse-exact-alias-tie | 1000 | 0.9820/1.2832/1.7191 | 0.9334/1.4133/2.0480 |
+| dense-exact-empty-term | 1000 | 0.5562/0.6162/0.6359 | 0.5459/0.5979/0.7560 |
+| dense-fuzzy-usage-weighted | 1000 | 39.3400/43.3123/53.4920 | 39.3576/47.7149/64.7441 |
+| empty-query-browse | 1000 | 0.3121/0.7223/0.7304 | 0.2883/0.4888/0.5783 |
+| sparse-exact-pending-provider | 1000 | 0.9648/1.2202/1.3895 | 0.9437/1.3726/1.4679 |
+| sparse-exact-alias-tie | 10000 | 9.5660/10.1932/10.2011 | 9.2284/9.8544/10.4433 |
+| dense-exact-empty-term | 10000 | 5.8547/6.5496/6.6072 | 5.3034/5.9507/6.1130 |
+| dense-fuzzy-usage-weighted | 10000 | 399.1597/408.5767/454.5630 | 400.4924/440.4177/468.7663 |
+| empty-query-browse | 10000 | 3.0195/3.8371/5.5074 | 2.8626/3.9897/4.5841 |
+| sparse-exact-pending-provider | 10000 | 9.3387/10.2716/11.8337 | 9.1084/11.2072/11.3707 |
+| plugin-heavy-dense | 1000 | 0.6982/0.9244/1.0155 | 0.7096/1.0505/1.1524 |
+
+| Original owner settings | N | C2-A eager p50/p95/max ms | Candidate p50/p95/max ms |
+|---|---:|---:|---:|
+| app_prefix_exact_match_default_list | 100 | 2.6725/3.3772/3.6081 | 2.7454/3.6289/3.6590 |
+| app_prefix_exact_match_default_list | 1000 | 9.7605/15.9550/18.2350 | 9.7231/15.8381/17.0509 |
+| app_prefix_exact_match_default_list | 10000 | 9.5686/12.0263/13.0745 | 9.7878/17.4238/17.4612 |
+| exact-alias-collision-usage-tied | 100 | 0.1334/0.2022/0.2255 | 0.1497/0.5348/0.7020 |
+| exact-empty-term-usage-weighted | 100 | 0.1019/0.2011/0.2214 | 0.1370/0.3709/0.3725 |
+| fuzzy-mode-usage-weighted | 100 | 3.9878/4.4022/4.4444 | 3.9402/4.3577/6.0595 |
+| empty-query-browse | 100 | 0.0508/0.0892/0.0928 | 0.0472/0.0684/0.0716 |
+| exact-alias-collision-provider-pending | 100 | 0.1483/0.2844/0.2984 | 0.1511/0.2899/0.3041 |
+| exact-alias-collision-usage-tied | 1000 | 0.9478/1.1923/1.2509 | 1.0821/2.0040/2.1186 |
+| exact-empty-term-usage-weighted | 1000 | 0.6043/0.9442/1.0963 | 0.5925/0.9811/1.2673 |
+| fuzzy-mode-usage-weighted | 1000 | 40.4428/44.3953/53.5078 | 39.5299/51.6367/54.3215 |
+| empty-query-browse | 1000 | 0.3152/0.4144/0.4168 | 0.3728/0.7961/0.8434 |
+| exact-alias-collision-provider-pending | 1000 | 0.9464/1.1493/1.1612 | 0.9658/1.5671/2.0214 |
+| exact-alias-collision-usage-tied | 10000 | 9.0339/9.4896/9.5386 | 9.2339/13.7824/15.2510 |
+| exact-empty-term-usage-weighted | 10000 | 6.2561/7.0044/8.0240 | 5.4005/6.7647/6.8158 |
+| fuzzy-mode-usage-weighted | 10000 | 400.9361/412.8564/422.6879 | 395.3902/529.5281/618.1502 |
+| empty-query-browse | 10000 | 3.0433/3.6730/3.7152 | 2.8579/3.6863/4.1387 |
+| exact-alias-collision-provider-pending | 10000 | 8.9361/10.5393/11.3298 | 9.6458/13.7168/17.5472 |
+
+Every sort subphase and matched G0 original-owner p50/p95/max remains in track_c_search_materialization_candidate_full.json. No timing exclusions, noise attribution, size-only benefit, total-copy reduction, or application-wide claim.
+
+Independent Full review CLEAR: staged544arrays10880values368scalars32triplets; original126arrays2520values342scalars18triplets. All34 fullorderedidentity/revision/viewport/work domains preserved with intended phasecounterchanges. Final disposition SKIPPED(measured gate): narrow denseexact10k gains do not offset materially worse fuzzy/root/sparse/pending/provider-heavy tails. Sort-record size24vs104 and deferredcopyphase are genuine properties, totalHcopies unchanged; no allocation/native claim. Restore candidate-owned search.rs and render.rs receipt migrations exactly to230f2996380619610305ac7a13ab214b38cca41e; retain test-only eager harness and all immutableevidence. Source restoration verified by exact Gitblob identity; no additional measurement round needed for gate decision.

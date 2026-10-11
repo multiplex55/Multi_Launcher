@@ -1,6 +1,11 @@
 # Track C execution and handoff notes
 
-## Current execution pointer (authoritative; history below)
+## Current execution pointer (authoritative)
+
+- Branch runtime-foundations; initial Runtime-Responsiveness/basebcfd24d226ffb46c85f9f7ce7bdd919466191070.13/29closed including C1C/C2B measuredskips. C2B rejectedcandidateac7e43db2762f44d6398e2101607938ba9866239; decisioncommitpending. ExactFull3owners34records680samples PASS and independentlyCLEAR, but materialfuzzy/root/sparse/pending/heavytails failgate. Search.rs/render.rs byte-identicallyrestoredto230f2996; eagerstagedharness/oracles retained; no freshCargoneededafterexactrestoration. AllCargoTERMINAL:19986/30492 andearliersessionsmustnotbepolled. Parentownsdocs/evidence/Git; sourcewriteridle. LOCALONLY/no native/allocatorclaim; C0incidentoutcomeUNKNOWN. NextC2Cplannerread-onlypacketinprogress, mustbaseonactualclosureHEADbeforeimplementation.
+
+## Prior execution pointer (historical)
+
 
 - Branch runtime-foundations; original Runtime-Responsiveness/basebcfd24d226ffb46c85f9f7ce7bdd919466191070. Accepted fused production sourceb6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1; C1-B closure4af431f42ebcb446aa11df2c9455764c0cb5e657. C1-C test-only source7af1dec31f25ede1c41a5605062df4d26f9a427d; evidence closure8b6b8b9d487bae3154d5304f35bef099291f1019.
 - Closed7/29: C0-A/B/C/D,C1-A/B and C1-C SKIPPED(measured gate). All Cargo terminal; source writers paused. C1-D Full1/1PASS,9cases180samples collected on0a88c34dddf53f8609adf9dbab65b8a6ec158b1a,run9771be86-3dc5-4f19-913e-607a1a999c04/execution118.813s. Full numeric/privacy and narrow-query gate review pending. Ordinary3/3+Small1/1PASS and reviewed. No production index installed. Parent owns docs/evidence/Cargo/Git. LOCAL ONLY.

@@ -6388,27 +6388,19 @@ mod tests {
                 .expect("Track C phase has a fixed slot")
                 .1
         };
-        let (candidates_scored, catalog_clones, moved_results) = if crate::performance::enabled() {
+        let (candidates_scored, local_clones, moved_results) = if crate::performance::enabled() {
             let first_frame = metric(crate::performance::track_c::Phase::HotkeyFirstUsableFrame);
             assert_eq!(first_frame.calls, 1);
             assert_eq!(first_frame.completed, 1);
             let scoring = metric(crate::performance::track_c::Phase::SearchScoreAndCloneHits);
             assert_eq!(scoring.calls, 1);
-            assert_eq!(scoring.action_clones, 0);
             let move_results = metric(crate::performance::track_c::Phase::SearchMoveResults);
             assert_eq!(move_results.calls, 1);
-            assert_eq!(
-                move_results.action_clones,
-                state.expected_actions.len() as u64
-            );
             let geometry = metric(crate::performance::track_c::Phase::RootGeometryCold);
             assert_eq!(geometry.calls, 1);
             (
                 scoring.candidates_scored,
-                // Preserve the root owner receipt's existing catalog-clone
-                // field while the underlying phase attribution moves clones
-                // from scoring to final materialization.
-                move_results.action_clones,
+                scoring.action_clones,
                 move_results.work_units,
             )
         } else {
@@ -6419,7 +6411,7 @@ mod tests {
             )
         };
         assert_eq!(candidates_scored, state.source_actions.len() as u64);
-        assert_eq!(catalog_clones, state.expected_actions.len() as u64);
+        assert_eq!(local_clones, state.expected_actions.len() as u64);
         assert_eq!(moved_results, state.expected_actions.len() as u64);
         OwnerObservation {
             output_identity,
@@ -6438,7 +6430,7 @@ mod tests {
             work_counters: vec![
                 state.source_actions.len() as u64,
                 candidates_scored,
-                catalog_clones,
+                local_clones,
                 moved_results,
                 rebuilds,
                 measured_rows,
