@@ -1,6 +1,6 @@
 # Track C C2-A search contract and characterization
 
-Status IN_PROGRESS; 11/29 closed. Base6efe54007057edc5172e38886b3602c46f40bdef (C1-G closure); accepted C1 runtime ccebeef374ec3f8063e264c0c5df60a827db835f. LOCAL ONLY. Planner c0_recon supplied the inspected packet at target/performance/track-c/next-packets/c2-a-prospective.md. Parent owns documents, collector, Cargo, evidence and Git; c0_docs is the sole source writer; c0_boundary_review independently reviews source/method and actual evidence.
+Status PASS; 12/29 closed. Base6efe54007057edc5172e38886b3602c46f40bdef (C1-G closure); accepted C1 runtime ccebeef374ec3f8063e264c0c5df60a827db835f. LOCAL ONLY. Planner c0_recon supplied the inspected packet at target/performance/track-c/next-packets/c2-a-prospective.md. Parent owns documents, collector, Cargo, evidence and Git; c0_docs is the sole source writer; c0_boundary_review independently reviews source/method and actual evidence.
 
 ## One bounded characterization milestone
 
@@ -58,3 +58,58 @@ Ordinary verification PASS: 17 distinct tests in two exact serial fast-dev runs.
 Small supplementary owner PASS1/1 runbcfc0ea7-859a-41d4-8d50-dfe93d2817a4 (build.85s,execution7.368s): strict collector accepted5records/100retainedsamples. Small frozen owners PASS2/2 run42359837-c3de-41c1-9d7d-60be835b4f52 (build.83s,execution18.207s):6records/120retainedsamples. These are uncommitted-source smoke runs; raw receipts remain explicitly UNCOMMITTED_SOURCE. The historical generic collector only accepts40hex source; an ignored Small-only adapter widens only that parameter validator, retaining all body validation and raw provenance. Tracked original collector unchanged. Independent numeric/identity/privacy/adapter review pending before local source commit. Full has not run.
 
 Independent Small raw/collected review CLEAR: supplemental145arrays/10timingtriplets/100scalars and original42arrays/18statistics, all11 fixture/structural identities match frozen G0. Original work/viewport domains unchanged. Adapter preserves raw UNCOMMITTED_SOURCE and changes only source-validator+Small guard. Retain separate supplemental fuzzy p95/max5.8138/6.8128ms versus original Small4.9639/5.3691ms; no causal overhead or performance gain is established from these separate smokes. Reviewed sanitized smoke bundles saved as track_c_search_attribution_small.json and track_c_search_owner_small.json. Ready for local source commit, then exact committed Full; C2-A remains IN_PROGRESS.
+
+Full supplemental owner PASS1/1 (run62888ed4-3afc-4912-8511-51c76ca3ae49, build.90s, execution63.146s) against committed source57f384f63de1635525b56e757134e15c76c221dd. Strict15records/300retainedsamples; independent435arrays/30timingtriplets/300scalars/source/protocol/15G0fixturestructuraldomains/Smalloverlap/privacy review CLEAR. Dense fuzzy10k owner p50/p95/max397.9052/531.1326/636.5089ms and sort.1764/.2026/.2099ms; sort is a narrow subphase, not a demonstrated dominant cost. Original Full owner run remains in progress; C2-A acceptance is pending.
+
+## Final C2-A acceptance
+
+PASS, independently reviewed;12/29 checkpoints closed, LOCAL ONLY. Source57f384f63de1635525b56e757134e15c76c221dd. Full frozen owners PASS2/2 (run92dc92a4-f4f9-4a98-b087-fb0970025b29, build.86s, root52.139s/search50.131s, total102.282s),18records/360retainedsamples. Review independently verified126arrays/342scalarfields/54timingstatistics and all18 complete/structural IDs, fixture/protocol/work/viewport domains exactly against frozenG0;15supplement overlays and6Small overlaps match. Comparison18rows/108timingvalues also independently verified. Combined Full33records660samples and Small11records220samples;17distinct ordinary tests PASS. All source findings resolved; no further verification required.
+
+Architectural result: unchanged shared search ownership and production ranking, independent eager full-outcome reference, compact semantic edge coverage, actual clone/sort/materialization receipts and owned inert fixtures. Preserve both eager reference bodies in C2-B. Current eager hit copies happen once before sort and final values move; a delayed-materialization candidate still needs H catalog Action copies for H outputs. Measured sorting is a narrow part of these fixtures, especially fuzzy queries. Smaller records alone are not sufficient acceptance evidence.
+
+Reviewed artifacts: track_c_search_attribution_full.json (supplement) and track_c_search_owner_full.json (original owners). Small artifacts remain historical reviewed UNCOMMITTED_SOURCE smokes. Earlier pending paragraphs above are chronological records, superseded by this acceptance.
+
+All contrary observations are retained below. The unchanged ranking algorithm does not explain the timing differences; inactive cfg(test) TLS lookups/branches exist, but their causal contribution has not been established. Headless root-query measurements establish usable CPU-frame receipts, not Win32 input/display responsiveness. Allocator/RSS, release and native tests NOT MEASURED/NOT RUN. The C0 recycle-bin incident deletion outcome remains UNKNOWN; no additional cleanup/recovery/native action was attempted.
+
+### Supplementary actual work and timing (committed Full)
+| Case | Actions | Owner p50 / p95 / max ms | Sort p50 / p95 / max ms | Early local clones | Local logical bytes | Browse materializations / bytes |
+|---|---:|---|---|---:|---:|---|
+| sparse-exact-alias-tie | 100 | 0.1162 / 0.2190 / 0.2348 | 0.0005 / 0.0007 / 0.0010 | 3 | 290 | 0 / 0 |
+| dense-exact-empty-term | 100 | 0.0964 / 0.1909 / 0.2324 | 0.0142 / 0.0289 / 0.0395 | 100 | 13496 | 0 / 0 |
+| dense-fuzzy-usage-weighted | 100 | 3.9023 / 4.0027 / 4.0667 | 0.0147 / 0.0196 / 0.0216 | 100 | 13496 | 0 / 0 |
+| empty-query-browse | 100 | 0.0604 / 0.0842 / 0.1041 | 0.0000 / 0.0000 / 0.0000 | 0 | 0 | 100 / 13896 |
+| sparse-exact-pending-provider | 100 | 0.1513 / 0.1977 / 0.1999 | 0.0006 / 0.0009 / 0.0009 | 3 | 290 | 0 / 0 |
+| sparse-exact-alias-tie | 1000 | 0.9224 / 1.6278 / 1.6825 | 0.0006 / 0.0009 / 0.0010 | 3 | 276 | 0 / 0 |
+| dense-exact-empty-term | 1000 | 0.5587 / 0.7794 / 0.8260 | 0.0269 / 0.0364 / 0.0373 | 1000 | 136657 | 0 / 0 |
+| dense-fuzzy-usage-weighted | 1000 | 39.1913 / 42.5440 / 46.1341 | 0.0306 / 0.0356 / 0.0364 | 1000 | 136657 | 0 / 0 |
+| empty-query-browse | 1000 | 0.3210 / 0.4290 / 0.6183 | 0.0000 / 0.0000 / 0.0000 | 0 | 0 | 1000 / 140657 |
+| sparse-exact-pending-provider | 1000 | 0.9789 / 1.4326 / 1.7614 | 0.0006 / 0.0012 / 0.0019 | 3 | 276 | 0 / 0 |
+| sparse-exact-alias-tie | 10000 | 8.9798 / 10.0162 / 10.3636 | 0.0012 / 0.0019 / 0.0020 | 3 | 276 | 0 / 0 |
+| dense-exact-empty-term | 10000 | 5.6613 / 7.7991 / 9.6014 | 0.1795 / 0.3239 / 0.3484 | 10000 | 1372759 | 0 / 0 |
+| dense-fuzzy-usage-weighted | 10000 | 397.9052 / 531.1326 / 636.5089 | 0.1764 / 0.2026 / 0.2099 | 10000 | 1372759 | 0 / 0 |
+| empty-query-browse | 10000 | 2.8437 / 3.6820 / 5.2545 | 0.0000 / 0.0000 / 0.0000 | 0 | 0 | 10000 / 1412759 |
+| sparse-exact-pending-provider | 10000 | 8.9243 / 9.2885 / 10.5820 | 0.0011 / 0.0015 / 0.0015 | 3 | 276 | 0 / 0 |
+
+### Frozen-owner G0 to C2-A timing (fast-dev)
+
+These are comparable owner/fixture domains at their recorded sources, not an optimization gain attributable to C2-A. Keep every row, including adverse tails.
+| Owner / case | Actions | G0 p50 / p95 / max ms | C2-A p50 / p95 / max ms |
+|---|---:|---|---|
+| query-to-usable-CPU-frame | 100 | 2.6449 / 3.4087 / 3.4110 | 2.6725 / 3.3772 / 3.6081 |
+| query-to-usable-CPU-frame | 1000 | 10.2972 / 13.2074 / 17.1924 | 9.7605 / 15.9550 / 18.2350 |
+| query-to-usable-CPU-frame | 10000 | 9.2657 / 9.7041 / 11.8132 | 9.5686 / 12.0263 / 13.0745 |
+| sparse-exact-alias-tie | 100 | 0.1230 / 0.1491 / 0.1501 | 0.1334 / 0.2022 / 0.2255 |
+| dense-exact-empty-term | 100 | 0.1248 / 0.2610 / 0.3434 | 0.1019 / 0.2011 / 0.2214 |
+| dense-fuzzy-usage-weighted | 100 | 3.9204 / 5.4625 / 6.1973 | 3.9878 / 4.4022 / 4.4444 |
+| empty-query-browse | 100 | 0.0399 / 0.0735 / 0.0749 | 0.0508 / 0.0892 / 0.0928 |
+| sparse-exact-pending-provider | 100 | 0.1245 / 0.1728 / 0.2725 | 0.1483 / 0.2844 / 0.2984 |
+| sparse-exact-alias-tie | 1000 | 0.9550 / 1.0786 / 1.2709 | 0.9478 / 1.1923 / 1.2509 |
+| dense-exact-empty-term | 1000 | 0.5510 / 0.6556 / 0.9172 | 0.6043 / 0.9442 / 1.0963 |
+| dense-fuzzy-usage-weighted | 1000 | 39.4503 / 42.7475 / 45.1321 | 40.4428 / 44.3953 / 53.5078 |
+| empty-query-browse | 1000 | 0.2762 / 0.5702 / 0.8117 | 0.3152 / 0.4144 / 0.4168 |
+| sparse-exact-pending-provider | 1000 | 0.9707 / 1.3354 / 1.6586 | 0.9464 / 1.1493 / 1.1612 |
+| sparse-exact-alias-tie | 10000 | 9.4264 / 9.7786 / 9.9183 | 9.0339 / 9.4896 / 9.5386 |
+| dense-exact-empty-term | 10000 | 5.9666 / 6.7493 / 12.8722 | 6.2561 / 7.0044 / 8.0240 |
+| dense-fuzzy-usage-weighted | 10000 | 397.9302 / 405.9538 / 412.7889 | 400.9361 / 412.8564 / 422.6879 |
+| empty-query-browse | 10000 | 3.0210 / 3.8272 / 6.1540 | 3.0433 / 3.6730 / 3.7152 |
+| sparse-exact-pending-provider | 10000 | 9.4191 / 10.8161 / 11.0793 | 8.9361 / 10.5393 / 11.3298 |
