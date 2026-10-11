@@ -142,7 +142,7 @@ struct ScreenDrawRegionOperation {
 }
 
 use crate::actions::folders;
-use crate::actions::{Action, load_actions_typed};
+use crate::actions::{Action, ActionIdLookup, load_actions_typed};
 use crate::actions_editor::ActionsEditor;
 use crate::clipboard_modify::coordinator::{
     ImmediateCompletionEvent, ImmediateExecutionCoordinator,
@@ -710,7 +710,7 @@ pub struct LauncherApp {
     command_bus: Arc<crate::commands::CommandBus>,
     action_cache: Vec<CachedSearchEntry>,
     action_filter_metadata: Vec<ActionFilterMetadata>,
-    actions_by_id: HashMap<String, Action>,
+    actions_by_id: ActionIdLookup,
     command_cache: Vec<Action>,
     command_search_cache: Vec<CachedSearchEntry>,
     completion_index: Option<Map<Vec<u8>>>,
@@ -2160,10 +2160,7 @@ impl LauncherApp {
         };
         #[cfg(not(test))]
         let plugin_editor = PluginEditor::new(&settings);
-        let actions_by_id = actions
-            .iter()
-            .map(|a| (a.action.clone(), a.clone()))
-            .collect::<HashMap<_, _>>();
+        let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
         let dashboard_runtime = DashboardRuntime::start({
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -4328,6 +4325,13 @@ mod tests {
         }
     }
 
+    fn resolved_action_lookup(lookup: &ActionIdLookup) -> HashMap<String, Action> {
+        lookup
+            .iter()
+            .map(|(id, action)| (id.to_owned(), action.clone()))
+            .collect()
+    }
+
     fn wait_for_index_ready(app: &mut LauncherApp) {
         let event = app
             .rx
@@ -4444,7 +4448,7 @@ mod tests {
         assert_eq!(crate::actions::actions_version(), version_before + 1);
         assert_eq!(app.actions_by_id.get("index:retained-id"), Some(&renamed));
         assert_eq!(app.actions_by_id.get("index:new-id"), Some(&added));
-        assert!(!app.actions_by_id.contains_key("index:removed-id"));
+        assert!(app.actions_by_id.get("index:removed-id").is_none());
         assert_eq!(app.action_cache[1].label_lc, "fresh needle retained target");
         assert_eq!(
             app.action_filter_metadata[1].normalized_id,
@@ -4548,7 +4552,7 @@ mod tests {
         );
 
         let actions_after_publication = Arc::clone(&app.actions);
-        let cache_after_publication = app.actions_by_id.clone();
+        let cache_after_publication = resolved_action_lookup(&app.actions_by_id);
         let results_after_publication = app.results.clone();
         let version_after_publication = crate::actions::actions_version();
         let second_config = crate::indexer::coordinator::IndexConfig::new(
@@ -4558,7 +4562,10 @@ mod tests {
         app.request_index_config(second_config);
         process_index_ready_through_watch_event(&mut app);
         assert!(Arc::ptr_eq(&app.actions, &actions_after_publication));
-        assert_eq!(app.actions_by_id, cache_after_publication);
+        assert_eq!(
+            resolved_action_lookup(&app.actions_by_id),
+            cache_after_publication
+        );
         assert_eq!(app.results, results_after_publication);
         assert_eq!(crate::actions::actions_version(), version_after_publication);
         assert!(Arc::ptr_eq(
@@ -4691,7 +4698,7 @@ mod tests {
         app.results = vec![tail.clone()];
         app.selected = Some(0);
         let actions = Arc::clone(&app.actions);
-        let by_id = app.actions_by_id.clone();
+        let by_id = resolved_action_lookup(&app.actions_by_id);
         let results = app.results.clone();
         let query = app.query.clone();
         let selected = app.selected;
@@ -4709,7 +4716,7 @@ mod tests {
         wait_for_index_ready(&mut app);
 
         assert!(Arc::ptr_eq(&app.actions, &actions));
-        assert_eq!(app.actions_by_id, by_id);
+        assert_eq!(resolved_action_lookup(&app.actions_by_id), by_id);
         assert_eq!(app.results, results);
         assert_eq!(app.query, query);
         assert_eq!(app.selected, selected);
@@ -5342,7 +5349,7 @@ mod tests {
         assert_eq!(&app.actions[..app.custom_len], external.as_slice());
         assert_eq!(&app.actions[app.custom_len..], indexed_tail.as_slice());
         assert_eq!(app.actions_by_id.get("external:action"), external.first());
-        assert!(!app.actions_by_id.contains_key("committed:action"));
+        assert!(app.actions_by_id.get("committed:action").is_none());
         assert_eq!(
             app.actions_by_id.get("indexed-first:action"),
             indexed_tail.first()
@@ -5365,7 +5372,7 @@ mod tests {
         app.process_watch_events();
         assert_eq!(app.custom_len, 0);
         assert_eq!(app.actions.as_slice(), indexed_tail.as_slice());
-        assert!(!app.actions_by_id.contains_key("external:action"));
+        assert!(app.actions_by_id.get("external:action").is_none());
         assert_eq!(
             app.actions_by_id.get("indexed-second:action"),
             indexed_tail.get(1)

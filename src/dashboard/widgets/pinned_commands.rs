@@ -1,7 +1,7 @@
 use super::{
     Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult, edit_typed_settings,
 };
-use crate::actions::Action;
+use crate::actions::{Action, ActionIdLookup};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::plugins::fav::FavEntry;
 use eframe::egui;
@@ -112,7 +112,7 @@ impl PinnedCommandsWidget {
 
     fn resolve_action<'a>(
         &self,
-        actions_by_id: &'a std::collections::HashMap<String, Action>,
+        actions_by_id: &'a ActionIdLookup,
         favorites: &'a [FavEntry],
         id: &str,
     ) -> Option<Action> {
@@ -260,6 +260,7 @@ mod tests {
     use crate::dashboard::data_cache::DashboardDataCache;
     use crate::plugin::PluginManager;
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     fn make_action(id: &str, label: &str) -> Action {
         Action {
@@ -272,7 +273,7 @@ mod tests {
 
     fn make_context<'a>(
         actions: &'a [Action],
-        actions_by_id: &'a HashMap<String, Action>,
+        actions_by_id: &'a ActionIdLookup,
         data_cache: &'a DashboardDataCache,
         plugins: &'a PluginManager,
         usage: &'a HashMap<String, u32>,
@@ -311,15 +312,10 @@ mod tests {
             action_ids: vec!["a".into()],
             layout: PinnedLayout::List,
         });
-        let mut actions_by_id = HashMap::new();
-        actions_by_id.insert("a".into(), make_action("a", "First"));
-        actions_by_id.insert("b".into(), make_action("b", "Second"));
-        let actions = vec![
-            actions_by_id.get("a").cloned().unwrap(),
-            actions_by_id.get("b").cloned().unwrap(),
-        ];
+        let actions = Arc::new(vec![make_action("a", "First"), make_action("b", "Second")]);
+        let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
         let ctx = make_context(
-            &actions,
+            actions.as_slice(),
             &actions_by_id,
             &data_cache,
             &plugins,
@@ -332,7 +328,7 @@ mod tests {
 
         widget.cfg.action_ids = vec!["b".into()];
         let ctx = make_context(
-            &actions,
+            actions.as_slice(),
             &actions_by_id,
             &data_cache,
             &plugins,
@@ -347,17 +343,16 @@ mod tests {
     #[test]
     fn refreshes_when_actions_version_changes() {
         let data_cache = DashboardDataCache::new();
-        let plugins = PluginManager::new();
+        let plugins = PluginManager::new_inert_for_test();
         let usage = HashMap::new();
         let mut widget = PinnedCommandsWidget::new(PinnedCommandsConfig {
             action_ids: vec!["a".into()],
             layout: PinnedLayout::List,
         });
-        let mut actions_by_id = HashMap::new();
-        actions_by_id.insert("a".into(), make_action("a", "First"));
-        let actions = vec![actions_by_id.get("a").cloned().unwrap()];
+        let actions = Arc::new(vec![make_action("a", "First")]);
+        let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
         let ctx = make_context(
-            &actions,
+            actions.as_slice(),
             &actions_by_id,
             &data_cache,
             &plugins,
@@ -368,10 +363,10 @@ mod tests {
         widget.refresh_cache(&ctx);
         assert_eq!(widget.cached_resolved[0].label, "First");
 
-        actions_by_id.insert("a".into(), make_action("a", "Updated"));
-        let actions = vec![actions_by_id.get("a").cloned().unwrap()];
+        let actions = Arc::new(vec![make_action("a", "Updated")]);
+        let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
         let ctx = make_context(
-            &actions,
+            actions.as_slice(),
             &actions_by_id,
             &data_cache,
             &plugins,

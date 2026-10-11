@@ -4,7 +4,10 @@ use crate::dashboard::diagnostics::{DashboardDiagnostics, DashboardDiagnosticsSn
 use crate::dashboard::layout::{NormalizedSlot, normalize_slots};
 use crate::dashboard::repaint::{RepaintDemand, aggregate_demands};
 use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
-use crate::{actions::Action, common::json_watch::JsonWatcher};
+use crate::{
+    actions::{Action, ActionIdLookup},
+    common::json_watch::JsonWatcher,
+};
 use eframe::egui;
 use eframe::egui::scroll_area::ScrollBarVisibility;
 #[cfg(test)]
@@ -33,7 +36,7 @@ pub enum WidgetActivation {
 /// Context shared with widgets at render time.
 pub struct DashboardContext<'a> {
     pub actions: &'a [Action],
-    pub actions_by_id: &'a std::collections::HashMap<String, Action>,
+    pub actions_by_id: &'a ActionIdLookup,
     pub usage: &'a std::collections::HashMap<String, u32>,
     pub plugins: &'a crate::plugin::PluginManager,
     pub enabled_plugins: Option<&'a std::collections::HashSet<String>>,
@@ -765,7 +768,7 @@ mod tests {
         data_cache: &'a DashboardDataCache,
     ) -> DashboardContext<'a> {
         static EMPTY_USAGE: Lazy<HashMap<String, u32>> = Lazy::new(HashMap::new);
-        static EMPTY_ACTIONS_BY_ID: Lazy<HashMap<String, Action>> = Lazy::new(HashMap::new);
+        static EMPTY_ACTIONS_BY_ID: Lazy<ActionIdLookup> = Lazy::new(ActionIdLookup::default);
         DashboardContext {
             actions: &[],
             actions_by_id: &EMPTY_ACTIONS_BY_ID,

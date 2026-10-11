@@ -10,7 +10,7 @@ use std::{cell::RefCell, rc::Rc, time::Instant};
 use crate::actions::Action;
 
 const PHASE_COUNT: usize = 15;
-const COUNTER_COUNT: usize = 17;
+const COUNTER_COUNT: usize = 18;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(usize)]
@@ -52,6 +52,7 @@ pub(super) enum Counter {
     IndexTailChanged = 14,
     IndexTailEqual = 15,
     SameQueryRefreshCalls = 16,
+    IdKeysCloned = 17,
 }
 
 #[derive(Clone, Debug, Default)]

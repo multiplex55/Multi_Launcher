@@ -1,9 +1,10 @@
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 static ACTIONS_VERSION: AtomicU64 = AtomicU64::new(0);
 static ACTIONS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -15,6 +16,92 @@ pub struct Action {
     pub action: String, // Path to folder or exe
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<String>,
+}
+
+/// ID lookup for one immutable action catalog.
+///
+/// The lookup owns the catalog it indexes so a resolved position can never be
+/// applied to a different publication. Duplicate IDs retain the existing
+/// last-catalog-entry-wins behavior without keeping a second owned `Action`.
+#[derive(Debug)]
+pub struct ActionIdLookup {
+    catalog: Arc<Vec<Action>>,
+    positions: HashMap<String, usize>,
+}
+
+impl ActionIdLookup {
+    /// Build a lookup bound to `catalog`, cloning ID keys but not action bodies.
+    pub fn new(catalog: Arc<Vec<Action>>) -> Self {
+        #[cfg(test)]
+        {
+            Self::build(catalog, || {})
+        }
+        #[cfg(not(test))]
+        {
+            Self::build(catalog)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_test_receipt(
+        catalog: Arc<Vec<Action>>,
+    ) -> (Self, ActionIdLookupBuildReceipt) {
+        let mut receipt = ActionIdLookupBuildReceipt::default();
+        let lookup = Self::build(catalog, || {
+            receipt.key_clone_attempts = receipt.key_clone_attempts.saturating_add(1);
+        });
+        (lookup, receipt)
+    }
+
+    fn build(catalog: Arc<Vec<Action>>, #[cfg(test)] mut record_key_clone: impl FnMut()) -> Self {
+        let mut positions = HashMap::with_capacity(catalog.len());
+        for (index, action) in catalog.iter().enumerate() {
+            let id = action.action.clone();
+            #[cfg(test)]
+            record_key_clone();
+            positions.insert(id, index);
+        }
+        Self { catalog, positions }
+    }
+
+    /// Resolve an ID to an action borrowed from this lookup's own catalog.
+    pub fn get(&self, id: &str) -> Option<&Action> {
+        let index = self.positions.get(id)?;
+        self.catalog.get(*index)
+    }
+
+    /// Number of distinct action IDs in the catalog.
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
+    /// Iterate over distinct IDs and their winning actions.
+    ///
+    /// Iteration order follows the hash table and is intentionally unspecified;
+    /// action catalog order remains available from the owning catalog itself.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Action)> {
+        self.positions
+            .iter()
+            .filter_map(|(id, index)| self.catalog.get(*index).map(|action| (id.as_str(), action)))
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct ActionIdLookupBuildReceipt {
+    /// Number of ID `String` clone attempts made by the constructor loop,
+    /// including attempts whose duplicate key was immediately replaced.
+    pub(crate) key_clone_attempts: usize,
+}
+
+impl Default for ActionIdLookup {
+    fn default() -> Self {
+        Self::new(Arc::new(Vec::new()))
+    }
 }
 
 pub fn load_actions_typed(
@@ -110,6 +197,68 @@ mod tests {
             action: format!("{label}:action"),
             args: Some(format!("{label} args")),
         }
+    }
+
+    #[test]
+    fn action_id_lookup_is_catalog_bound_and_preserves_exact_args() {
+        let mut duplicate_none = action("duplicate none");
+        duplicate_none.action = "duplicate:id".into();
+        duplicate_none.args = None;
+        let mut duplicate_empty = action("duplicate empty");
+        duplicate_empty.action = "duplicate:id".into();
+        duplicate_empty.args = Some(String::new());
+        let mut duplicate_value = action("duplicate value");
+        duplicate_value.action = "duplicate:id".into();
+        duplicate_value.args = Some("last args".into());
+        let mut none_args = action("none args");
+        none_args.action = "none:id".into();
+        none_args.args = None;
+        let mut empty_args = action("empty args");
+        empty_args.action = "empty:id".into();
+        empty_args.args = Some(String::new());
+        let mut nonempty_args = action("nonempty args");
+        nonempty_args.action = "value:id".into();
+        nonempty_args.args = Some("value".into());
+
+        let old_catalog = Arc::new(vec![
+            duplicate_none,
+            duplicate_empty,
+            duplicate_value.clone(),
+            none_args.clone(),
+            empty_args.clone(),
+            nonempty_args.clone(),
+        ]);
+        let (old_lookup, old_receipt) =
+            ActionIdLookup::new_with_test_receipt(Arc::clone(&old_catalog));
+
+        assert!(Arc::ptr_eq(&old_lookup.catalog, &old_catalog));
+        assert_eq!(old_receipt.key_clone_attempts, old_catalog.len());
+        assert_eq!(old_lookup.len(), 4);
+        assert_eq!(old_lookup.get("duplicate:id"), Some(&duplicate_value));
+        assert_eq!(old_lookup.get("none:id"), Some(&none_args));
+        assert_eq!(old_lookup.get("empty:id"), Some(&empty_args));
+        assert_eq!(old_lookup.get("value:id"), Some(&nonempty_args));
+        assert_eq!(old_lookup.get("missing:id"), None);
+        let resolved = old_lookup.iter().collect::<HashMap<_, _>>();
+        assert_eq!(
+            resolved.get("duplicate:id").copied(),
+            Some(&duplicate_value)
+        );
+        assert_eq!(resolved.get("none:id").copied(), Some(&none_args));
+        assert_eq!(resolved.get("empty:id").copied(), Some(&empty_args));
+        assert_eq!(resolved.get("value:id").copied(), Some(&nonempty_args));
+        drop(old_catalog);
+
+        let mut replacement_duplicate = action("replacement duplicate");
+        replacement_duplicate.action = "duplicate:id".into();
+        replacement_duplicate.args = Some("new generation".into());
+        let new_catalog = Arc::new(vec![replacement_duplicate.clone()]);
+        let new_lookup = ActionIdLookup::new(Arc::clone(&new_catalog));
+
+        assert!(Arc::ptr_eq(&new_lookup.catalog, &new_catalog));
+        assert_eq!(new_lookup.get("duplicate:id"), Some(&replacement_duplicate));
+        assert_eq!(old_lookup.get("duplicate:id"), Some(&duplicate_value));
+        assert_eq!(old_lookup.get("none:id"), Some(&none_args));
     }
 
     #[test]

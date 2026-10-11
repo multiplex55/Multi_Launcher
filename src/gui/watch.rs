@@ -755,6 +755,31 @@ mod tests {
         }
     }
 
+    fn track_c_assert_action_lookup_matches(
+        lookup: &crate::actions::ActionIdLookup,
+        expected_actions: &[crate::actions::Action],
+    ) {
+        let actual = lookup.iter().collect::<std::collections::HashMap<_, _>>();
+        let expected = expected_actions
+            .iter()
+            .map(|action| (action.action.as_str(), action))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            actual, expected,
+            "resolved ID lookup preserves full Actions"
+        );
+    }
+
+    fn track_c_expected_actions_by_id(
+        actions: &[crate::actions::Action],
+    ) -> std::collections::HashMap<String, crate::actions::Action> {
+        actions
+            .iter()
+            .cloned()
+            .map(|action| (action.action.clone(), action))
+            .collect()
+    }
+
     fn track_c_watch_action_signature(root: &Path, actions: &[crate::actions::Action]) -> u64 {
         use crate::performance::track_c_workloads::StableSignature;
 
@@ -963,7 +988,7 @@ mod tests {
         tail_selected_clone_bytes: u64,
         index_custom_selected_clone_bytes: u64,
         index_tail_selected_clone_bytes: u64,
-        id_selected_clone_bytes: u64,
+        id_key_selected_clone_bytes: u64,
     }
 
     struct TrackC1EValidatedSample {
@@ -1080,10 +1105,10 @@ mod tests {
         actions.iter().map(track_c1e_action_payload_bytes).sum()
     }
 
-    fn track_c1e_id_map_payload_bytes(actions: &[crate::actions::Action]) -> u64 {
+    fn track_c1f_id_key_bytes(actions: &[crate::actions::Action]) -> u64 {
         actions
             .iter()
-            .map(|action| track_c1e_action_payload_bytes(action) + action.action.len() as u64)
+            .map(|action| action.action.len() as u64)
             .sum()
     }
 
@@ -1350,7 +1375,7 @@ mod tests {
         let index_custom_selected_clone_bytes = track_c1e_selected_payload_bytes(full_catalog);
         let index_tail_selected_clone_bytes =
             track_c1e_selected_payload_bytes(&fixture.expected_tail);
-        let id_selected_clone_bytes = track_c1e_id_map_payload_bytes(&fixture.expected_actions);
+        let id_key_selected_clone_bytes = track_c1f_id_key_bytes(&fixture.expected_actions);
 
         crate::performance::track_c::reset();
         TrackC1EOwnerState {
@@ -1377,7 +1402,7 @@ mod tests {
             tail_selected_clone_bytes,
             index_custom_selected_clone_bytes,
             index_tail_selected_clone_bytes,
-            id_selected_clone_bytes,
+            id_key_selected_clone_bytes,
         }
     }
 
@@ -1424,8 +1449,22 @@ mod tests {
         let observer =
             track_c1e_merge_observer_snapshots(observer_guard.snapshot(), &state.setup_observer);
         drop(observer_guard);
+        let expected_by_id = track_c_expected_actions_by_id(&state.expected_actions);
 
         let published = state.case.publishes();
+        let expected_id_key_attempts = if published {
+            state.expected_actions.len() as u64
+        } else {
+            0
+        };
+        assert_eq!(
+            (
+                observer.counter(Counter::IdKeysCloned),
+                observer.counter(Counter::IdActionsProcessed),
+            ),
+            (expected_id_key_attempts, expected_id_key_attempts),
+            "key-clone and processed-action receipts match actual lookup construction"
+        );
         let expected_version = state
             .owner
             .actions_version_before
@@ -1520,12 +1559,7 @@ mod tests {
             .map(track_c_expected_filter_metadata)
             .collect::<Vec<_>>();
         assert_eq!(app.action_filter_metadata, expected_filter);
-        let expected_by_id = state
-            .expected_actions
-            .iter()
-            .map(|action| (action.action.clone(), action.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(app.actions_by_id, expected_by_id);
+        track_c_assert_action_lookup_matches(&app.actions_by_id, &state.expected_actions);
         assert_eq!(app.results, vec![state.expected_actions[9].clone()]);
         assert_eq!(app.query, "app Synthetic action 00009");
         assert_eq!(app.last_search_query, app.query);
@@ -1745,7 +1779,7 @@ mod tests {
                 0
             },
             if published {
-                state.id_selected_clone_bytes
+                state.id_key_selected_clone_bytes
             } else {
                 0
             },
@@ -1764,7 +1798,7 @@ mod tests {
         }
     }
 
-    fn emit_track_c1e_action_results(
+    fn emit_track_c1f_action_results(
         mode: crate::performance::track_c_workloads::BenchmarkMode,
         fixture: &TrackC1EFixture,
         samples: &[crate::performance::track_c_workloads::SampleRecord],
@@ -2003,15 +2037,23 @@ mod tests {
                     .map(|sample| sample.work_counters[12])
                     .collect(),
             ),
+            // ActionIdLookup::build clones only action.action Strings and
+            // retains the original catalog Arc; this is a structural zero,
+            // not an intercepted Action::clone counter.
+            ("id_full_actions_cloned", vec![0; samples.len()]),
             (
-                "id_selected_clone_bytes",
+                "id_keys_cloned",
+                track_c1e_counter_values(receipts, Counter::IdKeysCloned),
+            ),
+            (
+                "id_key_selected_clone_bytes",
                 samples
                     .iter()
                     .map(|sample| sample.work_counters[13])
                     .collect(),
             ),
         ]);
-        assert_eq!(arrays.len(), 44);
+        assert_eq!(arrays.len(), 46);
         assert!(
             arrays
                 .iter()
@@ -2029,7 +2071,7 @@ mod tests {
         }
         let is_index = fixture.case == TrackC1ECase::IndexAcceptedChanged;
         eprintln!(
-            "C1E_ACTIONS_RESULT schema=1 stage=sync_publication_attribution owner={} source={} profile={} mode={} telemetry_enabled={} observer_enabled=true fixture=custom_first_indexed_tail fixture_signature={:016x} output_signature={:016x} case={} count={} custom_count={} indexed_count={} warmups={} samples={} exclusions=0 scope=owner_includes_sync_publication overlap=nested_durations_not_subtracted outcome_scope=typed_load_0_not_called_1_valid_2_malformed_3_missing payload_scope=precomputed_logical_utf8_not_allocator_or_rss index_tail_scope=cloned_iterator_consumption{}",
+            "C1F_ACTIONS_RESULT schema=1 stage=id_position_projection owner={} source={} profile={} mode={} telemetry_enabled={} observer_enabled=true fixture=custom_first_indexed_tail fixture_signature={:016x} output_signature={:016x} case={} count={} custom_count={} indexed_count={} warmups={} samples={} exclusions=0 scope=owner_includes_sync_publication overlap=nested_durations_not_subtracted outcome_scope=typed_load_0_not_called_1_valid_2_malformed_3_missing payload_scope=precomputed_logical_utf8_not_allocator_or_rss index_tail_scope=cloned_iterator_consumption{}",
             if is_index {
                 "process_index_ready_accepted"
             } else {
@@ -2114,6 +2156,7 @@ mod tests {
         expected_results: &[crate::actions::Action],
         expected_version: u64,
     ) {
+        let expected_by_id = track_c_expected_actions_by_id(expected_actions);
         assert_eq!(app.actions.as_slice(), expected_actions);
         assert_eq!(app.custom_len, custom_len);
         assert_eq!(&app.actions[..custom_len], &expected_actions[..custom_len]);
@@ -2132,11 +2175,7 @@ mod tests {
                 .map(track_c_expected_filter_metadata)
                 .collect::<Vec<_>>()
         );
-        let expected_by_id = expected_actions
-            .iter()
-            .map(|action| (action.action.clone(), action.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(app.actions_by_id, expected_by_id);
+        track_c_assert_action_lookup_matches(&app.actions_by_id, expected_actions);
         assert_eq!(app.query, query);
         assert_eq!(app.last_search_query, query);
         assert_eq!(app.results, expected_results);
@@ -2417,8 +2456,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "opt-in C1-E publication characterization; parent runs isolated fast-dev Small/Full processes"]
-    fn track_c_c1e_benchmark_action_publication_attribution() {
+    #[ignore = "opt-in C1-F action ID-position characterization; parent runs isolated fast-dev Small/Full processes"]
+    fn track_c_c1f_benchmark_action_publication_attribution() {
         use crate::performance::track_c_workloads::{
             BenchmarkMode, MEASURED_SAMPLES, WARMUPS, measure_owner,
         };
@@ -2455,7 +2494,7 @@ mod tests {
                 assert_eq!(samples.len(), MEASURED_SAMPLES);
                 assert_eq!(validations.len(), WARMUPS + MEASURED_SAMPLES);
                 let measured = validations.into_iter().skip(WARMUPS).collect::<Vec<_>>();
-                emit_track_c1e_action_results(mode, &fixture, &samples, &measured);
+                emit_track_c1f_action_results(mode, &fixture, &samples, &measured);
             }
         }
     }
@@ -3431,11 +3470,7 @@ mod tests {
             .map(track_c_expected_filter_metadata)
             .collect::<Vec<_>>();
         assert_eq!(app.action_filter_metadata, expected_filter_metadata);
-        let expected_by_id = expected_actions
-            .iter()
-            .map(|action| (action.action.clone(), action.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(app.actions_by_id, expected_by_id);
+        track_c_assert_action_lookup_matches(&app.actions_by_id, expected_actions);
         assert_eq!(
             app.actions_by_id
                 .get(&state.indexed_tail[0].action)

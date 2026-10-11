@@ -2,7 +2,7 @@ use super::{
     BackgroundLoader, Widget, WidgetAction, WidgetSettingsContext, WidgetSettingsUiResult,
     edit_typed_settings,
 };
-use crate::actions::Action;
+use crate::actions::{Action, ActionIdLookup};
 use crate::dashboard::dashboard::{DashboardContext, WidgetActivation};
 use crate::history::{HISTORY_PINS_FILE, HistoryEntry, HistoryPin, toggle_pin};
 use chrono::TimeZone;
@@ -62,7 +62,7 @@ pub struct CommandHistoryWidget {
 struct HistoryResolutionContext<'a> {
     snapshot: &'a crate::dashboard::data_cache::DashboardDataSnapshot,
     commands: &'a [Action],
-    actions_by_id: &'a std::collections::HashMap<String, Action>,
+    actions_by_id: &'a ActionIdLookup,
 }
 
 #[cfg(test)]
@@ -434,7 +434,7 @@ impl CommandHistoryWidget {
         pins: Vec<HistoryPin>,
         plugins: &crate::plugin::PluginManager,
         enabled_plugins: Option<&HashSet<String>>,
-        actions_by_id: &HashMap<String, Action>,
+        actions_by_id: &ActionIdLookup,
         data_cache: &crate::dashboard::data_cache::DashboardDataCache,
     ) -> Vec<(Action, bool)> {
         let actions: &[Action] = &[];
@@ -582,7 +582,7 @@ mod tests {
         data_cache: &'a DashboardDataCache,
         plugins: &'a PluginManager,
         actions: &'a [Action],
-        actions_by_id: &'a HashMap<String, Action>,
+        actions_by_id: &'a ActionIdLookup,
         usage: &'a HashMap<String, u32>,
     ) -> DashboardContext<'a> {
         context_with_enabled(data_cache, plugins, actions, actions_by_id, usage, None)
@@ -592,7 +592,7 @@ mod tests {
         data_cache: &'a DashboardDataCache,
         plugins: &'a PluginManager,
         actions: &'a [Action],
-        actions_by_id: &'a HashMap<String, Action>,
+        actions_by_id: &'a ActionIdLookup,
         usage: &'a HashMap<String, u32>,
         enabled_plugins: Option<&'a HashSet<String>>,
     ) -> DashboardContext<'a> {
@@ -622,7 +622,7 @@ mod tests {
     fn resolution_context<'a>(
         snapshot: &'a DashboardDataSnapshot,
         commands: &'a [Action],
-        actions_by_id: &'a HashMap<String, Action>,
+        actions_by_id: &'a ActionIdLookup,
     ) -> HistoryResolutionContext<'a> {
         HistoryResolutionContext {
             snapshot,
@@ -638,6 +638,10 @@ mod tests {
             action: action_id.into(),
             args: args.map(str::to_owned),
         }
+    }
+
+    fn action_lookup(actions: impl IntoIterator<Item = Action>) -> ActionIdLookup {
+        ActionIdLookup::new(Arc::new(actions.into_iter().collect()))
     }
 
     fn history_entry(action: Action, index: usize) -> HistoryEntry {
@@ -949,7 +953,8 @@ mod tests {
                 fixture.catalog_action.clone(),
             )));
             let actions = Vec::new();
-            let ctx = context(&cache, &plugins, &actions, &fixture.actions_by_id, &usage);
+            let actions_by_id = action_lookup(fixture.actions_by_id.values().cloned());
+            let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
 
             for scenario in [
                 "mixed-count-8-no-filter",
@@ -1103,7 +1108,7 @@ mod tests {
         data_cache.set_snapshot_for_test(snapshot);
         let snapshot = data_cache.snapshot();
         let commands = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
 
         let opaque = HistoryPin {
@@ -1192,7 +1197,7 @@ mod tests {
             show_filter: true,
         });
         let actions = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let usage = HashMap::new();
         let both_enabled = HashSet::from(["catalog_first".to_owned(), "catalog_second".to_owned()]);
 
@@ -1292,7 +1297,7 @@ mod tests {
             action("Alpha second, no args", "plugin:duplicate", None),
             action("Empty args, second", "plugin:duplicate", Some("")),
         ];
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
         let saved = action("Saved label", "plugin:duplicate", None);
 
@@ -1339,19 +1344,10 @@ mod tests {
         let known_snippet = crate::plugins::snippets::snippet_run_action("prompted");
         let missing_snippet = crate::plugins::snippets::snippet_run_action("removed");
         let commands = vec![action("Plugin fallback", &missing_snippet, None)];
-        let actions_by_id = HashMap::from([
-            (
-                known_snippet.clone(),
-                action("Actions map collision", &known_snippet, None),
-            ),
-            (
-                missing_snippet.clone(),
-                action("Must not fall through", &missing_snippet, None),
-            ),
-            (
-                "actions:current".into(),
-                action("Current action by ID", "actions:current", None),
-            ),
+        let actions_by_id = action_lookup(vec![
+            action("Actions map collision", &known_snippet, None),
+            action("Must not fall through", &missing_snippet, None),
+            action("Current action by ID", "actions:current", None),
         ]);
         let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
 
@@ -1463,7 +1459,7 @@ mod tests {
         }]);
 
         let commands = vec![action("Plugin wins", "plugin:collision", Some("x"))];
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let resolution = resolution_context(&snapshot, &commands, &actions_by_id);
         let resolve = |action_id: &str, args: Option<&str>| {
             CommandHistoryWidget::resolve_action(
@@ -1552,7 +1548,7 @@ mod tests {
         cache.set_snapshot_for_test(initial);
         let captured = cache.snapshot();
         let commands = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let captured_context = resolution_context(&captured, &commands, &actions_by_id);
 
         let mut renamed = DashboardDataSnapshot::default();
@@ -1638,7 +1634,7 @@ mod tests {
             calls: Arc::clone(&catalog_calls),
         }));
         let actions = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
 
@@ -1716,7 +1712,7 @@ mod tests {
         let cache = DashboardDataCache::new();
         let plugins = PluginManager::new_inert_for_test();
         let actions = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
         let widget = CommandHistoryWidget::new(CommandHistoryConfig {
@@ -1756,7 +1752,7 @@ mod tests {
         let cache = DashboardDataCache::new();
         let plugins = PluginManager::new_inert_for_test();
         let actions = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
         let widget = CommandHistoryWidget::new(CommandHistoryConfig {
@@ -1796,10 +1792,7 @@ mod tests {
         let cache = DashboardDataCache::new();
         let plugins = PluginManager::new_inert_for_test();
         let actions = Vec::new();
-        let actions_by_id = HashMap::from([(
-            "action:11".into(),
-            action("Rare visible label", "action:11", None),
-        )]);
+        let actions_by_id = action_lookup(vec![action("Rare visible label", "action:11", None)]);
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
         let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
@@ -1846,7 +1839,7 @@ mod tests {
         let cache = DashboardDataCache::new();
         let plugins = PluginManager::new_inert_for_test();
         let actions = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
         let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
@@ -1903,7 +1896,7 @@ mod tests {
         let cache = DashboardDataCache::new();
         let plugins = PluginManager::new_inert_for_test();
         let actions = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
         let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {
@@ -2015,19 +2008,13 @@ mod tests {
         cache.set_snapshot_for_test(snapshot);
         let plugins = PluginManager::new_inert_for_test();
         let actions = Vec::new();
-        let actions_by_id = HashMap::from([
-            (
-                "renamed:action".into(),
-                action(
-                    "Current renamed presentation",
-                    "renamed:action",
-                    Some("new args"),
-                ),
+        let actions_by_id = action_lookup(vec![
+            action(
+                "Current renamed presentation",
+                "renamed:action",
+                Some("new args"),
             ),
-            (
-                "rare:label".into(),
-                action("Resolved Needle presentation", "rare:label", None),
-            ),
+            action("Resolved Needle presentation", "rare:label", None),
         ]);
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
@@ -2315,7 +2302,7 @@ mod tests {
         );
         let plugins = PluginManager::new_inert_for_test();
         let actions = Vec::new();
-        let actions_by_id = HashMap::new();
+        let actions_by_id = ActionIdLookup::default();
         let usage = HashMap::new();
         let ctx = context(&cache, &plugins, &actions, &actions_by_id, &usage);
         let mut widget = CommandHistoryWidget::new(CommandHistoryConfig {

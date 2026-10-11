@@ -151,7 +151,7 @@ impl LauncherApp {
     }
 
     pub fn update_action_cache(&mut self) {
-        self.action_cache = {
+        let action_cache = {
             #[cfg(test)]
             let _track_c_search_entries = super::track_c_action_observer::scope(
                 super::track_c_action_observer::Phase::SearchEntries,
@@ -164,9 +164,9 @@ impl LauncherApp {
         #[cfg(test)]
         super::track_c_action_observer::add(
             super::track_c_action_observer::Counter::SearchEntriesProcessed,
-            self.action_cache.len(),
+            action_cache.len(),
         );
-        self.action_filter_metadata = {
+        let action_filter_metadata = {
             #[cfg(test)]
             let _track_c_filter_metadata = super::track_c_action_observer::scope(
                 super::track_c_action_observer::Phase::FilterMetadata,
@@ -179,22 +179,31 @@ impl LauncherApp {
         #[cfg(test)]
         super::track_c_action_observer::add(
             super::track_c_action_observer::Counter::FilterEntriesProcessed,
-            self.action_filter_metadata.len(),
+            action_filter_metadata.len(),
         );
-        self.actions_by_id = {
+        #[cfg(test)]
+        let (actions_by_id, id_lookup_build_receipt) = {
             #[cfg(test)]
             let _track_c_id_map =
                 super::track_c_action_observer::scope(super::track_c_action_observer::Phase::IdMap);
-            self.actions
-                .iter()
-                .map(|action| (action.action.clone(), action.clone()))
-                .collect::<std::collections::HashMap<_, _>>()
+            crate::actions::ActionIdLookup::new_with_test_receipt(Arc::clone(&self.actions))
         };
+        #[cfg(not(test))]
+        let actions_by_id = crate::actions::ActionIdLookup::new(Arc::clone(&self.actions));
+        #[cfg(test)]
+        let id_entries = actions_by_id.len();
+        self.action_cache = action_cache;
+        self.action_filter_metadata = action_filter_metadata;
+        self.actions_by_id = actions_by_id;
         #[cfg(test)]
         {
             super::track_c_action_observer::add(
                 super::track_c_action_observer::Counter::IdActionsProcessed,
-                self.actions.len(),
+                id_lookup_build_receipt.key_clone_attempts,
+            );
+            super::track_c_action_observer::add(
+                super::track_c_action_observer::Counter::IdKeysCloned,
+                id_lookup_build_receipt.key_clone_attempts,
             );
             super::track_c_action_observer::set(
                 super::track_c_action_observer::Counter::CacheEntries,
@@ -206,7 +215,7 @@ impl LauncherApp {
             );
             super::track_c_action_observer::set(
                 super::track_c_action_observer::Counter::IdEntries,
-                self.actions_by_id.len(),
+                id_entries,
             );
         }
         // Search results are derived from the action catalog as well as the
