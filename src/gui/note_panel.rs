@@ -5265,6 +5265,896 @@ mod tests {
         rows
     }
 
+    // C1-C experiment only: retain source-position postings and exact fenced
+    // prose, then materialize rows against the current draft on every replay.
+    // This intentionally remains a full scan for sources without a canonical
+    // or typed posting; it is not a reverse-text index.
+    struct TrackCPreparedNoteSource {
+        slug: String,
+        title: String,
+        path: PathBuf,
+        fenced_searchable: String,
+    }
+
+    struct TrackCPreparedNoteProjection {
+        sources: Vec<TrackCPreparedNoteSource>,
+        canonical_links: HashMap<String, Vec<usize>>,
+        typed_note_refs: HashMap<String, Vec<usize>>,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct TrackCPreparedProjectionFootprint {
+        text_logical_bytes: usize,
+        text_capacity_bytes: usize,
+        metadata_logical_bytes: usize,
+        metadata_string_capacity_bytes: usize,
+        source_slot_bytes: usize,
+        posting_key_logical_bytes: usize,
+        posting_key_capacity_bytes: usize,
+        posting_positions: usize,
+        posting_position_capacity: usize,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct TrackCPreparedProjectionWork {
+        todo_visits: usize,
+        note_visits: usize,
+        canonical_posting_entries: usize,
+        typed_posting_entries: usize,
+        fallback_visits: usize,
+        fallback_input_bytes: usize,
+        snippet_calls: usize,
+        metadata_reads: usize,
+        linked_todo_rows: usize,
+        related_note_rows: usize,
+        mention_rows: usize,
+    }
+
+    struct TrackCPreparedProjectionReplay {
+        rows: [Vec<BacklinkRow>; 3],
+        todo_label_map: HashMap<String, String>,
+        work: TrackCPreparedProjectionWork,
+    }
+
+    impl TrackCPreparedNoteProjection {
+        fn prepare(notes: &[Note]) -> Self {
+            use crate::common::entity_ref::EntityKind;
+
+            let mut projection = Self {
+                sources: Vec::with_capacity(notes.len()),
+                canonical_links: HashMap::new(),
+                typed_note_refs: HashMap::new(),
+            };
+            for (position, note) in notes.iter().enumerate() {
+                projection.sources.push(TrackCPreparedNoteSource {
+                    slug: note.slug.clone(),
+                    title: note.title.clone(),
+                    path: note.path.clone(),
+                    fenced_searchable: content_without_fenced_code(&note.content),
+                });
+                for target in &note.links {
+                    projection
+                        .canonical_links
+                        .entry(target.clone())
+                        .or_default()
+                        .push(position);
+                }
+                for reference in &note.entity_refs {
+                    if reference.kind == EntityKind::Note {
+                        projection
+                            .typed_note_refs
+                            .entry(reference.id.clone())
+                            .or_default()
+                            .push(position);
+                    }
+                }
+            }
+            projection
+        }
+
+        fn footprint(&self) -> TrackCPreparedProjectionFootprint {
+            let mut footprint = TrackCPreparedProjectionFootprint {
+                source_slot_bytes: self
+                    .sources
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TrackCPreparedNoteSource>()),
+                ..TrackCPreparedProjectionFootprint::default()
+            };
+            for source in &self.sources {
+                footprint.text_logical_bytes = footprint
+                    .text_logical_bytes
+                    .saturating_add(source.fenced_searchable.len());
+                footprint.text_capacity_bytes = footprint
+                    .text_capacity_bytes
+                    .saturating_add(source.fenced_searchable.capacity());
+                // Paths are lossy UTF-8 display bytes. PathBuf capacity and
+                // HashMap bucket/control storage are intentionally excluded.
+                let path_bytes = source.path.to_string_lossy().len();
+                footprint.metadata_logical_bytes = footprint
+                    .metadata_logical_bytes
+                    .saturating_add(source.slug.len())
+                    .saturating_add(source.title.len())
+                    .saturating_add(path_bytes);
+                footprint.metadata_string_capacity_bytes = footprint
+                    .metadata_string_capacity_bytes
+                    .saturating_add(source.slug.capacity())
+                    .saturating_add(source.title.capacity());
+            }
+            for (key, positions) in self
+                .canonical_links
+                .iter()
+                .chain(self.typed_note_refs.iter())
+            {
+                footprint.posting_key_logical_bytes = footprint
+                    .posting_key_logical_bytes
+                    .saturating_add(key.len());
+                footprint.posting_key_capacity_bytes = footprint
+                    .posting_key_capacity_bytes
+                    .saturating_add(key.capacity());
+                footprint.posting_positions =
+                    footprint.posting_positions.saturating_add(positions.len());
+                footprint.posting_position_capacity = footprint
+                    .posting_position_capacity
+                    .saturating_add(positions.capacity());
+            }
+            footprint
+        }
+
+        fn replay(
+            &self,
+            current: &Note,
+            todos: &[crate::plugins::todo::TodoEntry],
+        ) -> TrackCPreparedProjectionReplay {
+            use crate::common::entity_ref::EntityKind;
+
+            let mut rows: [Vec<BacklinkRow>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut work = TrackCPreparedProjectionWork {
+                todo_visits: todos.len(),
+                note_visits: self.sources.len(),
+                ..TrackCPreparedProjectionWork::default()
+            };
+            let needles = note_reference_needles(current);
+            let current_searchable = content_without_fenced_code(&current.content);
+
+            for todo in todos {
+                let matched = todo
+                    .entity_refs
+                    .iter()
+                    .any(|reference| {
+                        reference.kind == EntityKind::Note && reference.id == current.slug
+                    })
+                    .then(|| {
+                        (
+                            format!("@note:{}", current.slug),
+                            "todo linked to note".to_string(),
+                        )
+                    })
+                    .or_else(|| {
+                        needles
+                            .iter()
+                            .find(|(needle, _)| todo.text.contains(needle))
+                            .cloned()
+                    });
+                let current_note_mentions_todo = !todo.id.is_empty()
+                    && (current_searchable.contains(&format!("@todo:{}", todo.id))
+                        || current.entity_refs.iter().any(|reference| {
+                            reference.kind == EntityKind::Todo && reference.id == todo.id
+                        }));
+                let matched = matched.or_else(|| {
+                    current_note_mentions_todo.then(|| {
+                        (
+                            format!("@todo:{}", todo.id),
+                            "note mentions todo".to_string(),
+                        )
+                    })
+                });
+                if let Some((needle, reason)) = matched {
+                    let row = BacklinkRow {
+                        title: todo.text.clone(),
+                        type_badge: "Todo".into(),
+                        updated: "n/a".into(),
+                        snippet: extract_snippet_around(&todo.text, &needle),
+                        reason,
+                        note_slug: None,
+                        todo_id: Some(todo.id.clone()),
+                    };
+                    work.snippet_calls = work.snippet_calls.saturating_add(1);
+                    rows[0].push(row.clone());
+                    rows[2].push(row);
+                }
+            }
+
+            let canonical_positions = self.canonical_links.get(&current.slug);
+            let typed_positions = self.typed_note_refs.get(&current.slug);
+            work.canonical_posting_entries = canonical_positions.map_or(0, Vec::len);
+            work.typed_posting_entries = typed_positions.map_or(0, Vec::len);
+            for (position, source) in self.sources.iter().enumerate() {
+                if source.slug == current.slug {
+                    continue;
+                }
+                let canonical_match = canonical_positions
+                    .is_some_and(|positions| positions.binary_search(&position).is_ok());
+                let typed_match = !canonical_match
+                    && typed_positions
+                        .is_some_and(|positions| positions.binary_search(&position).is_ok());
+                let matched = if canonical_match {
+                    Some((format!("[[{}", current.slug), "wiki link".to_string()))
+                } else if typed_match {
+                    Some((
+                        format!("@note:{}", current.slug),
+                        "entity reference".to_string(),
+                    ))
+                } else {
+                    work.fallback_visits = work.fallback_visits.saturating_add(1);
+                    work.fallback_input_bytes = work
+                        .fallback_input_bytes
+                        .saturating_add(source.fenced_searchable.len());
+                    needles
+                        .iter()
+                        .find(|(needle, _)| source.fenced_searchable.contains(needle))
+                        .cloned()
+                };
+                if let Some((needle, reason)) = matched {
+                    let is_mention = reason.contains("mention") || reason.contains("entity");
+                    let row = BacklinkRow {
+                        title: source.title.clone(),
+                        type_badge: "Note".into(),
+                        updated: track_c_prepared_updated(&source.path),
+                        snippet: extract_snippet_around(&source.fenced_searchable, &needle),
+                        reason,
+                        note_slug: Some(source.slug.clone()),
+                        todo_id: None,
+                    };
+                    work.metadata_reads = work.metadata_reads.saturating_add(1);
+                    work.snippet_calls = work.snippet_calls.saturating_add(1);
+                    if is_mention {
+                        rows[2].push(row);
+                    } else {
+                        rows[1].push(row);
+                    }
+                }
+            }
+
+            work.linked_todo_rows = rows[0].len();
+            work.related_note_rows = rows[1].len();
+            work.mention_rows = rows[2].len();
+            let todo_label_map = todos
+                .iter()
+                .filter(|todo| !todo.id.is_empty())
+                .map(|todo| (todo.id.clone(), todo.text.clone()))
+                .collect();
+            TrackCPreparedProjectionReplay {
+                rows,
+                todo_label_map,
+                work,
+            }
+        }
+    }
+
+    fn track_c_prepared_updated(path: &Path) -> String {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .map(|modified| {
+                chrono::DateTime::<chrono::Local>::from(modified)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn track_c_prepared_rows_signature(
+        rows: &[Vec<BacklinkRow>; 3],
+    ) -> Vec<Vec<TrackCBacklinkRowIdentity>> {
+        rows.iter()
+            .map(|category| backlink_rows_signature(category))
+            .collect::<Vec<_>>()
+    }
+
+    struct TrackC1CObserverPause {
+        previous: Option<NoteRefreshObserverHandle>,
+    }
+
+    impl TrackC1CObserverPause {
+        fn new() -> Self {
+            let previous = NOTE_REFRESH_OBSERVER
+                .with(|observer| std::mem::replace(&mut *observer.borrow_mut(), None));
+            Self { previous }
+        }
+    }
+
+    impl Drop for TrackC1CObserverPause {
+        fn drop(&mut self) {
+            NOTE_REFRESH_OBSERVER.with(|observer| {
+                *observer.borrow_mut() = self.previous.take();
+            });
+        }
+    }
+
+    struct TrackC1CProjectionBundle {
+        cache: crate::plugins::note::NoteCache,
+        projection: TrackCPreparedNoteProjection,
+    }
+
+    impl TrackC1CProjectionBundle {
+        fn new(notes: Vec<Note>) -> Self {
+            let cache = crate::plugins::note::build_note_cache_candidate_for_test(notes);
+            let projection = TrackCPreparedNoteProjection::prepare(&cache.notes);
+            Self { cache, projection }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct TrackC1CSample {
+        current_owner_ns: u64,
+        projection_owner_ns: u64,
+        projection_prepare_ns: u64,
+        current_repeat5_ns: u64,
+        projection_repeat5_ns: u64,
+        equal_current_publish_ns: u64,
+        equal_projection_publish_ns: u64,
+        changed_current_publish_ns: u64,
+        changed_projection_publish_ns: u64,
+        unchanged_gate_ns: u64,
+        canonical_posting_entries: u64,
+        typed_posting_entries: u64,
+        fallback_visits: u64,
+        fallback_input_bytes: u64,
+        linked_todo_rows: u64,
+        related_note_rows: u64,
+        mention_rows: u64,
+        snippet_calls: u64,
+        metadata_reads: u64,
+        complete_output_id: u64,
+        structural_output_id: u64,
+        note_revision: u64,
+        todo_revision: u64,
+        equal_break_even_k: Option<u64>,
+        changed_break_even_k: Option<u64>,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct TrackC1CProjectionOwnerReceipt {
+        note_revision: u64,
+        todo_revision: u64,
+        structural_output_id: u64,
+        complete_output_id: u64,
+        work: TrackCPreparedProjectionWork,
+        elapsed_ns: u64,
+    }
+
+    fn track_c1c_refresh_prepared_owner(
+        state: &mut TrackC1ANoteUiOwnerState,
+        projection: &TrackCPreparedNoteProjection,
+    ) -> TrackC1CProjectionOwnerReceipt {
+        use crate::performance::{Metric, MetricTimer, track_c};
+
+        let _current_note_revision = note_version();
+        let current_todo_revision = todo_version();
+        let mut relationship_timer = track_c::Timer::start(track_c::Phase::NoteRelationshipRefresh);
+        let (snapshot_note_revision, snapshot_notes) =
+            note_cache_snapshot_with_version().expect("candidate owner takes a healthy snapshot");
+        let _recompute_timer = MetricTimer::start(Metric::NoteHeavyRecompute);
+        let todos = load_todos_or_last_good(TODO_FILE);
+        let mut scan_timer = track_c::Timer::start(track_c::Phase::NoteMentionsScan);
+        let replay = projection.replay(&state.panel.note, &todos);
+        let work = replay.work;
+        scan_timer.set_work_units(snapshot_notes.len().saturating_add(todos.len()));
+        scan_timer.finish(track_c::Outcome::Completed);
+
+        let [linked_todos, related_notes, mentions] = replay.rows;
+        state.panel.derived.backlink_rows_linked_todos = linked_todos;
+        state.panel.derived.backlink_rows_related_notes = related_notes;
+        state.panel.derived.backlink_rows_mentions = mentions;
+        state.panel.derived.todo_label_map = replay.todo_label_map;
+        state.panel.last_notes_version = snapshot_note_revision;
+        state.panel.last_todo_revision = current_todo_revision;
+        state.panel.last_backlinks_enabled = Some(true);
+        state.panel.heavy_recompute_requested = false;
+        state.panel.heavy_refresh_retry = None;
+        state.panel.heavy_recompute_count = state.panel.heavy_recompute_count.saturating_add(1);
+
+        relationship_timer.set_work_units(snapshot_notes.len().saturating_add(todos.len()));
+        relationship_timer.finish(track_c::Outcome::Completed);
+        drop(_recompute_timer);
+        drop(snapshot_notes);
+        drop(todos);
+        TrackC1CProjectionOwnerReceipt {
+            note_revision: snapshot_note_revision,
+            todo_revision: current_todo_revision,
+            work,
+            ..TrackC1CProjectionOwnerReceipt::default()
+        }
+    }
+
+    fn track_c1c_validate_panel(
+        state: &TrackC1ANoteUiOwnerState,
+    ) -> TrackC1CProjectionOwnerReceipt {
+        assert_eq!(
+            track_c1a_panel_rows(&state.panel),
+            state.expected_rows,
+            "all seven row fields and category order match the frozen owner oracle"
+        );
+        assert_eq!(state.panel.derived.todo_label_map, state.expected_labels);
+        assert_eq!(state.panel.last_notes_version, state.expected_note_revision);
+        assert_eq!(state.panel.last_todo_revision, state.expected_todo_revision);
+        assert_eq!(note_version(), state.expected_note_revision);
+        assert_eq!(todo_version(), state.expected_todo_revision);
+        assert_eq!(state.panel.note.content, state.draft_content);
+        assert_eq!(state.panel.saved_content_baseline, state.original_content);
+        assert!(!state.panel.heavy_recompute_requested);
+        assert!(state.panel.heavy_refresh_retry.is_none());
+        let structural_output_id = track_c_backlink_rows_identity(
+            &track_c1a_panel_rows(&state.panel),
+            &state.panel.derived.todo_label_map,
+        );
+        let mut complete = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_3143_4E4F_5554,
+            "track-c-c1c-note-complete-state",
+            8,
+        );
+        complete.number(structural_output_id);
+        complete.number(state.panel.last_notes_version);
+        complete.number(state.panel.last_todo_revision);
+        complete.number(state.panel.note.slug.len() as u64);
+        complete.bytes(state.panel.note.slug.as_bytes());
+        complete.number(state.panel.note.content.len() as u64);
+        complete.bytes(state.panel.note.content.as_bytes());
+        complete.number(state.panel.saved_content_baseline.len() as u64);
+        complete.bytes(state.panel.saved_content_baseline.as_bytes());
+        complete.number(state.panel.heavy_recompute_requested as u64);
+        complete.number((state.panel.last_backlinks_enabled == Some(true)) as u64);
+        TrackC1CProjectionOwnerReceipt {
+            note_revision: state.panel.last_notes_version,
+            todo_revision: state.panel.last_todo_revision,
+            structural_output_id,
+            complete_output_id: complete.finish(),
+            ..TrackC1CProjectionOwnerReceipt::default()
+        }
+    }
+
+    fn track_c1c_assert_projection_matches_frozen(
+        projection: &TrackCPreparedNoteProjection,
+        current: &Note,
+        todos: &[crate::plugins::todo::TodoEntry],
+        canonical_notes: &[Note],
+    ) -> TrackCPreparedProjectionWork {
+        let replay = projection.replay(current, todos);
+        let expected = [
+            BacklinkTab::LinkedTodos,
+            BacklinkTab::RelatedNotes,
+            BacklinkTab::Mentions,
+        ]
+        .into_iter()
+        .map(|tab| track_c_eager_note_rows(current, tab, todos, canonical_notes))
+        .collect::<Vec<_>>();
+        assert_eq!(
+            track_c_prepared_rows_signature(&replay.rows),
+            expected
+                .iter()
+                .map(|rows| backlink_rows_signature(rows))
+                .collect::<Vec<_>>(),
+            "prepared replay matches every frozen row field and ordered category"
+        );
+        assert_eq!(replay.todo_label_map, track_c1a_labels_for(todos));
+        replay.work
+    }
+
+    fn track_c1c_run_current_owner(
+        state: &mut TrackC1ANoteUiOwnerState,
+    ) -> TrackC1CProjectionOwnerReceipt {
+        use crate::performance::track_c;
+
+        track_c::reset();
+        crate::performance::reset_metrics();
+        let started = Instant::now();
+        let completed = state.panel.refresh_heavy_derived(true, true);
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        assert!(
+            completed,
+            "current fused owner completes the controlled snapshot"
+        );
+        let mut receipt = track_c1c_validate_panel(state);
+        receipt.elapsed_ns = elapsed_ns;
+        track_c1c_assert_owner_phase_receipts(
+            state.expected_notes.len(),
+            state.expected_todos.len(),
+        );
+        receipt
+    }
+
+    fn track_c1c_run_projection_owner(
+        state: &mut TrackC1ANoteUiOwnerState,
+        projection: &TrackCPreparedNoteProjection,
+    ) -> TrackC1CProjectionOwnerReceipt {
+        use crate::performance::track_c;
+
+        track_c::reset();
+        crate::performance::reset_metrics();
+        let started = Instant::now();
+        let owner_receipt = track_c1c_refresh_prepared_owner(state, projection);
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let mut receipt = track_c1c_validate_panel(state);
+        assert_eq!(owner_receipt.note_revision, receipt.note_revision);
+        assert_eq!(owner_receipt.todo_revision, receipt.todo_revision);
+        receipt.work = owner_receipt.work;
+        receipt.elapsed_ns = elapsed_ns;
+        track_c1c_assert_owner_phase_receipts(
+            state.expected_notes.len(),
+            state.expected_todos.len(),
+        );
+        receipt
+    }
+
+    fn track_c1c_assert_owner_phase_receipts(note_count: usize, todo_count: usize) {
+        use crate::performance::track_c::{self, Phase};
+
+        if !crate::performance::enabled() {
+            return;
+        }
+        let expected_work = note_count.saturating_add(todo_count) as u64;
+        let phases = track_c::snapshot();
+        for phase in [Phase::NoteRelationshipRefresh, Phase::NoteMentionsScan] {
+            let stats = phases
+                .iter()
+                .find(|(candidate, _)| *candidate == phase)
+                .expect("Track C phase has fixed cardinality")
+                .1;
+            assert_eq!(stats.calls, 1);
+            assert_eq!(stats.work_units, expected_work);
+        }
+    }
+
+    fn track_c1c_assert_unchanged_gate_has_no_heavy_work() {
+        use crate::performance::{Metric, snapshot_metrics, track_c};
+
+        assert_eq!(snapshot_metrics()[Metric::NoteSnapshot as usize].calls, 0);
+        for phase in [
+            track_c::Phase::NoteRelationshipRefresh,
+            track_c::Phase::NoteMentionsScan,
+        ] {
+            let stats = track_c::snapshot()
+                .into_iter()
+                .find(|(candidate, _)| *candidate == phase)
+                .expect("Track C phase has fixed cardinality")
+                .1;
+            assert_eq!(stats.calls, 0);
+            assert_eq!(stats.work_units, 0);
+        }
+    }
+
+    fn track_c1c_break_even_k(
+        current_publish_ns: u64,
+        projection_publish_ns: u64,
+        current_owner_ns: u64,
+        projection_owner_ns: u64,
+    ) -> Option<u64> {
+        let per_refresh_saving = current_owner_ns.checked_sub(projection_owner_ns)?;
+        if per_refresh_saving == 0 {
+            return None;
+        }
+        let extra_publish = projection_publish_ns.saturating_sub(current_publish_ns);
+        Some(extra_publish.div_ceil(per_refresh_saving))
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct TrackC1CLocalPublicationReceipt {
+        equal_current_ns: u64,
+        equal_projection_ns: u64,
+        changed_current_ns: u64,
+        changed_projection_ns: u64,
+        equal_retained_logical_bytes: usize,
+        equal_retained_capacity_bytes: usize,
+        changed_old_logical_bytes: usize,
+        changed_old_capacity_bytes: usize,
+        changed_peak_logical_bytes: usize,
+        changed_peak_capacity_bytes: usize,
+    }
+
+    fn track_c1c_measure_local_publication(
+        canonical_notes: &[Note],
+        current: &Note,
+        todos: &[crate::plugins::todo::TodoEntry],
+    ) -> TrackC1CLocalPublicationReceipt {
+        use crate::plugins::note::build_note_cache_candidate_for_test;
+
+        assert!(canonical_notes.len() > 1);
+        let mut previous_notes = canonical_notes.to_vec();
+        previous_notes[1].title = format!("Previous {}", previous_notes[1].title);
+
+        // Prepare the old published generations outside the transaction
+        // timers. Both changed candidates below target this sample's exact
+        // canonical replay snapshot, rather than an unrelated edit.
+        let equal_current_cache = build_note_cache_candidate_for_test(canonical_notes.to_vec());
+        let equal_projection_bundle = TrackC1CProjectionBundle::new(canonical_notes.to_vec());
+        let mut changed_current_cache = build_note_cache_candidate_for_test(previous_notes.clone());
+        let mut changed_projection_bundle = TrackC1CProjectionBundle::new(previous_notes);
+        let equal_footprint = equal_projection_bundle.projection.footprint();
+        let changed_old_footprint = changed_projection_bundle.projection.footprint();
+
+        // Cloning test inputs is setup, not canonical construction or local
+        // publication work measured below.
+        let equal_current_input = canonical_notes.to_vec();
+        let current_started = Instant::now();
+        let equal_candidate = build_note_cache_candidate_for_test(equal_current_input);
+        let current_equal = equal_current_cache.notes == equal_candidate.notes;
+        drop(equal_candidate);
+        let equal_current_ns = current_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        assert!(current_equal, "same canonical input takes the equal branch");
+
+        // The proposed owner checks canonical equality before preparing an
+        // index. An equal candidate is discarded and retains the old
+        // projection, so this timed branch intentionally does not build one.
+        let equal_projection_input = canonical_notes.to_vec();
+        let projection_started = Instant::now();
+        let equal_projection_cache = build_note_cache_candidate_for_test(equal_projection_input);
+        let projection_equal = equal_projection_bundle.cache.notes == equal_projection_cache.notes;
+        drop(equal_projection_cache);
+        let equal_projection_ns = projection_started
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        assert!(
+            projection_equal,
+            "projection candidate uses the same equal canonical input and branch"
+        );
+
+        let changed_current_input = canonical_notes.to_vec();
+        let current_started = Instant::now();
+        let changed_candidate = build_note_cache_candidate_for_test(changed_current_input);
+        let current_changed = changed_current_cache.notes != changed_candidate.notes;
+        if current_changed {
+            let previous = std::mem::replace(&mut changed_current_cache, changed_candidate);
+            drop(previous);
+        } else {
+            drop(changed_candidate);
+        }
+        let changed_current_ns = current_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        assert!(
+            current_changed,
+            "changed canonical input takes replacement branch"
+        );
+
+        let changed_projection_input = canonical_notes.to_vec();
+        let projection_started = Instant::now();
+        let changed_projection_cache =
+            build_note_cache_candidate_for_test(changed_projection_input);
+        let projection_changed =
+            changed_projection_bundle.cache.notes != changed_projection_cache.notes;
+        if projection_changed {
+            let projection = TrackCPreparedNoteProjection::prepare(&changed_projection_cache.notes);
+            let replacement = TrackC1CProjectionBundle {
+                cache: changed_projection_cache,
+                projection,
+            };
+            let previous = std::mem::replace(&mut changed_projection_bundle, replacement);
+            drop(previous);
+        } else {
+            drop(changed_projection_cache);
+        }
+        let changed_projection_ns = projection_started
+            .elapsed()
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        assert!(
+            projection_changed,
+            "changed projection candidate takes the matching replacement branch"
+        );
+        assert_eq!(changed_current_cache.notes, canonical_notes);
+        assert_eq!(changed_projection_bundle.cache.notes, canonical_notes);
+        assert_eq!(equal_projection_bundle.cache.notes, canonical_notes);
+        let _ = track_c1c_assert_projection_matches_frozen(
+            &equal_projection_bundle.projection,
+            current,
+            todos,
+            canonical_notes,
+        );
+        let _ = track_c1c_assert_projection_matches_frozen(
+            &changed_projection_bundle.projection,
+            current,
+            todos,
+            canonical_notes,
+        );
+
+        let new_footprint = changed_projection_bundle.projection.footprint();
+        TrackC1CLocalPublicationReceipt {
+            equal_current_ns,
+            equal_projection_ns,
+            changed_current_ns,
+            changed_projection_ns,
+            // Equal rejection retains one projection generation because the
+            // approved owner checks equality before preparing the candidate.
+            equal_retained_logical_bytes: projection_logical_bytes(equal_footprint),
+            equal_retained_capacity_bytes: projection_capacity_bytes(equal_footprint),
+            // During changed replacement the old and new projection
+            // generations overlap until the local install drops the old one.
+            changed_old_logical_bytes: projection_logical_bytes(changed_old_footprint),
+            changed_old_capacity_bytes: projection_capacity_bytes(changed_old_footprint),
+            changed_peak_logical_bytes: projection_logical_bytes(changed_old_footprint)
+                .saturating_add(projection_logical_bytes(new_footprint)),
+            changed_peak_capacity_bytes: projection_capacity_bytes(changed_old_footprint)
+                .saturating_add(projection_capacity_bytes(new_footprint)),
+        }
+    }
+
+    fn projection_logical_bytes(footprint: TrackCPreparedProjectionFootprint) -> usize {
+        footprint
+            .text_logical_bytes
+            .saturating_add(footprint.metadata_logical_bytes)
+            .saturating_add(footprint.source_slot_bytes)
+            .saturating_add(footprint.posting_key_logical_bytes)
+            .saturating_add(
+                footprint
+                    .posting_positions
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )
+    }
+
+    fn projection_capacity_bytes(footprint: TrackCPreparedProjectionFootprint) -> usize {
+        footprint
+            .text_capacity_bytes
+            .saturating_add(footprint.metadata_string_capacity_bytes)
+            .saturating_add(footprint.source_slot_bytes)
+            .saturating_add(footprint.posting_key_capacity_bytes)
+            .saturating_add(
+                footprint
+                    .posting_position_capacity
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            )
+    }
+
+    fn track_c1c_emit_samples(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        item_count: usize,
+        transition: TrackC1ANoteTransition,
+        fixture_signature: u64,
+        samples: &[TrackC1CSample],
+        footprint: TrackCPreparedProjectionFootprint,
+        equal_retained_logical_bytes: usize,
+        equal_retained_capacity_bytes: usize,
+        changed_old_logical_bytes: usize,
+        changed_old_capacity_bytes: usize,
+        changed_peak_logical_bytes: usize,
+        changed_peak_capacity_bytes: usize,
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        assert!(!source.bytes().any(|byte| byte.is_ascii_whitespace()));
+        assert!(!profile.bytes().any(|byte| byte.is_ascii_whitespace()));
+        let values =
+            |select: fn(&TrackC1CSample) -> u64| track_c1a_join_u64(samples.iter().map(select));
+        let equal_current_one = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .equal_current_publish_ns
+                    .saturating_add(sample.current_owner_ns)
+            })
+            .collect::<Vec<_>>();
+        let equal_projection_one = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .equal_projection_publish_ns
+                    .saturating_add(sample.projection_owner_ns)
+            })
+            .collect::<Vec<_>>();
+        let equal_current_five = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .equal_current_publish_ns
+                    .saturating_add(sample.current_repeat5_ns)
+            })
+            .collect::<Vec<_>>();
+        let equal_projection_five = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .equal_projection_publish_ns
+                    .saturating_add(sample.projection_repeat5_ns)
+            })
+            .collect::<Vec<_>>();
+        let changed_current_one = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .changed_current_publish_ns
+                    .saturating_add(sample.current_owner_ns)
+            })
+            .collect::<Vec<_>>();
+        let changed_projection_one = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .changed_projection_publish_ns
+                    .saturating_add(sample.projection_owner_ns)
+            })
+            .collect::<Vec<_>>();
+        let changed_current_five = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .changed_current_publish_ns
+                    .saturating_add(sample.current_repeat5_ns)
+            })
+            .collect::<Vec<_>>();
+        let changed_projection_five = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .changed_projection_publish_ns
+                    .saturating_add(sample.projection_repeat5_ns)
+            })
+            .collect::<Vec<_>>();
+        let join = |items: &[u64]| track_c1a_join_u64(items.iter().copied());
+        let mut line = format!(
+            "C1C_NOTE_RESULT schema=1 stage=prepared_projection owner=NotePanel_refresh_heavy_derived_vs_prepared_projection_replay source={source} profile={profile} mode={} telemetry_enabled={} observer_enabled=false fixture=synthetic_note_panel_refresh fixture_signature={fixture_signature:016x} transition={} count={item_count} todo_count=12 viewport=960x640 settings=backlinks_enabled_inert cold_type={} warmups={WARMUPS} samples={MEASURED_SAMPLES} exclusions=0 repeat_k=5 repeat_scope=forced_invalidated_refresh_not_idle publication_totals_applicability=standalone_model_not_transition_latency publication_model=local_cache_simulation_without_global_lock_or_revision integrated_owner=false break_even_scope=local_simulation memory_scope=projection_only_lossy_utf8_paths_map_buckets_excluded allocator_and_process_ram=not_measured text_logical_bytes={} text_capacity_bytes={} metadata_logical_bytes={} metadata_string_capacity_bytes={} source_slot_bytes={} posting_key_logical_bytes={} posting_key_capacity_bytes={} posting_positions={} posting_position_capacity={} equal_projection_retained_logical_bytes={equal_retained_logical_bytes} equal_projection_retained_capacity_bytes={equal_retained_capacity_bytes} changed_old_projection_logical_bytes={changed_old_logical_bytes} changed_old_projection_capacity_bytes={changed_old_capacity_bytes} changed_two_generation_peak_logical_bytes={changed_peak_logical_bytes} changed_two_generation_peak_capacity_bytes={changed_peak_capacity_bytes}",
+            match mode {
+                crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+                crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+            },
+            crate::performance::enabled(),
+            transition.report_label(),
+            transition.cold_type(),
+            footprint.text_logical_bytes,
+            footprint.text_capacity_bytes,
+            footprint.metadata_logical_bytes,
+            footprint.metadata_string_capacity_bytes,
+            footprint.source_slot_bytes,
+            footprint.posting_key_logical_bytes,
+            footprint.posting_key_capacity_bytes,
+            footprint.posting_positions,
+            footprint.posting_position_capacity,
+        );
+        use std::fmt::Write as _;
+        write!(
+            line,
+            " current_owner_ns=[{}] projection_owner_ns=[{}] projection_prepare_ns=[{}] current_repeat5_ns=[{}] projection_repeat5_ns=[{}] unchanged_gate_ns=[{}] equal_current_publish_ns=[{}] equal_projection_publish_ns=[{}] changed_current_publish_ns=[{}] changed_projection_publish_ns=[{}] equal_current_plus1_ns=[{}] equal_projection_plus1_ns=[{}] equal_current_plus5_ns=[{}] equal_projection_plus5_ns=[{}] changed_current_plus1_ns=[{}] changed_projection_plus1_ns=[{}] changed_current_plus5_ns=[{}] changed_projection_plus5_ns=[{}] equal_break_even_k=[{}] equal_break_even_finite=[{}] changed_break_even_k=[{}] changed_break_even_finite=[{}] canonical_posting_entries=[{}] typed_posting_entries=[{}] fallback_visits=[{}] fallback_input_bytes=[{}] linked_todo_rows=[{}] related_note_rows=[{}] mention_rows=[{}] snippet_calls=[{}] metadata_reads=[{}] complete_output_ids=[{}] structural_output_ids=[{}] note_revisions=[{}] todo_revisions=[{}]",
+            values(|sample| sample.current_owner_ns),
+            values(|sample| sample.projection_owner_ns),
+            values(|sample| sample.projection_prepare_ns),
+            values(|sample| sample.current_repeat5_ns),
+            values(|sample| sample.projection_repeat5_ns),
+            values(|sample| sample.unchanged_gate_ns),
+            values(|sample| sample.equal_current_publish_ns),
+            values(|sample| sample.equal_projection_publish_ns),
+            values(|sample| sample.changed_current_publish_ns),
+            values(|sample| sample.changed_projection_publish_ns),
+            join(&equal_current_one),
+            join(&equal_projection_one),
+            join(&equal_current_five),
+            join(&equal_projection_five),
+            join(&changed_current_one),
+            join(&changed_projection_one),
+            join(&changed_current_five),
+            join(&changed_projection_five),
+            track_c1a_join_u64(samples.iter().map(|sample| sample.equal_break_even_k.unwrap_or(0))),
+            track_c1a_join_u64(samples.iter().map(|sample| sample.equal_break_even_k.is_some() as u64)),
+            track_c1a_join_u64(samples.iter().map(|sample| sample.changed_break_even_k.unwrap_or(0))),
+            track_c1a_join_u64(samples.iter().map(|sample| sample.changed_break_even_k.is_some() as u64)),
+            values(|sample| sample.canonical_posting_entries),
+            values(|sample| sample.typed_posting_entries),
+            values(|sample| sample.fallback_visits),
+            values(|sample| sample.fallback_input_bytes),
+            values(|sample| sample.linked_todo_rows),
+            values(|sample| sample.related_note_rows),
+            values(|sample| sample.mention_rows),
+            values(|sample| sample.snippet_calls),
+            values(|sample| sample.metadata_reads),
+            track_c1a_join_hex(samples.iter().map(|sample| sample.complete_output_id)),
+            track_c1a_join_hex(samples.iter().map(|sample| sample.structural_output_id)),
+            values(|sample| sample.note_revision),
+            values(|sample| sample.todo_revision),
+        )
+        .expect("append compact C1-C numeric record");
+        println!("{line}");
+    }
+
     fn track_c_backlink_rows_identity(
         rows: &[Vec<(
             String,
@@ -6639,6 +7529,451 @@ mod tests {
         );
         drop(state);
         drop(workspace);
+    }
+
+    #[test]
+    fn prepared_note_projection_matches_frozen_eager_categories_and_fresh_metadata() {
+        use crate::common::entity_ref::{EntityKind, EntityRef};
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+        use crate::plugins::todo::TodoEntry;
+
+        let workspace = TrackCWorkspace::new();
+        let _notes_env_guard = NOTES_ENV_LOCK.lock().expect("notes env lock");
+        let notes_dir = workspace.notes_dir();
+        std::fs::create_dir_all(&notes_dir).expect("create owned notes directory");
+        let note = |slug: &str, title: &str, content: &str| Note {
+            title: title.into(),
+            path: notes_dir.join(format!("{slug}.md")),
+            content: content.into(),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug: slug.into(),
+            alias: None,
+            aliases: Vec::new(),
+            entity_refs: Vec::new(),
+        };
+
+        let current = note("central", "Central", "# Central\n");
+        let fenced_wiki = note(
+            "fenced-wiki",
+            "Fenced canonical wiki",
+            "```md\n[[Central]]\n```\n",
+        );
+        let mut typed = note("typed-source", "Typed reference", "Typed only");
+        typed.entity_refs = vec![EntityRef::new(EntityKind::Note, "central", None)];
+        let suffix = note(
+            "suffix-source",
+            "Prefix substring",
+            "A literal @note:central-suffix occurrence",
+        );
+        let duplicate = note(
+            "duplicate-source",
+            "Duplicate source",
+            "An alias mention [[Fresh Alias]]",
+        );
+        let fenced_prose = note(
+            "fenced-prose",
+            "Fenced prose only",
+            "```text\n@note:central\n```\n",
+        );
+        let fresh_alias = note(
+            "fresh-alias-source",
+            "Fresh draft alias",
+            "The new draft needle [[Fresh Alias]]",
+        );
+        let source_notes = vec![
+            current.clone(),
+            fenced_wiki.clone(),
+            typed,
+            suffix,
+            duplicate.clone(),
+            duplicate,
+            fenced_prose,
+            fresh_alias,
+        ];
+        std::fs::write(&fenced_wiki.path, &fenced_wiki.content)
+            .expect("write the metadata fixture under the owned workspace");
+        let _cache_guard = crate::plugins::note::publish_note_cache_for_test(source_notes.clone());
+        let (note_revision, canonical_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("canonical projection fixture snapshot is healthy");
+        assert_eq!(canonical_notes.len(), source_notes.len());
+        assert_eq!(canonical_notes[4], canonical_notes[5]);
+
+        let mut draft = canonical_notes[0].clone();
+        draft.title = "Fresh Title".into();
+        draft.alias = Some("Fresh Alias".into());
+        draft.content = "# Fresh Title\n\n@todo:draft-outgoing".into();
+        let todos = vec![
+            TodoEntry {
+                id: "todo-typed".into(),
+                text: "TODO with a competing [[Fresh Title]] needle".into(),
+                done: false,
+                priority: 0,
+                tags: Vec::new(),
+                entity_refs: vec![EntityRef::new(EntityKind::Note, "central", None)],
+            },
+            TodoEntry {
+                id: "todo-needle".into(),
+                text: "TODO for [[Fresh Alias]]".into(),
+                done: false,
+                priority: 0,
+                tags: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+            TodoEntry {
+                id: "draft-outgoing".into(),
+                text: "TODO mentioned by the unsaved draft".into(),
+                done: false,
+                priority: 0,
+                tags: Vec::new(),
+                entity_refs: Vec::new(),
+            },
+        ];
+        let projection = TrackCPreparedNoteProjection::prepare(&canonical_notes);
+
+        let assert_matches_frozen = |projection: &TrackCPreparedNoteProjection| {
+            let replay = projection.replay(&draft, &todos);
+            let expected = [
+                BacklinkTab::LinkedTodos,
+                BacklinkTab::RelatedNotes,
+                BacklinkTab::Mentions,
+            ]
+            .into_iter()
+            .map(|tab| track_c_eager_note_rows(&draft, tab, &todos, &canonical_notes))
+            .collect::<Vec<_>>();
+            assert_eq!(
+                track_c_prepared_rows_signature(&replay.rows),
+                expected
+                    .iter()
+                    .map(|rows| backlink_rows_signature(rows))
+                    .collect::<Vec<_>>(),
+                "all seven row fields and ordered categories match the frozen eager oracle"
+            );
+            assert_eq!(
+                replay.todo_label_map,
+                track_c1a_labels_for(&todos),
+                "TODO label projection matches the current input"
+            );
+            assert_eq!(replay.work.todo_visits, todos.len());
+            assert_eq!(replay.work.note_visits, canonical_notes.len());
+            replay
+        };
+
+        let first = assert_matches_frozen(&projection);
+        assert_eq!(
+            first.rows[1]
+                .iter()
+                .filter_map(|row| row.note_slug.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                "fenced-wiki",
+                "duplicate-source",
+                "duplicate-source",
+                "fresh-alias-source"
+            ],
+            "raw fenced wiki metadata wins and duplicate source positions/order survive"
+        );
+        assert!(
+            first.rows[1]
+                .iter()
+                .all(|row| row.note_slug.as_deref() != Some("fenced-prose"))
+        );
+        assert!(first.rows[2].iter().any(|row| {
+            row.note_slug.as_deref() == Some("suffix-source") && row.reason == "note mention"
+        }));
+        assert!(first.rows[2].iter().any(|row| {
+            row.todo_id.as_deref() == Some("draft-outgoing") && row.reason == "note mentions todo"
+        }));
+        assert_eq!(
+            first.rows[0]
+                .iter()
+                .map(|row| row.todo_id.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            ["todo-typed", "todo-needle", "draft-outgoing"]
+        );
+
+        let with_metadata = first.rows[1]
+            .iter()
+            .find(|row| row.note_slug.as_deref() == Some("fenced-wiki"))
+            .expect("canonical wiki row is present")
+            .updated
+            .clone();
+        assert_ne!(with_metadata, "unknown");
+        std::fs::remove_file(&fenced_wiki.path)
+            .expect("remove only the owned metadata fixture file");
+        let after_file_removal = assert_matches_frozen(&projection);
+        let without_metadata = after_file_removal.rows[1]
+            .iter()
+            .find(|row| row.note_slug.as_deref() == Some("fenced-wiki"))
+            .expect("canonical wiki row remains after metadata disappears")
+            .updated
+            .clone();
+        assert_eq!(without_metadata, "unknown");
+        assert_eq!(note_revision, crate::plugins::note::note_version());
+    }
+
+    #[test]
+    #[ignore = "opt-in C1-C prepared projection viability benchmark; isolated synthetic notes only"]
+    fn track_c_c1c_benchmark_prepared_note_projection_viability() {
+        use crate::performance::track_c;
+        use crate::performance::track_c_workloads::{BenchmarkMode, MEASURED_SAMPLES, WARMUPS};
+        use crate::plugins::note::build_note_cache_candidate_for_test;
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let mut scenarios = mode
+            .note_sizes()
+            .iter()
+            .map(|count| (*count, TrackC1ANoteTransition::LocalDraft))
+            .collect::<Vec<_>>();
+        let persisted_count = if mode == BenchmarkMode::Small {
+            100
+        } else {
+            1_000
+        };
+        scenarios.extend([
+            (
+                persisted_count,
+                TrackC1ANoteTransition::ExternalNoteRevision,
+            ),
+            (
+                persisted_count,
+                TrackC1ANoteTransition::PersistedTodoRevision,
+            ),
+        ]);
+
+        for (item_count, transition) in scenarios {
+            let fixture_signature = track_c1a_fixture_signature(item_count, transition);
+            let mut samples = Vec::with_capacity(MEASURED_SAMPLES);
+            let mut memory_summary = None;
+            for iteration in 0..WARMUPS + MEASURED_SAMPLES {
+                let mut state = TrackC1ANoteUiOwnerState::new(item_count, transition);
+                assert_eq!(state.fixture_signature, fixture_signature);
+
+                // Exercise and validate the actual dialog caller outside the
+                // direct owner timing; it also settles the same canonical
+                // snapshot, draft, and inert settings used below.
+                let frame_time = state.owner_time();
+                let frame = track_c1a_run_frame(
+                    &state.context,
+                    &mut state.panel,
+                    &mut state.app,
+                    frame_time,
+                );
+                let _ = track_c1a_validate_owner(&mut state, &frame);
+                drop(frame);
+
+                // The C1-A observer is disabled for both owner paths and all
+                // projection preparation/publication timings. Track C's
+                // bounded metric timers remain identically enabled.
+                let _observer_pause = TrackC1CObserverPause::new();
+                track_c::reset();
+                crate::performance::reset_metrics();
+                let (snapshot_revision, canonical_notes) =
+                    crate::plugins::note::note_cache_snapshot_with_version()
+                        .expect("C1-C sample uses a healthy canonical snapshot");
+                assert_eq!(snapshot_revision, state.expected_note_revision);
+                assert_eq!(canonical_notes, state.expected_notes);
+                assert_eq!(todo_version(), state.expected_todo_revision);
+
+                let projection_cache = build_note_cache_candidate_for_test(canonical_notes.clone());
+                assert_eq!(projection_cache.notes, canonical_notes);
+                let preparation_started = Instant::now();
+                let projection = TrackCPreparedNoteProjection::prepare(&projection_cache.notes);
+                let projection_prepare_ns = preparation_started
+                    .elapsed()
+                    .as_nanos()
+                    .min(u64::MAX as u128) as u64;
+                let footprint = projection.footprint();
+                let projection_bundle = TrackC1CProjectionBundle {
+                    cache: projection_cache,
+                    projection,
+                };
+                let projection = &projection_bundle.projection;
+
+                // Alternate first-run order, then alternate each member of
+                // the five forced-refresh repeats to reduce systematic warm
+                // cache ordering bias. Every complete output is checked after
+                // its individual timer stops.
+                let (current_first, projection_first) = if iteration % 2 == 0 {
+                    (
+                        track_c1c_run_current_owner(&mut state),
+                        track_c1c_run_projection_owner(&mut state, projection),
+                    )
+                } else {
+                    let projected = track_c1c_run_projection_owner(&mut state, projection);
+                    let current = track_c1c_run_current_owner(&mut state);
+                    (current, projected)
+                };
+                assert_eq!(
+                    current_first.complete_output_id, projection_first.complete_output_id,
+                    "fused and prepared owners produce the same complete output state"
+                );
+                assert_eq!(
+                    current_first.structural_output_id,
+                    projection_first.structural_output_id
+                );
+
+                let mut current_repeat5_ns = 0_u64;
+                let mut projection_repeat5_ns = 0_u64;
+                let mut replay_work = projection_first.work;
+                for repeat in 0..5 {
+                    let (current, projected) = if (repeat + iteration) % 2 == 0 {
+                        (
+                            track_c1c_run_current_owner(&mut state),
+                            track_c1c_run_projection_owner(&mut state, projection),
+                        )
+                    } else {
+                        let projected = track_c1c_run_projection_owner(&mut state, projection);
+                        let current = track_c1c_run_current_owner(&mut state);
+                        (current, projected)
+                    };
+                    assert_eq!(current.complete_output_id, current_first.complete_output_id);
+                    assert_eq!(
+                        projected.complete_output_id,
+                        current_first.complete_output_id
+                    );
+                    current_repeat5_ns = current_repeat5_ns.saturating_add(current.elapsed_ns);
+                    projection_repeat5_ns =
+                        projection_repeat5_ns.saturating_add(projected.elapsed_ns);
+                    replay_work = projected.work;
+                }
+                assert_eq!(replay_work.note_visits, canonical_notes.len());
+                assert_eq!(replay_work.todo_visits, state.expected_todos.len());
+                assert_eq!(replay_work.linked_todo_rows, state.expected_rows[0].len());
+                assert_eq!(replay_work.related_note_rows, state.expected_rows[1].len());
+                assert_eq!(replay_work.mention_rows, state.expected_rows[2].len());
+                assert_eq!(
+                    replay_work.snippet_calls,
+                    replay_work
+                        .related_note_rows
+                        .saturating_add(replay_work.mention_rows),
+                    "TODO rows are cloned into Mentions, but each snippet is constructed once"
+                );
+
+                // Measure the existing cheap unchanged panel gate separately;
+                // it takes no canonical snapshot or relationship traversal.
+                track_c::reset();
+                crate::performance::reset_metrics();
+                let unchanged_started = Instant::now();
+                state
+                    .panel
+                    .maybe_refresh_heavy_derived(&state.context, true);
+                let unchanged_gate_ns =
+                    unchanged_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                let unchanged_receipt = track_c1c_validate_panel(&state);
+                assert_eq!(
+                    unchanged_receipt.complete_output_id,
+                    current_first.complete_output_id
+                );
+                track_c1c_assert_unchanged_gate_has_no_heavy_work();
+
+                // Equal/changed canonical transaction measurements are a
+                // standalone local publication model, not costs charged to
+                // this draft/TODO transition's refresh latency.
+                let publication = track_c1c_measure_local_publication(
+                    &canonical_notes,
+                    &state.panel.note,
+                    &state.expected_todos,
+                );
+                let current_id = current_first.complete_output_id;
+                let memory_now = (
+                    footprint,
+                    publication.equal_retained_logical_bytes,
+                    publication.equal_retained_capacity_bytes,
+                    publication.changed_old_logical_bytes,
+                    publication.changed_old_capacity_bytes,
+                    publication.changed_peak_logical_bytes,
+                    publication.changed_peak_capacity_bytes,
+                );
+                if let Some(previous) = memory_summary {
+                    assert_eq!(
+                        previous, memory_now,
+                        "the same synthetic fixture has stable logical/capacity receipts"
+                    );
+                } else {
+                    memory_summary = Some(memory_now);
+                }
+
+                if iteration >= WARMUPS {
+                    let equal_break_even_k = track_c1c_break_even_k(
+                        publication.equal_current_ns,
+                        publication.equal_projection_ns,
+                        current_first.elapsed_ns,
+                        projection_first.elapsed_ns,
+                    );
+                    let changed_break_even_k = track_c1c_break_even_k(
+                        publication.changed_current_ns,
+                        publication.changed_projection_ns,
+                        current_first.elapsed_ns,
+                        projection_first.elapsed_ns,
+                    );
+                    samples.push(TrackC1CSample {
+                        current_owner_ns: current_first.elapsed_ns,
+                        projection_owner_ns: projection_first.elapsed_ns,
+                        projection_prepare_ns,
+                        current_repeat5_ns,
+                        projection_repeat5_ns,
+                        equal_current_publish_ns: publication.equal_current_ns,
+                        equal_projection_publish_ns: publication.equal_projection_ns,
+                        changed_current_publish_ns: publication.changed_current_ns,
+                        changed_projection_publish_ns: publication.changed_projection_ns,
+                        unchanged_gate_ns,
+                        canonical_posting_entries: replay_work
+                            .canonical_posting_entries
+                            .min(u64::MAX as usize)
+                            as u64,
+                        typed_posting_entries: replay_work
+                            .typed_posting_entries
+                            .min(u64::MAX as usize)
+                            as u64,
+                        fallback_visits: replay_work.fallback_visits.min(u64::MAX as usize) as u64,
+                        fallback_input_bytes: replay_work
+                            .fallback_input_bytes
+                            .min(u64::MAX as usize)
+                            as u64,
+                        linked_todo_rows: replay_work.linked_todo_rows.min(u64::MAX as usize)
+                            as u64,
+                        related_note_rows: replay_work.related_note_rows.min(u64::MAX as usize)
+                            as u64,
+                        mention_rows: replay_work.mention_rows.min(u64::MAX as usize) as u64,
+                        snippet_calls: replay_work.snippet_calls.min(u64::MAX as usize) as u64,
+                        metadata_reads: replay_work.metadata_reads.min(u64::MAX as usize) as u64,
+                        complete_output_id: current_id,
+                        structural_output_id: current_first.structural_output_id,
+                        note_revision: current_first.note_revision,
+                        todo_revision: current_first.todo_revision,
+                        equal_break_even_k,
+                        changed_break_even_k,
+                    });
+                }
+            }
+
+            let (
+                footprint,
+                equal_retained_logical_bytes,
+                equal_retained_capacity_bytes,
+                changed_old_logical_bytes,
+                changed_old_capacity_bytes,
+                changed_peak_logical_bytes,
+                changed_peak_capacity_bytes,
+            ) = memory_summary.expect("warmups and samples produced a memory receipt");
+            track_c1c_emit_samples(
+                mode,
+                item_count,
+                transition,
+                fixture_signature,
+                &samples,
+                footprint,
+                equal_retained_logical_bytes,
+                equal_retained_capacity_bytes,
+                changed_old_logical_bytes,
+                changed_old_capacity_bytes,
+                changed_peak_logical_bytes,
+                changed_peak_capacity_bytes,
+            );
+        }
     }
 
     #[test]

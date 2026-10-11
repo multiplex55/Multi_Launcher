@@ -2,15 +2,15 @@
 
 ## Current execution pointer (authoritative; history below)
 
-- Branch `runtime-foundations`; accepted C1-B source/current source HEAD `b6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1`. Original branch `Runtime-Responsiveness`, base `bcfd24d226ffb46c85f9f7ce7bdd919466191070`. C1-B evidence closure commit follows this pointer.
-- Closed **6 of 29**: C0-A/B/C/D and C1-A/B. All Cargo terminal; all source writers paused. Parent owns docs, measurement, ledger and local Git.
+- Branch `runtime-foundations`; accepted C1-B source `b6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1`. Original branch `Runtime-Responsiveness`, base `bcfd24d226ffb46c85f9f7ce7bdd919466191070`. C1-B evidence closure HEAD `4af431f42ebcb446aa11df2c9455764c0cb5e657`.
+- Closed **6 of 29**: C0-A/B/C/D and C1-A/B. All Cargo terminal; source writers paused. C1-C ordinary3/3 and Small1/1 PASS; actual Small collected, independent numeric/privacy review CLEAR. Parent owns docs, measurement, ledger and local Git.
 - C1-B units 15/15, owned notes integration 4/4, Small 60 samples, Full supplemental 100 samples and original-owner 60 samples PASS. Independent source, complete ordered eager parity, numerical/privacy and acceptance reviews CLEAR. Actual traversal work 3*(N+12) to N+12; fenced projections 3*N to N. Full evidence `track_c_c1b_evidence.json`, report `track_c_notes_fusion.md`.
 - Matched actual-UI 5000-note p50/p95 1148.3915/1215.0013ms to 415.1562/467.6786ms. Original-owner 5000-note p50/p95/max 414.4422/431.9527/510.6336ms. Keep these separate headless fast-dev distributions and all maxima. External updated-text variation is qualified per sample. No native/release/application-wide claim.
 - C1-B `note.mentions_scan` now measures shared fused classification, not the old isolated mentions pass; both relationship phases count N+T. Track A/snapshot meanings unchanged. Selected String construction receipts are not allocator or RAM measurements.
 - Frozen G0 source `071243db068835617a054a74fb5734a6dd9f128d`, baseline JSON SHA256 `EE6C71106D08D46FCFAE06C1F7ACEEBD9E6131C4F27E54DF7AAC3106C5825599`; C1-A evidence SHA256 `5EAB61B883362DBEE001C20A712F8B865030795B9DC648118687608C9B43B660`, immutable. Profiles, dependencies and Track A/B reports unchanged.
 - C1-A test setup correction remains disclosed: cfg(test) explicit inert manager bypasses default plugin-editor discovery; earlier no-default-plugin-startup claims were insufficient. C1-B native/default-plugin auto-save integration NOT RUN; new owned inert close/save unit PASS.
 - C0-B Recycle Bin incident: actual deletion outcome UNKNOWN. Never run cleanup tests/native data actions. Native recipe NOT RUN; display/allocator traffic NOT MEASURED.
-- Next: bounded read-only C1-C planner gate. Residual scan latency alone does not authorize indexing; assess exact prose/wiki/entity/alias/draft semantics, coherent publication, invalidation and memory costs. Conditional measured skip requires independent approval. Source writes remain sequential. LOCAL ONLY.
+- Active C1-C test-only experiment: final source/protocol/collector review CLEAR; ordinary PASS3/3 and Small PASS1/1 (60 samples, run ae5cee89-8866-4910-9927-1ff370db4038). Actual Small reviewed and published as honest UNCOMMITTED_SOURCE smoke; reproducible collector published. Production unchanged; matched local canonical publication model excludes global locks/revision and is not transition latency. Small changed publication plus1 slightly regresses, plus5 improves. Next reviewed smoke/collector/source commit, then exact-source Full five scenarios. See track_c_notes_projection_gate.md. C1-C remains IN_PROGRESS,6/29 closed; LOCAL ONLY.
 
 ## Historical C1-A execution notes (superseded by current pointer)
 ## Active C1-A bounded milestone

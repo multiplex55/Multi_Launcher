@@ -1107,6 +1107,16 @@ pub(crate) fn publish_note_cache_for_test(notes: Vec<Note>) -> NoteCachePublicat
     NoteCachePublicationGuard(Some(original))
 }
 
+/// Build the canonical cache candidate without publishing it globally.
+///
+/// Track C's test-only projection gate uses this seam to compare equal and
+/// changed local candidate construction/replacement costs while keeping the
+/// process-wide cache and revision untouched.
+#[cfg(test)]
+pub(crate) fn build_note_cache_candidate_for_test(notes: Vec<Note>) -> NoteCache {
+    NoteCache::from_notes(notes)
+}
+
 #[cfg(test)]
 pub(crate) struct NoteCachePublicationGuard(Option<NoteCache>);
 
