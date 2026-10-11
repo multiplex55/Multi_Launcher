@@ -6,6 +6,199 @@ use crate::radial::acceptance_trace::{
 
 const ROOT_LIST_OVERSCAN_ROWS: usize = 2;
 
+#[cfg(test)]
+mod c2e_grid_cell_loop_observer {
+    use std::{cell::RefCell, time::Instant};
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct StorageGroups {
+        pub(super) cell_vectors: u64,
+        pub(super) column_vectors: u64,
+        pub(super) shared_row_vectors: u64,
+        pub(super) visual_bounds: u64,
+        pub(super) spill_tree: u64,
+    }
+
+    impl StorageGroups {
+        fn vector_bytes<T>(capacity: usize) -> u64 {
+            capacity
+                .saturating_mul(std::mem::size_of::<T>())
+                .try_into()
+                .unwrap_or(u64::MAX)
+        }
+
+        pub(super) fn from_cache(cache: &super::RootListGeometryCache) -> Self {
+            Self {
+                cell_vectors: Self::vector_bytes::<f32>(cache.grid_cell_widths.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(
+                        cache.grid_cell_heights.capacity(),
+                    )),
+                column_vectors: Self::vector_bytes::<f32>(cache.grid_column_x_offsets.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(
+                        cache.grid_column_widths.capacity(),
+                    )),
+                shared_row_vectors: Self::vector_bytes::<f32>(cache.row_tops.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(cache.row_heights.capacity())),
+                visual_bounds: Self::vector_bytes::<f32>(cache.grid_visual_row_tops.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(
+                        cache.grid_visual_row_bottoms.capacity(),
+                    )),
+                spill_tree: Self::vector_bytes::<f32>(cache.grid_visual_max_end_tree.capacity()),
+            }
+        }
+
+        pub(super) fn from_capacities(
+            cell_widths: usize,
+            cell_heights: usize,
+            column_offsets: usize,
+            column_widths: usize,
+            row_tops: usize,
+            row_heights: usize,
+            visual_tops: usize,
+            visual_bottoms: usize,
+            spill_tree: usize,
+        ) -> Self {
+            Self {
+                cell_vectors: Self::vector_bytes::<f32>(cell_widths)
+                    .saturating_add(Self::vector_bytes::<f32>(cell_heights)),
+                column_vectors: Self::vector_bytes::<f32>(column_offsets)
+                    .saturating_add(Self::vector_bytes::<f32>(column_widths)),
+                shared_row_vectors: Self::vector_bytes::<f32>(row_tops)
+                    .saturating_add(Self::vector_bytes::<f32>(row_heights)),
+                visual_bounds: Self::vector_bytes::<f32>(visual_tops)
+                    .saturating_add(Self::vector_bytes::<f32>(visual_bottoms)),
+                spill_tree: Self::vector_bytes::<f32>(spill_tree),
+            }
+        }
+
+        pub(super) fn total(self) -> u64 {
+            self.cell_vectors
+                .saturating_add(self.column_vectors)
+                .saturating_add(self.shared_row_vectors)
+                .saturating_add(self.visual_bounds)
+                .saturating_add(self.spill_tree)
+        }
+
+        pub(super) fn overlap(self, other: Self) -> Self {
+            Self {
+                cell_vectors: self.cell_vectors.saturating_add(other.cell_vectors),
+                column_vectors: self.column_vectors.saturating_add(other.column_vectors),
+                shared_row_vectors: self
+                    .shared_row_vectors
+                    .saturating_add(other.shared_row_vectors),
+                visual_bounds: self.visual_bounds.saturating_add(other.visual_bounds),
+                spill_tree: self.spill_tree.saturating_add(other.spill_tree),
+            }
+        }
+
+        pub(super) fn receipt(self, after: Self, peak: Self) -> [u64; 18] {
+            let before_total = self.total();
+            let after_total = after.total();
+            let peak_total = peak.total();
+            [
+                self.cell_vectors,
+                self.column_vectors,
+                self.shared_row_vectors,
+                self.visual_bounds,
+                self.spill_tree,
+                before_total,
+                after.cell_vectors,
+                after.column_vectors,
+                after.shared_row_vectors,
+                after.visual_bounds,
+                after.spill_tree,
+                after_total,
+                peak.cell_vectors,
+                peak.column_vectors,
+                peak.shared_row_vectors,
+                peak.visual_bounds,
+                peak.spill_tree,
+                peak_total,
+            ]
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct Receipt {
+        pub(super) calls: u64,
+        pub(super) cells: u64,
+        pub(super) elapsed_nanos: u64,
+        pub(super) replacement_peak: Option<StorageGroups>,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Receipt>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Scope {
+        active: bool,
+    }
+
+    impl Scope {
+        pub(super) fn start() -> Self {
+            ACTIVE.with(|active| {
+                assert!(
+                    active.borrow_mut().replace(Receipt::default()).is_none(),
+                    "C2-E grid cell-loop observations cannot be nested"
+                );
+            });
+            Self { active: true }
+        }
+
+        pub(super) fn finish(mut self) -> Receipt {
+            self.active = false;
+            ACTIVE.with(|active| {
+                active
+                    .borrow_mut()
+                    .take()
+                    .expect("C2-E grid cell-loop scope remains installed")
+            })
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            if self.active {
+                ACTIVE.with(|active| {
+                    active.borrow_mut().take();
+                });
+            }
+        }
+    }
+
+    pub(super) fn loop_started() -> Option<Instant> {
+        ACTIVE.with(|active| active.borrow().is_some().then(Instant::now))
+    }
+
+    pub(super) fn record_loop(started: Option<Instant>, cells: usize) {
+        let Some(started) = started else {
+            return;
+        };
+        let elapsed_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            let receipt = active
+                .as_mut()
+                .expect("a timed C2-E cell loop has an active observation scope");
+            receipt.calls = receipt.calls.saturating_add(1);
+            receipt.cells = receipt
+                .cells
+                .saturating_add(cells.try_into().unwrap_or(u64::MAX));
+            receipt.elapsed_nanos = receipt.elapsed_nanos.saturating_add(elapsed_nanos);
+        });
+    }
+
+    pub(super) fn record_replacement(old_cache: &super::RootListGeometryCache, new: StorageGroups) {
+        ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            let Some(receipt) = active.as_mut() else {
+                return;
+            };
+            receipt.replacement_peak = Some(StorageGroups::from_cache(old_cache).overlap(new));
+        });
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct RootListGeometryKey {
     result_generation: u64,
@@ -385,6 +578,10 @@ impl RootListGeometryCache {
         let mut cell_heights = Vec::with_capacity(results.len());
         let mut row_heights = vec![interaction_height.max(44.0); results.len().div_ceil(columns)];
 
+        #[cfg(test)]
+        let cell_loop_started = c2e_grid_cell_loop_observer::loop_started();
+        #[cfg(test)]
+        let observe_cell_loop = cell_loop_started.is_some();
         for (index, action) in results.iter().enumerate() {
             let text = format!("{}\n{}", action.label, action.desc);
             let galley = egui::WidgetText::from(text).into_galley_impl(
@@ -406,6 +603,8 @@ impl RootListGeometryCache {
             cell_widths.push(cell_width);
             cell_heights.push(cell_height);
         }
+        #[cfg(test)]
+        c2e_grid_cell_loop_observer::record_loop(cell_loop_started, results.len());
 
         let mut column_x_offsets = Vec::with_capacity(actual_columns);
         let mut grid_full_width = 0.0_f32;
@@ -459,6 +658,24 @@ impl RootListGeometryCache {
             .copied()
             .fold(cursor_y, f32::max);
         let empty_grid = row_heights.is_empty();
+
+        #[cfg(test)]
+        if observe_cell_loop {
+            c2e_grid_cell_loop_observer::record_replacement(
+                self,
+                c2e_grid_cell_loop_observer::StorageGroups::from_capacities(
+                    cell_widths.capacity(),
+                    cell_heights.capacity(),
+                    column_x_offsets.capacity(),
+                    column_widths.capacity(),
+                    row_tops.capacity(),
+                    row_heights.capacity(),
+                    grid_visual_row_tops.capacity(),
+                    grid_visual_row_bottoms.capacity(),
+                    grid_visual_max_end_tree.capacity(),
+                ),
+            );
+        }
 
         self.row_tops = row_tops;
         self.row_heights = row_heights;
@@ -7222,6 +7439,1549 @@ mod tests {
                     );
                 }
             }
+        }
+        drop(workspace);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2EGridRecipe {
+        FullGeometryCold,
+        SharedPrefixGrowth,
+        SharedPrefixShrink,
+        WarmRepeat,
+        TallCellSpillCold,
+    }
+
+    impl TrackC2EGridRecipe {
+        const PRIMARY: [Self; 5] = [
+            Self::FullGeometryCold,
+            Self::SharedPrefixGrowth,
+            Self::SharedPrefixShrink,
+            Self::WarmRepeat,
+            Self::TallCellSpillCold,
+        ];
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::FullGeometryCold => "full_geometry_cold",
+                Self::SharedPrefixGrowth => "shared_prefix_5_percent_growth",
+                Self::SharedPrefixShrink => "shared_prefix_20_percent_shrink",
+                Self::WarmRepeat => "warm_repeat",
+                Self::TallCellSpillCold => "tall_cell_spill_cold",
+            }
+        }
+
+        fn is_warm(self) -> bool {
+            self == Self::WarmRepeat
+        }
+
+        fn prefix_percent(self) -> Option<usize> {
+            match self {
+                Self::SharedPrefixGrowth => Some(5),
+                Self::SharedPrefixShrink => Some(20),
+                _ => None,
+            }
+        }
+    }
+
+    struct TrackC2EGridFixture {
+        recipe: TrackC2EGridRecipe,
+        count: usize,
+        columns: usize,
+        base_actions: Vec<Action>,
+        old_actions: Vec<Action>,
+        new_actions: Vec<Action>,
+        prefix_len: usize,
+        fixture_signature: u64,
+        base_action_id: u64,
+        old_action_id: u64,
+        new_action_id: u64,
+        old_presentation_id: u64,
+        presentation_id: u64,
+        old_presentation_utf8_bytes: u64,
+        presentation_utf8_bytes: u64,
+    }
+
+    fn track_c2e_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        text: &str,
+    ) {
+        signature.number(text.len() as u64);
+        signature.bytes(text.as_bytes());
+    }
+
+    fn track_c2e_presentation_texts(actions: &[Action]) -> Vec<String> {
+        actions
+            .iter()
+            .map(|action| format!("{}\n{}", action.label, action.desc))
+            .collect()
+    }
+
+    fn track_c2e_presentation_signature(texts: &[String]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-grid-presentation",
+            texts.len(),
+        );
+        for text in texts {
+            track_c2e_signature_string(&mut signature, text);
+        }
+        signature.finish()
+    }
+
+    fn track_c2e_grid_fixture(
+        count: usize,
+        columns: usize,
+        recipe: TrackC2EGridRecipe,
+    ) -> TrackC2EGridFixture {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture};
+
+        assert!(count >= 100);
+        let base_actions = action_fixture(count).values;
+        let mut old_actions = base_actions.clone();
+        let mut new_actions = base_actions.clone();
+        let prefix_len = match recipe.prefix_percent() {
+            Some(percent) => count.saturating_mul(percent) / 100,
+            None => count,
+        };
+        match recipe {
+            TrackC2EGridRecipe::FullGeometryCold | TrackC2EGridRecipe::WarmRepeat => {}
+            TrackC2EGridRecipe::SharedPrefixGrowth => {
+                assert_eq!(
+                    columns, 3,
+                    "prefix recipes are characterized at three columns"
+                );
+                let late_column_zero = (count - 1) / columns * columns;
+                assert!(late_column_zero >= prefix_len);
+                for (index, action) in new_actions.iter_mut().enumerate().skip(prefix_len) {
+                    action.label = format!("C2E suffix growth {index:05}");
+                }
+                new_actions[late_column_zero].label = format!(
+                    "C2E global growth {late_column_zero:05} {}",
+                    "W".repeat(2048)
+                );
+            }
+            TrackC2EGridRecipe::SharedPrefixShrink => {
+                assert_eq!(
+                    columns, 3,
+                    "prefix recipes are characterized at three columns"
+                );
+                let late_column_zero = (count - 1) / columns * columns;
+                assert!(late_column_zero >= prefix_len);
+                old_actions[late_column_zero].label = format!(
+                    "C2E old unique width {late_column_zero:05} {}",
+                    "W".repeat(2048)
+                );
+                for (index, action) in new_actions.iter_mut().enumerate().skip(prefix_len) {
+                    action.label = format!("C2E suffix shrink {index:05}");
+                }
+            }
+            TrackC2EGridRecipe::TallCellSpillCold => {
+                assert_eq!(columns, 3, "tall spill is characterized at three columns");
+                old_actions[0].label = "Tall cell spill line\n".repeat(150);
+                new_actions.clone_from(&old_actions);
+            }
+        }
+        let old_texts = track_c2e_presentation_texts(&old_actions);
+        let new_texts = track_c2e_presentation_texts(&new_actions);
+        let actual_prefix = old_texts
+            .iter()
+            .zip(&new_texts)
+            .take_while(|(old, new)| old == new)
+            .count();
+        assert_eq!(
+            actual_prefix, prefix_len,
+            "the recipe's exact full-cell prefix"
+        );
+
+        let base_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&base_actions);
+        let old_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&old_actions);
+        let new_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&new_actions);
+        let old_presentation_id = track_c2e_presentation_signature(&old_texts);
+        let presentation_id = track_c2e_presentation_signature(&new_texts);
+        let mut fixture =
+            StableSignature::new(0x435F_524F_4F54_4752, "track-c2e-grid-fixture", count);
+        track_c2e_signature_string(&mut fixture, recipe.name());
+        for value in [
+            count as u64,
+            columns as u64,
+            u64::from(960.0_f32.to_bits()),
+            u64::from(640.0_f32.to_bits()),
+            u64::from(1.0_f32.to_bits()),
+            0,
+            prefix_len as u64,
+            base_action_id,
+            old_action_id,
+            new_action_id,
+        ] {
+            fixture.number(value);
+        }
+        TrackC2EGridFixture {
+            recipe,
+            count,
+            columns,
+            base_actions,
+            old_actions,
+            new_actions,
+            prefix_len,
+            fixture_signature: fixture.finish(),
+            base_action_id,
+            old_action_id,
+            new_action_id,
+            old_presentation_id,
+            presentation_id,
+            old_presentation_utf8_bytes: old_texts.iter().map(|text| text.len() as u64).sum(),
+            presentation_utf8_bytes: new_texts.iter().map(|text| text.len() as u64).sum(),
+        }
+    }
+
+    fn track_c2e_recipe_specs(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+    ) -> Vec<(usize, usize, TrackC2EGridRecipe)> {
+        let mut specs = Vec::new();
+        for count in mode.action_sizes() {
+            for recipe in TrackC2EGridRecipe::PRIMARY {
+                specs.push((*count, 3, recipe));
+            }
+            for columns in [1, 2, 5, 6] {
+                specs.push((*count, columns, TrackC2EGridRecipe::FullGeometryCold));
+            }
+        }
+        specs
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct TrackC2EGridSearchState {
+        last_results_valid: bool,
+        last_search_pending: bool,
+        provider_revision: u64,
+        last_provider_revision: u64,
+        catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+        catalog_versions_stable: bool,
+        provider_deferral: u64,
+        pending_query_id: u64,
+        background_refresh_pending: bool,
+        selected: u64,
+    }
+
+    fn track_c2e_search_state(app: &LauncherApp) -> TrackC2EGridSearchState {
+        let mut pending_query = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-pending-query",
+            usize::from(app.pending_query.is_some()),
+        );
+        if let Some(query) = app.pending_query.as_deref() {
+            track_c2e_signature_string(&mut pending_query, query);
+        }
+        TrackC2EGridSearchState {
+            last_results_valid: app.last_results_valid,
+            last_search_pending: app.last_search_pending,
+            provider_revision: app.plugins.search_generation(),
+            last_provider_revision: app.last_search_provider_revision,
+            catalog_versions: app.last_search_result_catalog_versions,
+            catalog_versions_stable: app.last_search_result_catalog_versions_stable,
+            provider_deferral: match app.last_search_provider_deferral {
+                search::ProviderSearchDeferral::None => 0,
+                search::ProviderSearchDeferral::Capacity => 1,
+            },
+            pending_query_id: pending_query.finish(),
+            background_refresh_pending: app.background_query_refresh_pending,
+            selected: app.selected.map_or(u64::MAX, |index| index as u64),
+        }
+    }
+
+    struct TrackC2EGridState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        recipe: TrackC2EGridRecipe,
+        count: usize,
+        columns: usize,
+        expected_result_action_id: u64,
+        expected_catalog_action_id: u64,
+        expected_actions: Vec<Action>,
+        incoming_actions: Option<Vec<Action>>,
+        incoming_catalog: Option<Arc<Vec<Action>>>,
+        prefix_len: usize,
+        fixture_signature: u64,
+        presentation_id: u64,
+        expected_visible_ids: Vec<(usize, egui::Id)>,
+        expected_search_state: TrackC2EGridSearchState,
+        generation_before: u64,
+        old_key: Option<RootListGeometryKey>,
+        old_atlas: Option<Arc<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
+        storage_before: c2e_grid_cell_loop_observer::StorageGroups,
+        old_grid_column_widths: Vec<f32>,
+        old_grid_column_x_offsets: Vec<f32>,
+        old_late_cell_width: Option<f32>,
+        late_column_zero: Option<usize>,
+        geometry_before: RootListGeometryObservation,
+        available_width: f32,
+        outer: egui::Rect,
+        eager: EagerRootGridLayout,
+        style: egui::Style,
+        frame_index: usize,
+        expected_presentation_bytes: u64,
+    }
+
+    struct TrackC2EGridFrame {
+        _output: egui::FullOutput,
+        observation: c2e_grid_cell_loop_observer::Receipt,
+    }
+
+    fn track_c2e_prepare_grid_state(
+        root: &std::path::Path,
+        fixture: TrackC2EGridFixture,
+    ) -> TrackC2EGridState {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let mut initial_style = ctx.style().as_ref().clone();
+        initial_style.wrap = Some(false);
+        ctx.set_style(initial_style);
+        let TrackC2EGridFixture {
+            recipe,
+            count,
+            columns,
+            base_actions,
+            old_actions,
+            new_actions,
+            prefix_len,
+            fixture_signature,
+            base_action_id,
+            old_action_id,
+            new_action_id,
+            old_presentation_id,
+            presentation_id,
+            old_presentation_utf8_bytes,
+            presentation_utf8_bytes,
+        } = fixture;
+
+        let old_texts = track_c2e_presentation_texts(&old_actions);
+        let new_texts = track_c2e_presentation_texts(&new_actions);
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&old_actions),
+            old_action_id
+        );
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&new_actions),
+            new_action_id
+        );
+        assert_eq!(
+            track_c2e_presentation_signature(&old_texts),
+            old_presentation_id
+        );
+        assert_eq!(
+            track_c2e_presentation_signature(&new_texts),
+            presentation_id
+        );
+        assert_eq!(
+            old_texts.iter().map(|text| text.len() as u64).sum::<u64>(),
+            old_presentation_utf8_bytes
+        );
+        assert_eq!(
+            new_texts.iter().map(|text| text.len() as u64).sum::<u64>(),
+            presentation_utf8_bytes
+        );
+
+        let mut app = root_list_app_at(&ctx, old_actions, root);
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = columns;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        assert_eq!(app.results.len(), count);
+        assert_eq!(app.actions.len(), count);
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results),
+            old_action_id
+        );
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&app.actions),
+            old_action_id
+        );
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&base_actions),
+            base_action_id
+        );
+
+        let mut frame_index = 0;
+        for _ in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new());
+            frame_index += 1;
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert_eq!(app.query, "root list fixture");
+        assert_eq!(app.last_search_query, "root list fixture");
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert_eq!(app.plugins.search_generation(), 0);
+        assert_eq!(app.last_search_provider_revision, 0);
+        assert_eq!(app.last_plugin_search_generation, 0);
+        let startup_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            startup_catalog_versions,
+            crate::radial::dynamic::MutableResultCatalogVersions::default(),
+            "the isolated fresh-process fixture has no mutable-catalog publications"
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(startup_catalog_versions),
+            "the constructor's initial empty-query result records its catalog snapshot"
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.selected, None);
+        let geometry_before = app.root_list_geometry.test_observation();
+        assert!(geometry_before.rebuild_count > 0);
+        assert_eq!(geometry_before.measured_cells, count as u64);
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real root UI records its available width");
+        assert_eq!(available_width.to_bits(), 944.0_f32.to_bits());
+
+        if recipe == TrackC2EGridRecipe::TallCellSpillCold {
+            let row_top = app.root_list_geometry.row_tops[0];
+            let row_height = app.root_list_geometry.row_heights[0];
+            let scroll_id = app
+                .test_root_scroll_area_id
+                .expect("grid ScrollArea exists");
+            let mut scroll = egui::scroll_area::State::load(&ctx, scroll_id)
+                .expect("settled grid has ScrollArea state");
+            scroll.offset.y = row_top + row_height + 8.0;
+            scroll.store(&ctx, scroll_id);
+            let _ = run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new());
+            frame_index += 1;
+            app.dashboard_data_cache.wait_for_refresh();
+        }
+
+        let expected_visible_ids = app.test_root_rendered_row_ids.clone();
+        let style = ctx.style().as_ref().clone();
+        assert_eq!(style.wrap, Some(false));
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_fonts(egui::FontDefinitions::default());
+        let (outer, eager) = track_c_eager_root_grid_layout(
+            &oracle_ctx,
+            &new_actions,
+            columns,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        let search_state = track_c2e_search_state(&app);
+        assert_eq!(app.folder_aliases.len(), 0);
+        assert_eq!(app.folder_aliases_lc.len(), 0);
+        assert_eq!(app.bookmark_aliases.len(), 0);
+        assert_eq!(app.bookmark_aliases_lc.len(), 0);
+        let generation_before = app.root_list_geometry.result_generation;
+        let old_key = app.root_list_geometry.key.clone();
+        let old_atlas = app.root_list_geometry.font_atlas.clone();
+        let old_grid_column_widths = app.root_list_geometry.grid_column_widths.clone();
+        let old_grid_column_x_offsets = app.root_list_geometry.grid_column_x_offsets.clone();
+        let late_column_zero = matches!(
+            recipe,
+            TrackC2EGridRecipe::SharedPrefixGrowth | TrackC2EGridRecipe::SharedPrefixShrink
+        )
+        .then_some((count - 1) / columns * columns);
+        let old_late_cell_width =
+            late_column_zero.map(|index| app.root_list_geometry.grid_cell_widths[index]);
+        let storage_before =
+            c2e_grid_cell_loop_observer::StorageGroups::from_cache(&app.root_list_geometry);
+        let mut incoming_actions = None;
+        let mut incoming_catalog = None;
+        if !recipe.is_warm() {
+            incoming_catalog = Some(Arc::new(new_actions.clone()));
+            incoming_actions = Some(new_actions.clone());
+        }
+        crate::performance::track_c::reset();
+        TrackC2EGridState {
+            app,
+            ctx,
+            recipe,
+            count,
+            columns,
+            expected_result_action_id: new_action_id,
+            expected_catalog_action_id: new_action_id,
+            expected_actions: new_actions,
+            incoming_actions,
+            incoming_catalog,
+            prefix_len,
+            fixture_signature,
+            presentation_id,
+            expected_visible_ids,
+            expected_search_state: search_state,
+            generation_before,
+            old_key,
+            old_atlas,
+            storage_before,
+            old_grid_column_widths,
+            old_grid_column_x_offsets,
+            old_late_cell_width,
+            late_column_zero,
+            geometry_before,
+            available_width,
+            outer,
+            eager,
+            style,
+            frame_index,
+            expected_presentation_bytes: presentation_utf8_bytes,
+        }
+    }
+
+    fn track_c2e_run_grid_owner(state: &mut TrackC2EGridState) -> TrackC2EGridFrame {
+        let scope = c2e_grid_cell_loop_observer::Scope::start();
+        if !state.recipe.is_warm() {
+            state.app.actions = state
+                .incoming_catalog
+                .take()
+                .expect("cold recipe has an owned incoming catalog");
+            state.app.results = state
+                .incoming_actions
+                .take()
+                .expect("cold recipe has owned incoming results");
+            state.app.invalidate_root_list_results();
+        }
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        let output =
+            run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new());
+        TrackC2EGridFrame {
+            _output: output,
+            observation: scope.finish(),
+        }
+    }
+
+    fn track_c2e_geometry_signature(cache: &RootListGeometryCache) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-grid-geometry",
+            cache.grid_cell_widths.len(),
+        );
+        signature.number(cache.grid_columns as u64);
+        for values in [
+            &cache.grid_cell_widths,
+            &cache.grid_cell_heights,
+            &cache.grid_column_x_offsets,
+            &cache.grid_column_widths,
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.grid_visual_row_tops,
+            &cache.grid_visual_row_bottoms,
+            &cache.grid_visual_max_end_tree,
+        ] {
+            signature.number(values.len() as u64);
+            for value in values {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.grid_nominal_width,
+            cache.grid_full_width,
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        signature.finish()
+    }
+
+    fn track_c2e_full_state_signature(
+        state: &TrackC2EGridState,
+        result_action_id: u64,
+        catalog_action_id: u64,
+        presentation_id: u64,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let app = &state.app;
+        let mut signature = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-grid-full-state",
+            app.results.len(),
+        );
+        signature.number(result_action_id);
+        signature.number(catalog_action_id);
+        signature.number(presentation_id);
+        for text in [&app.query, &app.last_search_query] {
+            track_c2e_signature_string(&mut signature, text);
+        }
+        signature.number(app.last_results_valid as u64);
+        signature.number(app.last_search_pending as u64);
+        signature.number(app.plugins.search_generation());
+        signature.number(app.last_search_provider_revision);
+        signature.number(app.last_plugin_search_generation);
+        signature.number(app.last_search_result_catalog_versions_stable as u64);
+        if let Some(versions) = app.last_search_result_catalog_versions {
+            signature.number(1);
+            signature.number(versions.clipboard);
+            signature.number(versions.todo);
+            signature.number(versions.notes);
+        } else {
+            signature.number(0);
+        }
+        signature.number(match app.last_search_provider_deferral {
+            search::ProviderSearchDeferral::None => 0,
+            search::ProviderSearchDeferral::Capacity => 1,
+        });
+        signature.number(track_c2e_search_state(app).pending_query_id);
+        signature.number(app.background_query_refresh_pending as u64);
+        signature.number(app.selected.map_or(u64::MAX, |index| index as u64));
+        signature.number(app.pending_query.is_some() as u64);
+        signature.number(app.query_results_layout.enabled as u64);
+        signature.number(app.query_results_layout.respect_plugin_capability as u64);
+        signature.number(app.query_results_layout.cols as u64);
+        signature.number(app.resolved_grid_layout as u64);
+        signature.number(app.root_list_geometry.result_generation);
+        signature.finish()
+    }
+
+    fn track_c2e_viewport_signature(state: &TrackC2EGridState) -> (u64, Vec<usize>) {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("the rendered grid records its ScrollArea extent");
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("the rendered grid records its actual viewport");
+        let mut signature =
+            StableSignature::new(0x435F_524F_4F54_4752, "track-c2e-grid-viewport", rows.len());
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            signature.number(*index as u64);
+            track_c2e_signature_string(&mut signature, action_id);
+            track_c2e_signature_string(&mut signature, &format!("{id:?}"));
+        }
+        for (index, rect) in rects {
+            signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        (
+            signature.finish(),
+            rows.iter().map(|(index, _)| *index).collect(),
+        )
+    }
+
+    fn track_c2e_transition_receipts(
+        state: &TrackC2EGridState,
+        generation_after: u64,
+        atlas_same: bool,
+    ) -> Vec<u64> {
+        let key = state
+            .app
+            .root_list_geometry
+            .key
+            .as_ref()
+            .expect("real grid frame installs an exact geometry key");
+        let old = state.old_key.as_ref();
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("actual root grid viewport is captured");
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("actual root grid content extent is captured");
+        let font_id_signature = |key: &RootListGeometryKey| {
+            let mut signature = crate::performance::track_c_workloads::StableSignature::new(
+                0x435F_524F_4F54_4752,
+                "track-c2e-font-id",
+                1,
+            );
+            track_c2e_signature_string(&mut signature, &format!("{:?}", key.button_font));
+            signature.finish()
+        };
+        let new_spacing = state.ctx.style();
+        let spacing = &new_spacing.spacing;
+        vec![
+            state.generation_before,
+            generation_after,
+            generation_after.wrapping_sub(state.generation_before),
+            state.count as u64,
+            state.columns as u64,
+            old.is_some() as u64,
+            state.app.root_list_geometry.key.is_some() as u64,
+            old.map_or(0, |key| u64::from(key.width_bits)),
+            u64::from(key.width_bits),
+            old.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
+            u64::from(key.pixels_per_point_bits),
+            old.is_some_and(|key| key.wrap) as u64,
+            key.wrap as u64,
+            old.is_some_and(|key| key.show_full_paths) as u64,
+            key.show_full_paths as u64,
+            old.is_some_and(|key| key.is_grid) as u64,
+            key.is_grid as u64,
+            old.map_or(0, |key| key.grid_columns as u64),
+            key.grid_columns as u64,
+            old.map_or(0, |key| u64::from(key.grid_nominal_width_bits)),
+            u64::from(key.grid_nominal_width_bits),
+            old.map_or(0, font_id_signature),
+            font_id_signature(key),
+            u64::from(spacing.button_padding.x.to_bits()),
+            u64::from(spacing.button_padding.y.to_bits()),
+            u64::from(spacing.interact_size.y.to_bits()),
+            u64::from(spacing.interact_size.x.to_bits()),
+            u64::from(spacing.item_spacing.y.to_bits()),
+            u64::from(key.grid_spacing_x_bits),
+            u64::from(key.grid_spacing_y_bits),
+            atlas_same as u64,
+            u64::from(960.0_f32.to_bits()),
+            u64::from(640.0_f32.to_bits()),
+            u64::from(viewport.min.x.to_bits()),
+            u64::from(viewport.min.y.to_bits()),
+            u64::from(viewport.max.x.to_bits()),
+            u64::from(viewport.max.y.to_bits()),
+            u64::from(inner_rect.min.x.to_bits()),
+            u64::from(inner_rect.min.y.to_bits()),
+            u64::from(inner_rect.max.x.to_bits()),
+            u64::from(inner_rect.max.y.to_bits()),
+            u64::from(content_size.x.to_bits()),
+            u64::from(content_size.y.to_bits()),
+            u64::from(offset.x.to_bits()),
+            u64::from(offset.y.to_bits()),
+            u64::from(state.available_width.to_bits()),
+            u64::from(state.app.root_list_geometry.grid_full_width.to_bits()),
+            u64::from(state.app.root_list_geometry.content_width.to_bits()),
+            u64::from(state.app.root_list_geometry.total_height.to_bits()),
+            state.app.root_list_geometry.row_tops.len() as u64,
+            state.app.root_list_geometry.grid_visual_max_end_tree.len() as u64,
+            state.app.root_list_geometry.font_atlas.is_some() as u64,
+            state.app.test_root_rendered_row_ids.len() as u64,
+        ]
+    }
+
+    fn track_c2e_validate_grid_state(
+        state: &mut TrackC2EGridState,
+        frame: &TrackC2EGridFrame,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        let app = &state.app;
+        assert_eq!(
+            app.results, state.expected_actions,
+            "complete ordered grid results"
+        );
+        assert_eq!(
+            app.actions.as_ref(),
+            &state.expected_actions,
+            "complete shared action catalog matches measured results"
+        );
+        assert_eq!(app.query, "root list fixture");
+        assert_eq!(app.last_search_query, "root list fixture");
+        assert_eq!(app.selected, None);
+        assert_eq!(
+            track_c2e_search_state(app),
+            state.expected_search_state,
+            "search, provider, catalog, pending, and selection state are unchanged"
+        );
+        assert!(app.resolved_grid_layout);
+        assert!(app.query_results_layout.enabled);
+        assert_eq!(app.query_results_layout.cols, state.columns);
+        assert!(!app.query_results_layout.respect_plugin_capability);
+        assert!(app.folder_aliases.is_empty() && app.folder_aliases_lc.is_empty());
+        assert!(app.bookmark_aliases.is_empty() && app.bookmark_aliases_lc.is_empty());
+        let actual_available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("actual grid UI provides the measured width");
+        assert!((actual_available_width - state.available_width).abs() <= 0.01);
+        let cache = &app.root_list_geometry;
+        let key = cache.key.as_ref().expect("grid cache has current key");
+        let old_key = state
+            .old_key
+            .as_ref()
+            .expect("the prepared owner begins with settled grid geometry");
+        assert_eq!(key.width_bits, actual_available_width.to_bits());
+        assert_eq!(key.pixels_per_point_bits, 1.0_f32.to_bits());
+        assert!(!key.wrap && !key.show_full_paths && key.is_grid);
+        assert_eq!(key.grid_columns, state.columns);
+        assert_eq!(old_key.result_generation, state.generation_before);
+        assert_eq!(old_key.result_count, state.count);
+        assert_eq!(old_key.width_bits, key.width_bits);
+        assert_eq!(old_key.pixels_per_point_bits, key.pixels_per_point_bits);
+        assert_eq!(old_key.button_font, key.button_font);
+        assert_eq!(old_key.wrap, key.wrap);
+        assert_eq!(old_key.show_full_paths, key.show_full_paths);
+        assert_eq!(old_key.is_grid, key.is_grid);
+        assert_eq!(old_key.grid_columns, key.grid_columns);
+        assert_eq!(old_key.grid_nominal_width_bits, key.grid_nominal_width_bits);
+        assert_eq!(old_key.grid_spacing_x_bits, key.grid_spacing_x_bits);
+        assert_eq!(old_key.grid_spacing_y_bits, key.grid_spacing_y_bits);
+        let expected_nominal = ((actual_available_width
+            - (state.columns.saturating_sub(1) as f32 * 8.0))
+            / state.columns as f32)
+            .max(160.0);
+        assert_eq!(key.grid_nominal_width_bits, expected_nominal.to_bits());
+
+        let after = cache.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.geometry_before.rebuild_count);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.geometry_before.measured_cells);
+        if state.recipe.is_warm() {
+            assert_eq!(
+                rebuilds, 0,
+                "warm repeat preserves the exact geometry cache"
+            );
+            assert_eq!(measured_cells, 0);
+            assert_eq!(frame.observation.calls, 0);
+            assert_eq!(frame.observation.cells, 0);
+            assert_eq!(frame.observation.elapsed_nanos, 0);
+        } else {
+            assert_eq!(rebuilds, 1, "result-generation invalidation rebuilds once");
+            assert_eq!(measured_cells, state.count as u64);
+            assert_eq!(frame.observation.calls, 1);
+            assert_eq!(frame.observation.cells, state.count as u64);
+            assert!(frame.observation.elapsed_nanos > 0);
+        }
+        let geometry_ns = if rebuilds == 0 {
+            0
+        } else {
+            after.last_rebuild_nanos
+        };
+        let cell_loop_ns = frame.observation.elapsed_nanos;
+        assert!(cell_loop_ns <= geometry_ns);
+
+        assert_eq!(cache.grid_cell_widths.len(), state.expected_actions.len());
+        assert_eq!(cache.grid_cell_heights.len(), state.expected_actions.len());
+        let row_geometry = assert_track_c_root_grid_matches_eager(
+            cache,
+            &state.eager,
+            state.outer,
+            &state.expected_actions,
+            state.columns,
+            &state.style,
+            "C2-E complete cold grid owner",
+        );
+        let (viewport_id, actual_indices) = track_c2e_viewport_signature(state);
+        let (inner_rect, content_size, offset) = state.app.test_root_scroll_area_extent.unwrap();
+        assert!((content_size.x - cache.content_width).abs() <= 1.0);
+        assert!((content_size.y - cache.total_height).abs() <= 1.0);
+        let viewport = state.app.test_root_scroll_viewport_rect.unwrap();
+        let content_origin = inner_rect.min - offset;
+        let visible_start = row_geometry
+            .iter()
+            .position(|(top, height, _, _)| content_origin.y + *top + *height > viewport.min.y)
+            .unwrap_or(row_geometry.len());
+        let visible_end = row_geometry
+            .iter()
+            .take_while(|(top, _, _, _)| content_origin.y + *top < viewport.max.y)
+            .count();
+        let mut expected_visible_rows = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(row_geometry.len()))
+            .collect::<Vec<_>>();
+        expected_visible_rows.extend(row_geometry.iter().enumerate().filter_map(
+            |(row, (_, _, visual_top, visual_bottom))| {
+                (content_origin.y + *visual_top < viewport.max.y
+                    && content_origin.y + *visual_bottom > viewport.min.y)
+                    .then_some(row)
+            },
+        ));
+        expected_visible_rows.sort_unstable();
+        expected_visible_rows.dedup();
+        let expected_indices = expected_visible_rows
+            .into_iter()
+            .flat_map(|row| {
+                let start = row * state.columns;
+                start..(start + state.columns).min(state.count)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_indices, expected_indices);
+        assert!(
+            actual_indices.windows(2).all(|pair| pair[0] < pair[1]),
+            "painted cell indices are unique and retain absolute order"
+        );
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        assert_eq!(rows.len(), ids.len());
+        assert_eq!(rows.len(), rects.len());
+        for (((index, action_id), (id_index, _)), (rect_index, rect)) in
+            rows.iter().zip(ids).zip(rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager_cell = state.eager.cells[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_cell.min - state.outer.min),
+                eager_cell.size(),
+            );
+            assert!(rect.min.distance(expected_rect.min) <= 1.0);
+            assert!(rect.max.distance(expected_rect.max) <= 1.0);
+        }
+
+        let old_ids = state
+            .expected_visible_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut current_ids = std::collections::HashSet::with_capacity(ids.len());
+        for (index, id) in ids {
+            assert!(
+                current_ids.insert(*id),
+                "each painted absolute cell has a unique widget ID"
+            );
+            if let Some(old_id) = old_ids.get(index) {
+                if state.recipe.is_warm() {
+                    assert_eq!(id, old_id, "same generation preserves absolute widget IDs");
+                } else {
+                    assert_ne!(id, old_id, "a new results generation gets new widget IDs");
+                }
+            }
+        }
+
+        if state.recipe == TrackC2EGridRecipe::SharedPrefixGrowth {
+            let late = state
+                .late_column_zero
+                .expect("growth fixture identifies its late column-zero stress cell");
+            let old_cell_width = state
+                .old_late_cell_width
+                .expect("settled source layout includes the stress cell");
+            assert!(cache.grid_cell_widths[late] > old_cell_width);
+            assert!(cache.grid_column_widths[0] > state.old_grid_column_widths[0]);
+            assert!(cache.grid_column_x_offsets[1] > state.old_grid_column_x_offsets[1]);
+            assert!(cache.grid_column_x_offsets[2] > state.old_grid_column_x_offsets[2]);
+        }
+        if state.recipe == TrackC2EGridRecipe::SharedPrefixShrink {
+            let late = state
+                .late_column_zero
+                .expect("shrink fixture identifies its old late column-zero stress cell");
+            let old_cell_width = state
+                .old_late_cell_width
+                .expect("settled source layout includes the stress cell");
+            assert!(old_cell_width > cache.grid_cell_widths[late]);
+            assert!(state.old_grid_column_widths[0] > cache.grid_column_widths[0]);
+            assert!(cache.grid_column_x_offsets[1] < state.old_grid_column_x_offsets[1]);
+            assert!(cache.grid_column_x_offsets[2] < state.old_grid_column_x_offsets[2]);
+        }
+        if state.recipe == TrackC2EGridRecipe::TallCellSpillCold {
+            let (logical_top, logical_height, visual_top, visual_bottom) = row_geometry[0];
+            let logical_bottom = content_origin.y + logical_top + logical_height;
+            assert!(logical_bottom <= viewport.min.y);
+            assert!(
+                content_origin.y + visual_top < viewport.max.y
+                    && content_origin.y + visual_bottom > viewport.min.y
+            );
+            assert!(
+                rows.iter().any(|(index, _)| *index < state.columns),
+                "the offscreen logical row's visual spill remains painted"
+            );
+            let logical_row_zero_visible =
+                content_origin.y + logical_top < viewport.max.y && logical_bottom > viewport.min.y;
+            assert!(
+                !logical_row_zero_visible,
+                "row zero's logical interval is outside the viewport despite its tall visual spill"
+            );
+            assert!(
+                actual_indices
+                    .iter()
+                    .any(|index| *index / state.columns == 0),
+                "spill painting keeps row zero's absolute cell indices in the exact viewport set"
+            );
+        }
+
+        let storage_after = c2e_grid_cell_loop_observer::StorageGroups::from_cache(cache);
+        let storage_peak = frame.observation.replacement_peak.unwrap_or(storage_after);
+        if state.recipe.is_warm() {
+            assert_eq!(storage_after, state.storage_before);
+            assert_eq!(storage_peak, storage_after);
+        } else {
+            assert_eq!(
+                storage_peak,
+                state.storage_before.overlap(storage_after),
+                "the actual replacement site briefly owns cleared old cache plus all new vectors"
+            );
+        }
+        assert!(cache.row_x_offsets.capacity() == 0);
+        assert!(cache.row_response_x_offsets.capacity() == 0);
+        assert!(cache.row_widths.capacity() == 0);
+        assert!(cache.row_response_widths.capacity() == 0);
+
+        let atlas_same = matches!(
+            (state.old_atlas.as_ref(), cache.font_atlas.as_ref()),
+            (Some(old), Some(new)) if Arc::ptr_eq(old, new)
+        );
+        assert!(
+            atlas_same,
+            "all measured recipes retain the actual warm font atlas"
+        );
+        let action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&state.expected_actions);
+        let result_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results);
+        let catalog_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(app.actions.as_ref());
+        assert_eq!(result_action_id, action_id);
+        let presentation_texts = track_c2e_presentation_texts(&state.expected_actions);
+        let actual_presentation_bytes = presentation_texts
+            .iter()
+            .map(|text| text.len() as u64)
+            .sum::<u64>();
+        assert_eq!(actual_presentation_bytes, state.expected_presentation_bytes);
+        let presentation_id = track_c2e_presentation_signature(&presentation_texts);
+        assert_eq!(presentation_id, state.presentation_id);
+        assert_eq!(result_action_id, state.expected_result_action_id);
+        assert_eq!(catalog_action_id, state.expected_catalog_action_id);
+        let geometry_id = track_c2e_geometry_signature(cache);
+        let state_id = track_c2e_full_state_signature(
+            state,
+            result_action_id,
+            catalog_action_id,
+            presentation_id,
+        );
+        let generation_after = cache.result_generation;
+        assert_eq!(
+            generation_after,
+            if state.recipe.is_warm() {
+                state.generation_before
+            } else {
+                state.generation_before.wrapping_add(1)
+            }
+        );
+        let mut revisions = vec![presentation_id, geometry_id];
+        revisions.extend(track_c2e_transition_receipts(
+            state,
+            generation_after,
+            atlas_same,
+        ));
+        let painted_cells = rows.len() as u64;
+        let mut work_counters = vec![
+            geometry_ns,
+            cell_loop_ns,
+            rebuilds,
+            0,
+            measured_cells,
+            painted_cells,
+            state.prefix_len as u64,
+        ];
+        work_counters.extend(state.storage_before.receipt(storage_after, storage_peak));
+        OwnerObservation {
+            output_identity: state_id,
+            structural_signature: action_id,
+            revision_receipts: revisions,
+            viewport_receipt: Some(viewport_id),
+            work_units: measured_cells,
+            work_counters,
+        }
+    }
+
+    fn track_c2e_emit_samples(
+        fixture: &TrackC2EGridFixture,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(crate::performance::enabled());
+        assert_eq!(
+            crate::performance::track_c_workloads::BenchmarkMode::from_process_env()
+                .expect("valid Track C benchmark mode"),
+            mode
+        );
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        for (field, value) in [
+            ("source", source.as_str()),
+            ("profile", profile.as_str()),
+            ("case", fixture.recipe.name()),
+        ] {
+            assert!(
+                !value.bytes().any(|byte| byte.is_ascii_whitespace()),
+                "{field} token"
+            );
+        }
+        let arrays = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| {
+                    assert_eq!(sample.work_counters.len(), 25);
+                    sample.work_counters[index].to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ids = |f: fn(&crate::performance::track_c_workloads::SampleRecord) -> u64| {
+            samples
+                .iter()
+                .map(|sample| format!("{:016x}", f(sample)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let geometry_residual = samples
+            .iter()
+            .map(|sample| {
+                sample.work_counters[0]
+                    .saturating_sub(sample.work_counters[1])
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let owner_residual = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .elapsed_nanos
+                    .saturating_sub(sample.work_counters[0])
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let presentation_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.revision_receipts[0]))
+            .collect::<Vec<_>>()
+            .join(",");
+        let geometry_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.revision_receipts[1]))
+            .collect::<Vec<_>>()
+            .join(",");
+        let transition_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.revision_receipts[2..]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let storage_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.work_counters[7..]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        eprintln!(
+            "C2E_GRID_RESULT schema=1 stage=cold_grid_geometry_characterization installation=eager_grid_geometry fixture=synthetic_root_grid_geometry owner=RootListGeometryCache::ensure_grid measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 case={} count={} columns={} fixture_signature={:016x} elapsed_ns=[{}] geometry_ns=[{}] cell_loop_ns=[{}] geometry_residual_ns=[{}] owner_residual_ns=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] painted_cells=[{}] presentation_prefix_len=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{}] transition_receipts=[{}] storage_receipts=[{}]",
+            source,
+            profile,
+            mode,
+            WARMUPS,
+            samples.len(),
+            fixture.recipe.name(),
+            fixture.count,
+            fixture.columns,
+            fixture.fixture_signature,
+            elapsed,
+            arrays(0),
+            arrays(1),
+            geometry_residual,
+            owner_residual,
+            arrays(2),
+            arrays(3),
+            arrays(4),
+            arrays(5),
+            arrays(6),
+            ids(|sample| sample.output_identity),
+            ids(|sample| sample.structural_signature),
+            presentation_ids,
+            geometry_ids,
+            ids(|sample| sample.viewport_receipt.unwrap()),
+            transition_receipts,
+            storage_receipts,
+        );
+    }
+
+    fn track_c2e_n100_expected_binding(
+        fixture: &TrackC2EGridFixture,
+    ) -> Option<(u64, u64, u64, u64, u64, u64, usize)> {
+        if fixture.count != 100 {
+            return None;
+        }
+        match (fixture.recipe, fixture.columns) {
+            (TrackC2EGridRecipe::FullGeometryCold, 3) => Some((
+                0xda10_4120_fad8_3bc1,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::SharedPrefixGrowth, 3) => Some((
+                0x77e6_7587_e20c_1b48,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x5942_fd58_6669_6c37,
+                0x0d50_b2c9_c841_f532,
+                0xc357_8f26_4109_c20f,
+                5,
+            )),
+            (TrackC2EGridRecipe::SharedPrefixShrink, 3) => Some((
+                0x1244_8b89_406e_6296,
+                0xc374_5052_c657_97f2,
+                0x3138_4c47_c48b_cd73,
+                0xcbfd_79be_2552_7b18,
+                0x7f46_a882_d995_ac55,
+                0xfd2a_d140_815d_50b0,
+                20,
+            )),
+            (TrackC2EGridRecipe::WarmRepeat, 3) => Some((
+                0x7a52_b515_7331_c9e4,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::TallCellSpillCold, 3) => Some((
+                0x19cb_892b_bfdc_9a92,
+                0xc374_5052_c657_97f2,
+                0xbffd_2147_ce71_d20c,
+                0xbffd_2147_ce71_d20c,
+                0x01a3_80bc_17d6_755c,
+                0x01a3_80bc_17d6_755c,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 1) => Some((
+                0x4528_5c79_b9bf_706f,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 2) => Some((
+                0xd951_edf2_ef39_91fc,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 5) => Some((
+                0x128b_e8fb_7398_ff5b,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 6) => Some((
+                0x071b_a795_a9b3_3f08,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            _ => None,
+        }
+    }
+
+    fn track_c2e_rebase_grid_state(state: &mut TrackC2EGridState) {
+        let (
+            generation_before,
+            old_key,
+            old_atlas,
+            storage_before,
+            old_grid_column_widths,
+            old_grid_column_x_offsets,
+            geometry_before,
+            expected_visible_ids,
+            expected_search_state,
+        ) = {
+            let app = &state.app;
+            (
+                app.root_list_geometry.result_generation,
+                app.root_list_geometry.key.clone(),
+                app.root_list_geometry.font_atlas.clone(),
+                c2e_grid_cell_loop_observer::StorageGroups::from_cache(&app.root_list_geometry),
+                app.root_list_geometry.grid_column_widths.clone(),
+                app.root_list_geometry.grid_column_x_offsets.clone(),
+                app.root_list_geometry.test_observation(),
+                app.test_root_rendered_row_ids.clone(),
+                track_c2e_search_state(app),
+            )
+        };
+        state.generation_before = generation_before;
+        state.old_key = old_key;
+        state.old_atlas = old_atlas;
+        state.storage_before = storage_before;
+        state.old_grid_column_widths = old_grid_column_widths;
+        state.old_grid_column_x_offsets = old_grid_column_x_offsets;
+        state.geometry_before = geometry_before;
+        state.expected_visible_ids = expected_visible_ids;
+        state.expected_search_state = expected_search_state;
+        state.old_late_cell_width = None;
+        state.late_column_zero = None;
+    }
+
+    fn track_c2e_args_and_atlas_rejection_contract(root: &std::path::Path) {
+        let fixture = track_c2e_grid_fixture(100, 3, TrackC2EGridRecipe::FullGeometryCold);
+        let mut state = track_c2e_prepare_grid_state(root, fixture);
+        let initial_frame = track_c2e_run_grid_owner(&mut state);
+        track_c2e_validate_grid_state(&mut state, &initial_frame);
+
+        let old_action_id = state.expected_result_action_id;
+        let old_presentation_id = state.presentation_id;
+        let mut args_only_actions = state.expected_actions.clone();
+        let replacement_args = "track-c2e-args-only-contract".to_owned();
+        assert_ne!(
+            args_only_actions[0].args.as_deref(),
+            Some(replacement_args.as_str())
+        );
+        args_only_actions[0].args = Some(replacement_args);
+        let args_only_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&args_only_actions);
+        let args_only_presentation_id =
+            track_c2e_presentation_signature(&track_c2e_presentation_texts(&args_only_actions));
+        assert_ne!(args_only_action_id, old_action_id);
+        assert_eq!(args_only_presentation_id, old_presentation_id);
+
+        state.expected_actions = args_only_actions.clone();
+        state.expected_result_action_id = args_only_action_id;
+        state.expected_catalog_action_id = args_only_action_id;
+        state.prefix_len = state.count;
+        state.incoming_actions = Some(args_only_actions.clone());
+        state.incoming_catalog = Some(Arc::new(args_only_actions));
+        track_c2e_rebase_grid_state(&mut state);
+        let args_only_frame = track_c2e_run_grid_owner(&mut state);
+        let args_only_observation = track_c2e_validate_grid_state(&mut state, &args_only_frame);
+        assert_eq!(
+            args_only_observation.revision_receipts[0],
+            old_presentation_id
+        );
+        assert_eq!(
+            args_only_observation.structural_signature,
+            args_only_action_id
+        );
+
+        track_c2e_rebase_grid_state(&mut state);
+        let old_key = state
+            .old_key
+            .clone()
+            .expect("settled args-only grid has an exact key");
+        let old_generation = state.generation_before;
+        let old_atlas = state
+            .old_atlas
+            .as_ref()
+            .expect("settled grid retains its actual font atlas")
+            .clone();
+        let mut definitions = egui::FontDefinitions::default();
+        let duplicate = definitions
+            .font_data
+            .get("Ubuntu-Light")
+            .expect("egui default definitions include Ubuntu-Light")
+            .clone();
+        definitions
+            .font_data
+            .insert("TrackC2E-unused-atlas-rejection".into(), duplicate);
+        state.ctx.set_fonts(definitions.clone());
+
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_fonts(definitions);
+        oracle_ctx.set_style(state.style.clone());
+        let (outer, eager) = track_c_eager_root_grid_layout(
+            &oracle_ctx,
+            &state.expected_actions,
+            state.columns,
+            state.available_width,
+            &state.style,
+            state.app.list_scale,
+        );
+        state.outer = outer;
+        state.eager = eager;
+
+        let frame_index = state.frame_index;
+        state.frame_index += 1;
+        let scope = c2e_grid_cell_loop_observer::Scope::start();
+        let output = run_root_list_frame(
+            &state.ctx,
+            &mut state.app,
+            frame_index,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let atlas_frame = TrackC2EGridFrame {
+            _output: output,
+            observation: scope.finish(),
+        };
+        let app = &state.app;
+        let cache = &app.root_list_geometry;
+        let after = cache.test_observation();
+        assert_eq!(cache.key.as_ref(), Some(&old_key));
+        assert_eq!(cache.result_generation, old_generation);
+        assert_eq!(
+            after
+                .rebuild_count
+                .saturating_sub(state.geometry_before.rebuild_count),
+            1,
+            "an actual atlas change rejects the otherwise unchanged key"
+        );
+        assert_eq!(
+            after
+                .measured_cells
+                .saturating_sub(state.geometry_before.measured_cells),
+            state.count as u64
+        );
+        assert_eq!(atlas_frame.observation.calls, 1);
+        assert_eq!(atlas_frame.observation.cells, state.count as u64);
+        let current_atlas = cache
+            .font_atlas
+            .as_ref()
+            .expect("grid cache records the replacement font atlas");
+        assert!(!Arc::ptr_eq(&old_atlas, current_atlas));
+        assert_eq!(app.results, state.expected_actions);
+        assert_eq!(app.actions.as_ref(), &state.expected_actions);
+        assert_eq!(track_c2e_search_state(app), state.expected_search_state);
+        assert_eq!(app.query, "root list fixture");
+        assert_eq!(app.last_search_query, "root list fixture");
+        assert_eq!(app.selected, None);
+        let (_, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("atlas-replacement frame records its ScrollArea extent");
+        assert!((content_size.x - cache.content_width).abs() <= 1.0);
+        assert!((content_size.y - cache.total_height).abs() <= 1.0);
+        let _ = assert_track_c_root_grid_matches_eager(
+            cache,
+            &state.eager,
+            state.outer,
+            &state.expected_actions,
+            state.columns,
+            &state.style,
+            "C2-E same-key atlas rejection",
+        );
+        let _ = track_c2e_viewport_signature(&state);
+        assert_eq!(
+            state.app.test_root_rendered_row_ids, state.expected_visible_ids,
+            "same generation and presentation retain absolute widget IDs"
+        );
+    }
+
+    #[test]
+    fn track_c2e_oracle_cold_grid_recipe_contract() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        for (count, columns, recipe) in
+            track_c2e_recipe_specs(crate::performance::track_c_workloads::BenchmarkMode::Small)
+        {
+            let fixture = track_c2e_grid_fixture(count, columns, recipe);
+            if let Some((
+                expected_fixture,
+                base,
+                old,
+                new,
+                old_presentation,
+                presentation,
+                prefix,
+            )) = track_c2e_n100_expected_binding(&fixture)
+            {
+                assert_eq!(fixture.fixture_signature, expected_fixture);
+                assert_eq!(fixture.base_action_id, base);
+                assert_eq!(fixture.old_action_id, old);
+                assert_eq!(fixture.new_action_id, new);
+                assert_eq!(fixture.old_presentation_id, old_presentation);
+                assert_eq!(fixture.presentation_id, presentation);
+                assert_eq!(fixture.prefix_len, prefix);
+            }
+            let mut state = track_c2e_prepare_grid_state(workspace.root(), fixture);
+            let frame = track_c2e_run_grid_owner(&mut state);
+            let observation = track_c2e_validate_grid_state(&mut state, &frame);
+            assert_eq!(observation.revision_receipts[0], state.presentation_id);
+            assert_eq!(
+                observation.revision_receipts[1],
+                track_c2e_geometry_signature(&state.app.root_list_geometry)
+            );
+            drop(state);
+        }
+        track_c2e_args_and_atlas_rejection_contract(workspace.root());
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C C2-E owner characterization; isolated synthetic grid only"]
+    fn track_c2e_benchmark_cold_root_grid_geometry() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let workspace = TrackCWorkspace::new();
+        for (count, columns, recipe) in track_c2e_recipe_specs(mode) {
+            let fixture = track_c2e_grid_fixture(count, columns, recipe);
+            let samples = measure_owner(
+                || {
+                    track_c2e_prepare_grid_state(
+                        workspace.root(),
+                        track_c2e_grid_fixture(count, columns, recipe),
+                    )
+                },
+                track_c2e_run_grid_owner,
+                track_c2e_validate_grid_state,
+            );
+            track_c2e_emit_samples(&fixture, mode, &samples);
         }
         drop(workspace);
     }
