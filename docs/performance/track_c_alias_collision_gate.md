@@ -1,6 +1,6 @@
 # Track C C1-D alias-warning cost gate
 
-Status IN_PROGRESS;7/29 closed. Base8b6b8b9d487bae3154d5304f35bef099291f1019; LOCAL ONLY. Planner packet inspected; sole source writer c0_docs. Parent owns this report, ledger, collectors, execution and Git. Ordinary3/3 and Small1/1 PASS, independently reviewed. Source commit/exact-source Full pending.
+Status IN_PROGRESS;7/29 closed. Base8b6b8b9d487bae3154d5304f35bef099291f1019; LOCAL ONLY. Planner packet inspected; sole source writer c0_docs. Parent owns this report, ledger, collectors, execution and Git. Ordinary3/3, Small1/1 and exact-source Full1/1 PASS, independently reviewed. Baseline cost gate GO; narrow production query implementation pending.
 
 ## Objective and scope
 
@@ -59,3 +59,54 @@ Small terminal exit0; run0217ed5f-9dc6-4a2c-a2d8-fb37eda22726, build0.89s/test4.
 |ambiguous(two other slugs)|457000/588800/746800|212/306|29090|559160|209|
 
 These are controlled lookup/message owner timings, not Add/Rename save/toast/frame latency or an optimization. Full nine cases/180samples and conditional production-query decision remain pending. All Cargo terminal; writers paused;7/29 closed. Parent preparing test-only source commit.
+Test-only source/collector/reviewed smoke committed0a88c34dddf53f8609adf9dbab65b8a6ec158b1a; clean immediately after commit. Parent sole Cargo session85790 now runs exact-source Full ignored owner, run9771be86-3dc5-4f19-913e-607a1a999c04, build0.86s, raw c1-d/nextest-full.log. Nine cases/180 retained samples expected. All source writers paused; no production query authorized. Preserve session until terminal; collect with committed track_c_collect_alias_collision.ps1, ExpectedSource0a88c34dddf53f8609adf9dbab65b8a6ec158b1a/ExpectedModeFull/freshoutput, then independent numeric/privacy and cost gate. C1-D IN_PROGRESS;7/29closed.
+## Exact-source Full baseline (numeric/gate review pending)
+
+Session85790 terminal exit0; run9771be86-3dc5-4f19-913e-607a1a999c04, source0a88c34dddf53f8609adf9dbab65b8a6ec158b1a, fast-dev build0.86s/test118.799s/execution118.813s,1/1PASS,5172skipped. Committed collector accepted nine cases/180 retained samples/126arrays/36timing triplets into ignored full-candidate.json. No source changes during/after run. All Cargo terminal; writers paused. Actual numerical/privacy and conditional gate review pending.
+
+|Count/case|Owner p50/p95/max ms|Selected map bytes|Existing full snapshot estimated bytes|
+|---|---|---|---|
+|100 unique|0.0950/0.1641/0.2043|28740|0|
+|100 duplicate|0.5794/0.6691/0.7130|29002|559180|
+|100 ambiguous|0.4645/0.5968/0.6074|29090|559160|
+|1000 unique|0.8759/1.0737/1.2867|282990|0|
+|1000 duplicate|4.6168/5.2103/6.4112|283252|5707485|
+|1000 ambiguous|4.5559/5.6104/6.1441|283340|5707465|
+|5000 unique|6.2566/6.9821/7.3732|1412374|0|
+|5000 duplicate|26.4706/31.4618/31.8468|1412636|28593807|
+|5000 ambiguous|26.1068/26.7714/28.1801|1412724|28593787|
+
+5k conflict NoteSnapshot hold median13.54–13.56ms includes existing enabled O(N) estimate scan and cloning; format median5.99–6.13ms includes cloned-note filtering/materialization/disposal and final message. Do not sum independent quantiles to infer omitted phase cost. Unique still clones the entire map but takes no full-note snapshot. Invocation remains accepted Add/Rename only; no typing/frame/native/save latency claim. Selected logical estimates are not allocator traffic or process RAM.
+
+Parent sees a potentially justified narrow under-one-lock labels query: about30MB selected copying per conflict and26ms direct cost at5k, without any proposed retained index. Independent reviewer/planner assess gate and precise handoff before any production authorization. Full source output parity continues exact;7/29closed, C1-D IN_PROGRESS.
+## Reviewed baseline and production GO
+
+Independent exact-source Full numerical/privacy review CLEAR: every scalar, all126 arrays and36 nearest-rank timing triplets match raw output; controlled branch receipts, positive estimates, output bytes and per-sample timer containment are valid. Small/Full100 fixture/warning identities and controlled work match. Published track_c_c1d_baseline.json preserves source0a88c34dddf53f8609adf9dbab65b8a6ec158b1a and baseline-only attribution.
+
+Parent, planner and reviewer agree GO for one bounded production milestone: fallible conflict-label query in note.rs under one CACHE lock, canonical source order/duplicate entries/exact display preserved, captured revision receipt, no retained index or full-map/full-note copies. About26ms and30MB selected temporary copied payload at5k is material despite accepted-action-only frequency; this differs from the retained projection rejected in C1-C. No measured production gain yet.
+
+Sole writer c0_docs authorized for note.rs/note_panel.rs at exact0a88c34 HEAD. GUI diagnoses Err explicitly while accepted Add/Rename mutation/save remain advisory. Coherent-publication channels and scoped one-shot failure tests required; global cache poisoning forbidden. Frozen baseline oracle/protocol remain unchanged, optimized benchmark gets distinct companion schema/collector and same3/9 corpus. Parent owns docs/collectors/Cargo/Git. Production source review, exact tests, Small, source commit and matched Full remain required; C1-D IN_PROGRESS,7/29closed, LOCAL ONLY.
+
+## Optimized query companion collector
+
+Parent added track_c_collect_alias_query.ps1, distinct stage single_lock_conflict_labels,24arrays, strict static/hash/numeric-only schema and Small3/Full9 inventory. Fifteen query/message/work/revision arrays plus nine actual legacy snapshot zero controls. Independent draft collector review found candidate cardinality assumption: Duplicate has one canonical deduplicated slug and two source-row labels. Corrected expected candidate visits to unique1/duplicate1/ambiguous2; writer confirmed. Remaining parser review CLEAR pending final source/emitter alignment. Ignored explicitly synthetic positive3records+eight negative checks PASS; fabricated data are never measurement evidence. Query lock wait+hold contained by query time and query+message contained by owner; controlled work constant, revisions may vary across fresh publication fixtures. No production tests or benchmarks executed yet.
+
+Parent in-progress source observations: new query is crate-internal, formatter private in note owner; GUI warning composition remains separate. Query actual revision is asserted against pre/post fixture revision; label bytes sum individual labels before separators and output bytes cover full warning. Zero controls use existing alias observer and NoteSnapshot counters, derived alias payload estimates multiplied by actual observed calls. Added static candidate_scope=map_slug_entries_including_current and note_scope=ordered_cache_rows_scanned to emitter/collector; fresh explicitly synthetic v2 positive+eight negative checks PASS, originals retained. Advisory test audit uses inert app and owned temporary note files; injected one-shot lookup errors and Add/Rename save paths do not activate native/default plugins. Stable source review and actual Cargo still pending.
+
+## Stable production source review
+
+Writer paused after two-file production/query/test/emitter migration; rustfmt PASS, no Cargo. Independent bounded review found no production/protocol/ownership defect. Parent found one new owner-unit fixture error, confirmed by reviewer: parsed comma-separated metadata creates separate Éclair and 東京 aliases, so querying the combined literal cannot match. Sole writer assigned only the query-literal correction to ÉCLAIR, preserving Unicode casefold and two-candidate expectations; production parser/frozen GUI oracle unchanged. Review otherwise CLEAR: coherent one-lock old/new generation reads, exact duplicate/order/display, advisory explicit errors and unchanged Add/Rename save statements, no snapshots/body clones/retained state, scoped nonpanicking race hook/release guard, owned failure-test I/O, clock-free disabled hooks and actual24array zero/work receipts. Exact ordinary seven tests sufficient; no broader publication matrix requested. Actual ordinary/Small pending after focused correction verification.
+
+Focused correction verified: new plugin Unicode query is ÉCLAIR, unchanged parser/expected candidate count; rustfmt --check two files PASS and diff whitespace PASS. Independent conditional source review now CLEAR. Parent sole Cargo session18146 running exact seven ordinary fast-dev tests via ignored query/run.ps1, source UNCOMMITTED_SOURCE/base0a88. Raw query/nextest-ordinary.log. All writers paused; compilation started, no test result accepted yet.
+
+Ordinary first attempt session18146 terminal exit1 before tests: compilerE0689 at note_panel.rs expected_labels_returned.saturating_sub, missing integer type on test-only benchmark binding. No ordinary tests executed; raw log preserved. Sole writer assigned explicit u64 annotation matching query label counter; no production semantic change. Existing render unused-variable warning also emitted. All Cargo terminal until writer correction; rerun same seven with fresh log only.
+
+Explicit u64 benchmark annotation verified, rustfmtcheck PASS. Parent sole Cargo retry session5524 running same seven exact tests, fresh query/nextest-ordinary-retry.log, same UNCOMMITTED_SOURCE/base0a88. Writers paused; compilation pending. Original failed log retained.
+
+## Optimized ordinary and Small execution
+
+Ordinary retry session5524 terminal exit0, run d794f7f5-179f-4a2b-8511-678470aae5ed, fast-dev build2m00s/execution0.330s,7/7PASS,5169skipped. Exact semantic oracle, query owner parity, coherent old/new publication, injected-error Add/Rename persistence, two alias resolution regressions and existing versioned snapshot publication test genuinely executed. Only three existing render-test warnings. Original compiler-failed attempt retained; explicit u64 benchmark binding fixed before retry. No source changes after retry.
+
+Small terminal exit0, run2e146fe7-868c-4178-8099-b9427d4da91c, build0.87s/test4.551s/execution4.566s,1/1PASS,5175skipped. Three100-note cases/60samples collected with companion parser. Owner p50/p95/max ns: unique8800/11100/11900; duplicate42000/46100/60300; ambiguous43600/53400/58300. Actual canonical candidate visits1/1/2, note visits0/100/100, returned labels0/2/2, label bytes0/163/158, outputbytes0/217/209. All nine legacy snapshot controls zero. This remains uncommitted-source smoke, not exact-source Full or user-visible timing. Independent raw/numeric/privacy/hash continuity review pending; all Cargo terminal, writer paused. C1-D IN_PROGRESS,7/29closed.
+
+Independent optimized Small review CLEAR: every scalar/all72arrays×20/15nearest-rank triplets/raw correspondence/privacy and branch/timer receipts verified. Baseline100 fixture/warning hashes and output sizes exact; nine legacy snapshot controls zero. Unicode/type corrections focused-verified, no behavior change. Published track_c_c1d_query_small.json with honest REVIEWED_UNCOMMITTED_QUERY_SMOKE attribution. Parent comparison confirms track_c1d_notes/eager_warning/fixture_signature/output_signature source functions unchanged from0a88. Cumulative diff inspected, no obsolete warning snapshot/GUI formatter path. Source/collector/baseline/smoke/docs ready for coherent local production commit; exact-source Full remains required before C1-D closure.

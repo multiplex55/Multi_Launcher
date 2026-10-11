@@ -11,7 +11,7 @@ use crate::notes_markdown::{
 };
 use crate::plugins::note::{
     Note, NoteExternalOpen, NoteLinkMenuTarget, NoteTarget, append_note, assets_dir,
-    available_tags, extract_aliases, image_files, load_notes, note_alias_map_snapshot,
+    available_tags, extract_aliases, image_files, load_notes, note_alias_conflict_display_labels,
     note_cache_snapshot, note_cache_snapshot_with_version,
     note_link_menu_targets_snapshot_with_version, note_version, resolve_note_query, save_note,
     save_note_image_asset,
@@ -1455,47 +1455,37 @@ impl NotePanel {
         }
     }
 
-    fn alias_collision_warning(&self, alias: &str) -> Option<String> {
+    fn alias_collision_warning(&self, alias: &str) -> anyhow::Result<Option<String>> {
         #[cfg(test)]
         alias_warning_test_observer::lookup_called();
         let alias = alias.trim();
         if alias.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let alias_map = note_alias_map_snapshot();
-        let Some(slugs) = alias_map.get(&alias.to_lowercase()) else {
-            return None;
+        let (_, Some(labels)) = note_alias_conflict_display_labels(alias, &self.note.slug)? else {
+            return Ok(None);
         };
-        let conflicting_slugs: HashSet<&str> = slugs
-            .iter()
-            .map(String::as_str)
-            .filter(|slug| *slug != self.note.slug)
-            .collect();
-        if conflicting_slugs.is_empty() {
-            return None;
-        }
-        let notes = note_cache_snapshot();
         #[cfg(test)]
         let formatting_started = alias_warning_test_observer::formatting_started();
-        let labels = notes
-            .into_iter()
-            .filter(|note| conflicting_slugs.contains(note.slug.as_str()))
-            .map(|note| note_display_with_secondary(&note))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let labels = labels.join(", ");
         let message = format!("Alias \"{alias}\" is already used by {labels}");
         #[cfg(test)]
         alias_warning_test_observer::formatting_finished(formatting_started, message.len());
-        Some(message)
+        Ok(Some(message))
     }
 
     fn warn_alias_collision(&self, app: &mut LauncherApp, alias: &str) {
-        if let Some(message) = self.alias_collision_warning(alias) {
-            app.add_toast(Toast {
+        match self.alias_collision_warning(alias) {
+            Ok(Some(message)) => app.add_toast(Toast {
                 text: message.into(),
                 kind: ToastKind::Warning,
                 options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
-            });
+            }),
+            Ok(None) => {}
+            Err(err) => app.report_error(
+                "note alias warning",
+                format!("Could not check for conflicting note aliases: {err}"),
+            ),
         }
     }
 
@@ -4876,14 +4866,6 @@ fn format_note_updated(note: &Note) -> String {
                 .to_string()
         })
         .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn note_display_with_secondary(note: &Note) -> String {
-    if let Some(alias) = note.alias.as_deref().filter(|a| !a.trim().is_empty()) {
-        format!("{alias} ({} · {})", note.title, note.slug)
-    } else {
-        format!("{} ({})", note.title, note.slug)
-    }
 }
 
 fn content_without_fenced_code(content: &str) -> String {
@@ -13567,13 +13549,6 @@ body"
         )
     }
 
-    fn track_c1d_note_snapshot_metric() -> crate::performance::MetricSnapshot {
-        crate::performance::snapshot_metrics()
-            .into_iter()
-            .find(|sample| sample.metric == crate::performance::Metric::NoteSnapshot)
-            .expect("the fixed metric collector contains NoteSnapshot")
-    }
-
     #[test]
     fn alias_collision_warning_matches_frozen_reference_for_semantic_edges() {
         use crate::performance::track_c_workloads::TrackCWorkspace;
@@ -13630,7 +13605,7 @@ body"
 
         let blank_observer = alias_warning_test_observer::Scope::begin();
         let blank_alias_observer = crate::plugins::note::NoteAliasSnapshotTestObserver::begin();
-        assert_eq!(panel.alias_collision_warning("  \t "), None);
+        assert_eq!(panel.alias_collision_warning("  \t ").unwrap(), None);
         assert_eq!(blank_observer.snapshot().lookup_calls, 1);
         assert_eq!(blank_alias_observer.snapshot().calls, 0);
         drop(blank_alias_observer);
@@ -13638,18 +13613,28 @@ body"
 
         let self_observer = alias_warning_test_observer::Scope::begin();
         let self_alias_observer = crate::plugins::note::NoteAliasSnapshotTestObserver::begin();
-        assert_eq!(panel.alias_collision_warning(" Self only "), None);
+        let self_query_observer = crate::plugins::note::NoteAliasConflictQueryTestObserver::begin();
+        assert_eq!(panel.alias_collision_warning(" Self only ").unwrap(), None);
         let self_stats = self_observer.snapshot();
         assert_eq!(self_stats.lookup_calls, 1);
         assert_eq!(self_stats.formatting_calls, 0);
         let self_alias_stats = self_alias_observer.snapshot();
-        assert_eq!(self_alias_stats.calls, 1);
+        assert_eq!(self_alias_stats.calls, 0);
         assert_eq!(self_alias_stats.failures, 0);
+        let self_query_stats = self_query_observer.snapshot();
+        assert_eq!(self_query_stats.calls, 1);
+        assert_eq!(self_query_stats.successes, 1);
+        assert_eq!(self_query_stats.candidate_entries, 1);
+        assert_eq!(self_query_stats.candidate_slugs_examined, 1);
+        assert_eq!(self_query_stats.notes_visited, 0);
+        drop(self_query_observer);
         drop(self_alias_observer);
         drop(self_observer);
 
         let unicode_query = "  ÉCLAIR, 東京  ";
-        let unicode_output = panel.alias_collision_warning(unicode_query);
+        let unicode_output = panel
+            .alias_collision_warning(unicode_query)
+            .expect("healthy cache produces a warning result");
         assert_eq!(
             unicode_output,
             track_c1d_eager_warning(unicode_query, TRACK_C1D_CURRENT_SLUG, &canonical)
@@ -13662,9 +13647,14 @@ body"
         );
 
         let punctuation_query = " Alias + punctuation! ";
-        assert_eq!(panel.alias_collision_warning(punctuation_query), None);
+        assert_eq!(
+            panel.alias_collision_warning(punctuation_query).unwrap(),
+            None
+        );
         panel.note.slug = "unsaved-current-slug".into();
-        let self_slug_is_now_conflicting = panel.alias_collision_warning("Self only");
+        let self_slug_is_now_conflicting = panel
+            .alias_collision_warning("Self only")
+            .expect("healthy cache reports current draft slug conflicts");
         assert_eq!(
             self_slug_is_now_conflicting,
             track_c1d_eager_warning("Self only", "unsaved-current-slug", &canonical)
@@ -13678,13 +13668,83 @@ body"
     }
 
     #[test]
+    fn alias_warning_query_failure_is_reported_and_add_rename_saves_continue() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+        use crate::plugins::note::{
+            NoteAliasConflictQueryTestObserver, fail_next_note_alias_conflict_query_for_test,
+        };
+
+        let workspace = TrackCWorkspace::new();
+        let _cache_guard = crate::plugins::note::publish_note_cache_for_test(Vec::new());
+        let notes_dir = TempNotesDir::new();
+        let context = egui::Context::default();
+        let mut app = track_c1a_make_inert_app(&context, &workspace);
+        app.show_inline_errors = true;
+        app.error = None;
+        notes_dir.write_note("current.md", "# Current\nAlias: Original\n\nBody");
+        notes_dir.refresh_cache();
+        let current = crate::plugins::note::note_cache_snapshot()
+            .into_iter()
+            .find(|note| note.slug == "current")
+            .expect("owned note is present before accepted alias edits");
+        let mut panel = NotePanel::from_note(current);
+
+        let add_query_observer = NoteAliasConflictQueryTestObserver::begin();
+        {
+            let _failure = fail_next_note_alias_conflict_query_for_test();
+            panel.warn_alias_collision(&mut app, "Added alias");
+        }
+        let add_query = add_query_observer.snapshot();
+        assert_eq!(add_query.calls, 1);
+        assert_eq!(add_query.failures, 1);
+        drop(add_query_observer);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("Could not check for conflicting note aliases")),
+            "a failed advisory lookup is surfaced through the app error channel"
+        );
+
+        panel.note.content = add_alias_metadata(&panel.note.content, "Added alias");
+        panel.save_alias_metadata_change(&mut app);
+        let saved_after_add = std::fs::read_to_string(notes_dir.dir.path().join("current.md"))
+            .expect("accepted Add continues to persistence after lookup error");
+        assert!(saved_after_add.contains("Added alias"));
+
+        app.error = None;
+        let rename_query_observer = NoteAliasConflictQueryTestObserver::begin();
+        {
+            let _failure = fail_next_note_alias_conflict_query_for_test();
+            panel.warn_alias_collision(&mut app, "Renamed alias");
+        }
+        let rename_query = rename_query_observer.snapshot();
+        assert_eq!(rename_query.calls, 1);
+        assert_eq!(rename_query.failures, 1);
+        drop(rename_query_observer);
+        panel.note.content =
+            rename_alias_metadata(&panel.note.content, "Original", "Renamed alias");
+        panel.save_alias_metadata_change(&mut app);
+        let saved_after_rename = std::fs::read_to_string(notes_dir.dir.path().join("current.md"))
+            .expect("accepted Rename continues to persistence after lookup error");
+        assert!(!saved_after_rename.contains("Alias: Original"));
+        assert!(saved_after_rename.contains("Renamed alias"));
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("Could not check for conflicting note aliases"))
+        );
+    }
+
+    #[test]
     #[ignore = "fixed-sample C1-D owner characterization; run through the Track C controlled runner"]
-    fn track_c_c1d_benchmark_alias_collision_warning_costs() {
+    fn track_c_c1d_benchmark_single_lock_alias_warning_costs() {
         use crate::performance::track_c_workloads::{
             BenchmarkMode, MEASURED_SAMPLES, TrackCWorkspace, WARMUPS,
         };
         use crate::performance::{Metric, reset_metrics, snapshot_metrics};
-        use crate::plugins::note::NoteAliasSnapshotTestObserver;
+        use crate::plugins::note::{
+            NoteAliasConflictQueryTestObserver, NoteAliasSnapshotTestObserver,
+        };
         use std::time::Instant;
 
         assert!(
@@ -13706,9 +13766,20 @@ body"
         for count in mode.note_sizes() {
             for case in TrackC1DAliasCase::ALL {
                 let mut owner_ns = Vec::with_capacity(MEASURED_SAMPLES);
-                let mut lookup_calls = Vec::with_capacity(MEASURED_SAMPLES);
-                let mut format_calls = Vec::with_capacity(MEASURED_SAMPLES);
-                let mut format_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut query_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut message_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut query_calls = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut query_successes = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut query_failures = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut query_lock_wait_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut query_lock_hold_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut candidate_entries = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut candidate_slugs_examined = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut notes_visited = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut labels_returned = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut label_bytes = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut output_bytes = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut note_revision_receipts = Vec::with_capacity(MEASURED_SAMPLES);
                 let mut alias_map_snapshot_calls = Vec::with_capacity(MEASURED_SAMPLES);
                 let mut alias_map_snapshot_key_entries = Vec::with_capacity(MEASURED_SAMPLES);
                 let mut alias_map_snapshot_slug_entries = Vec::with_capacity(MEASURED_SAMPLES);
@@ -13718,7 +13789,6 @@ body"
                 let mut note_snapshot_estimated_clone_bytes = Vec::with_capacity(MEASURED_SAMPLES);
                 let mut note_snapshot_lock_wait_ns = Vec::with_capacity(MEASURED_SAMPLES);
                 let mut note_snapshot_lock_hold_ns = Vec::with_capacity(MEASURED_SAMPLES);
-                let mut warning_output_bytes = Vec::with_capacity(MEASURED_SAMPLES);
                 let mut fixture_signature = None;
                 let mut warning_signature = None;
 
@@ -13774,23 +13844,19 @@ body"
                     );
 
                     reset_metrics();
-                    if sample_index < WARMUPS {
-                        let actual = panel.alias_collision_warning(case.query());
-                        assert_eq!(actual, expected, "warmup output matches full oracle");
-                        let metric = track_c1d_note_snapshot_metric();
-                        let expected_calls: u64 = if expected.is_some() { 1 } else { 0 };
-                        assert_eq!(metric.calls, expected_calls);
-                        continue;
-                    }
-
                     let formatting_observer = alias_warning_test_observer::Scope::begin();
                     let alias_snapshot_observer = NoteAliasSnapshotTestObserver::begin();
+                    let query_observer = NoteAliasConflictQueryTestObserver::begin();
                     let started = Instant::now();
-                    let actual = panel.alias_collision_warning(case.query());
+                    let actual = panel
+                        .alias_collision_warning(case.query())
+                        .expect("controlled cache query succeeds");
                     let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
                     let observer_stats = formatting_observer.snapshot();
                     let alias_stats = alias_snapshot_observer.snapshot();
+                    let query_stats = query_observer.snapshot();
                     drop(alias_snapshot_observer);
+                    drop(query_observer);
                     drop(formatting_observer);
 
                     // All full-output/oracle checks and telemetry collection
@@ -13798,35 +13864,83 @@ body"
                     assert_eq!(actual, expected, "measured output equals frozen warning");
                     assert_eq!(crate::plugins::note::note_version(), revision);
                     assert_eq!(observer_stats.lookup_calls, 1);
-                    assert_eq!(alias_stats.calls, 1);
+                    assert_eq!(
+                        alias_stats.calls, 0,
+                        "optimized path avoids alias-map snapshots"
+                    );
+                    assert_eq!(alias_stats.key_entries, 0);
                     assert_eq!(alias_stats.failures, 0, "owned cache lock stays healthy");
-                    assert_eq!(alias_stats.key_entries, expected_key_entries);
                     let expected_format_calls: u64 = if expected.is_some() { 1 } else { 0 };
                     assert_eq!(observer_stats.formatting_calls, expected_format_calls);
                     assert_eq!(
                         observer_stats.output_bytes,
                         expected.as_ref().map_or(0, |message| message.len() as u64)
                     );
+                    assert_eq!(query_stats.calls, 1);
+                    assert_eq!(query_stats.successes, 1);
+                    assert_eq!(query_stats.failures, 0);
+                    assert_eq!(query_stats.note_revision, revision);
+
+                    let normalized_query = case.query().trim().to_lowercase();
+                    let expected_candidate_entries = expected_alias_map
+                        .get(&normalized_query)
+                        .map_or(0, |slugs| slugs.len() as u64);
+                    let expected_notes_visited = if expected.is_some() { *count as u64 } else { 0 };
+                    let expected_labels_returned: u64 = match case {
+                        TrackC1DAliasCase::Unique => 0,
+                        TrackC1DAliasCase::Duplicate | TrackC1DAliasCase::Ambiguous => 2,
+                    };
+                    let expected_label_bytes =
+                        expected.as_ref().map_or(0, |message| {
+                            let prefix =
+                                format!("Alias \"{}\" is already used by ", case.query().trim());
+                            message.len().saturating_sub(prefix.len()).saturating_sub(
+                                expected_labels_returned.saturating_sub(1) as usize * 2,
+                            ) as u64
+                        });
+                    assert_eq!(query_stats.candidate_entries, expected_candidate_entries);
+                    assert_eq!(
+                        query_stats.candidate_slugs_examined, expected_candidate_entries,
+                        "candidate receipt counts actual map-slug iterations, including the current slug"
+                    );
+                    assert_eq!(query_stats.notes_visited, expected_notes_visited);
+                    assert_eq!(query_stats.labels_returned, expected_labels_returned);
+                    assert_eq!(query_stats.label_bytes, expected_label_bytes);
 
                     let metrics = snapshot_metrics();
                     let snapshot = metrics
                         .iter()
                         .find(|metric| metric.metric == Metric::NoteSnapshot)
                         .expect("NoteSnapshot metric is present");
-                    let expected_snapshot_calls: u64 = if expected.is_some() { 1 } else { 0 };
-                    assert_eq!(snapshot.calls, expected_snapshot_calls);
+                    assert_eq!(
+                        snapshot.calls, 0,
+                        "optimized path avoids full-note snapshots"
+                    );
                     assert_eq!(snapshot.errors, 0);
                     assert_eq!(snapshot.abandoned, 0);
-                    if expected_snapshot_calls == 0 {
-                        assert_eq!(snapshot.work_units, 0);
-                    } else {
-                        assert!(snapshot.work_units > 0);
+                    assert_eq!(snapshot.work_units, 0);
+                    assert_eq!(snapshot.lock_wait_nanos_total, 0);
+                    assert_eq!(snapshot.elapsed_nanos_total, 0);
+
+                    if sample_index < WARMUPS {
+                        continue;
                     }
 
                     owner_ns.push(elapsed);
-                    lookup_calls.push(observer_stats.lookup_calls);
-                    format_calls.push(observer_stats.formatting_calls);
-                    format_ns.push(observer_stats.formatting_nanos);
+                    query_ns.push(query_stats.query_nanos);
+                    message_ns.push(observer_stats.formatting_nanos);
+                    query_calls.push(query_stats.calls);
+                    query_successes.push(query_stats.successes);
+                    query_failures.push(query_stats.failures);
+                    query_lock_wait_ns.push(query_stats.lock_wait_nanos);
+                    query_lock_hold_ns.push(query_stats.lock_hold_nanos);
+                    candidate_entries.push(query_stats.candidate_entries);
+                    candidate_slugs_examined.push(query_stats.candidate_slugs_examined);
+                    notes_visited.push(query_stats.notes_visited);
+                    labels_returned.push(query_stats.labels_returned);
+                    label_bytes.push(query_stats.label_bytes);
+                    output_bytes.push(observer_stats.output_bytes);
+                    note_revision_receipts.push(query_stats.note_revision);
                     alias_map_snapshot_calls.push(alias_stats.calls);
                     alias_map_snapshot_key_entries.push(alias_stats.key_entries);
                     alias_map_snapshot_slug_entries
@@ -13838,15 +13952,25 @@ body"
                     note_snapshot_estimated_clone_bytes.push(snapshot.work_units);
                     note_snapshot_lock_wait_ns.push(snapshot.lock_wait_nanos_total);
                     note_snapshot_lock_hold_ns.push(snapshot.elapsed_nanos_total);
-                    warning_output_bytes.push(observer_stats.output_bytes);
                 }
 
                 let fixture_signature = fixture_signature.expect("measured fixture signature");
                 let warning_signature = warning_signature.expect("measured warning signature");
                 let owner_ns = track_c1d_numeric_array(&owner_ns);
-                let lookup_calls = track_c1d_numeric_array(&lookup_calls);
-                let format_calls = track_c1d_numeric_array(&format_calls);
-                let format_ns = track_c1d_numeric_array(&format_ns);
+                let query_ns = track_c1d_numeric_array(&query_ns);
+                let message_ns = track_c1d_numeric_array(&message_ns);
+                let query_calls = track_c1d_numeric_array(&query_calls);
+                let query_successes = track_c1d_numeric_array(&query_successes);
+                let query_failures = track_c1d_numeric_array(&query_failures);
+                let query_lock_wait_ns = track_c1d_numeric_array(&query_lock_wait_ns);
+                let query_lock_hold_ns = track_c1d_numeric_array(&query_lock_hold_ns);
+                let candidate_entries = track_c1d_numeric_array(&candidate_entries);
+                let candidate_slugs_examined = track_c1d_numeric_array(&candidate_slugs_examined);
+                let notes_visited = track_c1d_numeric_array(&notes_visited);
+                let labels_returned = track_c1d_numeric_array(&labels_returned);
+                let label_bytes = track_c1d_numeric_array(&label_bytes);
+                let output_bytes = track_c1d_numeric_array(&output_bytes);
+                let note_revision_receipts = track_c1d_numeric_array(&note_revision_receipts);
                 let alias_map_snapshot_calls = track_c1d_numeric_array(&alias_map_snapshot_calls);
                 let alias_map_snapshot_key_entries =
                     track_c1d_numeric_array(&alias_map_snapshot_key_entries);
@@ -13862,9 +13986,8 @@ body"
                     track_c1d_numeric_array(&note_snapshot_lock_wait_ns);
                 let note_snapshot_lock_hold_ns =
                     track_c1d_numeric_array(&note_snapshot_lock_hold_ns);
-                let warning_output_bytes = track_c1d_numeric_array(&warning_output_bytes);
                 eprintln!(
-                    "C1D_ALIAS_RESULT schema=1 stage=alias_collision_characterization owner=NotePanel_alias_collision_warning source={source} profile={profile} mode={} telemetry_enabled=true observer_enabled=true fixture=synthetic_alias_collision fixture_signature={fixture_signature:016x} warning_signature={warning_signature:016x} case={} count={count} warmups={WARMUPS} samples={MEASURED_SAMPLES} exclusions=0 owner_scope=lookup_and_message_only invocation_scope=accepted_Add_or_Rename_not_keystrokes estimate_scope=selected_logical_payload_not_allocator_or_RSS snapshot_hold_scope=existing_PERF1_estimate_plus_clone legacy_error_scope=empty_snapshot_defaults_not_coherence_proof owner_ns=[{owner_ns}] lookup_calls=[{lookup_calls}] format_calls=[{format_calls}] format_ns=[{format_ns}] alias_map_snapshot_calls=[{alias_map_snapshot_calls}] alias_map_snapshot_key_entries=[{alias_map_snapshot_key_entries}] alias_map_snapshot_slug_entries=[{alias_map_snapshot_slug_entries}] alias_map_selected_clone_bytes=[{alias_map_selected_clone_bytes}] note_snapshot_calls=[{note_snapshot_calls}] note_snapshot_entries=[{note_snapshot_entries}] note_snapshot_estimated_clone_bytes=[{note_snapshot_estimated_clone_bytes}] note_snapshot_lock_wait_ns=[{note_snapshot_lock_wait_ns}] note_snapshot_lock_hold_ns=[{note_snapshot_lock_hold_ns}] warning_output_bytes=[{warning_output_bytes}]",
+                    "C1D_ALIAS_QUERY_RESULT schema=1 stage=single_lock_conflict_labels owner=NotePanel_alias_collision_warning source={source} profile={profile} mode={} telemetry_enabled=true observer_enabled=true fixture=synthetic_alias_collision fixture_signature={fixture_signature:016x} warning_signature={warning_signature:016x} case={} count={count} warmups={WARMUPS} samples={MEASURED_SAMPLES} exclusions=0 owner_scope=lookup_join_message_only invocation_scope=accepted_Add_or_Rename_not_keystrokes lock_scope=single_CACHE_generation estimate_scope=selected_logical_payload_not_allocator_or_RSS candidate_scope=map_slug_entries_including_current note_scope=ordered_cache_rows_scanned legacy_error_scope=fallible_query_diagnosed_save_continues owner_ns=[{owner_ns}] query_ns=[{query_ns}] message_ns=[{message_ns}] query_calls=[{query_calls}] query_successes=[{query_successes}] query_failures=[{query_failures}] query_lock_wait_ns=[{query_lock_wait_ns}] query_lock_hold_ns=[{query_lock_hold_ns}] candidate_entries=[{candidate_entries}] candidate_slugs_examined=[{candidate_slugs_examined}] notes_visited=[{notes_visited}] labels_returned=[{labels_returned}] label_bytes=[{label_bytes}] output_bytes=[{output_bytes}] note_revision_receipts=[{note_revision_receipts}] alias_map_snapshot_calls=[{alias_map_snapshot_calls}] alias_map_snapshot_key_entries=[{alias_map_snapshot_key_entries}] alias_map_snapshot_slug_entries=[{alias_map_snapshot_slug_entries}] alias_map_selected_clone_bytes=[{alias_map_selected_clone_bytes}] note_snapshot_calls=[{note_snapshot_calls}] note_snapshot_entries=[{note_snapshot_entries}] note_snapshot_estimated_clone_bytes=[{note_snapshot_estimated_clone_bytes}] note_snapshot_lock_wait_ns=[{note_snapshot_lock_wait_ns}] note_snapshot_lock_hold_ns=[{note_snapshot_lock_hold_ns}]",
                     match mode {
                         BenchmarkMode::Small => "small",
                         BenchmarkMode::Full => "full",
