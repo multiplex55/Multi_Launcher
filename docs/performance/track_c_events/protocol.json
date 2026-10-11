@@ -1,0 +1,100 @@
+{
+  "schema": 1,
+  "checkpoint": "C3-C",
+  "status": "DRAFT_NOT_AUTHORIZED_FOR_EXECUTION",
+  "source_base": "464bd5db2d876ac7e9da688d41b22bc398794647",
+  "profile": "fast-dev",
+  "mode_counts": {
+    "Small": [
+      200
+    ],
+    "Full": [
+      20000
+    ]
+  },
+  "warmups": 5,
+  "retained_samples": 20,
+  "exclusions": 0,
+  "quantiles": "nearest rank ceil(p*n), 1-based. Across20samples: whole owner, total drain, sum of per-frame durations, maximum per-frame duration and burst mean/max age. Individual event ages also pooled with event-weighting and explicit event count. Individual frame timings retained; no pooled-frame statistic is silently labeled20samples.",
+  "original_control_owners": [
+    "gui::watch::tests::track_c_benchmark_watch_event_finite_burst_owner",
+    "gui::watch::tests::track_c_benchmark_watch_event_concurrent_offered_load_owner"
+  ],
+  "companion_marker": "TRACK_C3C_EVENT_RESULT",
+  "companion_schema": 1,
+  "stage": "gui_event_frame_characterization",
+  "owner": "LauncherApp::process_watch_events+LauncherApp::render_root_frame",
+  "measurement_scope": "trigger_enqueue_or_start_gate+event_drain+egui_Context_run+FullOutput_drop",
+  "recipes": [
+    {
+      "case": "quiet_settled_frame",
+      "events": 0,
+      "frames": 1
+    },
+    {
+      "case": "finite_burst_frame",
+      "events": 10,
+      "composition": "Original8:changedActions,actualstaleIndexReady,5equalActions,inertRecycleOk; plus staleEmergency,invalidLeaseRadial",
+      "max_frames": 8
+    },
+    {
+      "case": "bounded_replenishing_frame",
+      "events": 18,
+      "composition": "Finite16Actionsproducer plus staleEmergency and invalidLeaseRadial",
+      "max_frames": 8
+    }
+  ],
+  "observation_requirements": [
+    "Per-app lifecycleprobe beforeconstruction,app/worker drop then releasewait outsideownerclock",
+    "All callback attempts accounted incl failedregistration; incomplete release preserves workspace/env",
+    "Bounded trace,overflow/abandoned fail; exact accepted/dequeued/finalzero and producerack",
+    "Per-frame depth/drained/ack/wakes/CPUcompletion; direct ctx repaint separateViewportWake",
+    "Real handler/drain/wholeframe nested boundaries, posttimer fulloracle excluded",
+    "Setup-aged envelopes explicitly distinguished from triggeringowner enqueue; originalenvelopes preserved",
+    "FullAction equality before owned-root normalization; fullidentity separateprojection/state/viewport",
+    "Originalcontrolhistorical timer/emitter/oracle semantics preserved; lifecycle qualification disclosed",
+    "No handler wait on producer/no artificial delay/no observer-driven producer scheduling",
+    "Observed overlap and emptybacklog retained; finite traffic not proof sustainedstarvation"
+  ],
+  "safety": [
+    "No native/action/recycle/clipboard/desktop operation",
+    "Beforefirstframe dashboard_initial_refresh_queued true; no backend-refresh variants withoutinertinjection",
+    "Mint emergency then clearglobalactiveowner beforeenqueue, unwind-safe",
+    "Missing radiallease rejectsbeforeresolve",
+    "One Cargo process, exact tests serial; no fullsuite/release/native campaign"
+  ],
+  "pending": [
+    "Stable source/protocol/precise schema and fixture bindings",
+    "Independent source/method review",
+    "Exact ordinary discovery/execution",
+    "Small controls+companion then clean committedsource Full",
+    "Independent numerical/privacy/publication review"
+  ],
+  "local_only": true,
+  "quiet_age": "NOT_APPLICABLE: zeroevents, empty individual age vector; no age p50/p95/max or fabricated0ns latency",
+  "draft_review": {
+    "reviewer": "c0_boundary_review",
+    "status": "COUNTS_MATRIX_CLOCK_LIMITS_CLEAR_WITH_TWO_SCHEMA_QUALIFICATIONS_RESOLVED",
+    "resolved": [
+      "Explicit per-sample sum/max frame aggregates, no silent pooled-frame20count",
+      "Quiet event age NOT_APPLICABLE/absent, not0ns latency"
+    ],
+    "source_schema_execution_gate": "PENDING"
+  },
+  "lifecycle_limit": "Release receipts prove final notify callback closure release and fixture-path safety, not join of notify6.1.1 detached Windows backend thread. Existing coordinator Rust workers still shut down through their owner.",
+  "early_source_review": {
+    "reviewer": "c0_boundary_review",
+    "status": "IN_PROGRESS_NOT_STABLE_SOURCE_ACCEPTANCE",
+    "finding": "SharedActionsfixture existing actions_path registers GUIActionswatcher not included in prior capture map.",
+    "resolution_required": "cfgtestGuiActions kind/capture plus exactC3C per-appinventory; historicalC3A EXPECTED10 unchanged",
+    "c3a_qualification": "Independent source review: render fixture explicitly asserts root/actions.json absent, supplies that absent path and never saves/activates; constructor skipsActionswatcher. No retrospectiveC3Areceiptgap identified.",
+    "other_limits": "Lifecyclepatch stillrequirescompleted-source review, precise schema and actual execution"
+  },
+  "expected_per_app_handlers": [
+    "clipboard_modify",
+    "gui_actions",
+    "gui_notes",
+    "json_dashboard"
+  ],
+  "handler_inventory_basis": "Source-derived before execution: existing Actions file and Notes directory get cfg(test) GUI watchers; absent alias/todo/other JSON files do not. Dashboard and ClipboardModify watch their owned parent. Inert PluginManager creates no NotePlugin or Omni JSON watchers. Attempts/created/final-release inventories are checked separately; registration failure invalidates expected success even when final callback releases."
+}

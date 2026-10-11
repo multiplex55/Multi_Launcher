@@ -3,6 +3,153 @@ use super::*;
 use crate::performance::track_c::EventOrigin;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+mod track_c3c_dispatch_receipt {
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::atomic::{AtomicBool, Ordering},
+    };
+
+    const RECEIPT_CAPACITY: usize = 32;
+    static ACTIVE_FAST_PATH: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Clone, Debug)]
+    pub(super) struct Dispatch {
+        pub frame: u64,
+        pub ordinal: u64,
+        pub kind: &'static str,
+        pub depth_after_dequeue: Option<usize>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub(super) struct Snapshot {
+        pub events: Vec<Dispatch>,
+        pub overflow: bool,
+    }
+
+    #[derive(Default)]
+    struct State {
+        frame: u64,
+        receipt: Snapshot,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Guard {
+        state: Rc<RefCell<State>>,
+        previous: Option<Rc<RefCell<State>>>,
+    }
+
+    impl Guard {
+        pub(super) fn install() -> Self {
+            assert!(
+                ACTIVE_FAST_PATH
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok(),
+                "C3-C dequeue observation is process-scoped and must be serialized"
+            );
+            let state = Rc::new(RefCell::new(State {
+                frame: 0,
+                receipt: Snapshot {
+                    events: Vec::with_capacity(RECEIPT_CAPACITY),
+                    overflow: false,
+                },
+            }));
+            let previous = ACTIVE.with(|active| active.replace(Some(Rc::clone(&state))));
+            Self { state, previous }
+        }
+
+        pub(super) fn set_frame(&self, frame: u64) {
+            self.state.borrow_mut().frame = frame;
+        }
+
+        pub(super) fn snapshot(&self) -> Snapshot {
+            self.state.borrow().receipt.clone()
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE_FAST_PATH.store(false, Ordering::Release);
+            ACTIVE.with(|active| {
+                let current = active.replace(self.previous.take());
+                debug_assert!(
+                    current
+                        .as_ref()
+                        .is_some_and(|current| Rc::ptr_eq(current, &self.state)),
+                    "C3-C dequeue observers must be restored in stack order"
+                );
+            });
+        }
+    }
+
+    pub(super) fn record(event: &super::WatchEvent, depth_after_dequeue: Option<usize>) {
+        if !ACTIVE_FAST_PATH.load(Ordering::Acquire) {
+            return;
+        }
+        ACTIVE.with(|active| {
+            let Some(state) = active.borrow().as_ref().cloned() else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            if state.receipt.events.len() == RECEIPT_CAPACITY {
+                state.receipt.overflow = true;
+                return;
+            }
+            let ordinal = state.receipt.events.len() as u64;
+            let frame = state.frame;
+            state.receipt.events.push(Dispatch {
+                frame,
+                ordinal,
+                kind: kind(event),
+                depth_after_dequeue,
+            });
+        });
+    }
+
+    fn kind(event: &super::WatchEvent) -> &'static str {
+        use super::WatchEvent;
+        match event {
+            WatchEvent::Actions => "actions",
+            WatchEvent::IndexReady => "index_ready",
+            WatchEvent::Folders => "folders",
+            WatchEvent::Bookmarks => "bookmarks",
+            WatchEvent::Clipboard => "clipboard",
+            WatchEvent::Snippets => "snippets",
+            WatchEvent::Notes => "notes",
+            WatchEvent::Todos => "todos",
+            WatchEvent::Favorites => "favorites",
+            WatchEvent::Gestures => "gestures",
+            WatchEvent::Dashboard(_) => "dashboard",
+            WatchEvent::Recycle(_) => "recycle",
+            WatchEvent::ExecuteAction(_) => "execute_action",
+            WatchEvent::RadialDispatch(_) => "radial_dispatch",
+            WatchEvent::RadialPrepare(_) => "radial_prepare",
+            WatchEvent::RadialResolveDeferred(_) => "radial_resolve_deferred",
+            WatchEvent::RadialDeferredSearchReady { .. } => "radial_deferred_search_ready",
+            WatchEvent::RadialAuthoringSearchReady { .. } => "radial_authoring_search_ready",
+            WatchEvent::RadialAuthoringSearchFailed { .. } => "radial_authoring_search_failed",
+            WatchEvent::AuthoringProviderCapacityAvailable => "authoring_capacity_available",
+            WatchEvent::RadialInvalidate => "radial_invalidate",
+            WatchEvent::RadialConfigDiagnostic(_) => "radial_config_diagnostic",
+            WatchEvent::RadialRuntimeDiagnostic(_) => "radial_runtime_diagnostic",
+            WatchEvent::RadialDiagnostic(_) => "radial_diagnostic",
+            WatchEvent::RadialSubmenuPlacementFailure(_) => "radial_submenu_placement_failure",
+            WatchEvent::RadialPlacementActionResult { .. } => "radial_placement_action_result",
+            WatchEvent::RadialMigrationNotice(_) => "radial_migration_notice",
+            WatchEvent::RadialMigrationState { .. } => "radial_migration_state",
+            WatchEvent::ScreenDrawStart => "screen_draw_start",
+            WatchEvent::ScreenDrawRecover(_) => "screen_draw_recover",
+            WatchEvent::ScreenDrawEmergency(_) => "screen_draw_emergency",
+            WatchEvent::ClipboardModify(_) => "clipboard_modify",
+            WatchEvent::VirtualDesktop(_) => "virtual_desktop",
+        }
+    }
+}
+
 pub(super) fn watch_file(
     path: &Path,
     tx: EventSender,
@@ -68,6 +215,7 @@ fn track_c_gui_handler_release(
     use crate::performance::track_c_watcher_lifecycle::HandlerKind;
 
     let kind = match event {
+        WatchEvent::Actions => HandlerKind::GuiActions,
         WatchEvent::Folders => HandlerKind::GuiFolders,
         WatchEvent::Bookmarks => HandlerKind::GuiBookmarks,
         WatchEvent::Todos => HandlerKind::GuiTodos,
@@ -86,6 +234,8 @@ impl LauncherApp {
         while let Ok(delivery) = self.rx.try_recv_for_dispatch() {
             drained = drained.saturating_add(1);
             self.event_sink.event_consumed();
+            #[cfg(test)]
+            track_c3c_dispatch_receipt::record(&delivery.event, self.rx.queued_depth());
             match delivery.event {
                 WatchEvent::RadialDispatch(request) => self.execute_radial_dispatch(request),
                 WatchEvent::RadialPrepare(envelope) => self.prepare_radial(envelope),
@@ -878,7 +1028,7 @@ mod tests {
     }
 
     struct TrackCActionsOwnerState {
-        app: LauncherApp,
+        app: TrackCObservedApp,
         expected_actions: Vec<crate::actions::Action>,
         indexed_tail: Vec<crate::actions::Action>,
         index_root: PathBuf,
@@ -924,10 +1074,23 @@ mod tests {
         handlers: Vec<crate::performance::track_c::EventSnapshot>,
     }
 
+    const TRACK_C_HANDLER_REPORT_CAPACITY: usize = 32;
+    const TRACK_C_EXPECTED_HANDLER_KINDS:
+        [crate::performance::track_c_watcher_lifecycle::HandlerKind; 4] = [
+        crate::performance::track_c_watcher_lifecycle::HandlerKind::ClipboardModify,
+        crate::performance::track_c_watcher_lifecycle::HandlerKind::GuiActions,
+        crate::performance::track_c_watcher_lifecycle::HandlerKind::GuiNotes,
+        crate::performance::track_c_watcher_lifecycle::HandlerKind::JsonDashboard,
+    ];
+
     struct TrackCActionsFixture {
         // The owner apps are local to each sample and drop before this fixture
         // drops its CWD/temp-directory guard.
-        _workspace: crate::performance::track_c_workloads::TrackCWorkspace,
+        _workspace: std::sync::Arc<
+            std::sync::Mutex<crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace>,
+        >,
+        handler_reports: std::sync::Arc<std::sync::Mutex<Vec<TrackCHandlerReport>>>,
+        handler_report_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
         index_root: PathBuf,
         actions_path: PathBuf,
         settings_path: PathBuf,
@@ -937,6 +1100,137 @@ mod tests {
         indexed_tail: Vec<crate::actions::Action>,
         custom_len: usize,
         fixture_signature: u64,
+    }
+
+    #[derive(Clone)]
+    struct TrackCHandlerReport {
+        attempts: Vec<crate::performance::track_c_watcher_lifecycle::HandlerKind>,
+        created: Vec<crate::performance::track_c_watcher_lifecycle::HandlerKind>,
+        released: Vec<crate::performance::track_c_watcher_lifecycle::HandlerKind>,
+        overflowed: bool,
+        complete: bool,
+    }
+
+    struct TrackCHandlerReleaseGuard {
+        probe: Option<crate::performance::track_c_watcher_lifecycle::HandlerReleaseProbe>,
+        workspace: std::sync::Arc<
+            std::sync::Mutex<crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace>,
+        >,
+        reports: std::sync::Arc<std::sync::Mutex<Vec<TrackCHandlerReport>>>,
+        report_overflow: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl TrackCHandlerReleaseGuard {
+        fn begin(fixture: &TrackCActionsFixture) -> Self {
+            use crate::performance::track_c_watcher_lifecycle::HandlerReleaseProbe;
+
+            let root = fixture
+                ._workspace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .root()
+                .to_path_buf();
+            fixture
+                ._workspace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .callbacks_may_use_paths();
+            Self {
+                probe: Some(HandlerReleaseProbe::begin(&root)),
+                workspace: std::sync::Arc::clone(&fixture._workspace),
+                reports: std::sync::Arc::clone(&fixture.handler_reports),
+                report_overflow: std::sync::Arc::clone(&fixture.handler_report_overflow),
+            }
+        }
+    }
+
+    impl Drop for TrackCHandlerReleaseGuard {
+        fn drop(&mut self) {
+            let Some(probe) = self.probe.take() else {
+                return;
+            };
+            let mut report = probe.wait(std::time::Duration::from_secs(5));
+            report.attempts.sort_by_key(|kind| kind.token());
+            report.created.sort_by_key(|kind| kind.token());
+            report.released.sort_by_key(|kind| kind.token());
+            let exact_inventory = report.attempts == TRACK_C_EXPECTED_HANDLER_KINDS
+                && report.created == TRACK_C_EXPECTED_HANDLER_KINDS
+                && report.released == TRACK_C_EXPECTED_HANDLER_KINDS;
+            report.complete &= exact_inventory;
+            self.workspace
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .callbacks_released(&report);
+            let complete = report.complete && !report.overflowed;
+            let mut reports = self
+                .reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if reports.len() < TRACK_C_HANDLER_REPORT_CAPACITY {
+                reports.push(TrackCHandlerReport {
+                    attempts: report.attempts,
+                    created: report.created,
+                    released: report.released,
+                    overflowed: report.overflowed,
+                    complete,
+                });
+            } else {
+                self.report_overflow
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            assert!(
+                complete || std::thread::panicking(),
+                "all captured filesystem callback handlers release before fixture paths restore"
+            );
+        }
+    }
+
+    struct TrackCObservedApp {
+        app: Option<LauncherApp>,
+        release: Option<TrackCHandlerReleaseGuard>,
+    }
+
+    impl std::ops::Deref for TrackCObservedApp {
+        type Target = LauncherApp;
+
+        fn deref(&self) -> &Self::Target {
+            self.app.as_ref().expect("tracked launcher app is live")
+        }
+    }
+
+    impl std::ops::DerefMut for TrackCObservedApp {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.app.as_mut().expect("tracked launcher app is live")
+        }
+    }
+
+    impl Drop for TrackCObservedApp {
+        fn drop(&mut self) {
+            drop(self.app.take());
+            // Dropping the release guard waits only after LauncherApp has
+            // released its watchers/coordinator, before the fixture restores
+            // the workspace CWD and environment.
+            drop(self.release.take());
+        }
+    }
+
+    impl Drop for TrackCActionsFixture {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                return;
+            }
+            assert!(
+                !self
+                    .handler_report_overflow
+                    .load(std::sync::atomic::Ordering::Acquire),
+                "bounded per-fixture callback release reports did not overflow"
+            );
+            let reports = self
+                .handler_reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(reports.len() <= TRACK_C_HANDLER_REPORT_CAPACITY);
+        }
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1027,8 +1321,9 @@ mod tests {
         use crate::performance::track_c_workloads;
 
         assert!(total_count >= 4);
-        let workspace = track_c_workloads::TrackCWorkspace::new();
-        let owner_root = workspace.root().join("actions-owner");
+        let workspace = crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace::new();
+        let workspace_root = workspace.root().to_path_buf();
+        let owner_root = workspace_root.join("actions-owner");
         std::fs::create_dir_all(&owner_root).expect("create owned action fixture directory");
         let index_root = owner_root.join("indexed");
         let custom_len = total_count / 2;
@@ -1054,7 +1349,7 @@ mod tests {
         let mut expected_actions = replacement_custom.clone();
         expected_actions.extend(indexed_tail.iter().cloned());
         let actions_path = owner_root.join("actions.json");
-        let settings_path = workspace.settings_path();
+        let settings_path = workspace_root.join("settings.json");
         let canonical_index_root =
             std::fs::canonicalize(&index_root).expect("canonicalize owned index fixture root");
 
@@ -1084,7 +1379,11 @@ mod tests {
         let fixture_signature = fixture.finish();
 
         TrackCActionsFixture {
-            _workspace: workspace,
+            _workspace: std::sync::Arc::new(std::sync::Mutex::new(workspace)),
+            handler_reports: std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(
+                TRACK_C_HANDLER_REPORT_CAPACITY,
+            ))),
+            handler_report_overflow: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             index_root: canonical_index_root,
             actions_path,
             settings_path,
@@ -3414,6 +3713,10 @@ mod tests {
         settings.max_indexed_items = Some(fixture.indexed_tail.len());
         let mut initial_actions = fixture.initial_custom.clone();
         initial_actions.extend(fixture.indexed_tail.iter().cloned());
+        // Start callback tracking before LauncherApp constructs any path
+        // watchers. The guard is declared before `app`, so an unwind drops the
+        // app first and then performs the bounded release wait.
+        let release = TrackCHandlerReleaseGuard::begin(fixture);
         let mut app = LauncherApp::new(
             &context,
             Arc::new(initial_actions),
@@ -3462,7 +3765,10 @@ mod tests {
 
         (
             TrackCActionsOwnerState {
-                app,
+                app: TrackCObservedApp {
+                    app: Some(app),
+                    release: Some(release),
+                },
                 expected_actions: fixture.expected_actions.clone(),
                 indexed_tail: fixture.indexed_tail.clone(),
                 index_root: fixture.index_root.clone(),

@@ -26,6 +26,7 @@ pub(crate) enum HandlerKind {
     GuiTodos,
     GuiNotes,
     ClipboardModify,
+    GuiActions,
 }
 
 impl HandlerKind {
@@ -54,6 +55,7 @@ impl HandlerKind {
             Self::GuiTodos => "gui_todos",
             Self::GuiNotes => "gui_notes",
             Self::ClipboardModify => "clipboard_modify",
+            Self::GuiActions => "gui_actions",
         }
     }
 }

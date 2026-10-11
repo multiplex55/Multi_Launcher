@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "checkpoint": "C3-C",
+  "status": "INDEPENDENT_FOUNDATION_SOURCE_CLEAR_FOR_EXACT8_ORDINARY",
+  "source_parent": "464bd5db2d876ac7e9da688d41b22bc398794647",
+  "source_commit": "UNCOMMITTED_SOURCE",
+  "source_sha256": {
+    "src/gui/watch.rs": "fac65a5b74683674800be686fa08897df4203ab35eb477053115df2769669d43",
+    "src/performance/track_c_watcher_lifecycle.rs": "aa68d6a657522053c8ae0bd67fd823ca00abf27a6bdfc063d7f71ed4eb4abd0c",
+    "src/gui/mod.rs": "ccd99736e30a1497b3c91aaa166acb76a33e2ec1c1171d28e3966abad2d5196f",
+    "src/gui/event_channel.rs": "57090a1a3014cfcb4d868616d3ec268f01fe41e4d270bfbbbc15d6c7c42415c1",
+    "src/gui/render.rs": "bdf593eb1261e6ed8606227fc43af280f712172718a3bc25dd677755bd7886c1",
+    "src/gui/state.rs": "81f140e7f93da5455138ab025eb6b217e47b4bab512f1254a4d16e4d766cf5a9"
+  },
+  "reviewer": "c0_boundary_review",
+  "scope": [
+    "Per-app callback probe and app-before-release teardown",
+    "Fail-closed exact four attempted/created/released inventories before restoration",
+    "GuiActions capture; historical C3A EXPECTED10 unchanged",
+    "Bounded per-app32/per-fixture32 receipts and unwind handling",
+    "Passive static33-variant32-capacity observer; ownership before TLS mutation",
+    "Original synthetic fixture bytes and timer/emitter/oracle paths preserved"
+  ],
+  "findings_resolved": [
+    "Previously untracked existing Actions watcher",
+    "Missing exact inventory could permit vacuous complete release",
+    "Inventory must invalidate report before workspace quiescence",
+    "Parent found observer install must claim ownership before TLS replacement"
+  ],
+  "c3a_qualification": "Actions file explicitly absent in accepted startup fixture; no retrospective Actions callback gap identified",
+  "ordinary_scope_count": 8,
+  "tests_executed_at_review": 0,
+  "benchmarks_executed": 0,
+  "pending": [
+    "Actual exact8 results",
+    "Three real-frame recipes and precise companion schema",
+    "Final source/method review and source/profile/fixture matched Small/Full evidence",
+    "Independent numerical/privacy/publication closure"
+  ],
+  "local_only": true
+}
