@@ -1,6 +1,6 @@
 # C2-D â€” exact cold list geometry gate
 
-Status: IN_PROGRESS, characterization only. Accepted base `43c90ca759b4c9ec3fd92747bd8f28c933805c80`; C2-C accepted runtime `da838c6d59cc5a4172c3a2471398a673dd0188f9`. Fourteen of29 checkpoints closed. LOCAL ONLY. The planner inspected the actual list owner and callers; one writer owns only new render.rs tests. Parent owns this plan/protocol/collector/evidence/Cargo/Git. No production layout/cache/storage/invalidation or extra observer change is authorized yet.
+Status: IN_PROGRESS, reviewed eager baseline; one bounded runtime candidate experiment approved after this evidence commit. Accepted base `43c90ca759b4c9ec3fd92747bd8f28c933805c80`; C2-C accepted runtime `da838c6d59cc5a4172c3a2471398a673dd0188f9`. Fourteen of29 checkpoints closed. LOCAL ONLY. The planner inspected the actual list owner and callers; one writer owns src/gui/render.rs for the bounded candidate. Parent owns this plan/protocol/collector/evidence/Cargo/Git. Parent GO authorizes only the Phase 2 experiment below; acceptance requires measured full-owner savings and exact semantics.
 
 ## Ownership and existing constraints
 
@@ -18,7 +18,7 @@ Every sample checks complete ordered Actions, six geometry vectors/total height/
 
 Use existing actual test observation for rebuild count/measured rows/cells/geometry time; geometry_ns=0 on warm control, not stale prior time. Capture environment/atlas change receipts and exact presentation-prefix length from independently constructed old/new fixture data outside clock. Partial logical geometry vector capacities may be reported explicitly; they are not allocator/RSS or total retained-memory measurements. No invented baseline comparison timing. Additional actual-site test observer requires identified missing metric and parent approval.
 
-## Phase 2 â€” conditional runtime candidate (not authorized)
+## Phase 2 â€” conditional runtime candidate (experiment GO; acceptance pending)
 
 Only after reviewed committed baseline, consider one bounded previous list presentation projection, exact ordered display prefix and cumulative geometry checkpoint. Require exact environment and retained atlas Arc. Recompute every affected suffix row and final extent; matching later text alone cannot prove geometry. Preserve result generation/widget IDs/popup cleanup for complete-Action replacement even when display matches. Display/mode/environment invalidation rejects or purges retained state, preserving accepted alias reload semantics. No cloned full Actions, multigeneration cache, grid algorithm or background galley measurement.
 
@@ -85,3 +85,64 @@ Collector correction retained in history: first Small collection rejected a widt
 Independent Small evidence disposition CLEAR for local harness commit and exact-source Full, not runtime acceptance. Reviewer compared raw log/JSON all180arrays3600entries/204scalars/24triplets and independently recomputed240semantic hashes with separate FNV implementation; all fixture/control/work/transition/privacy bindings PASS. Executed eager assertions cover geometry/viewport, not separate font-metric regeneration. Source remains one1191-line test-module addition, runtime and original helpers unchanged. C2-D remains IN_PROGRESS; Full36records720samples required before candidate decision. LOCAL ONLY.
 
 Independent Small evidence disposition CLEAR for local harness commit and exact-source Full, not runtime acceptance. Reviewer compared raw log/JSON all180arrays3600entries/204scalars/24triplets and independently recomputed240semantic hashes with separate FNV implementation; all fixture/control/work/transition/privacy bindings PASS. Executed eager assertions cover geometry/viewport, not separate font-metric regeneration. Source remains one1191-line test-module addition, runtime and original helpers unchanged. C2-D remains IN_PROGRESS; Full36records720samples required before candidate decision. LOCAL ONLY.
+
+Harness/Small source commit d57dab096711f32c7dc33cc874ebf2d940e6dd45 created locally after review and clean staged diff; original G0JSON SHA256 remains EE6C71106D08D46FCFAE06C1F7ACEEBD9E6131C4F27E54DF7AAC3106C5825599. Exact-source Full36records720samples dispatched as runca0b8d64-0cd9-4479-8ed1-2d1a57731e95, build0.87s; result pending. Source/HEAD remain frozen during execution. No runtime candidate authorized.
+
+## Conditional candidate handoff refinement — read-only, Full gate pending
+
+Planner refined one milestone on exact d57dab096711f32c7dc33cc874ebf2d940e6dd45 while Full runs; no source prototype or implementation authorized. RootListGeometryCache owns one previous successful list presentation/checkpoint and its actual geometry/environment/atlas validity. Keep warm exact-key/atlas return before all formatting/scans. Result invalidation preserves each existing generation increment and popup cleanup; repeated pre-frame invalidations retain at most one useful previously measured projection, never an empty/unmeasured replacement. Explicit display and list/grid mode invalidation purge/reject reuse, including conservative alias reload semantics.
+
+Cold ensure requires precise environment/atlas equality, compares complete ordered formatted text only until first mismatch, reuses the proven prefix and resumes original f32 spacing/y/width/x recurrence for every affected suffix. Result count/generation may change; args-only may have identical presentation but still requires new generation/widget IDs/popup handling. No cloned full Actions, multigeneration lookup, later matching-row reuse, grid algorithm change or force-eager behavior switch. Initial storage creation and all timed installation/invalidation/format/compare/storage/disposal costs count inside full owner. Actual galley count is suffix length; commit count stays distinct and can be1 with0 measured rows. Partial logical storage reporting includes old/new overlap, string lengths/capacities and geometry/checkpoint capacities, not allocator/RSS.
+
+Required stage migration: new candidate emitter/collector/ordinary work expectations; all baseline artifacts/collector remain immutable. C2-D cold N assertions intentionally become N-prefix only for eligible replacements, otherwise N. C2-C track_c2c_validate_owner changed-provider recipe changes args only: candidate may reuse every presentation row while preserving full Action/provider/generation/eager assertions; its historical N+1 measurement expectation must migrate explicitly, never silently relabel historical timing. Original C0 display-invalidation fixture still requires N and original C0/C2-A eager oracle bodies remain unchanged. Focus candidate tests on exact existing recipes plus bounded empty/single/stress/selection/click/navigation/popup/repeated-invalidation behavior and one existing grid eager smoke for shared storage. Candidate scope/GO awaits independently reviewed Full baseline and explicit parent decision.
+
+## Exact-source Full eager baseline — independently CLEAR
+
+Source d57dab096711f32c7dc33cc874ebf2d940e6dd45; runca0b8d64-0cd9-4479-8ed1-2d1a57731e95; build0.87s/test1016.438s/Nextest execution1016.469s. 1/1 ownerPASS,36records720retained samples,5warmups/20samples/0exclusions per recipe. Full test wall time includes untimed fixture setup/eager validation; owner elapsed_ns includes only installation/environment mutation plus actual CPU frame. Strict collection and parent independent720semantic hashes/72nearest-rank triplets PASS. Small12-case non-timing overlaps all156arrays3120entries/180scalars match, excluding only elapsed_ns/geometry_ns/statistics/source/mode. Independent review CLEAR: 540 arrays/10800 entries,612 scalars,72 timing triplets and720 separately recomputed semantic hashes; Small overlaps match exactly. No runtime optimization acceptance.
+
+Full owner and geometry p50/p95/max below are milliseconds. All adverse first-open/environment/tail cases retained.
+
+| N | Case | Full owner | Geometry | Prefix | Painted |
+|---|---|---|---|---|---|
+| 100 | fresh_context_first_open | 15.0359/21.3780/22.6060 | 5.8329/8.1726/8.3729 | 0 | 26 |
+| 100 | shared_prefix_5_percent | 6.9356/7.9522/8.4348 | 5.8842/6.7016/7.1090 | 5 | 25 |
+| 100 | shared_prefix_20_percent | 6.0069/8.1545/8.2827 | 4.8884/6.6901/6.8674 | 20 | 26 |
+| 100 | identical_presentation_new_generation | 5.3144/7.5893/8.0235 | 4.1860/6.0984/6.4411 | 100 | 26 |
+| 100 | last_row_text_edit | 5.2871/7.3917/8.5755 | 4.1909/6.0954/6.9834 | 99 | 26 |
+| 100 | first_row_width_expansion_no_wrap | 5.2027/6.0846/6.3408 | 4.0430/4.7434/4.8284 | 0 | 29 |
+| 100 | full_paths_toggle | 5.3826/6.1948/6.3772 | 4.2117/4.8432/5.1554 | 0 | 26 |
+| 100 | wrap_change | 6.1489/6.8629/9.4290 | 4.9676/5.6571/7.7835 | 100 | 29 |
+| 100 | font_atlas_replacement | 13.7910/18.1080/18.9938 | 5.4571/8.2472/8.3906 | 100 | 26 |
+| 100 | pixels_per_point_change | 14.3893/17.4319/18.9928 | 5.5404/6.6376/7.0972 | 100 | 21 |
+| 100 | viewport_width_change | 6.3110/7.6116/8.0185 | 5.3231/6.4386/6.7132 | 100 | 24 |
+| 100 | warm_repeat | 1.0446/1.2410/1.2816 | 0.0000/0.0000/0.0000 | 100 | 26 |
+| 1000 | fresh_context_first_open | 65.8638/77.0927/92.7477 | 55.2815/61.9538/77.3898 | 0 | 26 |
+| 1000 | shared_prefix_5_percent | 61.7244/69.2664/69.4899 | 60.1979/67.8458/68.0328 | 50 | 26 |
+| 1000 | shared_prefix_20_percent | 60.1792/66.7475/72.9068 | 58.7584/65.3174/71.4041 | 200 | 26 |
+| 1000 | identical_presentation_new_generation | 53.7778/59.5942/62.9444 | 52.3175/58.2049/61.4420 | 1000 | 26 |
+| 1000 | last_row_text_edit | 53.6438/63.1035/64.3137 | 52.2891/61.5824/62.7767 | 999 | 26 |
+| 1000 | first_row_width_expansion_no_wrap | 49.3637/50.8247/53.7297 | 47.7269/49.2322/51.9948 | 0 | 29 |
+| 1000 | full_paths_toggle | 54.8761/58.6501/61.7303 | 53.8165/57.4987/60.6181 | 0 | 26 |
+| 1000 | wrap_change | 50.8487/58.7502/59.1593 | 49.5755/57.0168/57.8493 | 1000 | 29 |
+| 1000 | font_atlas_replacement | 61.8384/68.6881/79.2295 | 53.4295/60.7604/68.2087 | 1000 | 26 |
+| 1000 | pixels_per_point_change | 62.2897/70.4497/86.0640 | 53.4124/58.5900/71.1502 | 1000 | 21 |
+| 1000 | viewport_width_change | 54.0588/60.5037/65.2137 | 52.8890/59.3536/64.0094 | 1000 | 24 |
+| 1000 | warm_repeat | 1.0027/1.3132/1.3140 | 0.0000/0.0000/0.0000 | 1000 | 26 |
+| 10000 | fresh_context_first_open | 604.8952/729.1262/820.5416 | 561.7572/683.1177/732.0431 | 0 | 26 |
+| 10000 | shared_prefix_5_percent | 628.1134/651.4424/765.8397 | 623.5481/646.8816/760.4302 | 500 | 26 |
+| 10000 | shared_prefix_20_percent | 621.6263/677.3523/704.4039 | 617.0762/671.9601/699.7216 | 2000 | 26 |
+| 10000 | identical_presentation_new_generation | 551.6320/598.8862/616.5687 | 547.2865/594.4309/611.8311 | 10000 | 26 |
+| 10000 | last_row_text_edit | 557.1789/598.7135/619.2397 | 552.7768/594.2242/614.7955 | 9999 | 26 |
+| 10000 | first_row_width_expansion_no_wrap | 499.4731/573.6285/579.9358 | 494.6728/569.1347/574.8740 | 0 | 29 |
+| 10000 | full_paths_toggle | 561.3349/609.7567/621.3020 | 560.2186/608.3862/620.1280 | 0 | 26 |
+| 10000 | wrap_change | 498.9457/518.8426/530.3989 | 497.7993/517.6845/529.2479 | 10000 | 29 |
+| 10000 | font_atlas_replacement | 558.9813/600.6273/718.2097 | 550.5030/592.3912/666.5011 | 10000 | 26 |
+| 10000 | pixels_per_point_change | 560.0683/576.9729/583.1194 | 550.9472/568.3305/573.9492 | 10000 | 21 |
+| 10000 | viewport_width_change | 551.8365/617.4324/630.6484 | 550.7143/616.2937/629.0716 | 10000 | 24 |
+| 10000 | warm_repeat | 1.0519/1.5997/1.7189 | 0.0000/0.0000/0.0000 | 10000 | 26 |
+
+Every cold sample rebuilds1/measuresN list rows/0gridcells; warm0/0/0 with geometry_ns0. Actual all24transition fields and complete Action/presentation/state bindings pass; first-open before capacity0, every settled before and every after capacity24*N bytes (2400/24000/240000), six geometry f32 vectors only. Environment-only recipes may have full presentation prefix but cannot reuse geometry across changed key/atlas. Source-confirmed composite ppp transition and actual effective widths remain explicit. No independent font-metric regeneration, production overlap frequency, application-wide speedup, native composition or allocator/RSS claim.
+
+## Parent experiment decision
+
+Independent reviewer and parent GO for ONE bounded previous-presentation/prefix-checkpoint candidate after this evidence commit. Actual 10k prefixes500/2000 and dominant geometry costs justify measuring the hypothesis. The refined packet above is adopted with exact environment/atlas matching, unchanged warm early return, complete f32 recurrence and generation/popup behavior. Candidate formatting/comparison/initial storage/disposal and old/new logical overlap must be measured inside the full owner. Baseline source d57dab096711f32c7dc33cc874ebf2d940e6dd45, collector and evidence stay immutable. Use distinct candidate protocol; migrate affected C2-C args-only work assertions explicitly. KEEP requires exact eager geometry/state/interaction parity, lower full-owner cold p95 for 5–20% prefixes, no material warm regression and bounded disclosed retention. Otherwise retain evidence and close as measured SKIP. All Cargo terminal;14/29 closed, C2-D still IN_PROGRESS. LOCAL ONLY.
