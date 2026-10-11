@@ -337,6 +337,8 @@ pub struct PluginManager {
     runtime_enablement: Option<Option<HashSet<String>>>,
     next_plugin_epoch: u64,
     deferred_dynamic_reloads: Vec<(PathBuf, Weak<PluginSlot>)>,
+    #[cfg(test)]
+    inert_for_test: bool,
 }
 
 /// Immutable provider ownership captured for a bounded radial resolution
@@ -565,7 +567,14 @@ impl PluginManager {
                 .expect("open isolated test mkmacro store")
                 .0,
         );
-        Self::from_macro_store(store)
+        let mut manager = Self::from_macro_store(store);
+        manager.inert_for_test = true;
+        manager
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_inert_for_test(&self) -> bool {
+        self.inert_for_test
     }
 
     fn from_macro_store(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
@@ -586,6 +595,8 @@ impl PluginManager {
             },
             next_plugin_epoch: 0,
             deferred_dynamic_reloads: Vec::new(),
+            #[cfg(test)]
+            inert_for_test: false,
         }
     }
 
@@ -713,6 +724,8 @@ impl PluginManager {
             },
             next_plugin_epoch: 0,
             deferred_dynamic_reloads: Vec::new(),
+            #[cfg(test)]
+            inert_for_test: false,
         }
     }
 

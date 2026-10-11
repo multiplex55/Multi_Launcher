@@ -17,7 +17,16 @@ pub struct PluginEditor {
 impl PluginEditor {
     pub fn new(settings: &Settings) -> Self {
         let info = Self::gather_available(&settings.plugin_dirs.clone().unwrap_or_default());
+        Self::with_available(settings, info)
+    }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_manager_for_test(settings: &Settings, manager: &PluginManager) -> Self {
+        Self::with_available(settings, manager.plugin_infos())
+    }
+
+    fn with_available(settings: &Settings, mut info: Vec<(String, String, Vec<String>)>) -> Self {
+        info.sort_by_key(|plugin| plugin.0.to_lowercase());
         // If settings don't specify enabled plugins, enable all gathered ones by
         // default.
         let enabled_plugins = match &settings.enabled_plugins {
@@ -53,9 +62,7 @@ impl PluginEditor {
             &std::collections::HashMap::new(),
             Arc::new(Vec::new()),
         );
-        let mut infos = pm.plugin_infos();
-        infos.sort_by_key(|a| a.0.to_lowercase());
-        infos
+        pm.plugin_infos()
     }
 
     fn save_settings(&mut self, app: &mut LauncherApp) {

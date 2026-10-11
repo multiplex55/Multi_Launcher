@@ -2124,6 +2124,13 @@ impl LauncherApp {
             .internal_services()
             .workspace_catalog
             .attach(&multi_manager.workspaces);
+        #[cfg(test)]
+        let plugin_editor = if plugins.is_inert_for_test() {
+            PluginEditor::new_with_manager_for_test(&settings, &plugins)
+        } else {
+            PluginEditor::new(&settings)
+        };
+        #[cfg(not(test))]
         let plugin_editor = PluginEditor::new(&settings);
         let actions_by_id = actions
             .iter()

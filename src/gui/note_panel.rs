@@ -44,6 +44,197 @@ const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const HEAVY_RECOMPUTE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
 
+// C1-A attribution is compiled only into test builds and is active only while
+// a test owns a `NoteRefreshObservationScope`. It intentionally does not feed
+// the existing Track C collector or alter the C0 result schema.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum NoteRefreshStringClass {
+    Needles = 0,
+    FencedContent = 1,
+    Snippet = 2,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum NoteRefreshDurationKind {
+    Refresh,
+    Snapshot,
+    TodoLoad,
+    LabelMapBuild,
+    Pass(usize),
+    DerivedInstall,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NoteRefreshPassObservation {
+    calls: u64,
+    todo_visits: u64,
+    note_visits: u64,
+    elapsed_nanos: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct NoteRefreshObservation {
+    refresh_calls: u64,
+    successful_recomputes: u64,
+    failed_snapshots: u64,
+    snapshot_calls: u64,
+    snapshot_successes: u64,
+    todo_load_calls: u64,
+    label_map_visits: u64,
+    passes: [NoteRefreshPassObservation; 3],
+    fenced_content_calls: u64,
+    fenced_input_bytes: u64,
+    fenced_output_bytes: u64,
+    materialized_string_counts: [u64; 3],
+    materialized_string_len_bytes: [u64; 3],
+    materialized_string_capacity_bytes: [u64; 3],
+    refresh_elapsed_nanos: u64,
+    snapshot_elapsed_nanos: u64,
+    todo_load_elapsed_nanos: u64,
+    label_map_build_elapsed_nanos: u64,
+    derived_install_elapsed_nanos: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct NoteRefreshObserverHandle(std::rc::Rc<std::cell::RefCell<NoteRefreshObservation>>);
+
+#[cfg(test)]
+impl NoteRefreshObserverHandle {
+    fn current() -> Option<Self> {
+        NOTE_REFRESH_OBSERVER.with(|observer| observer.borrow().clone())
+    }
+
+    fn record(&self, update: impl FnOnce(&mut NoteRefreshObservation)) {
+        update(&mut self.0.borrow_mut());
+    }
+
+    fn record_materialized_string(&self, class: NoteRefreshStringClass, value: &String) {
+        self.record(|observation| {
+            let index = class as usize;
+            observation.materialized_string_counts[index] =
+                observation.materialized_string_counts[index].saturating_add(1);
+            observation.materialized_string_len_bytes[index] =
+                observation.materialized_string_len_bytes[index].saturating_add(value.len() as u64);
+            observation.materialized_string_capacity_bytes[index] = observation
+                .materialized_string_capacity_bytes[index]
+                .saturating_add(value.capacity() as u64);
+        });
+    }
+
+    fn add_elapsed(&self, kind: NoteRefreshDurationKind, elapsed_nanos: u64) {
+        self.record(|observation| match kind {
+            NoteRefreshDurationKind::Refresh => {
+                observation.refresh_elapsed_nanos = observation
+                    .refresh_elapsed_nanos
+                    .saturating_add(elapsed_nanos);
+            }
+            NoteRefreshDurationKind::Snapshot => {
+                observation.snapshot_elapsed_nanos = observation
+                    .snapshot_elapsed_nanos
+                    .saturating_add(elapsed_nanos);
+            }
+            NoteRefreshDurationKind::TodoLoad => {
+                observation.todo_load_elapsed_nanos = observation
+                    .todo_load_elapsed_nanos
+                    .saturating_add(elapsed_nanos);
+            }
+            NoteRefreshDurationKind::LabelMapBuild => {
+                observation.label_map_build_elapsed_nanos = observation
+                    .label_map_build_elapsed_nanos
+                    .saturating_add(elapsed_nanos);
+            }
+            NoteRefreshDurationKind::Pass(index) => {
+                observation.passes[index].elapsed_nanos = observation.passes[index]
+                    .elapsed_nanos
+                    .saturating_add(elapsed_nanos);
+            }
+            NoteRefreshDurationKind::DerivedInstall => {
+                observation.derived_install_elapsed_nanos = observation
+                    .derived_install_elapsed_nanos
+                    .saturating_add(elapsed_nanos);
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+struct NoteRefreshObservationTimer {
+    observer: Option<NoteRefreshObserverHandle>,
+    kind: NoteRefreshDurationKind,
+    started: Option<Instant>,
+}
+
+#[cfg(test)]
+impl NoteRefreshObservationTimer {
+    fn start(observer: Option<NoteRefreshObserverHandle>, kind: NoteRefreshDurationKind) -> Self {
+        let started = observer.as_ref().map(|_| Instant::now());
+        Self {
+            observer,
+            kind,
+            started,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoteRefreshObservationTimer {
+    fn drop(&mut self) {
+        if let (Some(observer), Some(started)) = (&self.observer, self.started) {
+            observer.add_elapsed(
+                self.kind,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static NOTE_REFRESH_OBSERVER: std::cell::RefCell<Option<NoteRefreshObserverHandle>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+struct NoteRefreshObservationScope {
+    handle: NoteRefreshObserverHandle,
+    previous: Option<NoteRefreshObserverHandle>,
+}
+
+#[cfg(test)]
+impl NoteRefreshObservationScope {
+    fn new() -> Self {
+        let handle = NoteRefreshObserverHandle(std::rc::Rc::new(std::cell::RefCell::new(
+            NoteRefreshObservation::default(),
+        )));
+        let previous = NOTE_REFRESH_OBSERVER
+            .with(|observer| std::mem::replace(&mut *observer.borrow_mut(), Some(handle.clone())));
+        Self { handle, previous }
+    }
+
+    fn snapshot(&self) -> NoteRefreshObservation {
+        self.handle.0.borrow().clone()
+    }
+
+    fn reset(&self) {
+        *self.handle.0.borrow_mut() = NoteRefreshObservation::default();
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoteRefreshObservationScope {
+    fn drop(&mut self) {
+        NOTE_REFRESH_OBSERVER.with(|observer| {
+            *observer.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
 #[derive(Clone, Copy)]
 struct HeavyRefreshRetry {
     notes_revision: u64,
@@ -1223,6 +1414,22 @@ impl NotePanel {
     }
 
     fn refresh_heavy_derived(&mut self, force: bool, backlinks_enabled: bool) -> bool {
+        #[cfg(test)]
+        let refresh_observer = {
+            let observer = NoteRefreshObserverHandle::current();
+            if let Some(observer) = &observer {
+                observer.record(|observation| {
+                    observation.refresh_calls = observation.refresh_calls.saturating_add(1);
+                });
+            }
+            observer
+        };
+        #[cfg(test)]
+        let _refresh_observation_timer = NoteRefreshObservationTimer::start(
+            refresh_observer.clone(),
+            NoteRefreshDurationKind::Refresh,
+        );
+
         let current_notes_version = note_version();
         let current_todo_revision = todo_version();
         let settings_changed = self.last_backlinks_enabled != Some(backlinks_enabled);
@@ -1250,10 +1457,33 @@ impl NotePanel {
         );
 
         #[cfg(test)]
-        let snapshot = if std::mem::take(&mut self.fail_next_heavy_snapshot) {
-            Err(anyhow::anyhow!("injected note snapshot failure"))
-        } else {
-            note_cache_snapshot_with_version()
+        let snapshot = {
+            if let Some(observer) = &refresh_observer {
+                observer.record(|observation| {
+                    observation.snapshot_calls = observation.snapshot_calls.saturating_add(1);
+                });
+            }
+            let _snapshot_observation_timer = NoteRefreshObservationTimer::start(
+                refresh_observer.clone(),
+                NoteRefreshDurationKind::Snapshot,
+            );
+            let snapshot = if std::mem::take(&mut self.fail_next_heavy_snapshot) {
+                Err(anyhow::anyhow!("injected note snapshot failure"))
+            } else {
+                note_cache_snapshot_with_version()
+            };
+            if let Some(observer) = &refresh_observer {
+                observer.record(|observation| {
+                    if snapshot.is_ok() {
+                        observation.snapshot_successes =
+                            observation.snapshot_successes.saturating_add(1);
+                    } else {
+                        observation.failed_snapshots =
+                            observation.failed_snapshots.saturating_add(1);
+                    }
+                });
+            }
+            snapshot
         };
         #[cfg(not(test))]
         let snapshot = note_cache_snapshot_with_version();
@@ -1274,12 +1504,46 @@ impl NotePanel {
 
         let _recompute_timer =
             crate::performance::MetricTimer::start(crate::performance::Metric::NoteHeavyRecompute);
+        #[cfg(test)]
+        {
+            if let Some(observer) = &refresh_observer {
+                observer.record(|observation| {
+                    observation.todo_load_calls = observation.todo_load_calls.saturating_add(1);
+                });
+            }
+        }
+        #[cfg(test)]
+        let todo_load_observation_timer = NoteRefreshObservationTimer::start(
+            refresh_observer.clone(),
+            NoteRefreshDurationKind::TodoLoad,
+        );
         let todos = load_todos_or_last_good(TODO_FILE);
+        #[cfg(test)]
+        drop(todo_load_observation_timer);
+
+        #[cfg(test)]
+        let label_map_observation_timer = NoteRefreshObservationTimer::start(
+            refresh_observer.clone(),
+            NoteRefreshDurationKind::LabelMapBuild,
+        );
+        #[cfg(test)]
+        let label_map_observer = refresh_observer.clone();
         let todo_label_map = todos
             .iter()
-            .filter(|todo| !todo.id.is_empty())
+            .filter(|todo| {
+                #[cfg(test)]
+                if let Some(observer) = &label_map_observer {
+                    observer.record(|observation| {
+                        observation.label_map_visits =
+                            observation.label_map_visits.saturating_add(1);
+                    });
+                }
+                !todo.id.is_empty()
+            })
             .map(|todo| (todo.id.clone(), todo.text.clone()))
             .collect::<HashMap<_, _>>();
+        #[cfg(test)]
+        drop(label_map_observation_timer);
 
         let linked_todo_rows =
             backlink_rows_for_note(&self.note, BacklinkTab::LinkedTodos, &todos, &notes);
@@ -1293,6 +1557,11 @@ impl NotePanel {
         mentions_timer.set_work_units(todos.len().saturating_add(notes.len()));
         mentions_timer.finish(crate::performance::track_c::Outcome::Completed);
 
+        #[cfg(test)]
+        let derived_install_observation_timer = NoteRefreshObservationTimer::start(
+            refresh_observer.clone(),
+            NoteRefreshDurationKind::DerivedInstall,
+        );
         self.derived.todo_label_map = todo_label_map;
         self.derived.backlink_rows_linked_todos = linked_todo_rows;
         self.derived.backlink_rows_related_notes = related_note_rows;
@@ -1306,12 +1575,20 @@ impl NotePanel {
         self.last_backlinks_enabled = Some(true);
         self.heavy_recompute_requested = false;
         self.heavy_refresh_retry = None;
+        #[cfg(test)]
+        drop(derived_install_observation_timer);
         relationship_timer
             .set_work_units(todos.len().saturating_add(notes.len()).saturating_mul(3));
         relationship_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
             self.heavy_recompute_count += 1;
+            if let Some(observer) = &refresh_observer {
+                observer.record(|observation| {
+                    observation.successful_recomputes =
+                        observation.successful_recomputes.saturating_add(1);
+                });
+            }
         }
         true
     }
@@ -4438,26 +4715,59 @@ pub fn extract_links(content: &str) -> Vec<(String, String)> {
 
 fn extract_snippet_around(content: &str, needle: &str) -> String {
     const WINDOW: usize = 44;
+    #[cfg(test)]
+    let observer = NoteRefreshObserverHandle::current();
     let compact = content.replace('\n', " ");
+    #[cfg(test)]
+    if let Some(observer) = &observer {
+        observer.record_materialized_string(NoteRefreshStringClass::Snippet, &compact);
+    }
     if compact.is_empty() {
-        return String::new();
+        let output = String::new();
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.record_materialized_string(NoteRefreshStringClass::Snippet, &output);
+        }
+        return output;
     }
     let lower = compact.to_lowercase();
+    #[cfg(test)]
+    if let Some(observer) = &observer {
+        observer.record_materialized_string(NoteRefreshStringClass::Snippet, &lower);
+    }
     let needle_lower = needle.to_lowercase();
-    if let Some(pos) = lower.find(&needle_lower) {
+    #[cfg(test)]
+    if let Some(observer) = &observer {
+        observer.record_materialized_string(NoteRefreshStringClass::Snippet, &needle_lower);
+    }
+    let output = if let Some(pos) = lower.find(&needle_lower) {
         let start = pos.saturating_sub(WINDOW);
         let end = (pos + needle_lower.len() + WINDOW).min(compact.len());
         let mut out = compact[start..end].trim().to_string();
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.record_materialized_string(NoteRefreshStringClass::Snippet, &out);
+        }
         if start > 0 {
             out = format!("…{out}");
+            #[cfg(test)]
+            if let Some(observer) = &observer {
+                observer.record_materialized_string(NoteRefreshStringClass::Snippet, &out);
+            }
         }
         if end < compact.len() {
             out.push('…');
         }
         out
     } else {
-        compact.chars().take(90).collect()
-    }
+        let output = compact.chars().take(90).collect::<String>();
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.record_materialized_string(NoteRefreshStringClass::Snippet, &output);
+        }
+        output
+    };
+    output
 }
 
 fn format_note_editor_timestamp<Tz>(timestamp: DateTime<Tz>) -> String
@@ -4497,6 +4807,8 @@ fn note_display_with_secondary(note: &Note) -> String {
 }
 
 fn content_without_fenced_code(content: &str) -> String {
+    #[cfg(test)]
+    let observer = NoteRefreshObserverHandle::current();
     let mut out = String::new();
     let mut in_code = false;
     for line in content.lines() {
@@ -4510,10 +4822,25 @@ fn content_without_fenced_code(content: &str) -> String {
         }
         out.push('\n');
     }
+    #[cfg(test)]
+    if let Some(observer) = &observer {
+        observer.record(|observation| {
+            observation.fenced_content_calls = observation.fenced_content_calls.saturating_add(1);
+            observation.fenced_input_bytes = observation
+                .fenced_input_bytes
+                .saturating_add(content.len() as u64);
+            observation.fenced_output_bytes = observation
+                .fenced_output_bytes
+                .saturating_add(out.len() as u64);
+        });
+        observer.record_materialized_string(NoteRefreshStringClass::FencedContent, &out);
+    }
     out
 }
 
 fn note_reference_needles(current: &Note) -> Vec<(String, String)> {
+    #[cfg(test)]
+    let observer = NoteRefreshObserverHandle::current();
     let mut needles = vec![
         (format!("[[{}]]", current.title), "wiki title".to_string()),
         (format!("[[{}]]", current.slug), "wiki slug".to_string()),
@@ -4526,8 +4853,22 @@ fn note_reference_needles(current: &Note) -> Vec<(String, String)> {
             "note mention".to_string(),
         ),
     ];
+    #[cfg(test)]
+    if let Some(observer) = &observer {
+        for (needle, reason) in &needles {
+            observer.record_materialized_string(NoteRefreshStringClass::Needles, needle);
+            observer.record_materialized_string(NoteRefreshStringClass::Needles, reason);
+        }
+    }
     if let Some(alias) = current.alias.as_deref().filter(|a| !a.trim().is_empty()) {
-        needles.push((format!("[[{}]]", alias.trim()), "wiki alias".to_string()));
+        let alias_needle = format!("[[{}]]", alias.trim());
+        let alias_reason = "wiki alias".to_string();
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.record_materialized_string(NoteRefreshStringClass::Needles, &alias_needle);
+            observer.record_materialized_string(NoteRefreshStringClass::Needles, &alias_reason);
+        }
+        needles.push((alias_needle, alias_reason));
     }
     needles.sort();
     needles.dedup();
@@ -4540,12 +4881,42 @@ fn backlink_rows_for_note(
     todos: &[crate::plugins::todo::TodoEntry],
     notes: &[Note],
 ) -> Vec<BacklinkRow> {
+    #[cfg(test)]
+    let observer = NoteRefreshObserverHandle::current();
+    #[cfg(test)]
+    let pass_index = match tab {
+        BacklinkTab::LinkedTodos => 0,
+        BacklinkTab::RelatedNotes => 1,
+        BacklinkTab::Mentions => 2,
+    };
+    #[cfg(test)]
+    {
+        if let Some(observer) = &observer {
+            observer.record(|observation| {
+                observation.passes[pass_index].calls =
+                    observation.passes[pass_index].calls.saturating_add(1);
+            });
+        }
+    }
+    #[cfg(test)]
+    let _pass_observation_timer = NoteRefreshObservationTimer::start(
+        observer.clone(),
+        NoteRefreshDurationKind::Pass(pass_index),
+    );
+
     let mut rows = Vec::new();
     let current_slug = current_note.slug.as_str();
     let needles = note_reference_needles(current_note);
     let current_searchable = content_without_fenced_code(&current_note.content);
 
     for todo in todos {
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.record(|observation| {
+                observation.passes[pass_index].todo_visits =
+                    observation.passes[pass_index].todo_visits.saturating_add(1);
+            });
+        }
         let matched = todo
             .entity_refs
             .iter()
@@ -4591,6 +4962,13 @@ fn backlink_rows_for_note(
     }
 
     for note in notes {
+        #[cfg(test)]
+        if let Some(observer) = &observer {
+            observer.record(|observation| {
+                observation.passes[pass_index].note_visits =
+                    observation.passes[pass_index].note_visits.saturating_add(1);
+            });
+        }
         if note.slug == current_slug {
             continue;
         }
@@ -4957,6 +5335,937 @@ mod tests {
         expected_labels: HashMap<String, String>,
         expected_note_revision: u64,
         expected_todo_revision: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC1ANoteTransition {
+        LocalDraft,
+        ExternalNoteRevision,
+        PersistedTodoRevision,
+    }
+
+    impl TrackC1ANoteTransition {
+        fn report_label(self) -> &'static str {
+            match self {
+                Self::LocalDraft => "local-draft-debounce",
+                Self::ExternalNoteRevision => "external-note-revision",
+                Self::PersistedTodoRevision => "persisted-todo-revision",
+            }
+        }
+
+        fn cold_type(self) -> &'static str {
+            match self {
+                Self::LocalDraft => "debounce-due-refresh",
+                Self::ExternalNoteRevision => "external-note-revision-bypass",
+                Self::PersistedTodoRevision => "todo-revision-bypass",
+            }
+        }
+    }
+
+    struct TrackC1ATodoSnapshotGuard {
+        path: String,
+        original: Vec<crate::plugins::todo::TodoEntry>,
+    }
+
+    impl TrackC1ATodoSnapshotGuard {
+        fn publish(path: &str, replacement: &[crate::plugins::todo::TodoEntry]) -> Self {
+            let original = crate::plugins::todo::TODO_DATA
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            crate::plugins::todo::replace_todos(path, replacement.to_vec())
+                .expect("publish synthetic TODO state in the owned workspace");
+            Self {
+                path: path.to_string(),
+                original,
+            }
+        }
+    }
+
+    impl Drop for TrackC1ATodoSnapshotGuard {
+        fn drop(&mut self) {
+            let _ =
+                crate::plugins::todo::replace_todos(&self.path, std::mem::take(&mut self.original));
+        }
+    }
+
+    struct TrackC1ANoteUiOwnerState {
+        // Remove observation before dropping owners; app, panel, caches, and
+        // their paths are torn down before the owned CWD is restored.
+        _observer_scope: NoteRefreshObservationScope,
+        panel: NotePanel,
+        app: LauncherApp,
+        _note_cache_guard: crate::plugins::note::NoteCachePublicationGuard,
+        _todo_snapshot_guard: TrackC1ATodoSnapshotGuard,
+        context: egui::Context,
+        expected_notes: Vec<Note>,
+        expected_todos: Vec<crate::plugins::todo::TodoEntry>,
+        expected_rows: Vec<Vec<TrackCBacklinkRowIdentity>>,
+        expected_labels: HashMap<String, String>,
+        expected_note_revision: u64,
+        expected_todo_revision: u64,
+        initial_rows: Vec<Vec<TrackCBacklinkRowIdentity>>,
+        original_content: String,
+        draft_content: String,
+        transition: TrackC1ANoteTransition,
+        fixture_signature: u64,
+        item_count: usize,
+        _workspace: crate::performance::track_c_workloads::TrackCWorkspace,
+        _notes_env_guard: MutexGuard<'static, ()>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TrackC1ANoteSampleDetails {
+        observation: NoteRefreshObservation,
+        snapshot_metric: crate::performance::MetricSnapshot,
+    }
+
+    impl TrackC1ANoteUiOwnerState {
+        fn new(item_count: usize, transition: TrackC1ANoteTransition) -> Self {
+            use crate::performance::track_c_workloads::TrackCWorkspace;
+
+            // Match the existing test lock order: TrackCWorkspace owns the
+            // workload/CWD lock, then the note-environment lock serializes
+            // TempNotesDir users while the app and workspace are alive.
+            let workspace = TrackCWorkspace::new();
+            let notes_env_guard = NOTES_ENV_LOCK.lock().expect("notes env lock");
+            let (fixture, original_todos) = track_c_note_inputs(item_count);
+            let mut signature_notes = fixture.values.clone();
+            let mut signature_todos = original_todos.clone();
+
+            if transition == TrackC1ANoteTransition::ExternalNoteRevision {
+                write_track_c_note_files(&workspace, &fixture.values);
+            }
+
+            let context = egui::Context::default();
+            let mut app = track_c1a_make_inert_app(&context, &workspace);
+
+            // Finish app construction before publishing the owner fixture.
+            // The explicit inert manager prevents PluginEditor metadata
+            // discovery from registering default plugins and refreshing the
+            // global note cache; publish the controlled stores last so the
+            // panel and eager oracle observe the same inputs.
+            let note_cache_guard =
+                crate::plugins::note::publish_note_cache_for_test(fixture.values.clone());
+            let todo_snapshot_guard =
+                TrackC1ATodoSnapshotGuard::publish(TODO_FILE, &original_todos);
+
+            if transition == TrackC1ANoteTransition::ExternalNoteRevision {
+                crate::plugins::note::refresh_cache()
+                    .expect("load the owned initial Markdown fixture");
+            }
+
+            let (initial_note_revision, initial_notes) =
+                crate::plugins::note::note_cache_snapshot_with_version()
+                    .expect("initial synthetic note cache snapshot is healthy");
+            let current = initial_notes
+                .iter()
+                .find(|note| note.slug == "synthetic-note-00000")
+                .expect("fixture contains the current note")
+                .clone();
+
+            let mut panel = NotePanel::from_note(current);
+            let (panel_note_revision, panel_notes) =
+                crate::plugins::note::note_cache_snapshot_with_version()
+                    .expect("panel initialization leaves the controlled note cache available");
+            assert_eq!(panel_note_revision, initial_note_revision);
+            assert_eq!(panel_notes, initial_notes);
+            let saved_original_content = panel.note.content.clone();
+            let baseline_rows = track_c1a_rows_for(&panel.note, &original_todos, &initial_notes);
+            let baseline_labels = track_c1a_labels_for(&original_todos);
+            assert_eq!(
+                track_c1a_panel_rows(&panel),
+                baseline_rows,
+                "initial actual panel rows match the frozen eager reference"
+            );
+            assert_eq!(panel.derived.todo_label_map, baseline_labels);
+            assert_eq!(panel.last_notes_version, initial_note_revision);
+            assert_eq!(panel.last_todo_revision, todo_version());
+
+            // Settle the real dialog caller before arming the observer or
+            // editing. The retained FullOutput is dropped outside any sample.
+            let baseline_output = track_c1a_run_frame(&context, &mut panel, &mut app, 9.0);
+            drop(baseline_output);
+            let initial_rows = track_c1a_panel_rows(&panel);
+
+            let observer_scope = NoteRefreshObservationScope::new();
+            let draft_content = format!(
+                "{}\n\nDraft-only relation @todo:todo-11",
+                saved_original_content
+            );
+            panel.replace_content_from_mutation(draft_content.clone(), 10.0);
+            let predeadline_output = track_c1a_run_frame(&context, &mut panel, &mut app, 10.1);
+            drop(predeadline_output);
+            let predeadline_observation = observer_scope.snapshot();
+            assert_eq!(
+                predeadline_observation,
+                NoteRefreshObservation::default(),
+                "the pre-deadline actual UI frame does no heavy refresh work"
+            );
+            assert_eq!(track_c1a_panel_rows(&panel), initial_rows);
+            assert_eq!(panel.derived.todo_label_map, baseline_labels);
+            assert_eq!(panel.last_notes_version, initial_note_revision);
+            assert_eq!(panel.last_todo_revision, todo_version());
+            assert_eq!(panel.saved_content_baseline, saved_original_content);
+            assert_eq!(panel.note.content, draft_content);
+            assert!(panel.heavy_recompute_requested);
+
+            let mut expected_notes = initial_notes;
+            let mut expected_todos = original_todos.clone();
+            match transition {
+                TrackC1ANoteTransition::LocalDraft => {}
+                TrackC1ANoteTransition::ExternalNoteRevision => {
+                    let changed = &mut signature_notes[1];
+                    let replacement =
+                        track_c1a_external_revision_content(&changed.slug, &changed.content);
+                    changed.title = replacement
+                        .lines()
+                        .next()
+                        .and_then(|line| line.strip_prefix("# "))
+                        .expect("external fixture retains a Markdown title")
+                        .to_string();
+                    changed.content = replacement.clone();
+                    let path = workspace.notes_dir().join(format!("{}.md", changed.slug));
+                    std::fs::write(path, replacement)
+                        .expect("persist one external note edit in the owned workspace");
+                    crate::plugins::note::refresh_cache()
+                        .expect("publish the externally changed owned note files");
+                    let (revision, notes) =
+                        crate::plugins::note::note_cache_snapshot_with_version()
+                            .expect("refreshed synthetic note cache snapshot is healthy");
+                    assert_ne!(revision, initial_note_revision);
+                    expected_notes = notes;
+                }
+                TrackC1ANoteTransition::PersistedTodoRevision => {
+                    signature_todos[0].text =
+                        "Persisted TODO revision for @note:synthetic-note-00000".into();
+                    signature_todos[0].tags.push("persisted-revision".into());
+                    expected_todos =
+                        crate::plugins::todo::replace_todos(TODO_FILE, signature_todos.clone())
+                            .expect("publish a changed TODO snapshot in the owned workspace");
+                }
+            }
+
+            let (expected_note_revision, published_notes) =
+                crate::plugins::note::note_cache_snapshot_with_version()
+                    .expect("expected synthetic note snapshot is healthy");
+            if transition != TrackC1ANoteTransition::ExternalNoteRevision {
+                expected_notes = published_notes;
+            }
+            let expected_todo_revision = todo_version();
+            assert_eq!(
+                expected_notes.len(),
+                item_count,
+                "each scenario keeps the complete synthetic note catalog"
+            );
+            if transition != TrackC1ANoteTransition::PersistedTodoRevision {
+                expected_todos = original_todos;
+            }
+            let expected_rows = track_c1a_rows_for(&panel.note, &expected_todos, &expected_notes);
+            let expected_labels = track_c1a_labels_for(&expected_todos);
+            assert_ne!(
+                expected_rows, initial_rows,
+                "each transition must change the actual derived output"
+            );
+
+            let fixture_signature = track_c1a_scenario_identity(
+                &signature_notes,
+                &signature_todos,
+                transition,
+                &draft_content,
+            );
+            observer_scope.reset();
+            crate::performance::track_c::reset();
+            crate::performance::reset_metrics();
+
+            Self {
+                _observer_scope: observer_scope,
+                panel,
+                app,
+                _note_cache_guard: note_cache_guard,
+                _todo_snapshot_guard: todo_snapshot_guard,
+                context,
+                expected_notes,
+                expected_todos,
+                expected_rows,
+                expected_labels,
+                expected_note_revision,
+                expected_todo_revision,
+                initial_rows,
+                original_content: saved_original_content,
+                draft_content,
+                transition,
+                fixture_signature,
+                item_count,
+                _workspace: workspace,
+                _notes_env_guard: notes_env_guard,
+            }
+        }
+
+        fn owner_time(&self) -> f64 {
+            match self.transition {
+                TrackC1ANoteTransition::LocalDraft => 10.26,
+                TrackC1ANoteTransition::ExternalNoteRevision
+                | TrackC1ANoteTransition::PersistedTodoRevision => 10.2,
+            }
+        }
+    }
+
+    fn track_c1a_make_inert_app(
+        context: &egui::Context,
+        workspace: &crate::performance::track_c_workloads::TrackCWorkspace,
+    ) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(HashSet::new());
+        settings.enabled_capabilities = Some(HashMap::new());
+        settings.plugin_dirs = Some(Vec::new());
+        settings.index_paths = Some(Vec::new());
+        settings.note.backlinks_enabled = true;
+        settings.note.collapsed_sections_persist = false;
+
+        let mut app = LauncherApp::new(
+            context,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            workspace.actions_path().to_string_lossy().into_owned(),
+            workspace.settings_path().to_string_lossy().into_owned(),
+            settings,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some(HashSet::new()),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.watchers.clear();
+        while app.rx.try_recv().is_ok() {}
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.usage.clear();
+        app.enable_toasts = false;
+        app.show_inline_errors = false;
+        app.show_error_toasts = false;
+        app.dashboard_enabled = false;
+        app.note_settings.backlinks_enabled = true;
+        app.note_settings.collapsed_sections_persist = false;
+        app
+    }
+
+    fn write_track_c_note_files(
+        workspace: &crate::performance::track_c_workloads::TrackCWorkspace,
+        notes: &[Note],
+    ) {
+        let notes_dir = workspace.notes_dir();
+        std::fs::create_dir_all(&notes_dir).expect("owned note directory exists");
+        for note in notes {
+            std::fs::write(notes_dir.join(format!("{}.md", note.slug)), &note.content)
+                .expect("write synthetic note document");
+        }
+    }
+
+    fn track_c1a_external_revision_content(slug: &str, content: &str) -> String {
+        format!("# External revision {slug}\n{content}")
+    }
+
+    fn track_c1a_rows_for(
+        current: &Note,
+        todos: &[crate::plugins::todo::TodoEntry],
+        notes: &[Note],
+    ) -> Vec<Vec<TrackCBacklinkRowIdentity>> {
+        [
+            BacklinkTab::LinkedTodos,
+            BacklinkTab::RelatedNotes,
+            BacklinkTab::Mentions,
+        ]
+        .into_iter()
+        .map(|tab| backlink_rows_signature(&track_c_eager_note_rows(current, tab, todos, notes)))
+        .collect()
+    }
+
+    fn track_c1a_panel_rows(panel: &NotePanel) -> Vec<Vec<TrackCBacklinkRowIdentity>> {
+        [
+            &panel.derived.backlink_rows_linked_todos,
+            &panel.derived.backlink_rows_related_notes,
+            &panel.derived.backlink_rows_mentions,
+        ]
+        .into_iter()
+        .map(|rows| backlink_rows_signature(rows))
+        .collect()
+    }
+
+    fn track_c1a_labels_for(todos: &[crate::plugins::todo::TodoEntry]) -> HashMap<String, String> {
+        todos
+            .iter()
+            .filter(|todo| !todo.id.is_empty())
+            .map(|todo| (todo.id.clone(), todo.text.clone()))
+            .collect()
+    }
+
+    fn track_c1a_run_frame(
+        context: &egui::Context,
+        panel: &mut NotePanel,
+        app: &mut LauncherApp,
+        time: f64,
+    ) -> egui::FullOutput {
+        context.run(
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            |context| panel.ui(context, app),
+        )
+    }
+
+    fn track_c1a_scenario_identity(
+        notes: &[Note],
+        todos: &[crate::plugins::todo::TodoEntry],
+        transition: TrackC1ANoteTransition,
+        draft_content: &str,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_3141_4E4F_5445,
+            "track-c-c1a-note-refresh-input",
+            notes.len().saturating_add(todos.len()),
+        );
+        signature.number(track_c_note_and_todo_fixture_identity(notes, todos));
+        signature.number(transition.report_label().len() as u64);
+        signature.bytes(transition.report_label().as_bytes());
+        signature.number(draft_content.len() as u64);
+        signature.bytes(draft_content.as_bytes());
+        signature.finish()
+    }
+
+    fn track_c1a_validate_owner(
+        state: &mut TrackC1ANoteUiOwnerState,
+        output: &egui::FullOutput,
+    ) -> (
+        crate::performance::track_c_workloads::OwnerObservation,
+        TrackC1ANoteSampleDetails,
+    ) {
+        use crate::performance::{Metric, track_c};
+
+        // Retaining the complete egui output until after these assertions
+        // keeps its destruction and all expected-output work outside timing.
+        let _output_pixels_per_point = output.pixels_per_point;
+        assert_eq!(state.expected_notes.len(), state.item_count);
+        assert_eq!(
+            track_c1a_panel_rows(&state.panel),
+            state.expected_rows,
+            "every row field, category, and order matches the frozen eager oracle"
+        );
+        assert_eq!(state.panel.derived.todo_label_map, state.expected_labels);
+        assert_eq!(state.panel.last_notes_version, state.expected_note_revision);
+        assert_eq!(state.panel.last_todo_revision, state.expected_todo_revision);
+        assert_eq!(
+            crate::plugins::note::note_version(),
+            state.expected_note_revision
+        );
+        assert_eq!(todo_version(), state.expected_todo_revision);
+        assert_eq!(state.panel.last_backlinks_enabled, Some(true));
+        assert_eq!(state.panel.note.content, state.draft_content);
+        assert_eq!(state.panel.saved_content_baseline, state.original_content);
+        assert!(!state.panel.heavy_recompute_requested);
+        assert!(state.panel.heavy_refresh_retry.is_none());
+
+        let observation = state._observer_scope.snapshot();
+        assert_eq!(observation.refresh_calls, 1);
+        assert_eq!(observation.successful_recomputes, 1);
+        assert_eq!(observation.failed_snapshots, 0);
+        assert_eq!(observation.snapshot_calls, 1);
+        assert_eq!(observation.snapshot_successes, 1);
+        assert_eq!(observation.todo_load_calls, 1);
+        assert_eq!(
+            observation.label_map_visits,
+            state.expected_todos.len() as u64
+        );
+        for pass in &observation.passes {
+            assert_eq!(pass.calls, 1);
+            assert_eq!(pass.todo_visits, state.expected_todos.len() as u64);
+            assert_eq!(pass.note_visits, state.expected_notes.len() as u64);
+        }
+        assert_eq!(
+            observation.fenced_content_calls,
+            state.expected_notes.len().saturating_mul(3) as u64
+        );
+
+        let structure =
+            track_c_backlink_rows_identity(&state.expected_rows, &state.expected_labels);
+        assert_ne!(state.expected_rows, state.initial_rows);
+        let mut complete = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_3141_4E4F_5554,
+            "track-c-c1a-note-complete-state",
+            8,
+        );
+        complete.number(structure);
+        complete.number(state.expected_note_revision);
+        complete.number(state.expected_todo_revision);
+        complete.number(state.original_content.len() as u64);
+        complete.bytes(state.original_content.as_bytes());
+        complete.number(state.draft_content.len() as u64);
+        complete.bytes(state.draft_content.as_bytes());
+        complete.number(state.panel.heavy_recompute_requested as u64);
+        complete.number((state.panel.last_backlinks_enabled == Some(true)) as u64);
+        let output_identity = complete.finish();
+
+        let snapshot_metric = crate::performance::snapshot_metrics()[Metric::NoteSnapshot as usize];
+        if crate::performance::enabled() {
+            assert_eq!(snapshot_metric.calls, 1);
+            // This historical metric records snapshot samples but does not
+            // record successful outcomes; observer.snapshot_successes above
+            // is the success receipt for this owner.
+            assert_eq!(snapshot_metric.completed, 0);
+        }
+        let note_relationship = track_c::snapshot()
+            .into_iter()
+            .find(|(phase, _)| *phase == track_c::Phase::NoteRelationshipRefresh)
+            .expect("note relationship phase is fixed-cardinality")
+            .1;
+        let note_mentions = track_c::snapshot()
+            .into_iter()
+            .find(|(phase, _)| *phase == track_c::Phase::NoteMentionsScan)
+            .expect("note mentions phase is fixed-cardinality")
+            .1;
+        if crate::performance::enabled() {
+            assert_eq!(note_relationship.calls, 1);
+            assert_eq!(note_mentions.calls, 1);
+            assert_eq!(
+                note_relationship.work_units,
+                note_mentions.work_units.saturating_mul(3)
+            );
+        }
+        let work_units = note_relationship.work_units;
+
+        let details = TrackC1ANoteSampleDetails {
+            observation,
+            snapshot_metric,
+        };
+        state._observer_scope.reset();
+        track_c::reset();
+        crate::performance::reset_metrics();
+        let idle_time = state.owner_time() + 0.01;
+        let idle_output =
+            track_c1a_run_frame(&state.context, &mut state.panel, &mut state.app, idle_time);
+        drop(idle_output);
+        assert_eq!(
+            state._observer_scope.snapshot(),
+            NoteRefreshObservation::default(),
+            "the next idle actual UI frame performs no heavy refresh work"
+        );
+        assert_eq!(
+            crate::performance::snapshot_metrics()[Metric::NoteSnapshot as usize].calls,
+            0,
+            "the idle frame takes no note snapshot"
+        );
+        let owner_observation = crate::performance::track_c_workloads::OwnerObservation {
+            output_identity,
+            structural_signature: structure,
+            revision_receipts: vec![state.expected_note_revision, state.expected_todo_revision],
+            viewport_receipt: None,
+            work_units,
+            work_counters: vec![
+                details.observation.refresh_calls,
+                details.observation.snapshot_calls,
+                details.observation.successful_recomputes,
+                details.observation.todo_load_calls,
+                details.observation.label_map_visits,
+                work_units,
+            ],
+        };
+        (owner_observation, details)
+    }
+
+    fn track_c1a_fixture_signature(item_count: usize, transition: TrackC1ANoteTransition) -> u64 {
+        let (fixture, todos) = track_c_note_inputs(item_count);
+        let mut signature_notes = fixture.values;
+        let mut signature_todos = todos;
+        match transition {
+            TrackC1ANoteTransition::LocalDraft => {}
+            TrackC1ANoteTransition::ExternalNoteRevision => {
+                let note = &mut signature_notes[1];
+                let revised = track_c1a_external_revision_content(&note.slug, &note.content);
+                note.title = revised
+                    .lines()
+                    .next()
+                    .and_then(|line| line.strip_prefix("# "))
+                    .expect("external fixture retains a Markdown title")
+                    .to_string();
+                note.content = revised;
+            }
+            TrackC1ANoteTransition::PersistedTodoRevision => {
+                signature_todos[0].text =
+                    "Persisted TODO revision for @note:synthetic-note-00000".into();
+                signature_todos[0].tags.push("persisted-revision".into());
+            }
+        }
+        let draft_content = format!(
+            "{}\n\nDraft-only relation @todo:todo-11",
+            signature_notes[0].content
+        );
+        track_c1a_scenario_identity(
+            &signature_notes,
+            &signature_todos,
+            transition,
+            &draft_content,
+        )
+    }
+
+    fn track_c1a_join_u64(values: impl IntoIterator<Item = u64>) -> String {
+        values
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn track_c1a_join_hex(values: impl IntoIterator<Item = u64>) -> String {
+        values
+            .into_iter()
+            .map(|value| format!("{value:016x}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn track_c1a_emit_samples(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        item_count: usize,
+        transition: TrackC1ANoteTransition,
+        fixture_signature: u64,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+        details: &[TrackC1ANoteSampleDetails],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert_eq!(details.len(), MEASURED_SAMPLES);
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        assert!(!source.bytes().any(|byte| byte.is_ascii_whitespace()));
+        assert!(!profile.bytes().any(|byte| byte.is_ascii_whitespace()));
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos)
+            .collect::<Vec<_>>();
+        let frame_p50 = crate::performance::track_c_workloads::nearest_rank(&elapsed, 50);
+        let frame_p95 = crate::performance::track_c_workloads::nearest_rank(&elapsed, 95);
+        let frame_max = elapsed.iter().copied().max().unwrap_or_default();
+        let mut line = format!(
+            "C1A_NOTE_RESULT schema=1 owner=egui_Context_run+NotePanel_ui source={source} profile={profile} mode={mode:?} telemetry_enabled={} observer_enabled=true fixture=synthetic_note_panel_refresh fixture_signature={fixture_signature:016x} transition={} count={item_count} todo_count=12 viewport=960x640 settings=backlinks_enabled_inert cold_type={} warmups={WARMUPS} samples={MEASURED_SAMPLES} exclusions=0 frame_timer=Context_run+NotePanel_ui attributed_owner=NotePanel_refresh_heavy_derived frame_elapsed_ns=[{}] frame_p50_ns={frame_p50} frame_p95_ns={frame_p95} frame_max_ns={frame_max} complete_output_state_ids=[{}] structural_output_ids=[{}] note_revisions=[{}] todo_revisions=[{}] work_units=[{}] work_counters=[{}]",
+            crate::performance::enabled(),
+            transition.report_label(),
+            transition.cold_type(),
+            track_c1a_join_u64(elapsed),
+            track_c1a_join_hex(samples.iter().map(|sample| sample.output_identity)),
+            track_c1a_join_hex(samples.iter().map(|sample| sample.structural_signature)),
+            track_c1a_join_u64(samples.iter().map(|sample| sample.revision_receipts[0])),
+            track_c1a_join_u64(samples.iter().map(|sample| sample.revision_receipts[1])),
+            track_c1a_join_u64(samples.iter().map(|sample| sample.work_units)),
+            samples
+                .iter()
+                .map(|sample| track_c1a_join_u64(sample.work_counters.iter().copied()))
+                .collect::<Vec<_>>()
+                .join(";"),
+        );
+        let append = |line: &mut String, name: &str, values: String| {
+            use std::fmt::Write as _;
+            write!(line, " {name}=[{values}]").expect("append numeric C1A field");
+        };
+        let observer_values = |select: fn(&NoteRefreshObservation) -> u64| {
+            track_c1a_join_u64(details.iter().map(|detail| select(&detail.observation)))
+        };
+        append(
+            &mut line,
+            "refresh_calls",
+            observer_values(|o| o.refresh_calls),
+        );
+        append(
+            &mut line,
+            "refresh_successes",
+            observer_values(|o| o.successful_recomputes),
+        );
+        append(
+            &mut line,
+            "failed_snapshots",
+            observer_values(|o| o.failed_snapshots),
+        );
+        append(
+            &mut line,
+            "snapshot_calls",
+            observer_values(|o| o.snapshot_calls),
+        );
+        append(
+            &mut line,
+            "snapshot_successes",
+            observer_values(|o| o.snapshot_successes),
+        );
+        append(
+            &mut line,
+            "todo_load_calls",
+            observer_values(|o| o.todo_load_calls),
+        );
+        append(
+            &mut line,
+            "label_map_visits",
+            observer_values(|o| o.label_map_visits),
+        );
+        append(
+            &mut line,
+            "fence_calls",
+            observer_values(|o| o.fenced_content_calls),
+        );
+        append(
+            &mut line,
+            "fence_input_bytes",
+            observer_values(|o| o.fenced_input_bytes),
+        );
+        append(
+            &mut line,
+            "fence_output_bytes",
+            observer_values(|o| o.fenced_output_bytes),
+        );
+        append(
+            &mut line,
+            "refresh_ns",
+            observer_values(|o| o.refresh_elapsed_nanos),
+        );
+        append(
+            &mut line,
+            "snapshot_ns",
+            observer_values(|o| o.snapshot_elapsed_nanos),
+        );
+        append(
+            &mut line,
+            "todo_load_ns",
+            observer_values(|o| o.todo_load_elapsed_nanos),
+        );
+        append(
+            &mut line,
+            "label_map_build_ns",
+            observer_values(|o| o.label_map_build_elapsed_nanos),
+        );
+        append(
+            &mut line,
+            "derived_install_ns",
+            observer_values(|o| o.derived_install_elapsed_nanos),
+        );
+        for pass_index in 0..3 {
+            append(
+                &mut line,
+                &format!("pass{pass_index}_calls"),
+                track_c1a_join_u64(
+                    details
+                        .iter()
+                        .map(|detail| detail.observation.passes[pass_index].calls),
+                ),
+            );
+            append(
+                &mut line,
+                &format!("pass{pass_index}_todo_visits"),
+                track_c1a_join_u64(
+                    details
+                        .iter()
+                        .map(|detail| detail.observation.passes[pass_index].todo_visits),
+                ),
+            );
+            append(
+                &mut line,
+                &format!("pass{pass_index}_note_visits"),
+                track_c1a_join_u64(
+                    details
+                        .iter()
+                        .map(|detail| detail.observation.passes[pass_index].note_visits),
+                ),
+            );
+            append(
+                &mut line,
+                &format!("pass{pass_index}_ns"),
+                track_c1a_join_u64(
+                    details
+                        .iter()
+                        .map(|detail| detail.observation.passes[pass_index].elapsed_nanos),
+                ),
+            );
+        }
+        for (index, name) in ["needles", "fenced", "snippet"].into_iter().enumerate() {
+            append(
+                &mut line,
+                &format!("string_{name}_count"),
+                track_c1a_join_u64(
+                    details
+                        .iter()
+                        .map(|d| d.observation.materialized_string_counts[index]),
+                ),
+            );
+            append(
+                &mut line,
+                &format!("string_{name}_len_bytes"),
+                track_c1a_join_u64(
+                    details
+                        .iter()
+                        .map(|d| d.observation.materialized_string_len_bytes[index]),
+                ),
+            );
+            append(
+                &mut line,
+                &format!("string_{name}_capacity_bytes"),
+                track_c1a_join_u64(
+                    details
+                        .iter()
+                        .map(|d| d.observation.materialized_string_capacity_bytes[index]),
+                ),
+            );
+        }
+        append(
+            &mut line,
+            "snapshot_metric_calls",
+            track_c1a_join_u64(details.iter().map(|d| d.snapshot_metric.calls)),
+        );
+        append(
+            &mut line,
+            "snapshot_metric_estimated_clone_bytes",
+            track_c1a_join_u64(details.iter().map(|d| d.snapshot_metric.work_units)),
+        );
+        append(
+            &mut line,
+            "snapshot_metric_elapsed_ns",
+            track_c1a_join_u64(
+                details
+                    .iter()
+                    .map(|d| d.snapshot_metric.elapsed_nanos_total),
+            ),
+        );
+        append(
+            &mut line,
+            "snapshot_metric_lock_wait_ns",
+            track_c1a_join_u64(
+                details
+                    .iter()
+                    .map(|d| d.snapshot_metric.lock_wait_nanos_total),
+            ),
+        );
+        append(
+            &mut line,
+            "snapshot_metric_completed",
+            track_c1a_join_u64(details.iter().map(|d| d.snapshot_metric.completed)),
+        );
+        append(
+            &mut line,
+            "snapshot_metric_errors",
+            track_c1a_join_u64(details.iter().map(|d| d.snapshot_metric.errors)),
+        );
+        append(
+            &mut line,
+            "snapshot_metric_abandoned",
+            track_c1a_join_u64(details.iter().map(|d| d.snapshot_metric.abandoned)),
+        );
+        println!("{line}");
+    }
+
+    #[test]
+    fn track_c_c1a_open_note_panel_refresh_matches_frozen_rows_and_actual_work() {
+        for transition in [
+            TrackC1ANoteTransition::LocalDraft,
+            TrackC1ANoteTransition::ExternalNoteRevision,
+            TrackC1ANoteTransition::PersistedTodoRevision,
+        ] {
+            let mut state = TrackC1ANoteUiOwnerState::new(100, transition);
+            let time = state.owner_time();
+            let output =
+                track_c1a_run_frame(&state.context, &mut state.panel, &mut state.app, time);
+            let (observation, details) = track_c1a_validate_owner(&mut state, &output);
+            drop(output);
+            assert_ne!(observation.output_identity, 0);
+            assert_ne!(observation.structural_signature, 0);
+            assert_eq!(details.observation.fenced_content_calls, 300);
+            assert_eq!(details.observation.passes[0].note_visits, 100);
+            assert_eq!(details.observation.passes[1].note_visits, 100);
+            assert_eq!(details.observation.passes[2].note_visits, 100);
+        }
+    }
+
+    #[test]
+    #[ignore = "opt-in C1-A note refresh attribution; synthetic owned workspace only"]
+    fn track_c_c1a_benchmark_open_note_panel_refresh_attribution() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, MEASURED_SAMPLES, WARMUPS, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let mut scenarios = mode
+            .note_sizes()
+            .iter()
+            .map(|count| (*count, TrackC1ANoteTransition::LocalDraft))
+            .collect::<Vec<_>>();
+        let persisted_count = if mode == BenchmarkMode::Small {
+            100
+        } else {
+            1_000
+        };
+        scenarios.extend([
+            (
+                persisted_count,
+                TrackC1ANoteTransition::ExternalNoteRevision,
+            ),
+            (
+                persisted_count,
+                TrackC1ANoteTransition::PersistedTodoRevision,
+            ),
+        ]);
+
+        for (item_count, transition) in scenarios {
+            let fixture_signature = track_c1a_fixture_signature(item_count, transition);
+            let validation_index = std::cell::Cell::new(0_usize);
+            let details = std::cell::RefCell::new(Vec::with_capacity(MEASURED_SAMPLES));
+            let samples = measure_owner(
+                || {
+                    let state = TrackC1ANoteUiOwnerState::new(item_count, transition);
+                    assert_eq!(state.fixture_signature, fixture_signature);
+                    state
+                },
+                |state| {
+                    let time = state.owner_time();
+                    track_c1a_run_frame(&state.context, &mut state.panel, &mut state.app, time)
+                },
+                |state, output| {
+                    let current_index = validation_index.get();
+                    validation_index.set(current_index + 1);
+                    let (observation, detail) = track_c1a_validate_owner(state, output);
+                    if current_index >= WARMUPS {
+                        details.borrow_mut().push(detail);
+                    }
+                    observation
+                },
+            );
+            let details = details.into_inner();
+            assert_eq!(validation_index.get(), WARMUPS + MEASURED_SAMPLES);
+            track_c1a_emit_samples(
+                mode,
+                item_count,
+                transition,
+                fixture_signature,
+                &samples,
+                &details,
+            );
+        }
     }
 
     fn track_c_note_inputs(
@@ -7876,6 +9185,7 @@ More text.
 
     #[test]
     fn link_menu_snapshot_failure_retains_populated_cache_until_recovery() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let notes_dir = TempNotesDir::new();
         notes_dir.write_note("current.md", "# Current\n\nCurrent body");
         notes_dir.write_note("before.md", "# Before\n\nBefore body");
@@ -9188,6 +10498,7 @@ Body with [[Other]]"
 
     #[test]
     fn unchanged_heavy_check_skips_note_snapshot_alias_hash_and_recompute() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
         let initial_recomputes = panel.heavy_recompute_count;
         let ctx = egui::Context::default();
@@ -9234,6 +10545,7 @@ Body with [[Other]]"
 
     #[test]
     fn todo_revision_change_bypasses_local_edit_debounce() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
         let initial_recomputes = panel.heavy_recompute_count;
         panel.mark_content_changed(f64::MAX);
@@ -9359,6 +10671,7 @@ Body with [[Other]]"
 
     #[test]
     fn persisted_note_revision_bypasses_local_edit_debounce() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let notes_dir = TempNotesDir::new();
         notes_dir.write_note("alpha.md", "# Alpha\n\nBody");
         notes_dir.refresh_cache();
@@ -9664,6 +10977,7 @@ Body with [[Other]]"
 
     #[test]
     fn changed_note_revision_and_setting_bypass_retry_deadline() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let notes_dir = TempNotesDir::new();
         notes_dir.write_note("alpha.md", "# Alpha\n\nBody");
         notes_dir.refresh_cache();
@@ -9712,6 +11026,7 @@ Body with [[Other]]"
 
     #[test]
     fn failed_heavy_snapshot_retains_rows_and_retries_after_cooldown() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
         let initial_signature = derived_workload_signature(&panel);
         let initial_notes_revision = panel.last_notes_version;
@@ -9759,6 +11074,7 @@ Body with [[Other]]"
 
     #[test]
     fn new_draft_after_failed_refresh_uses_normal_edit_debounce() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let mut panel = NotePanel::from_note(empty_note("# Title\n\nBody"));
         let initial_recomputes = panel.heavy_recompute_count;
         panel.fail_next_heavy_snapshot = true;
