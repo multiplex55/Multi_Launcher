@@ -63,3 +63,21 @@ Small run0573cd92-a4b3-4317-9bd7-42e7ba353726 PASS1/1, build.97s/test35.333s/exe
 
 These characterize different baseline recipes; subtracting cached owner time does not isolate geometry savings. No optimization or production prevalence claim. Full committed-source baseline required before authorizing a runtime candidate. C2-C remains IN_PROGRESS,13/29closedLOCALONLY.
 Independent Small numerical/source/privacy review CLEARforbaselineharnesscommit:3records63arrays1260values66scalars6nearest-ranktriplets exactraw/JSON. Allcatalog/providerreceipts, fullboundsemantic/ActionIDs, stableviewport22paintedrows, delta0vs1/geometry0vs101rows/providercalls0vs1 checked; geometrywithinownerall60samples. Sanitized baseline_small statusREVIEWED_UNCOMMITTED_EAGER_BASELINE_SMOKE. SourcecommitthenexactFull9/180required, no runtimecandidateauthorized.
+
+## Exact-source Full eager baseline
+
+Source `76793267b7902282456e52588986b2effa992bbf`; run436e1f10-a726-4f92-918f-e68ce04bf49d PASS1/1, build0.91s/test247.613s/execution247.629s. Nine recipes/180 retained samples, five warmups each, zero exclusions; strict collection accepted. Independent numerical/source/privacy review CLEAR:189arrays3780values198scalars18nearest-ranktriplets, all identities/state/work/receipts and three Small non-timing overlaps. No runtime candidate authorized before this baseline evidence commit.
+
+| Case | N | Owner p50/p95/max ms | Geometry p50/p95/max ms |
+|---|---:|---:|---:|
+| cached_repeat | 100 | 0.8968/1.0457/1.0683 | 0.0000/0.0000/0.0000 |
+| equal_provider_notification | 100 | 5.4254/6.8294/7.8781 | 4.2747/5.4406/6.3347 |
+| changed_provider_notification | 100 | 5.2966/6.2063/6.3695 | 4.1892/4.9759/5.1680 |
+| cached_repeat | 1000 | 0.9461/1.2278/1.2695 | 0.0000/0.0000/0.0000 |
+| equal_provider_notification | 1000 | 54.1812/59.1624/64.0101 | 52.3214/57.2215/62.1682 |
+| changed_provider_notification | 1000 | 55.7053/110.3065/121.4695 | 54.2169/107.7522/119.4659 |
+| cached_repeat | 10000 | 0.9593/1.2887/1.5005 | 0.0000/0.0000/0.0000 |
+| equal_provider_notification | 10000 | 548.5311/613.9868/629.3620 | 541.6434/606.5904/619.3513 |
+| changed_provider_notification | 10000 | 547.8612/576.5696/615.9344 | 541.4550/570.0935/608.8313 |
+
+Cached controls rebuild zero rows; both notified cases rebuild N+1 rows and invoke the provider once. Full ordered Actions, semantic state, revision receipts and eager visible geometry are checked separately. Contrary changed-N1000 p95/max110.3065/121.4695ms remains reported. These are baseline costs, with no candidate speedup or production-frequency claim.
