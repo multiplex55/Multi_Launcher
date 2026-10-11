@@ -48,3 +48,44 @@ Ordinary retry terminalPASS6/6, run f839b5de-3818-4179-86a2-e4bf766d8707, fast-d
 
 Small terminalPASS1/1, run4c1491a9-a3c0-42bf-91bb-d1ae7b770655, build0.89s / test7.467s / execution7.484s,5178skipped; raw small-1.log. Strict collectorPASS5records/100samples to track_c_c1e_small.json, honestly UNCOMMITTED_SOURCE, independent numeric review pending. Owner p50/p95/max ms: changed6.5471/8.4233/9.5959; equal11.0382/12.5847/14.1255; malformed0.3978/0.5772/0.6423; missing0.3619/0.4931/0.5148; accepted-index0.3871/0.4316/0.4561. These are supplemental characterization smoke, no optimization/comparison claim; equal load latency contrary case retained without exclusions. Source commit and exact-source Full remain pending after independent evidence review.
 Independent actual Small evidence review CLEAR: all220arrays, every scalar/hash and75nearest-rank timing triplets match raw source;100samples meet nested/exclusive/work/Arc/version invariants. Retained cardinalities100cache/100filter/99ID/1result/100completionkeys/1suggestion. Actual clone partition50tail or50custom+50indexed and selected UTF8 byte estimates checked; no payload/path exposure. Ordinary6/6 and Small1/1 confirmed, failed compile preserved separately. JSON status REVIEWED_UNCOMMITTED_CHARACTERIZATION_SMOKE; clear for source commit then exact-source Full, no optimization authorization.
+Reviewed C1-E source committed locally as508bcf47a006729c064f62adb66609616ccbcaf0; clean immediately afterward. Exact-source Full started runfecb9cd0-ebeb-4c2b-8aed-4d05a2eb35f0, session69434, fast-dev build0.85s; raw full-1.log. No Full result yet. Source writers paused; strict Full collection/independent review/keep-change decision and checkpoint closure pending,8/29closed.
+Prospective read-only C1-F planner packet completed at508bcf47; saved ignored target/performance/track-c/next-packets/c1-f-prospective.md. Candidate only: immutable catalog-bound ID indices eliminate duplicate fullAction bodies while preserving public Arc<Vec<Action>>, ID-only pin/history and fallback. Existing constructor/dashboard/history/pinned consumers identified; synchronous localcandidate installation needs no new worker. Fullgate/controlledcandidate value unresolved, no implementationauthorization. Oldprojection destruction placement and fullowner latency must be compared; offthread/tailmetadata alternatives not preselected.
+
+## Exact-source Full characterization
+
+Full terminalPASS1/1, run fecb9cd0-ebeb-4c2b-8aed-4d05a2eb35f0, source508bcf47a006729c064f62adb66609616ccbcaf0, fast-dev build0.85s/test642.834s/execution642.857s,5178skipped. StrictcollectorPASS20records400samples, raw full-1.log preserved. All owners serial; source unchanged throughout. Independent numerical/gate review pending.
+
+| Actions | Case | Owner p50 ms | p95 ms | max ms | ID construction p50 ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 100 | custom_changed | 6.3093 | 8.0909 | 10.0437 | 0.0699 |
+| 100 | custom_equal | 10.7080 | 11.9270 | 12.9692 | 0.0000 |
+| 100 | custom_malformed | 0.3901 | 0.5113 | 0.5601 | 0.0000 |
+| 100 | custom_missing | 0.3345 | 0.4865 | 0.5878 | 0.0000 |
+| 100 | index_accepted_changed | 0.3929 | 0.4557 | 0.4715 | 0.0659 |
+| 1000 | custom_changed | 4.9410 | 5.2145 | 5.3698 | 0.6399 |
+| 1000 | custom_equal | 1.5839 | 1.8847 | 2.0314 | 0.0000 |
+| 1000 | custom_malformed | 0.4703 | 0.5447 | 0.7374 | 0.0000 |
+| 1000 | custom_missing | 0.4001 | 0.5103 | 0.5641 | 0.0000 |
+| 1000 | index_accepted_changed | 3.5229 | 5.7634 | 6.6007 | 0.6231 |
+| 10000 | custom_changed | 47.7038 | 56.5249 | 62.2670 | 6.7579 |
+| 10000 | custom_equal | 14.1475 | 15.3865 | 20.0922 | 0.0000 |
+| 10000 | custom_malformed | 0.5015 | 0.5806 | 1.0075 | 0.0000 |
+| 10000 | custom_missing | 0.4242 | 0.5031 | 0.5939 | 0.0000 |
+| 10000 | index_accepted_changed | 35.8054 | 44.1261 | 48.9291 | 7.1256 |
+| 20000 | custom_changed | 95.3291 | 102.8852 | 108.1373 | 13.8316 |
+| 20000 | custom_equal | 29.2355 | 34.9968 | 44.9636 | 0.0000 |
+| 20000 | custom_malformed | 0.5260 | 0.8406 | 17.3050 | 0.0000 |
+| 20000 | custom_missing | 0.4445 | 0.6046 | 0.8943 | 0.0000 |
+| 20000 | index_accepted_changed | 73.6367 | 85.6836 | 100.9051 | 14.2689 |
+
+All20scenarios retain20samples/zeroexclusions, including malformed20k maximum17.3050ms and 100-action equal-load contrary latency. Phase quantiles are independently reported; no subtraction/sum of quantiles estimates residual or isolated benefit. Owner includes replaced projection disposal outside construction clocks. This is characterization, not G0/G1 speedup or native/frame latency.
+
+Separate frozen C0 owner Small200 terminalPASS1/1, runec140bfc-4bec-4493-a3c9-a8a10369f9b6, exact508bcf47, build0.95s/test1.634s/execution1.650s,5178skipped. FrozencollectorPASS1record20samples to track_c_c1e_c0_smoke.json; raw c0-owner-small-1.log. Fixtureb0999378b773fa54/output3f51907ee2bc81c6/structuralf2e34bcc96dca53e; p50/p95/max8.4536/10.4246/10.8123ms. Separate owner-path/parity receipt, not comparable to supplemental100 or G0/G1 performance. AllCargo terminal.
+
+## Reviewed decision and closure
+
+C1-E PASS;9/29closed, LOCAL ONLY. Independent Full review matched every scalar/hash and880arrays against raw20records, recomputed300timing triplets, checked all400samples and exact5cases×4sizes. Allfive100-action fixture/output hashes and non-timing work arrays match reviewedSmall. Separate frozen C0Small sevenarrays/20samples/scalars/hash/work/privacy review CLEAR. Actual targeted ordinary6/6, supplementalSmall1/1, exact-sourceFull1/1, frozenC0Small1/1 PASS; first compile failure remains zero-execution evidence. No further C1-E testing required.
+
+KEEP public contiguous Arc<Vec<Action>>, custom-first/indexed-tail order, existing search/filter projection design and synchronous scheduling. Change evaluation is limited to eliminating duplicate Action bodies in the ID projection through catalog-bound positions. Do not select segmented catalogs, tail reuse or off-thread preparation. At20k actualIDconstruction20k attempts/19,999retained entries copies4,852,954/4,852,960selected logicalAction+key bytes for changedcustom/acceptedindex. These are construction-attempt text copies, including duplicate insertion, neither allocator nor retained RAM. Independent same-sample ID/owner ratios span13.62–15.04% custom and16.84–25.70% index. This materially supports a C1-F controlled candidate, not a promised removable duration or realized gain; hashing/key ownership remain, along with typedload/filter/refresh costs.
+
+Parent/planner/reviewer GO for bounded C1-F ID-position candidate only after this closure commit. Candidate must bind private positions to its own immutable catalog, preserve duplicate last winner and ID-only pin/history precedence, migrate constructor/dashboard/history/pins deliberately, and release the old catalog/projection within the complete owner. Require full-owner improvement at10k/20k both routes, exactcompleteconsumerparity and contrary-case reporting; rollback/skip if marginal or materially worse. Keep C1-E schema/evidence frozen and introduce distinct optimized receipts. No new workers or persistence formats. Native/display/allocator measurements remain NOT MEASURED; C1-G will provide final matched G0/G1 stage comparison.
