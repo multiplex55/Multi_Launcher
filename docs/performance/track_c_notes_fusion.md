@@ -1,6 +1,6 @@
 # Track C C1-B note relationship fusion
 
-Status: IN_PROGRESS. Base `0a7f0efde29efc78b5c0a9bd5d2bea3187d88ee6`; C1-A source `b47c1646d99c653b53e96bafa6b242259eabef17`. Closed checkpoints remain5of29. LOCAL ONLY.
+Status: PASS. Accepted source `b6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1`; C1-A comparison source `b47c1646d99c653b53e96bafa6b242259eabef17`. Closed checkpoints:6of29. LOCAL ONLY.
 
 ## Bounded plan and ownership
 
@@ -59,3 +59,51 @@ Small fused attribution PASS1/1,5168skipped, run `08b0e537-c732-494b-9116-544342
 Each refresh reports one fused traversal,100note visits/12todo visits, separate12label-map visits,100fence transforms and one successful snapshot; previous relationship work336/fences300 becomes112/100. Full oracle parity/predeadline/idle controls remain active for every sample. Selected construction lengths/capacities continue to omit allocator traffic, row clones and final retained memory. This smoke is not accepted committed-source Full evidence or an application-wide improvement claim.
 
 Independent Small numerical review CLEAR: all126 raw arrays match three collected records exactly, twenty samples each; scalar protocol, every timing quantile, actual fused/snapshot/fence/string receipts, nested containment and privacy passed. Fixture signatures and revision arrays match C1-A exactly; local/todo full and structural output arrays match exactly. External retains two structural hashes from timestamp text, with full eager parity each sample, so no forced cross-run equality. Needle construction count30→10; fenced construction lengths are exactly one-third. Do not reinterpret these as allocator/RAM totals. Reviewed honest uncommitted smoke saved in `track_c_c1b_small.json`, separate collector `track_c_collect_fused_note_attribution.ps1`. Source commit can proceed with C1-B IN_PROGRESS; Full comparison/acceptance remains pending.
+
+## Exact committed-source Full acceptance (chronological execution record; closure below)
+
+Reviewed source committed locally as `b6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1` (`perf(notes): [C1-B] fuse relationship refresh with exact parity`); tree clean immediately afterward. Full five-scenario attribution is active in parent session78056, run `2e3d86b1-1ab7-468b-903b-bed354879a0e`, raw ignored `c1-b/nextest-full-attribution.log`, fast-dev build0.85s. Runner guards exact HEAD/clean source/no competing Cargo, refuses log overwrite, saves/restores variables in finally and rechecks source afterward. All source writers paused. Full and original-owner acceptance still pending; C1-B IN_PROGRESS,5of29closed.
+
+Full actual-UI attribution terminal PASS1/1,5168skipped, run `2e3d86b1-1ab7-468b-903b-bed354879a0e`, build0.85s, execution219.687s. New committed collector accepted five scenarios/100samples. Parent matched comparison checks passed fixture/protocol/revisions/snapshot frequency+clone-estimate continuity and exact local/todo full/structural identities; external timestamp differences remain subject to each sample's full eager oracle. Actual work, fence transforms, needles and fenced construction lengths are one-third of C1-A. Raw originals unchanged, numerical review pending.
+
+| Transition / notes | C1-A Full frame p50 / p95 (ms) | C1-B Full frame p50 / p95 / max (ms) | Actual classification visits before→after |
+| --- | --- | --- | --- |
+| Draft /100 |24.9107 /26.4808 |10.9725 /11.9409 /12.0505 |336→112 |
+| Draft /1000 |233.9967 /243.0205 |84.5982 /94.0154 /94.1794 |3036→1012 |
+| Draft /5000 |1148.3915 /1215.0013 |415.1562 /467.6786 /470.3673 |15036→5012 |
+| External note /1000 |234.3999 /245.5493 |86.6309 /88.0320 /91.9028 |3036→1012 |
+| Persisted todo /1000 |231.1382 /248.4943 |83.8665 /89.0144 /92.9206 |3036→1012 |
+
+Observed matched headless CPU frame p50 reductions span55.95–63.85%; p95 reductions54.91–64.18%. These compare this explicit observer-enabled owner/fixtures/profile only, not release, native input-to-display or application-wide responsiveness. Full distributions and unfavorable samples are retained. Original-owner rerun active on the same committed source in parent session86366, raw `c1-b/nextest-full-original-owner.log`; no source writes or concurrent Cargo. C1-B acceptance remains pending independent Full/original review.
+
+Independent Full supplemental/comparison review CLEAR: all210 raw arrays exactly match five records/100samples; all scalar provenance, quantiles, containment, actual work/string receipts and privacy passed. Reviewer independently recomputed C1-A per-sample three-pass sums and all comparison distributions/percentages. Four local/todo complete/structural identity arrays match exactly; external1000 has three structural hashes now versus two in C1-A, retaining filesystem updated-text variation and full eager parity per sample. Snapshot frequencies/clone estimates and raw note/todo revisions match across all five scenarios. Observed CPU gains support fusion provisionally, with no native, allocator or application-wide inference.
+
+Original owner terminal PASS1/1,5168skipped, run `d33d1c13-49cb-40de-b689-14744221b581`, build0.84s, execution74.060s. Same committed source/fast-dev/Full/PERF1; observer not armed but test hooks compiled. All three records collected; independent review pending.
+
+| Notes | Frozen G0 original p50 / p95 / max (ms) | C1-B original p50 / p95 / max (ms) |
+| --- | --- | --- |
+|100 |22.3415 /23.4536 /26.5596 |8.8114 /13.0563 /13.7565 |
+|1000 |229.0207 /254.2780 /385.6323 |83.5328 /88.5737 /92.6750 |
+|5000 |1153.8690 /1182.8377 /1255.7501 |414.4422 /431.9527 /510.6336 |
+
+Keep all maxima, including510.6336ms at5000 in this original-owner distribution. Do not mix original-owner and actual-UI distributions. Actual relationship work is now112/1012/5012 instead of336/3036/15036, with the fixed shared-classification phase scope disclosed above. Snapshot and Track A metric meanings remain unchanged. Original raw logs and G0 immutable.
+
+## Reproduction
+
+Use exact accepted source `b6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1`, serialize Cargo, refuse existing raw-log names, save/restore process variables in `finally`, and verify clean source/HEAD before and after. Full invocations used:
+
+```powershell
+$env:MULTI_LAUNCHER_PERF='1'
+$env:ML_SKIP_CLIPBOARD_SYNC='1'
+$env:ML_TRACK_C_PROFILE='fast-dev'
+$env:ML_TRACK_C_BENCH_MODE='full'
+$env:ML_TRACK_C_SOURCE_SHA='b6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1'
+cargo nextest run --lib --cargo-profile fast-dev --test-threads 1 --no-fail-fast --success-output immediate --run-ignored only -E 'test(track_c_c1b_benchmark_open_note_panel_refresh_attribution)'
+cargo nextest run --lib --cargo-profile fast-dev --test-threads 1 --no-fail-fast --success-output immediate --run-ignored only -E 'test(track_c_benchmark_note_panel_heavy_refresh_owner)'
+```
+
+Capture separate raw logs. Parse supplemental output with `track_c_collect_fused_note_attribution.ps1 -ExpectedSource <exact SHA> -ExpectedMode Full -LogPath <log> -OutputPath <fresh output>`. The original owner uses `track_c_collect_owner_results.ps1` with `-LogPaths`. Keep the old C1-A collector/source/artifacts intact; its three-pass schema deliberately rejects fused records. Compare exact matched fixtures/profile/mode, raw work and snapshot receipts, full oracle outputs, and actual per-sample old pass sums. Native display and allocator traffic are outside these commands.
+
+## C1-B closure
+
+Independent original-owner review and fusion acceptance gate CLEAR. All21 raw arrays/60samples match collected JSON and independently recomputed quantiles; every fixture/full-state/structural/revision/viewport/protocol domain matches BOTH frozen G0 and C1-A exactly. Intended traversal work alone changes3*(N+12)→N+12. Original-owner p50 reductions versus matched C1-A are61.80/64.07/64.39%, p95 reductions60.66/65.26/63.59% for100/1000/5000 notes. All samples, including510.6336ms maximum, remain. Source, complete eager parity, actual visit/fence reduction, safe targeted tests, Small/Full/original owner and privacy/numerical reviews satisfy the bounded gate. C1-B PASS;6of29closed. Complete exact-source records and matched distributions saved in `track_c_c1b_evidence.json`. No index, alias optimization, persistence/profile/dependency change or native responsiveness claim. Next C1-C must separately establish whether residual cost justifies an exact bounded projection after publication/memory/invalidation costs.

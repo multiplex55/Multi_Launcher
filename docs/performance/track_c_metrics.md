@@ -66,3 +66,9 @@ metadata private. Native presentation remains outside these measurements.
 ## C1-A attribution supplement
 
 C1-A adds a distinct observer-enabled actual NotePanel UI series; it does not redefine frozen C0 or Track A metrics. See `track_c_notes_contract.md` for selected construction-point String estimates, overlapping timer boundaries, legacy NoteSnapshot completion semantics and test-constructor isolation correction. `track_c_c1a_evidence.json` retains all exact-source Full observations and the original-owner continuity rerun. Native display and allocator traffic remain unmeasured.
+
+## C1-B phase scope transition
+
+The table above describes frozen G0/C1-A traversal scopes. From accepted C1-B source `b6361dd6cb4fd7ce4ce534fda1e9c34dddaf2ee1`, `note.relationship_refresh` records actual fused traversal work N+T, replacing 3*(N+T). The existing `note.mentions_scan` phase now spans shared normalization and classification for all three relationship categories, with N+T visits including the skipped self-note. It is no longer an isolated mentions-pass timer. Do not compare its elapsed time directly to the old isolated phase. Track A and snapshot metric meanings remain unchanged; frozen artifacts and the old C1-A collector are immutable.
+
+The named test observer records one actual fused traversal, N note visits and T todo visits. Shared needle construction and fenced projection receipts establish reduced work; selected String lengths/capacities do not measure allocator traffic, retained memory or peak RAM. Nested timer boundaries overlap. Exact-source Full and original-owner observations are retained in `track_c_c1b_evidence.json`; see `track_c_notes_fusion.md` for matched comparison limits.
