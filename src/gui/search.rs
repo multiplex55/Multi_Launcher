@@ -151,27 +151,76 @@ impl LauncherApp {
     }
 
     pub fn update_action_cache(&mut self) {
-        self.action_cache = self
-            .actions
-            .iter()
-            .map(CachedSearchEntry::from_action)
-            .collect();
-        self.action_filter_metadata = self
-            .actions
-            .iter()
-            .map(ActionFilterMetadata::from_action)
-            .collect();
-        self.actions_by_id = self
-            .actions
-            .iter()
-            .map(|a| (a.action.clone(), a.clone()))
-            .collect();
+        self.action_cache = {
+            #[cfg(test)]
+            let _track_c_search_entries = super::track_c_action_observer::scope(
+                super::track_c_action_observer::Phase::SearchEntries,
+            );
+            self.actions
+                .iter()
+                .map(CachedSearchEntry::from_action)
+                .collect::<Vec<_>>()
+        };
+        #[cfg(test)]
+        super::track_c_action_observer::add(
+            super::track_c_action_observer::Counter::SearchEntriesProcessed,
+            self.action_cache.len(),
+        );
+        self.action_filter_metadata = {
+            #[cfg(test)]
+            let _track_c_filter_metadata = super::track_c_action_observer::scope(
+                super::track_c_action_observer::Phase::FilterMetadata,
+            );
+            self.actions
+                .iter()
+                .map(ActionFilterMetadata::from_action)
+                .collect::<Vec<_>>()
+        };
+        #[cfg(test)]
+        super::track_c_action_observer::add(
+            super::track_c_action_observer::Counter::FilterEntriesProcessed,
+            self.action_filter_metadata.len(),
+        );
+        self.actions_by_id = {
+            #[cfg(test)]
+            let _track_c_id_map =
+                super::track_c_action_observer::scope(super::track_c_action_observer::Phase::IdMap);
+            self.actions
+                .iter()
+                .map(|action| (action.action.clone(), action.clone()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        #[cfg(test)]
+        {
+            super::track_c_action_observer::add(
+                super::track_c_action_observer::Counter::IdActionsProcessed,
+                self.actions.len(),
+            );
+            super::track_c_action_observer::set(
+                super::track_c_action_observer::Counter::CacheEntries,
+                self.action_cache.len(),
+            );
+            super::track_c_action_observer::set(
+                super::track_c_action_observer::Counter::FilterEntries,
+                self.action_filter_metadata.len(),
+            );
+            super::track_c_action_observer::set(
+                super::track_c_action_observer::Counter::IdEntries,
+                self.actions_by_id.len(),
+            );
+        }
         // Search results are derived from the action catalog as well as the
         // query. Keep the cached-query fast path from treating old results as
         // current after a catalog publication.
-        self.last_results_valid = false;
-        self.action_completion_dirty = true;
-        self.schedule_completion_rebuild();
+        {
+            #[cfg(test)]
+            let _track_c_invalidation = super::track_c_action_observer::scope(
+                super::track_c_action_observer::Phase::CompletionInvalidation,
+            );
+            self.last_results_valid = false;
+            self.action_completion_dirty = true;
+            self.schedule_completion_rebuild();
+        }
     }
 
     pub fn update_command_cache(&mut self) {
@@ -271,6 +320,15 @@ impl LauncherApp {
     }
 
     pub fn search(&mut self) {
+        #[cfg(test)]
+        let _track_c_search_total = super::track_c_action_observer::scope(
+            super::track_c_action_observer::Phase::SearchTotal,
+        );
+        #[cfg(test)]
+        super::track_c_action_observer::add(
+            super::track_c_action_observer::Counter::SameQueryRefreshCalls,
+            1,
+        );
         // An explicit search satisfies any pending background refresh using
         // the current query, including a newer user intent during OCR.
         self.background_query_refresh_pending = false;

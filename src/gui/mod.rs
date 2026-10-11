@@ -64,6 +64,8 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+#[cfg(test)]
+mod track_c_action_observer;
 pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
@@ -1098,12 +1100,21 @@ impl LauncherApp {
         let mut timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::ActionPublishPrepare,
         );
-        let indexed = self
-            .actions
-            .iter()
-            .skip(self.custom_len.min(self.actions.len()))
-            .cloned()
-            .collect::<Vec<_>>();
+        let indexed = {
+            #[cfg(test)]
+            let _track_c_tail_copy =
+                track_c_action_observer::scope(track_c_action_observer::Phase::TailCopy);
+            self.actions
+                .iter()
+                .skip(self.custom_len.min(self.actions.len()))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        #[cfg(test)]
+        track_c_action_observer::add(
+            track_c_action_observer::Counter::TailActionsCloned,
+            indexed.len(),
+        );
         timer.set_work_units(indexed.len());
         timer.finish(crate::performance::track_c::Outcome::Completed);
         self.publish_actions(custom, indexed);
@@ -1118,12 +1129,29 @@ impl LauncherApp {
             crate::performance::track_c::Phase::ActionPublishCommit,
         );
         self.custom_len = custom.len();
-        let mut actions = custom;
-        actions.extend(additional);
-        timer.set_work_units(actions.len());
-        self.actions = Arc::new(actions);
+        let catalog_len = {
+            #[cfg(test)]
+            let _track_c_catalog_assembly =
+                track_c_action_observer::scope(track_c_action_observer::Phase::CatalogAssemblyArc);
+            let mut actions = custom;
+            actions.extend(additional);
+            let catalog_len = actions.len();
+            self.actions = Arc::new(actions);
+            catalog_len
+        };
+        #[cfg(test)]
+        track_c_action_observer::add(
+            track_c_action_observer::Counter::CatalogAssemblyActions,
+            catalog_len,
+        );
+        timer.set_work_units(catalog_len);
         self.update_action_cache();
-        self.request_background_query_refresh();
+        {
+            #[cfg(test)]
+            let _track_c_same_query_refresh =
+                track_c_action_observer::scope(track_c_action_observer::Phase::SameQueryRefresh);
+            self.request_background_query_refresh();
+        }
         timer.finish(crate::performance::track_c::Outcome::Completed);
     }
 

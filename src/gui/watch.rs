@@ -162,13 +162,29 @@ impl LauncherApp {
                         default_submenu_presentation;
                 }
                 WatchEvent::Actions => {
+                    #[cfg(test)]
+                    let _track_c_actions_event = super::track_c_action_observer::scope(
+                        super::track_c_action_observer::Phase::ActionsEvent,
+                    );
                     let mut reload_timer = crate::performance::MetricTimer::start(
                         crate::performance::Metric::ActionsReload,
                     );
                     reload_timer.set_work_units(0);
                     let _transaction = crate::actions::transaction_guard();
-                    let custom = match load_actions_typed(&self.actions_path) {
+                    let typed_load = {
+                        #[cfg(test)]
+                        let _track_c_typed_load = super::track_c_action_observer::scope(
+                            super::track_c_action_observer::Phase::TypedLoad,
+                        );
+                        load_actions_typed(&self.actions_path)
+                    };
+                    let custom = match typed_load {
                         Ok(crate::common::persistence::LoadState::Missing) => {
+                            #[cfg(test)]
+                            super::track_c_action_observer::set_value(
+                                super::track_c_action_observer::Counter::TypedLoadOutcome,
+                                3,
+                            );
                             let error = crate::common::persistence::PersistenceError::Read {
                                 path: PathBuf::from(&self.actions_path),
                                 source: std::io::Error::new(
@@ -183,9 +199,34 @@ impl LauncherApp {
                             self.actions_persistence_diagnostic = Some(error);
                             continue;
                         }
-                        Ok(crate::common::persistence::LoadState::Empty) => Vec::new(),
-                        Ok(crate::common::persistence::LoadState::Loaded(actions)) => actions,
+                        Ok(crate::common::persistence::LoadState::Empty) => {
+                            #[cfg(test)]
+                            super::track_c_action_observer::set_value(
+                                super::track_c_action_observer::Counter::TypedLoadOutcome,
+                                1,
+                            );
+                            Vec::new()
+                        }
+                        Ok(crate::common::persistence::LoadState::Loaded(actions)) => {
+                            #[cfg(test)]
+                            {
+                                super::track_c_action_observer::set_value(
+                                    super::track_c_action_observer::Counter::TypedLoadOutcome,
+                                    1,
+                                );
+                                super::track_c_action_observer::add(
+                                    super::track_c_action_observer::Counter::TypedActionsLoaded,
+                                    actions.len(),
+                                );
+                            }
+                            actions
+                        }
                         Err(error) => {
+                            #[cfg(test)]
+                            super::track_c_action_observer::set_value(
+                                super::track_c_action_observer::Counter::TypedLoadOutcome,
+                                2,
+                            );
                             self.report_error_message(
                                 "actions.reload",
                                 format!("Failed to reload actions: {error}"),
@@ -846,6 +887,90 @@ mod tests {
         fixture_signature: u64,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC1ECase {
+        CustomChanged,
+        CustomEqual,
+        CustomMalformed,
+        CustomMissing,
+        IndexAcceptedChanged,
+    }
+
+    impl TrackC1ECase {
+        fn token(self) -> &'static str {
+            match self {
+                Self::CustomChanged => "custom_changed",
+                Self::CustomEqual => "custom_equal",
+                Self::CustomMalformed => "custom_malformed",
+                Self::CustomMissing => "custom_missing",
+                Self::IndexAcceptedChanged => "index_accepted_changed",
+            }
+        }
+
+        fn typed_load_outcome(self) -> u64 {
+            match self {
+                Self::CustomChanged | Self::CustomEqual => 1,
+                Self::CustomMalformed => 2,
+                Self::CustomMissing => 3,
+                Self::IndexAcceptedChanged => 0,
+            }
+        }
+
+        fn version_delta(self) -> u64 {
+            match self {
+                Self::CustomChanged | Self::IndexAcceptedChanged => 1,
+                Self::CustomEqual | Self::CustomMalformed | Self::CustomMissing => 0,
+            }
+        }
+
+        fn publishes(self) -> bool {
+            self.version_delta() != 0
+        }
+    }
+
+    struct TrackC1EFixture {
+        base: TrackCActionsFixture,
+        case: TrackC1ECase,
+        expected_custom: Vec<crate::actions::Action>,
+        expected_tail: Vec<crate::actions::Action>,
+        expected_actions: Vec<crate::actions::Action>,
+        fixture_signature: u64,
+    }
+
+    struct TrackC1EOwnerState {
+        // The app owns any test coordinator. It must drop before the observer,
+        // registry lock, and the fixture's workspace.
+        owner: TrackCActionsOwnerState,
+        _age_recorder: Option<super::event_channel::EventAgeRecorder>,
+        setup_observer: super::track_c_action_observer::Snapshot,
+        observer: Option<super::track_c_action_observer::Guard>,
+        _registry_guard: std::sync::MutexGuard<'static, ()>,
+        case: TrackC1ECase,
+        accepted_index_config: Option<crate::indexer::coordinator::IndexConfig>,
+        accepted_index_generation: Option<u64>,
+        expected_custom: Vec<crate::actions::Action>,
+        expected_tail: Vec<crate::actions::Action>,
+        expected_actions: Vec<crate::actions::Action>,
+        fixture_signature: u64,
+        initial_actions_ptr: usize,
+        initial_radial_ptr: usize,
+        initial_radial_builds: usize,
+        initial_root_generation: u64,
+        initial_history_digest: u64,
+        initial_completion_keys: Vec<String>,
+        initial_suggestions: Vec<String>,
+        pins: Vec<crate::history::HistoryPin>,
+        tail_selected_clone_bytes: u64,
+        index_custom_selected_clone_bytes: u64,
+        index_tail_selected_clone_bytes: u64,
+        id_selected_clone_bytes: u64,
+    }
+
+    struct TrackC1EValidatedSample {
+        observer: super::track_c_action_observer::Snapshot,
+        observation: crate::performance::track_c_workloads::OwnerObservation,
+    }
+
     fn track_c_actions_fixture(total_count: usize) -> TrackCActionsFixture {
         use crate::performance::track_c_workloads;
 
@@ -917,6 +1042,1421 @@ mod tests {
             indexed_tail,
             custom_len,
             fixture_signature,
+        }
+    }
+
+    impl Drop for TrackC1EOwnerState {
+        fn drop(&mut self) {
+            // Disable the thread-local observer before LauncherApp and any
+            // coordinator fields are dropped during unwinding or teardown.
+            self.observer.take();
+        }
+    }
+
+    fn track_c1e_merge_observer_snapshots(
+        mut owner: super::track_c_action_observer::Snapshot,
+        setup: &super::track_c_action_observer::Snapshot,
+    ) -> super::track_c_action_observer::Snapshot {
+        for (value, setup_value) in owner.phases_ns.iter_mut().zip(setup.phases_ns) {
+            *value = value.saturating_add(setup_value);
+        }
+        for (value, setup_value) in owner.phase_calls.iter_mut().zip(setup.phase_calls) {
+            *value = value.saturating_add(setup_value);
+        }
+        for (value, setup_value) in owner.counters.iter_mut().zip(setup.counters) {
+            *value = value.saturating_add(setup_value);
+        }
+        owner
+    }
+
+    fn track_c1e_action_payload_bytes(action: &crate::actions::Action) -> u64 {
+        action.label.len() as u64
+            + action.desc.len() as u64
+            + action.action.len() as u64
+            + action.args.as_ref().map_or(0, |args| args.len() as u64)
+    }
+
+    fn track_c1e_selected_payload_bytes(actions: &[crate::actions::Action]) -> u64 {
+        actions.iter().map(track_c1e_action_payload_bytes).sum()
+    }
+
+    fn track_c1e_id_map_payload_bytes(actions: &[crate::actions::Action]) -> u64 {
+        actions
+            .iter()
+            .map(|action| track_c1e_action_payload_bytes(action) + action.action.len() as u64)
+            .sum()
+    }
+
+    fn track_c1e_fixture(total_count: usize, case: TrackC1ECase) -> TrackC1EFixture {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let base = track_c_actions_fixture(total_count);
+        let mut expected_custom = base.initial_custom.clone();
+        let mut expected_tail = base.indexed_tail.clone();
+        match case {
+            TrackC1ECase::CustomChanged => expected_custom = base.replacement_custom.clone(),
+            TrackC1ECase::IndexAcceptedChanged => {
+                expected_tail[0]
+                    .desc
+                    .push_str("; accepted synthetic index generation");
+            }
+            TrackC1ECase::CustomEqual
+            | TrackC1ECase::CustomMalformed
+            | TrackC1ECase::CustomMissing => {}
+        }
+        let mut expected_actions = expected_custom.clone();
+        expected_actions.extend(expected_tail.iter().cloned());
+
+        let mut signature =
+            StableSignature::new(0, "track-c1e-action-publication-fixture", total_count);
+        signature.number(base.fixture_signature);
+        signature.bytes(case.token().as_bytes());
+        if case == TrackC1ECase::IndexAcceptedChanged {
+            signature.bytes(
+                b"index-config-root=track-c1e-accepted-generation;max-items=expected-tail-count",
+            );
+        }
+        signature.number(base.custom_len as u64);
+        signature.number(base.indexed_tail.len() as u64);
+        signature.number(track_c_watch_action_signature(
+            &base.index_root,
+            &base.initial_custom,
+        ));
+        signature.number(track_c_watch_action_signature(
+            &base.index_root,
+            &expected_custom,
+        ));
+        signature.number(track_c_watch_action_signature(
+            &base.index_root,
+            &expected_tail,
+        ));
+        signature.bytes(b"query=app Synthetic action 00009;exact=true;usage=empty");
+        signature.bytes(b"plugins=inert;aliases=empty;dashboard=off;toasts=off;hotkeys=off");
+        signature.bytes(b"action-option-args-preserved;duplicate-id-last-catalog-occurrence");
+        let fixture_signature = signature.finish();
+
+        TrackC1EFixture {
+            base,
+            case,
+            expected_custom,
+            expected_tail,
+            expected_actions,
+            fixture_signature,
+        }
+    }
+
+    fn track_c1e_completion_keys(app: &LauncherApp) -> Vec<String> {
+        use fst::{IntoStreamer, Streamer};
+
+        let Some(index) = app.completion_index.as_ref() else {
+            return Vec::new();
+        };
+        let mut stream = index.stream().into_stream();
+        let mut keys = Vec::new();
+        while let Some((key, _)) = stream.next() {
+            keys.push(
+                std::str::from_utf8(key)
+                    .expect("completion keys are UTF-8")
+                    .to_owned(),
+            );
+        }
+        keys
+    }
+
+    fn track_c1e_expected_completion_keys(
+        app: &LauncherApp,
+        actions: &[crate::actions::Action],
+    ) -> Vec<String> {
+        let mut keys = app
+            .command_cache
+            .iter()
+            .map(|action| action.label.to_lowercase())
+            .chain(
+                actions
+                    .iter()
+                    .map(|action| format!("app {}", action.label.to_lowercase())),
+            )
+            .collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    fn track_c1e_expected_suggestions(keys: &[String], query: &str, limit: usize) -> Vec<String> {
+        let query = query.to_lowercase();
+        keys.iter()
+            .filter(|key| key.starts_with(&query) && key.as_str() != query)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    fn track_c1e_fixture_pin(
+        action_id: &str,
+        args: Option<String>,
+        timestamp: i64,
+    ) -> crate::history::HistoryPin {
+        crate::history::HistoryPin {
+            action_id: action_id.to_owned(),
+            label: "Saved synthetic pin".into(),
+            desc: "Saved synthetic description".into(),
+            args,
+            query: "app Synthetic action".into(),
+            timestamp,
+        }
+    }
+
+    fn make_track_c1e_owner_state(fixture: &TrackC1EFixture) -> TrackC1EOwnerState {
+        use crate::indexer::coordinator::{IndexConfig, IndexCoordinator};
+
+        let registry_guard = TRACK_C_EVENT_REGISTRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut owner = make_track_c_actions_owner_state(&fixture.base);
+        let mut age_recorder = None;
+        let mut setup_observer = super::track_c_action_observer::Snapshot::default();
+        let mut accepted_index_config = None;
+        let mut accepted_index_generation = None;
+        if fixture.case == TrackC1ECase::IndexAcceptedChanged {
+            // Consume only the setup helper's original equal Actions envelope.
+            // The measured event below is the coordinator's original queued
+            // IndexReady envelope; it is never received and re-enqueued.
+            std::fs::write(
+                &owner.actions_path,
+                serde_json::to_vec(&fixture.base.initial_custom)
+                    .expect("serialize initial custom state outside owner"),
+            )
+            .expect("restore initial custom action payload before index setup");
+            let initial_pointer = Arc::as_ptr(&owner.app.actions) as usize;
+            owner.app.process_watch_events();
+            assert_eq!(Arc::as_ptr(&owner.app.actions) as usize, initial_pointer);
+            assert!(owner.app.rx.try_recv().is_err());
+            owner.expected_actions = fixture.base.initial_custom.clone();
+
+            age_recorder = Some(install_track_c_observed_channel(&mut owner.app, 2));
+            let accepted_tail = fixture.expected_tail.clone();
+            let coordinator =
+                IndexCoordinator::with_test_scanner(move |_| Ok(accepted_tail.clone()))
+                    .expect("construct inert accepted-index coordinator");
+            owner.app.install_test_index_coordinator(coordinator);
+            let setup_guard = super::track_c_action_observer::Guard::install();
+            let config = IndexConfig::new(
+                vec!["track-c1e-accepted-generation".into()],
+                Some(fixture.expected_tail.len()),
+            );
+            accepted_index_config = Some(config.clone());
+            {
+                let _request = super::track_c_action_observer::scope(
+                    super::track_c_action_observer::Phase::IndexRequest,
+                );
+                owner.app.request_index_config(config.clone());
+            }
+            let generation = owner
+                .app
+                .indexing
+                .expected_generation
+                .expect("accepted synthetic index generation");
+            accepted_index_generation = Some(generation);
+            {
+                let _wait = super::track_c_action_observer::scope(
+                    super::track_c_action_observer::Phase::ScannerWait,
+                );
+                let completion = owner
+                    .app
+                    .wait_for_index_completion_for_test(generation)
+                    .expect("accepted synthetic index scan completes");
+                assert_eq!(completion.config(), &config);
+                assert_eq!(
+                    completion
+                        .outcome()
+                        .as_ref()
+                        .expect("scan succeeds")
+                        .as_slice(),
+                    fixture.expected_tail.as_slice()
+                );
+                wait_for_track_c_successful_enqueue(
+                    &owner.app,
+                    age_recorder.as_ref().expect("observed index sender"),
+                    1,
+                    1,
+                );
+            }
+            owner.indexed_tail = fixture.expected_tail.clone();
+            owner.expected_actions = fixture.expected_actions.clone();
+            owner.app.completion_rebuild_after =
+                Some(Instant::now() + super::COMPLETION_REBUILD_DEBOUNCE);
+            setup_observer = setup_guard.snapshot();
+            drop(setup_guard);
+        } else {
+            match fixture.case {
+                TrackC1ECase::CustomChanged => {}
+                TrackC1ECase::CustomEqual => {
+                    std::fs::write(
+                        &owner.actions_path,
+                        serde_json::to_vec(&fixture.base.initial_custom)
+                            .expect("serialize unchanged custom state outside owner"),
+                    )
+                    .expect("write equal custom action payload");
+                    owner.expected_actions = fixture.expected_actions.clone();
+                }
+                TrackC1ECase::CustomMalformed => {
+                    std::fs::write(&owner.actions_path, b"{")
+                        .expect("write malformed action payload");
+                    owner.expected_actions = fixture.expected_actions.clone();
+                }
+                TrackC1ECase::CustomMissing => {
+                    std::fs::remove_file(&owner.actions_path)
+                        .expect("remove action payload before missing-file owner");
+                    owner.expected_actions = fixture.expected_actions.clone();
+                }
+                TrackC1ECase::IndexAcceptedChanged => unreachable!(),
+            }
+        }
+
+        let initial_actions_ptr = Arc::as_ptr(&owner.app.actions) as usize;
+        let radial_before = owner.app.cached_universal_action_catalog_snapshot();
+        assert_eq!(
+            radial_before
+                .entries
+                .iter()
+                .take(owner.app.actions.len())
+                .map(|entry| entry.selected_action.clone())
+                .collect::<Vec<_>>(),
+            owner.app.actions.as_ref().clone()
+        );
+        let initial_radial_ptr = Arc::as_ptr(&radial_before) as usize;
+        drop(radial_before);
+        let initial_radial_builds = owner
+            .app
+            .authoring_catalog_build_count
+            .load(Ordering::SeqCst);
+        let initial_root_generation = owner.app.root_list_geometry.result_generation_for_test();
+        let initial_history_digest = owner.app.query_history.acceptance_digest();
+        let initial_completion_keys = track_c1e_completion_keys(&owner.app);
+        assert!(!initial_completion_keys.is_empty());
+        let initial_suggestions = owner.app.suggestions.clone();
+        assert_eq!(owner.app.actions.len(), fixture.expected_actions.len());
+
+        let duplicate_id = fixture.base.indexed_tail[0].action.clone();
+        let argument_id = fixture.base.initial_custom[3].action.clone();
+        assert!(fixture.base.initial_custom[3].args.is_some());
+        let pins = vec![
+            track_c1e_fixture_pin(&duplicate_id, Some("saved args differ".into()), 2),
+            track_c1e_fixture_pin(&argument_id, None, 1),
+        ];
+        let full_catalog = &fixture.base.initial_custom;
+        let full_indexed = &fixture.base.indexed_tail;
+        let tail_selected_clone_bytes = track_c1e_selected_payload_bytes(full_indexed);
+        let index_custom_selected_clone_bytes = track_c1e_selected_payload_bytes(full_catalog);
+        let index_tail_selected_clone_bytes =
+            track_c1e_selected_payload_bytes(&fixture.expected_tail);
+        let id_selected_clone_bytes = track_c1e_id_map_payload_bytes(&fixture.expected_actions);
+
+        crate::performance::track_c::reset();
+        TrackC1EOwnerState {
+            owner,
+            _age_recorder: age_recorder,
+            setup_observer,
+            observer: Some(super::track_c_action_observer::Guard::install()),
+            _registry_guard: registry_guard,
+            case: fixture.case,
+            accepted_index_config,
+            accepted_index_generation,
+            expected_custom: fixture.expected_custom.clone(),
+            expected_tail: fixture.expected_tail.clone(),
+            expected_actions: fixture.expected_actions.clone(),
+            fixture_signature: fixture.fixture_signature,
+            initial_actions_ptr,
+            initial_radial_ptr,
+            initial_radial_builds,
+            initial_root_generation,
+            initial_history_digest,
+            initial_completion_keys,
+            initial_suggestions,
+            pins,
+            tail_selected_clone_bytes,
+            index_custom_selected_clone_bytes,
+            index_tail_selected_clone_bytes,
+            id_selected_clone_bytes,
+        }
+    }
+
+    fn track_c1e_phase_values(
+        samples: &[TrackC1EValidatedSample],
+        phase: super::track_c_action_observer::Phase,
+    ) -> Vec<u64> {
+        samples
+            .iter()
+            .map(|sample| sample.observer.phase_ns(phase))
+            .collect()
+    }
+
+    fn track_c1e_phase_call_values(
+        samples: &[TrackC1EValidatedSample],
+        phase: super::track_c_action_observer::Phase,
+    ) -> Vec<u64> {
+        samples
+            .iter()
+            .map(|sample| sample.observer.phase_calls(phase))
+            .collect()
+    }
+
+    fn track_c1e_counter_values(
+        samples: &[TrackC1EValidatedSample],
+        counter: super::track_c_action_observer::Counter,
+    ) -> Vec<u64> {
+        samples
+            .iter()
+            .map(|sample| sample.observer.counter(counter))
+            .collect()
+    }
+
+    fn validate_track_c1e_owner(state: &mut TrackC1EOwnerState) -> TrackC1EValidatedSample {
+        use super::track_c_action_observer::{Counter, Phase};
+        use crate::performance::track_c_workloads::{OwnerObservation, StableSignature};
+
+        // Freeze owner receipts before any untimed completion-index rebuild or
+        // consumer verification can add work to the measured observer.
+        let observer_guard = state
+            .observer
+            .take()
+            .expect("the Track C1E observer is scoped to one owner invocation");
+        let observer =
+            track_c1e_merge_observer_snapshots(observer_guard.snapshot(), &state.setup_observer);
+        drop(observer_guard);
+
+        let published = state.case.publishes();
+        let expected_version = state
+            .owner
+            .actions_version_before
+            .saturating_add(state.case.version_delta());
+        let version_after = crate::actions::actions_version();
+        assert_eq!(version_after, expected_version);
+        assert_eq!(
+            observer.counter(Counter::TypedLoadOutcome),
+            state.case.typed_load_outcome(),
+            "typed loader outcome comes from the actual owner branch"
+        );
+        let expected_loaded = match state.case {
+            TrackC1ECase::CustomChanged | TrackC1ECase::CustomEqual => {
+                state.expected_custom.len() as u64
+            }
+            TrackC1ECase::CustomMalformed
+            | TrackC1ECase::CustomMissing
+            | TrackC1ECase::IndexAcceptedChanged => 0,
+        };
+        assert_eq!(
+            observer.counter(Counter::TypedActionsLoaded),
+            expected_loaded
+        );
+        assert_eq!(
+            observer.phase_calls(Phase::ActionsEvent),
+            (state.case != TrackC1ECase::IndexAcceptedChanged) as u64
+        );
+        assert_eq!(
+            observer.phase_calls(Phase::IndexReadyOwner),
+            (state.case == TrackC1ECase::IndexAcceptedChanged) as u64
+        );
+        assert_eq!(
+            observer.counter(Counter::IndexAccepted),
+            (state.case == TrackC1ECase::IndexAcceptedChanged) as u64
+        );
+        assert_eq!(observer.counter(Counter::IndexRejected), 0);
+
+        let expected_actions_version = expected_version;
+        if published {
+            assert_track_c_actions_owner_state(
+                &state.owner,
+                &state.expected_actions,
+                expected_actions_version,
+            );
+        } else {
+            let app = &state.owner.app;
+            assert_eq!(app.actions.as_slice(), state.expected_actions.as_slice());
+            assert_eq!(
+                crate::actions::actions_version(),
+                expected_actions_version,
+                "equal or failed load retains the current catalog generation"
+            );
+            assert_eq!(app.query, "app Synthetic action 00009");
+            assert_eq!(app.last_search_query, app.query);
+            assert_eq!(app.results, vec![state.expected_actions[9].clone()]);
+            assert!(app.last_results_valid);
+            assert!(!app.last_search_pending);
+            assert!(!app.background_query_refresh_pending);
+            assert_eq!(app.selected, Some(0), "no-op reload retains selection");
+        }
+        let app = &mut state.owner.app;
+        if let (Some(config), Some(generation)) = (
+            state.accepted_index_config.as_ref(),
+            state.accepted_index_generation,
+        ) {
+            assert_eq!(&app.indexing.desired, config);
+            assert_eq!(app.indexing.expected_generation, Some(generation));
+        } else {
+            assert!(state.accepted_index_config.is_none());
+            assert!(state.accepted_index_generation.is_none());
+        }
+        assert_eq!(app.custom_len, state.expected_custom.len());
+        assert_eq!(
+            &app.actions[..app.custom_len],
+            state.expected_custom.as_slice(),
+            "custom-first prefix preserves every Action field and Option args"
+        );
+        assert_eq!(
+            &app.actions[app.custom_len..],
+            state.expected_tail.as_slice(),
+            "indexed-tail membership and order match the accepted generation"
+        );
+        let expected_cache = state
+            .expected_actions
+            .iter()
+            .map(track_c_expected_cached_search_entry)
+            .collect::<Vec<_>>();
+        assert_eq!(app.action_cache, expected_cache);
+        let expected_filter = state
+            .expected_actions
+            .iter()
+            .map(track_c_expected_filter_metadata)
+            .collect::<Vec<_>>();
+        assert_eq!(app.action_filter_metadata, expected_filter);
+        let expected_by_id = state
+            .expected_actions
+            .iter()
+            .map(|action| (action.action.clone(), action.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(app.actions_by_id, expected_by_id);
+        assert_eq!(app.results, vec![state.expected_actions[9].clone()]);
+        assert_eq!(app.query, "app Synthetic action 00009");
+        assert_eq!(app.last_search_query, app.query);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.selected, if published { None } else { Some(0) });
+        assert_eq!(
+            app.query_history.acceptance_digest(),
+            state.initial_history_digest,
+            "publication refresh does not alter query-history navigation state"
+        );
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            state.initial_root_generation + published as u64,
+            "only a changed catalog/search refresh invalidates root result geometry"
+        );
+
+        let diagnostic_present = app.actions_persistence_diagnostic.is_some();
+        assert_eq!(
+            diagnostic_present,
+            matches!(
+                state.case,
+                TrackC1ECase::CustomMalformed | TrackC1ECase::CustomMissing
+            ),
+            "malformed and missing files retain last-good state with a diagnostic"
+        );
+        if !diagnostic_present {
+            assert!(app.error.is_none());
+        } else {
+            assert!(app.actions_persistence_diagnostic.is_some());
+        }
+
+        let expected_pin_actions = state
+            .pins
+            .iter()
+            .map(|pin| expected_by_id.get(&pin.action_id).cloned())
+            .collect::<Vec<_>>();
+        let resolved_pin_actions = state
+            .pins
+            .iter()
+            .map(|pin| app.resolve_pin_action(pin))
+            .collect::<Vec<_>>();
+        assert_eq!(resolved_pin_actions, expected_pin_actions);
+
+        let completion_keys_before_rebuild = track_c1e_completion_keys(app);
+        if published {
+            assert!(app.completion_index.is_none());
+            assert!(app.action_completion_dirty);
+            assert!(app.suggestions.is_empty());
+            app.rebuild_completion_index_now();
+        } else {
+            assert!(app.completion_index.is_some());
+            assert!(!app.action_completion_dirty);
+            assert_eq!(
+                completion_keys_before_rebuild,
+                state.initial_completion_keys
+            );
+            assert_eq!(app.suggestions, state.initial_suggestions);
+        }
+        let expected_completion_keys =
+            track_c1e_expected_completion_keys(app, &state.expected_actions);
+        let completion_keys = track_c1e_completion_keys(app);
+        assert_eq!(completion_keys, expected_completion_keys);
+        assert!(!app.action_completion_dirty);
+        let expected_suggestions =
+            track_c1e_expected_suggestions(&expected_completion_keys, &app.query, 5);
+        assert_eq!(app.suggestions, expected_suggestions);
+
+        let radial = app.cached_universal_action_catalog_snapshot();
+        let radial_actions = radial
+            .entries
+            .iter()
+            .take(state.expected_actions.len())
+            .map(|entry| entry.selected_action.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(radial_actions, state.expected_actions);
+        let radial_pointer = Arc::as_ptr(&radial) as usize;
+        let radial_builds = app.authoring_catalog_build_count.load(Ordering::SeqCst);
+        assert_eq!(
+            radial_builds,
+            state.initial_radial_builds + published as usize,
+            "the radial catalog rebuilds only when the action generation changes"
+        );
+        assert_eq!(radial_pointer == state.initial_radial_ptr, !published);
+        drop(radial);
+        let actions_pointer = Arc::as_ptr(&app.actions) as usize;
+        let actions_arc_retained = actions_pointer == state.initial_actions_ptr;
+        assert_eq!(actions_arc_retained, !published);
+
+        if state.case == TrackC1ECase::IndexAcceptedChanged {
+            assert_eq!(app.rx.queued_depth(), Some(0));
+            let delivered = state
+                ._age_recorder
+                .as_ref()
+                .expect("accepted index uses its original observed channel")
+                .snapshot();
+            assert_eq!(delivered.delivered.len(), 1);
+            assert_eq!(delivered.overflow, 0);
+            assert_eq!(delivered.abandoned, 0);
+            assert_eq!(
+                (delivered.delivered[0].class, delivered.delivered[0].origin),
+                (
+                    crate::performance::track_c::EventClass::IndexCompletion,
+                    EventOrigin::IndexCoordinator
+                )
+            );
+        } else {
+            assert_eq!(app.rx.queued_depth(), Some(0));
+        }
+
+        let root_generation = app.root_list_geometry.result_generation_for_test();
+        let history_digest = app.query_history.acceptance_digest();
+        let radial_build_delta = radial_builds.saturating_sub(state.initial_radial_builds);
+        let mut complete = StableSignature::new(
+            state.fixture_signature,
+            "track-c1e-complete-consumer-state",
+            state.expected_actions.len(),
+        );
+        complete.number(track_c_watch_projection_signature(
+            app,
+            &state.owner.index_root,
+        ));
+        complete.number(state.case.version_delta());
+        if let (Some(config), Some(generation)) = (
+            state.accepted_index_config.as_ref(),
+            state.accepted_index_generation,
+        ) {
+            complete.bytes(b"accepted-index-config");
+            complete.number(generation);
+            complete.number(config.roots().len() as u64);
+            for root in config.roots() {
+                track_c_watch_signature_string(&mut complete, root);
+            }
+            match config.max_items() {
+                Some(max_items) => {
+                    complete.number(1);
+                    complete.number(max_items as u64);
+                }
+                None => complete.number(0),
+            }
+        } else {
+            complete.bytes(b"no-index-config");
+        }
+        complete.number(root_generation.saturating_sub(state.initial_root_generation));
+        complete.number(radial_build_delta as u64);
+        complete.number(actions_arc_retained as u64);
+        complete.number(history_digest);
+        complete.number(app.action_completion_dirty as u64);
+        complete.number(app.command_completion_dirty as u64);
+        complete.number(completion_keys.len() as u64);
+        for key in &completion_keys {
+            track_c_watch_signature_string(&mut complete, key);
+        }
+        complete.number(resolved_pin_actions.len() as u64);
+        for action in &resolved_pin_actions {
+            if let Some(action) = action {
+                complete.bytes(b"resolved");
+                complete.number(track_c_watch_action_signature(
+                    &state.owner.index_root,
+                    std::slice::from_ref(action),
+                ));
+            } else {
+                complete.bytes(b"fallback");
+            }
+        }
+        complete.bytes(state.case.token().as_bytes());
+        complete.bytes(if diagnostic_present {
+            b"diagnostic-retained"
+        } else {
+            b"diagnostic-none"
+        });
+        let output_identity = complete.finish();
+        let structural_signature =
+            track_c_watch_action_signature(&state.owner.index_root, &app.actions);
+        let mut revisions = vec![
+            state.owner.actions_version_before,
+            version_after,
+            state.initial_root_generation,
+            root_generation,
+            state.initial_radial_builds as u64,
+            radial_builds as u64,
+            state.initial_history_digest,
+            history_digest,
+            app.last_search_provider_revision,
+        ];
+        if let Some(versions) = app.last_search_result_catalog_versions {
+            revisions.extend([versions.clipboard, versions.todo, versions.notes]);
+        } else {
+            revisions.extend([u64::MAX, u64::MAX, u64::MAX]);
+        }
+        let work_units = state.expected_actions.len() as u64;
+        let work_counters = vec![
+            state.expected_custom.len() as u64,
+            state.expected_tail.len() as u64,
+            app.action_cache.len() as u64,
+            app.action_filter_metadata.len() as u64,
+            app.actions_by_id.len() as u64,
+            app.results.len() as u64,
+            completion_keys.len() as u64,
+            app.suggestions.len() as u64,
+            state.case.version_delta(),
+            actions_arc_retained as u64,
+            if state.case == TrackC1ECase::CustomChanged {
+                state.tail_selected_clone_bytes
+            } else {
+                0
+            },
+            if state.case == TrackC1ECase::IndexAcceptedChanged {
+                state.index_custom_selected_clone_bytes
+            } else {
+                0
+            },
+            if state.case == TrackC1ECase::IndexAcceptedChanged {
+                state.index_tail_selected_clone_bytes
+            } else {
+                0
+            },
+            if published {
+                state.id_selected_clone_bytes
+            } else {
+                0
+            },
+        ];
+        let observation = OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: revisions,
+            viewport_receipt: None,
+            work_units,
+            work_counters,
+        };
+        TrackC1EValidatedSample {
+            observer,
+            observation,
+        }
+    }
+
+    fn emit_track_c1e_action_results(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        fixture: &TrackC1EFixture,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+        receipts: &[TrackC1EValidatedSample],
+    ) {
+        use super::track_c_action_observer::{Counter, Phase};
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert_eq!(receipts.len(), MEASURED_SAMPLES);
+        assert!(samples.iter().all(|sample| {
+            sample.output_identity == samples[0].output_identity
+                && sample.structural_signature == samples[0].structural_signature
+                && sample.work_units == fixture.expected_actions.len() as u64
+                && sample.work_counters == samples[0].work_counters
+        }));
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let telemetry_enabled = crate::performance::enabled();
+        assert!(
+            telemetry_enabled,
+            "C1E benchmark requires Track C telemetry"
+        );
+        assert_eq!(
+            crate::performance::track_c_workloads::BenchmarkMode::from_process_env(),
+            Ok(mode),
+            "reported mode matches the benchmark process"
+        );
+        let custom_count = fixture.expected_custom.len();
+        let indexed_count = fixture.expected_tail.len();
+        let count = custom_count + indexed_count;
+        let mut arrays: Vec<(&str, Vec<u64>)> = vec![
+            (
+                "actions_event_ns",
+                track_c1e_phase_values(receipts, Phase::ActionsEvent),
+            ),
+            (
+                "typed_load_ns",
+                track_c1e_phase_values(receipts, Phase::TypedLoad),
+            ),
+            (
+                "tail_copy_ns",
+                track_c1e_phase_values(receipts, Phase::TailCopy),
+            ),
+            (
+                "catalog_assembly_arc_ns",
+                track_c1e_phase_values(receipts, Phase::CatalogAssemblyArc),
+            ),
+            (
+                "search_entries_ns",
+                track_c1e_phase_values(receipts, Phase::SearchEntries),
+            ),
+            (
+                "filter_metadata_ns",
+                track_c1e_phase_values(receipts, Phase::FilterMetadata),
+            ),
+            ("id_map_ns", track_c1e_phase_values(receipts, Phase::IdMap)),
+            (
+                "completion_invalidation_ns",
+                track_c1e_phase_values(receipts, Phase::CompletionInvalidation),
+            ),
+            (
+                "same_query_refresh_ns",
+                track_c1e_phase_values(receipts, Phase::SameQueryRefresh),
+            ),
+            (
+                "search_total_ns",
+                track_c1e_phase_values(receipts, Phase::SearchTotal),
+            ),
+            (
+                "index_ready_owner_ns",
+                track_c1e_phase_values(receipts, Phase::IndexReadyOwner),
+            ),
+            (
+                "index_request_ns",
+                track_c1e_phase_values(receipts, Phase::IndexRequest),
+            ),
+            (
+                "scanner_wait_ns",
+                track_c1e_phase_values(receipts, Phase::ScannerWait),
+            ),
+            (
+                "index_custom_prefix_copy_ns",
+                track_c1e_phase_values(receipts, Phase::IndexCustomPrefixCopy),
+            ),
+            (
+                "index_tail_clone_ns",
+                track_c1e_phase_values(receipts, Phase::IndexTailClone),
+            ),
+            (
+                "typed_load_calls",
+                track_c1e_phase_call_values(receipts, Phase::TypedLoad),
+            ),
+            (
+                "tail_copy_calls",
+                track_c1e_phase_call_values(receipts, Phase::TailCopy),
+            ),
+            (
+                "catalog_assembly_arc_calls",
+                track_c1e_phase_call_values(receipts, Phase::CatalogAssemblyArc),
+            ),
+            (
+                "search_entries_calls",
+                track_c1e_phase_call_values(receipts, Phase::SearchEntries),
+            ),
+            (
+                "filter_metadata_calls",
+                track_c1e_phase_call_values(receipts, Phase::FilterMetadata),
+            ),
+            (
+                "id_map_calls",
+                track_c1e_phase_call_values(receipts, Phase::IdMap),
+            ),
+            (
+                "completion_invalidation_calls",
+                track_c1e_phase_call_values(receipts, Phase::CompletionInvalidation),
+            ),
+            (
+                "same_query_refresh_calls",
+                track_c1e_phase_call_values(receipts, Phase::SameQueryRefresh),
+            ),
+            (
+                "typed_load_outcome",
+                track_c1e_counter_values(receipts, Counter::TypedLoadOutcome),
+            ),
+            (
+                "typed_actions_loaded",
+                track_c1e_counter_values(receipts, Counter::TypedActionsLoaded),
+            ),
+            (
+                "tail_actions_cloned",
+                track_c1e_counter_values(receipts, Counter::TailActionsCloned),
+            ),
+            (
+                "index_custom_actions_cloned",
+                track_c1e_counter_values(receipts, Counter::IndexCustomActionsCloned),
+            ),
+            (
+                "index_tail_actions_cloned",
+                track_c1e_counter_values(receipts, Counter::IndexTailActionsCloned),
+            ),
+            (
+                "catalog_assembly_actions",
+                track_c1e_counter_values(receipts, Counter::CatalogAssemblyActions),
+            ),
+            (
+                "search_entries_processed",
+                track_c1e_counter_values(receipts, Counter::SearchEntriesProcessed),
+            ),
+            (
+                "filter_entries_processed",
+                track_c1e_counter_values(receipts, Counter::FilterEntriesProcessed),
+            ),
+            (
+                "id_actions_processed",
+                track_c1e_counter_values(receipts, Counter::IdActionsProcessed),
+            ),
+        ];
+        arrays.extend([
+            (
+                "cache_entries",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[2])
+                    .collect(),
+            ),
+            (
+                "filter_entries",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[3])
+                    .collect(),
+            ),
+            (
+                "id_entries",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[4])
+                    .collect(),
+            ),
+            (
+                "query_results",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[5])
+                    .collect(),
+            ),
+            (
+                "completion_keys",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[6])
+                    .collect(),
+            ),
+            (
+                "suggestions",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[7])
+                    .collect(),
+            ),
+            (
+                "actions_version_delta",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[8])
+                    .collect(),
+            ),
+            (
+                "arc_retained",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[9])
+                    .collect(),
+            ),
+            (
+                "tail_selected_clone_bytes",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[10])
+                    .collect(),
+            ),
+            (
+                "index_custom_selected_clone_bytes",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[11])
+                    .collect(),
+            ),
+            (
+                "index_tail_selected_clone_bytes",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[12])
+                    .collect(),
+            ),
+            (
+                "id_selected_clone_bytes",
+                samples
+                    .iter()
+                    .map(|sample| sample.work_counters[13])
+                    .collect(),
+            ),
+        ]);
+        assert_eq!(arrays.len(), 44);
+        assert!(
+            arrays
+                .iter()
+                .all(|(_, values)| values.len() == MEASURED_SAMPLES)
+        );
+        let mut array_text = String::new();
+        for (name, values) in arrays {
+            let encoded = values
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            use std::fmt::Write as _;
+            write!(&mut array_text, " {name}=[{encoded}]").expect("format result field");
+        }
+        let is_index = fixture.case == TrackC1ECase::IndexAcceptedChanged;
+        eprintln!(
+            "C1E_ACTIONS_RESULT schema=1 stage=sync_publication_attribution owner={} source={} profile={} mode={} telemetry_enabled={} observer_enabled=true fixture=custom_first_indexed_tail fixture_signature={:016x} output_signature={:016x} case={} count={} custom_count={} indexed_count={} warmups={} samples={} exclusions=0 scope=owner_includes_sync_publication overlap=nested_durations_not_subtracted outcome_scope=typed_load_0_not_called_1_valid_2_malformed_3_missing payload_scope=precomputed_logical_utf8_not_allocator_or_rss index_tail_scope=cloned_iterator_consumption{}",
+            if is_index {
+                "process_index_ready_accepted"
+            } else {
+                "process_watch_events_actions"
+            },
+            source,
+            profile,
+            if mode == crate::performance::track_c_workloads::BenchmarkMode::Small {
+                "small"
+            } else {
+                "full"
+            },
+            telemetry_enabled,
+            fixture.fixture_signature,
+            samples[0].output_identity,
+            fixture.case.token(),
+            count,
+            custom_count,
+            indexed_count,
+            WARMUPS,
+            MEASURED_SAMPLES,
+            array_text,
+        );
+    }
+
+    #[test]
+    fn track_c_oracle_action_publication_preserves_complete_consumers() {
+        for case in [
+            TrackC1ECase::CustomChanged,
+            TrackC1ECase::CustomEqual,
+            TrackC1ECase::CustomMalformed,
+            TrackC1ECase::CustomMissing,
+            TrackC1ECase::IndexAcceptedChanged,
+        ] {
+            let fixture = track_c1e_fixture(100, case);
+            let mut state = make_track_c1e_owner_state(&fixture);
+            // Setup completion is acknowledged before this owner call; an
+            // accepted index remains the coordinator's original envelope.
+            assert_eq!(state.owner.app.rx.queued_depth(), Some(1));
+            state.owner.app.process_watch_events();
+            let sample = validate_track_c1e_owner(&mut state);
+            assert_eq!(sample.observation.work_units, 100);
+            let current_indexed = &state.expected_tail[0];
+            let current_pin =
+                track_c1e_fixture_pin(&current_indexed.action, current_indexed.args.clone(), 20);
+            let missing_pin =
+                track_c1e_fixture_pin("synthetic:removed-history-action", Some(String::new()), 10);
+            let history_rows =
+                crate::dashboard::widgets::CommandHistoryWidget::prepare_pinned_entries_for_test(
+                    vec![current_pin, missing_pin.clone()],
+                    &state.owner.app.plugins,
+                    state.owner.app.enabled_plugins.as_ref(),
+                    &state.owner.app.actions_by_id,
+                    &state.owner.app.dashboard_data_cache,
+                );
+            assert_eq!(
+                history_rows,
+                vec![
+                    (current_indexed.clone(), false),
+                    (
+                        crate::actions::Action {
+                            label: missing_pin.label.clone(),
+                            desc: missing_pin.desc.clone(),
+                            action: missing_pin.action_id.clone(),
+                            args: missing_pin.args.clone(),
+                        },
+                        true,
+                    ),
+                ],
+                "history resolves a current indexed id and preserves a missing pin as fallback"
+            );
+            drop(state);
+            drop(fixture);
+        }
+    }
+
+    fn assert_track_c1e_transition_consumers(
+        app: &mut LauncherApp,
+        expected_actions: &[crate::actions::Action],
+        custom_len: usize,
+        query: &str,
+        expected_results: &[crate::actions::Action],
+        expected_version: u64,
+    ) {
+        assert_eq!(app.actions.as_slice(), expected_actions);
+        assert_eq!(app.custom_len, custom_len);
+        assert_eq!(&app.actions[..custom_len], &expected_actions[..custom_len]);
+        assert_eq!(&app.actions[custom_len..], &expected_actions[custom_len..]);
+        assert_eq!(
+            app.action_cache,
+            expected_actions
+                .iter()
+                .map(track_c_expected_cached_search_entry)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            app.action_filter_metadata,
+            expected_actions
+                .iter()
+                .map(track_c_expected_filter_metadata)
+                .collect::<Vec<_>>()
+        );
+        let expected_by_id = expected_actions
+            .iter()
+            .map(|action| (action.action.clone(), action.clone()))
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(app.actions_by_id, expected_by_id);
+        assert_eq!(app.query, query);
+        assert_eq!(app.last_search_query, query);
+        assert_eq!(app.results, expected_results);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.selected, None);
+        assert_eq!(crate::actions::actions_version(), expected_version);
+
+        if app.completion_index.is_none() {
+            assert!(app.action_completion_dirty);
+            assert!(app.suggestions.is_empty());
+            app.rebuild_completion_index_now();
+        }
+        let expected_keys = track_c1e_expected_completion_keys(app, expected_actions);
+        assert_eq!(track_c1e_completion_keys(app), expected_keys);
+        assert!(!app.action_completion_dirty);
+        assert_eq!(
+            app.suggestions,
+            track_c1e_expected_suggestions(&expected_keys, query, 5)
+        );
+
+        let radial = app.cached_universal_action_catalog_snapshot();
+        assert_eq!(
+            radial
+                .entries
+                .iter()
+                .take(expected_actions.len())
+                .map(|entry| entry.selected_action.clone())
+                .collect::<Vec<_>>(),
+            expected_actions
+        );
+        drop(radial);
+
+        let mut pins = Vec::new();
+        if let Some(indexed) = expected_actions.get(custom_len) {
+            pins.push(track_c1e_fixture_pin(
+                &indexed.action,
+                indexed.args.clone(),
+                30,
+            ));
+        }
+        if custom_len > 3 {
+            let custom = &expected_actions[3];
+            pins.push(track_c1e_fixture_pin(
+                &custom.action,
+                custom.args.clone(),
+                20,
+            ));
+        }
+        pins.push(track_c1e_fixture_pin(
+            "synthetic:removed-history-action",
+            Some(String::new()),
+            10,
+        ));
+        let history_rows =
+            crate::dashboard::widgets::CommandHistoryWidget::prepare_pinned_entries_for_test(
+                pins.clone(),
+                &app.plugins,
+                app.enabled_plugins.as_ref(),
+                &app.actions_by_id,
+                &app.dashboard_data_cache,
+            );
+        let expected_history_rows = pins
+            .iter()
+            .map(|pin| {
+                if let Some(action) = expected_by_id.get(&pin.action_id) {
+                    (action.clone(), false)
+                } else {
+                    (
+                        crate::actions::Action {
+                            label: pin.label.clone(),
+                            desc: pin.desc.clone(),
+                            action: pin.action_id.clone(),
+                            args: pin.args.clone(),
+                        },
+                        true,
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(history_rows, expected_history_rows);
+    }
+
+    #[test]
+    fn track_c_oracle_local_equal_empty_prefix_and_recovery_publication() {
+        let fixture = track_c1e_fixture(100, TrackC1ECase::CustomEqual);
+        let mut state = make_track_c1e_owner_state(&fixture);
+
+        // The queued watcher notification is equal and must retain the app's
+        // original catalog Arc and generation.
+        assert_eq!(state.owner.app.rx.queued_depth(), Some(1));
+        state.owner.app.process_watch_events();
+        let equal_watcher = validate_track_c1e_owner(&mut state);
+        assert_eq!(equal_watcher.observation.work_units, 100);
+        assert_eq!(state.owner.app.rx.queued_depth(), Some(0));
+
+        // A local durable save deliberately publishes even when its custom
+        // payload is identical; the actions transaction owns the version bump.
+        let watcher_equal_pointer = Arc::as_ptr(&state.owner.app.actions) as usize;
+        let root_generation_before_local_equal = state
+            .owner
+            .app
+            .root_list_geometry
+            .result_generation_for_test();
+        let version_before_local_equal = crate::actions::actions_version();
+        state
+            .owner
+            .app
+            .update_custom_actions(|actions| {
+                assert_eq!(actions.as_slice(), fixture.expected_custom.as_slice());
+                Ok(())
+            })
+            .expect("equal local custom save succeeds in the owned workspace");
+        let version_after_local_equal = crate::actions::actions_version();
+        assert_eq!(version_after_local_equal, version_before_local_equal + 1);
+        assert_eq!(
+            state
+                .owner
+                .app
+                .root_list_geometry
+                .result_generation_for_test(),
+            root_generation_before_local_equal + 1
+        );
+        assert_ne!(
+            Arc::as_ptr(&state.owner.app.actions) as usize,
+            watcher_equal_pointer,
+            "a durable equal local save still republishes the catalog"
+        );
+        assert_track_c_actions_owner_state(
+            &state.owner,
+            &fixture.expected_actions,
+            version_after_local_equal,
+        );
+        assert_track_c1e_transition_consumers(
+            &mut state.owner.app,
+            &fixture.expected_actions,
+            fixture.expected_custom.len(),
+            "app Synthetic action 00009",
+            &fixture.expected_actions[9..10],
+            version_after_local_equal,
+        );
+        assert!(matches!(
+            crate::actions::load_actions_typed(&state.owner.actions_path)
+                .expect("read the owned persisted custom prefix"),
+            crate::common::persistence::LoadState::Loaded(actions)
+                if actions == fixture.expected_custom
+        ));
+
+        // Once that save is on disk, an equal watcher notification must keep
+        // the newly published Arc and the version produced by the local save.
+        let local_equal_pointer = Arc::as_ptr(&state.owner.app.actions) as usize;
+        state
+            .owner
+            .app
+            .event_tx
+            .with_origin(EventOrigin::FileWatcher)
+            .send(WatchEvent::Actions)
+            .expect("queue the equal watcher notification");
+        state.owner.app.process_watch_events();
+        assert_eq!(crate::actions::actions_version(), version_after_local_equal);
+        assert_eq!(
+            Arc::as_ptr(&state.owner.app.actions) as usize,
+            local_equal_pointer,
+            "an equal watcher reload retains the local-save catalog Arc"
+        );
+        assert_eq!(
+            state
+                .owner
+                .app
+                .root_list_geometry
+                .result_generation_for_test(),
+            root_generation_before_local_equal + 1
+        );
+        assert_track_c_actions_owner_state(
+            &state.owner,
+            &fixture.expected_actions,
+            version_after_local_equal,
+        );
+        assert_track_c1e_transition_consumers(
+            &mut state.owner.app,
+            &fixture.expected_actions,
+            fixture.expected_custom.len(),
+            "app Synthetic action 00009",
+            &fixture.expected_actions[9..10],
+            version_after_local_equal,
+        );
+
+        // Empty custom files retain the indexed tail, and a later valid local
+        // save restores the custom prefix through the same publication owner.
+        let empty_query = "app __track_c1e_no_such_action__";
+        state.owner.app.query = empty_query.into();
+        let root_generation_before_empty = state
+            .owner
+            .app
+            .root_list_geometry
+            .result_generation_for_test();
+        let before_empty_pointer = Arc::as_ptr(&state.owner.app.actions) as usize;
+        let version_before_empty = crate::actions::actions_version();
+        state
+            .owner
+            .app
+            .update_custom_actions(|actions| {
+                actions.clear();
+                Ok(())
+            })
+            .expect("empty custom prefix persists in the owned workspace");
+        let version_after_empty = crate::actions::actions_version();
+        assert_eq!(version_after_empty, version_before_empty + 1);
+        assert_ne!(
+            Arc::as_ptr(&state.owner.app.actions) as usize,
+            before_empty_pointer
+        );
+        assert_eq!(
+            state
+                .owner
+                .app
+                .root_list_geometry
+                .result_generation_for_test(),
+            root_generation_before_empty + 1
+        );
+        assert!(matches!(
+            crate::actions::load_actions_typed(&state.owner.actions_path)
+                .expect("read the owned empty custom prefix"),
+            crate::common::persistence::LoadState::Loaded(actions) if actions.is_empty()
+        ));
+        assert_track_c1e_transition_consumers(
+            &mut state.owner.app,
+            &fixture.expected_tail,
+            0,
+            empty_query,
+            &[],
+            version_after_empty,
+        );
+
+        state.owner.app.query = "app Synthetic action 00009".into();
+        let root_generation_before_recovery = state
+            .owner
+            .app
+            .root_list_geometry
+            .result_generation_for_test();
+        let app = &mut state.owner.app;
+        let before_recovery_pointer = Arc::as_ptr(&app.actions) as usize;
+        let version_before_recovery = crate::actions::actions_version();
+        app.update_custom_actions(|actions| {
+            *actions = fixture.expected_custom.clone();
+            Ok(())
+        })
+        .expect("valid custom prefix recovers in the owned workspace");
+        let version_after_recovery = crate::actions::actions_version();
+        assert_eq!(version_after_recovery, version_before_recovery + 1);
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            root_generation_before_recovery + 1
+        );
+        assert_ne!(Arc::as_ptr(&app.actions) as usize, before_recovery_pointer);
+        assert_track_c_actions_owner_state(
+            &state.owner,
+            &fixture.expected_actions,
+            version_after_recovery,
+        );
+        assert_track_c1e_transition_consumers(
+            &mut state.owner.app,
+            &fixture.expected_actions,
+            fixture.expected_custom.len(),
+            "app Synthetic action 00009",
+            &fixture.expected_actions[9..10],
+            version_after_recovery,
+        );
+        assert!(matches!(
+            crate::actions::load_actions_typed(&state.owner.actions_path)
+                .expect("read the recovered owned custom prefix"),
+            crate::common::persistence::LoadState::Loaded(actions)
+                if actions == fixture.expected_custom
+        ));
+        drop(state);
+        drop(fixture);
+    }
+
+    #[test]
+    #[ignore = "opt-in C1-E publication characterization; parent runs isolated fast-dev Small/Full processes"]
+    fn track_c_c1e_benchmark_action_publication_attribution() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, MEASURED_SAMPLES, WARMUPS, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let total_counts: &[usize] = match mode {
+            BenchmarkMode::Small => &[100],
+            BenchmarkMode::Full => &[100, 1_000, 10_000, 20_000],
+        };
+        for total_count in total_counts {
+            for case in [
+                TrackC1ECase::CustomChanged,
+                TrackC1ECase::CustomEqual,
+                TrackC1ECase::CustomMalformed,
+                TrackC1ECase::CustomMissing,
+                TrackC1ECase::IndexAcceptedChanged,
+            ] {
+                let fixture = track_c1e_fixture(*total_count, case);
+                let mut validations = Vec::with_capacity(WARMUPS + MEASURED_SAMPLES);
+                let samples = measure_owner(
+                    || make_track_c1e_owner_state(&fixture),
+                    |state| {
+                        state.owner.app.process_watch_events();
+                        crate::actions::actions_version()
+                    },
+                    |state, _version_after| {
+                        let validated = validate_track_c1e_owner(state);
+                        let observation = validated.observation.clone();
+                        validations.push(validated);
+                        observation
+                    },
+                );
+                assert_eq!(samples.len(), MEASURED_SAMPLES);
+                assert_eq!(validations.len(), WARMUPS + MEASURED_SAMPLES);
+                let measured = validations.into_iter().skip(WARMUPS).collect::<Vec<_>>();
+                emit_track_c1e_action_results(mode, &fixture, &samples, &measured);
+            }
         }
     }
 

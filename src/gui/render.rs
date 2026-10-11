@@ -149,6 +149,11 @@ impl RootListGeometryCache {
         self.invalidate_geometry();
     }
 
+    #[cfg(test)]
+    pub(super) fn result_generation_for_test(&self) -> u64 {
+        self.result_generation
+    }
+
     fn observe_grid_mode(&mut self, is_grid: bool) {
         if self
             .last_grid_mode
