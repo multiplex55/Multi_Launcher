@@ -12,6 +12,29 @@ use tempfile::tempdir;
 
 static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
+struct OwnedCwdGuard {
+    previous: std::path::PathBuf,
+    _workspace: tempfile::TempDir,
+}
+
+impl OwnedCwdGuard {
+    fn new() -> Self {
+        let previous = std::env::current_dir().expect("capture test working directory");
+        let workspace = tempdir().expect("create isolated test working directory");
+        std::env::set_current_dir(workspace.path()).expect("enter isolated test working directory");
+        Self {
+            previous,
+            _workspace: workspace,
+        }
+    }
+}
+
+impl Drop for OwnedCwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.previous);
+    }
+}
+
 fn setup() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
     let notes_dir = dir.path().join("notes");
@@ -209,6 +232,7 @@ fn note_tags_parses_edge_cases() {
 #[test]
 fn note_link_dedupes_backlinks() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _cwd = OwnedCwdGuard::new();
     let _tmp = setup();
     append_note("alpha", "link to [[beta note]] and [[Beta Note]]").unwrap();
     append_note("beta note", "beta").unwrap();
@@ -315,6 +339,7 @@ fn note_open_uses_fuzzy_matching() {
 #[test]
 fn note_alias_supports_open_rm_and_labels() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _cwd = OwnedCwdGuard::new();
     let _tmp = setup();
     append_note("alpha", "# alpha\nAlias: special-name\n\ncontent").unwrap();
     let plugin = NotePlugin::default();
@@ -359,6 +384,7 @@ fn launcher_app_delete_note_accepts_alias() {
 #[test]
 fn extract_tags_skips_code_fences() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _cwd = OwnedCwdGuard::new();
     let _tmp = setup();
     append_note("alpha", "```\n#foo\n```\n#bar").unwrap();
     let notes = load_notes().unwrap();
@@ -425,6 +451,7 @@ fn link_validation_rejects_invalid_urls() {
 #[test]
 fn note_meta_wrap_links_integration_parses_aliases_and_preserves_links_regression() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _cwd = OwnedCwdGuard::new();
     let _tmp = setup();
     append_note("Roadmap", "# Roadmap\nAlias: Plan\nAliases: Old Plan, Strategy\n\nSee https://roadmap.example and [[Second Note]].").unwrap();
     append_note("Second Note", "# Second Note\n\nBacklink to [[Roadmap]].").unwrap();

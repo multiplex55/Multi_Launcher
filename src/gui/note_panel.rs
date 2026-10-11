@@ -44,9 +44,9 @@ const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const HEAVY_RECOMPUTE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
 
-// C1-A attribution is compiled only into test builds and is active only while
+// C1-B attribution is compiled only into test builds and is active only while
 // a test owns a `NoteRefreshObservationScope`. It intentionally does not feed
-// the existing Track C collector or alter the C0 result schema.
+// the existing Track C collector or alter frozen C0/C1-A result artifacts.
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum NoteRefreshStringClass {
@@ -62,13 +62,13 @@ enum NoteRefreshDurationKind {
     Snapshot,
     TodoLoad,
     LabelMapBuild,
-    Pass(usize),
+    FusedTraversal,
     DerivedInstall,
 }
 
 #[cfg(test)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct NoteRefreshPassObservation {
+struct NoteRefreshFusedTraversalObservation {
     calls: u64,
     todo_visits: u64,
     note_visits: u64,
@@ -85,7 +85,7 @@ struct NoteRefreshObservation {
     snapshot_successes: u64,
     todo_load_calls: u64,
     label_map_visits: u64,
-    passes: [NoteRefreshPassObservation; 3],
+    fused_traversal: NoteRefreshFusedTraversalObservation,
     fenced_content_calls: u64,
     fenced_input_bytes: u64,
     fenced_output_bytes: u64,
@@ -148,8 +148,9 @@ impl NoteRefreshObserverHandle {
                     .label_map_build_elapsed_nanos
                     .saturating_add(elapsed_nanos);
             }
-            NoteRefreshDurationKind::Pass(index) => {
-                observation.passes[index].elapsed_nanos = observation.passes[index]
+            NoteRefreshDurationKind::FusedTraversal => {
+                observation.fused_traversal.elapsed_nanos = observation
+                    .fused_traversal
                     .elapsed_nanos
                     .saturating_add(elapsed_nanos);
             }
@@ -1545,15 +1546,10 @@ impl NotePanel {
         #[cfg(test)]
         drop(label_map_observation_timer);
 
-        let linked_todo_rows =
-            backlink_rows_for_note(&self.note, BacklinkTab::LinkedTodos, &todos, &notes);
-        let related_note_rows =
-            backlink_rows_for_note(&self.note, BacklinkTab::RelatedNotes, &todos, &notes);
         let mut mentions_timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::NoteMentionsScan,
         );
-        let mention_rows =
-            backlink_rows_for_note(&self.note, BacklinkTab::Mentions, &todos, &notes);
+        let prepared_rows = backlink_rows_for_note(&self.note, &todos, &notes);
         mentions_timer.set_work_units(todos.len().saturating_add(notes.len()));
         mentions_timer.finish(crate::performance::track_c::Outcome::Completed);
 
@@ -1563,9 +1559,9 @@ impl NotePanel {
             NoteRefreshDurationKind::DerivedInstall,
         );
         self.derived.todo_label_map = todo_label_map;
-        self.derived.backlink_rows_linked_todos = linked_todo_rows;
-        self.derived.backlink_rows_related_notes = related_note_rows;
-        self.derived.backlink_rows_mentions = mention_rows;
+        self.derived.backlink_rows_linked_todos = prepared_rows.linked_todos;
+        self.derived.backlink_rows_related_notes = prepared_rows.related_notes;
+        self.derived.backlink_rows_mentions = prepared_rows.mentions;
 
         // The note revision came with this exact snapshot. Todo revisions are
         // sampled before loading so a concurrent write can only leave an older
@@ -1577,8 +1573,7 @@ impl NotePanel {
         self.heavy_refresh_retry = None;
         #[cfg(test)]
         drop(derived_install_observation_timer);
-        relationship_timer
-            .set_work_units(todos.len().saturating_add(notes.len()).saturating_mul(3));
+        relationship_timer.set_work_units(todos.len().saturating_add(notes.len()));
         relationship_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
@@ -4875,36 +4870,36 @@ fn note_reference_needles(current: &Note) -> Vec<(String, String)> {
     needles
 }
 
+struct PreparedBacklinkRows {
+    linked_todos: Vec<BacklinkRow>,
+    related_notes: Vec<BacklinkRow>,
+    mentions: Vec<BacklinkRow>,
+}
+
 fn backlink_rows_for_note(
     current_note: &Note,
-    tab: BacklinkTab,
     todos: &[crate::plugins::todo::TodoEntry],
     notes: &[Note],
-) -> Vec<BacklinkRow> {
+) -> PreparedBacklinkRows {
     #[cfg(test)]
     let observer = NoteRefreshObserverHandle::current();
     #[cfg(test)]
-    let pass_index = match tab {
-        BacklinkTab::LinkedTodos => 0,
-        BacklinkTab::RelatedNotes => 1,
-        BacklinkTab::Mentions => 2,
-    };
-    #[cfg(test)]
-    {
-        if let Some(observer) = &observer {
-            observer.record(|observation| {
-                observation.passes[pass_index].calls =
-                    observation.passes[pass_index].calls.saturating_add(1);
-            });
-        }
+    if let Some(observer) = &observer {
+        observer.record(|observation| {
+            observation.fused_traversal.calls = observation.fused_traversal.calls.saturating_add(1);
+        });
     }
     #[cfg(test)]
-    let _pass_observation_timer = NoteRefreshObservationTimer::start(
+    let _fused_observation_timer = NoteRefreshObservationTimer::start(
         observer.clone(),
-        NoteRefreshDurationKind::Pass(pass_index),
+        NoteRefreshDurationKind::FusedTraversal,
     );
 
-    let mut rows = Vec::new();
+    let mut prepared = PreparedBacklinkRows {
+        linked_todos: Vec::new(),
+        related_notes: Vec::new(),
+        mentions: Vec::new(),
+    };
     let current_slug = current_note.slug.as_str();
     let needles = note_reference_needles(current_note);
     let current_searchable = content_without_fenced_code(&current_note.content);
@@ -4913,8 +4908,8 @@ fn backlink_rows_for_note(
         #[cfg(test)]
         if let Some(observer) = &observer {
             observer.record(|observation| {
-                observation.passes[pass_index].todo_visits =
-                    observation.passes[pass_index].todo_visits.saturating_add(1);
+                observation.fused_traversal.todo_visits =
+                    observation.fused_traversal.todo_visits.saturating_add(1);
             });
         }
         let matched = todo
@@ -4946,10 +4941,8 @@ fn backlink_rows_for_note(
                 )
             })
         });
-        if let Some((needle, reason)) = matched
-            && matches!(tab, BacklinkTab::LinkedTodos | BacklinkTab::Mentions)
-        {
-            rows.push(BacklinkRow {
+        if let Some((needle, reason)) = matched {
+            let row = BacklinkRow {
                 title: todo.text.clone(),
                 type_badge: "Todo".to_string(),
                 updated: "n/a".to_string(),
@@ -4957,7 +4950,10 @@ fn backlink_rows_for_note(
                 reason,
                 note_slug: None,
                 todo_id: Some(todo.id.clone()),
-            });
+            };
+            // Todo relationships intentionally appear in both categories.
+            prepared.linked_todos.push(row.clone());
+            prepared.mentions.push(row);
         }
     }
 
@@ -4965,8 +4961,8 @@ fn backlink_rows_for_note(
         #[cfg(test)]
         if let Some(observer) = &observer {
             observer.record(|observation| {
-                observation.passes[pass_index].note_visits =
-                    observation.passes[pass_index].note_visits.saturating_add(1);
+                observation.fused_traversal.note_visits =
+                    observation.fused_traversal.note_visits.saturating_add(1);
             });
         }
         if note.slug == current_slug {
@@ -5000,22 +4996,23 @@ fn backlink_rows_for_note(
             });
         if let Some((needle, reason)) = matched {
             let is_mention = reason.contains("mention") || reason.contains("entity");
-            if (tab == BacklinkTab::RelatedNotes && !is_mention)
-                || (tab == BacklinkTab::Mentions && is_mention)
-            {
-                rows.push(BacklinkRow {
-                    title: note.title.clone(),
-                    type_badge: "Note".to_string(),
-                    updated: format_note_updated(note),
-                    snippet: extract_snippet_around(&searchable, &needle),
-                    reason,
-                    note_slug: Some(note.slug.clone()),
-                    todo_id: None,
-                });
+            let row = BacklinkRow {
+                title: note.title.clone(),
+                type_badge: "Note".to_string(),
+                updated: format_note_updated(note),
+                snippet: extract_snippet_around(&searchable, &needle),
+                reason,
+                note_slug: Some(note.slug.clone()),
+                todo_id: None,
+            };
+            if is_mention {
+                prepared.mentions.push(row);
+            } else {
+                prepared.related_notes.push(row);
             }
         }
     }
-    rows
+    prepared
 }
 
 fn extract_wiki_links(content: &str) -> Vec<String> {
@@ -5333,6 +5330,8 @@ mod tests {
         _cache_guard: crate::plugins::note::NoteCachePublicationGuard,
         expected_rows: Vec<Vec<TrackCBacklinkRowIdentity>>,
         expected_labels: HashMap<String, String>,
+        expected_note_count: usize,
+        expected_todo_count: usize,
         expected_note_revision: u64,
         expected_todo_revision: u64,
     }
@@ -5795,14 +5794,18 @@ mod tests {
             observation.label_map_visits,
             state.expected_todos.len() as u64
         );
-        for pass in &observation.passes {
-            assert_eq!(pass.calls, 1);
-            assert_eq!(pass.todo_visits, state.expected_todos.len() as u64);
-            assert_eq!(pass.note_visits, state.expected_notes.len() as u64);
-        }
+        assert_eq!(observation.fused_traversal.calls, 1);
+        assert_eq!(
+            observation.fused_traversal.todo_visits,
+            state.expected_todos.len() as u64
+        );
+        assert_eq!(
+            observation.fused_traversal.note_visits,
+            state.expected_notes.len() as u64
+        );
         assert_eq!(
             observation.fenced_content_calls,
-            state.expected_notes.len().saturating_mul(3) as u64
+            state.expected_notes.len() as u64
         );
 
         let structure =
@@ -5845,10 +5848,13 @@ mod tests {
         if crate::performance::enabled() {
             assert_eq!(note_relationship.calls, 1);
             assert_eq!(note_mentions.calls, 1);
-            assert_eq!(
-                note_relationship.work_units,
-                note_mentions.work_units.saturating_mul(3)
-            );
+            let expected_visits = state
+                .expected_notes
+                .len()
+                .saturating_add(state.expected_todos.len())
+                as u64;
+            assert_eq!(note_relationship.work_units, expected_visits);
+            assert_eq!(note_mentions.work_units, expected_visits);
         }
         let work_units = note_relationship.work_units;
 
@@ -5942,7 +5948,7 @@ mod tests {
             .join(",")
     }
 
-    fn track_c1a_emit_samples(
+    fn track_c1b_emit_samples(
         mode: crate::performance::track_c_workloads::BenchmarkMode,
         item_count: usize,
         transition: TrackC1ANoteTransition,
@@ -5968,7 +5974,7 @@ mod tests {
         let frame_p95 = crate::performance::track_c_workloads::nearest_rank(&elapsed, 95);
         let frame_max = elapsed.iter().copied().max().unwrap_or_default();
         let mut line = format!(
-            "C1A_NOTE_RESULT schema=1 owner=egui_Context_run+NotePanel_ui source={source} profile={profile} mode={mode:?} telemetry_enabled={} observer_enabled=true fixture=synthetic_note_panel_refresh fixture_signature={fixture_signature:016x} transition={} count={item_count} todo_count=12 viewport=960x640 settings=backlinks_enabled_inert cold_type={} warmups={WARMUPS} samples={MEASURED_SAMPLES} exclusions=0 frame_timer=Context_run+NotePanel_ui attributed_owner=NotePanel_refresh_heavy_derived frame_elapsed_ns=[{}] frame_p50_ns={frame_p50} frame_p95_ns={frame_p95} frame_max_ns={frame_max} complete_output_state_ids=[{}] structural_output_ids=[{}] note_revisions=[{}] todo_revisions=[{}] work_units=[{}] work_counters=[{}]",
+            "C1B_NOTE_RESULT schema=1 stage=fused owner=egui_Context_run+NotePanel_ui source={source} profile={profile} mode={mode:?} telemetry_enabled={} observer_enabled=true fixture=synthetic_note_panel_refresh fixture_signature={fixture_signature:016x} transition={} count={item_count} todo_count=12 viewport=960x640 settings=backlinks_enabled_inert cold_type={} warmups={WARMUPS} samples={MEASURED_SAMPLES} exclusions=0 frame_timer=Context_run+NotePanel_ui attributed_owner=NotePanel_refresh_heavy_derived frame_elapsed_ns=[{}] frame_p50_ns={frame_p50} frame_p95_ns={frame_p95} frame_max_ns={frame_max} complete_output_state_ids=[{}] structural_output_ids=[{}] note_revisions=[{}] todo_revisions=[{}] work_units=[{}] work_counters=[{}]",
             crate::performance::enabled(),
             transition.report_label(),
             transition.cold_type(),
@@ -5986,7 +5992,7 @@ mod tests {
         );
         let append = |line: &mut String, name: &str, values: String| {
             use std::fmt::Write as _;
-            write!(line, " {name}=[{values}]").expect("append numeric C1A field");
+            write!(line, " {name}=[{values}]").expect("append numeric C1B field");
         };
         let observer_values = |select: fn(&NoteRefreshObservation) -> u64| {
             track_c1a_join_u64(details.iter().map(|detail| select(&detail.observation)))
@@ -6066,44 +6072,26 @@ mod tests {
             "derived_install_ns",
             observer_values(|o| o.derived_install_elapsed_nanos),
         );
-        for pass_index in 0..3 {
-            append(
-                &mut line,
-                &format!("pass{pass_index}_calls"),
-                track_c1a_join_u64(
-                    details
-                        .iter()
-                        .map(|detail| detail.observation.passes[pass_index].calls),
-                ),
-            );
-            append(
-                &mut line,
-                &format!("pass{pass_index}_todo_visits"),
-                track_c1a_join_u64(
-                    details
-                        .iter()
-                        .map(|detail| detail.observation.passes[pass_index].todo_visits),
-                ),
-            );
-            append(
-                &mut line,
-                &format!("pass{pass_index}_note_visits"),
-                track_c1a_join_u64(
-                    details
-                        .iter()
-                        .map(|detail| detail.observation.passes[pass_index].note_visits),
-                ),
-            );
-            append(
-                &mut line,
-                &format!("pass{pass_index}_ns"),
-                track_c1a_join_u64(
-                    details
-                        .iter()
-                        .map(|detail| detail.observation.passes[pass_index].elapsed_nanos),
-                ),
-            );
-        }
+        append(
+            &mut line,
+            "fused_calls",
+            observer_values(|o| o.fused_traversal.calls),
+        );
+        append(
+            &mut line,
+            "fused_todo_visits",
+            observer_values(|o| o.fused_traversal.todo_visits),
+        );
+        append(
+            &mut line,
+            "fused_note_visits",
+            observer_values(|o| o.fused_traversal.note_visits),
+        );
+        append(
+            &mut line,
+            "fused_ns",
+            observer_values(|o| o.fused_traversal.elapsed_nanos),
+        );
         for (index, name) in ["needles", "fenced", "snippet"].into_iter().enumerate() {
             append(
                 &mut line,
@@ -6194,16 +6182,126 @@ mod tests {
             drop(output);
             assert_ne!(observation.output_identity, 0);
             assert_ne!(observation.structural_signature, 0);
-            assert_eq!(details.observation.fenced_content_calls, 300);
-            assert_eq!(details.observation.passes[0].note_visits, 100);
-            assert_eq!(details.observation.passes[1].note_visits, 100);
-            assert_eq!(details.observation.passes[2].note_visits, 100);
+            assert_eq!(details.observation.fenced_content_calls, 100);
+            assert_eq!(details.observation.fused_traversal.calls, 1);
+            assert_eq!(details.observation.fused_traversal.todo_visits, 12);
+            assert_eq!(details.observation.fused_traversal.note_visits, 100);
         }
     }
 
     #[test]
-    #[ignore = "opt-in C1-A note refresh attribution; synthetic owned workspace only"]
-    fn track_c_c1a_benchmark_open_note_panel_refresh_attribution() {
+    fn track_c_c1b_note_save_on_close_persists_and_refreshes_backlinks() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+        use crate::plugins::todo::TodoEntry;
+
+        let workspace = TrackCWorkspace::new();
+        let _notes_env_guard = NOTES_ENV_LOCK.lock().expect("notes env lock");
+        let _cache_guard = crate::plugins::note::publish_note_cache_for_test(Vec::new());
+        std::fs::create_dir_all(workspace.notes_dir()).expect("create owned notes directory");
+        let initial_content = "# Current\n\nOriginal body";
+        std::fs::write(workspace.notes_dir().join("current.md"), initial_content)
+            .expect("write owned current note");
+        std::fs::write(
+            workspace.notes_dir().join("other.md"),
+            "# Other\n\n[[Current]]",
+        )
+        .expect("write owned related note");
+        crate::plugins::note::refresh_cache().expect("publish owned note files");
+        let (initial_revision, initial_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("owned initial cache is healthy");
+        let current = initial_notes
+            .iter()
+            .find(|note| note.slug == "current")
+            .expect("current note loaded from the owned workspace")
+            .clone();
+        assert_eq!(current.path, workspace.notes_dir().join("current.md"));
+
+        let todos = vec![TodoEntry {
+            id: "todo-close-save".into(),
+            text: "Close-save relationship target".into(),
+            done: false,
+            priority: 0,
+            tags: Vec::new(),
+            entity_refs: Vec::new(),
+        }];
+        let _todo_guard = TrackC1ATodoSnapshotGuard::publish(TODO_FILE, &todos);
+        let context = egui::Context::default();
+        let mut app = track_c1a_make_inert_app(&context, &workspace);
+        app.note_save_on_close = true;
+        app.note_always_overwrite = true;
+        let draft = format!("{}\n\n@todo:todo-close-save", current.content);
+        let mut panel = NotePanel::from_note(current);
+        panel.replace_content_from_mutation(draft.clone(), 10.0);
+        app.push_note_panel(panel);
+
+        let observer = NoteRefreshObservationScope::new();
+        assert!(
+            app.close_front_dialog(),
+            "the close owner handles the panel"
+        );
+        let close_observation = observer.snapshot();
+        assert_eq!(close_observation.refresh_calls, 1);
+        assert_eq!(close_observation.successful_recomputes, 1);
+        assert_eq!(close_observation.snapshot_successes, 1);
+        assert_eq!(close_observation.fused_traversal.calls, 1);
+        assert_eq!(close_observation.fused_traversal.todo_visits, 1);
+        assert_eq!(close_observation.fused_traversal.note_visits, 2);
+        assert_eq!(close_observation.fenced_content_calls, 2);
+        drop(observer);
+
+        let saved_path = workspace.notes_dir().join("current.md");
+        assert_eq!(std::fs::read_to_string(&saved_path).unwrap(), draft);
+        let (saved_revision, saved_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("save publishes a healthy current note snapshot");
+        assert_ne!(saved_revision, initial_revision);
+        let saved_current = saved_notes
+            .iter()
+            .find(|note| note.slug == "current")
+            .expect("saved note remains in the canonical cache");
+        assert_eq!(saved_current.content, draft);
+
+        let expected_rows = [
+            BacklinkTab::LinkedTodos,
+            BacklinkTab::RelatedNotes,
+            BacklinkTab::Mentions,
+        ]
+        .into_iter()
+        .map(|tab| {
+            backlink_rows_signature(&track_c_eager_note_rows(
+                saved_current,
+                tab,
+                &todos,
+                &saved_notes,
+            ))
+        })
+        .collect::<Vec<_>>();
+        let mut refreshed_panel = NotePanel::from_note(saved_current.clone());
+        refreshed_panel.last_backlinks_enabled = None;
+        refreshed_panel.maybe_refresh_heavy_derived(&context, true);
+        let actual_rows = [
+            &refreshed_panel.derived.backlink_rows_linked_todos,
+            &refreshed_panel.derived.backlink_rows_related_notes,
+            &refreshed_panel.derived.backlink_rows_mentions,
+        ]
+        .into_iter()
+        .map(|rows| backlink_rows_signature(rows))
+        .collect::<Vec<_>>();
+        assert_eq!(actual_rows, expected_rows);
+        assert!(
+            refreshed_panel
+                .derived
+                .backlink_rows_linked_todos
+                .iter()
+                .any(|row| row.todo_id.as_deref() == Some("todo-close-save")),
+            "saved outgoing TODO reference appears in the refreshed derived rows"
+        );
+    }
+
+    #[test]
+    #[ignore = "opt-in C1-B fused note refresh attribution; synthetic owned workspace only"]
+    fn track_c_c1b_benchmark_open_note_panel_refresh_attribution() {
         use crate::performance::track_c_workloads::{
             BenchmarkMode, MEASURED_SAMPLES, WARMUPS, measure_owner,
         };
@@ -6257,7 +6355,7 @@ mod tests {
             );
             let details = details.into_inner();
             assert_eq!(validation_index.get(), WARMUPS + MEASURED_SAMPLES);
-            track_c1a_emit_samples(
+            track_c1b_emit_samples(
                 mode,
                 item_count,
                 transition,
@@ -6424,6 +6522,8 @@ mod tests {
             _cache_guard: cache_guard,
             expected_rows,
             expected_labels,
+            expected_note_count: snapshot_notes.len(),
+            expected_todo_count: todos.len(),
             expected_note_revision,
             expected_todo_revision,
         }
@@ -6475,7 +6575,11 @@ mod tests {
             assert_eq!(refresh.calls, 1, "actual heavy-refresh owner ran once");
             assert_eq!(refresh.completed, 1);
             assert_eq!(mentions.calls, 1);
-            assert_eq!(refresh.work_units, mentions.work_units.saturating_mul(3));
+            let expected_visits = state
+                .expected_note_count
+                .saturating_add(state.expected_todo_count) as u64;
+            assert_eq!(refresh.work_units, expected_visits);
+            assert_eq!(mentions.work_units, expected_visits);
         }
         OwnerObservation {
             output_identity: complete.finish(),
@@ -10054,13 +10158,304 @@ More text.
             )],
         }];
 
-        let linked = backlink_rows_for_note(&current, BacklinkTab::LinkedTodos, &todos, &notes);
-        let related = backlink_rows_for_note(&current, BacklinkTab::RelatedNotes, &todos, &notes);
-        let mentions = backlink_rows_for_note(&current, BacklinkTab::Mentions, &todos, &notes);
+        let prepared = backlink_rows_for_note(&current, &todos, &notes);
 
-        assert_eq!(linked.len(), 1);
-        assert_eq!(related.len(), 1);
-        assert!(!mentions.is_empty());
+        assert_eq!(prepared.linked_todos.len(), 1);
+        assert_eq!(prepared.related_notes.len(), 1);
+        assert!(!prepared.mentions.is_empty());
+    }
+
+    #[test]
+    fn prepared_backlink_rows_match_frozen_eager_categories_and_order() {
+        use crate::common::entity_ref::{EntityKind, EntityRef};
+        use crate::plugins::todo::TodoEntry;
+
+        let make_note =
+            |title: &str, slug: &str, content: &str, entity_refs: Vec<EntityRef>| Note {
+                title: title.into(),
+                path: std::path::PathBuf::new(),
+                content: content.into(),
+                tags: Vec::new(),
+                links: Vec::new(),
+                slug: slug.into(),
+                alias: None,
+                aliases: Vec::new(),
+                entity_refs,
+            };
+        let make_todo = |id: &str, text: &str, entity_refs: Vec<EntityRef>| TodoEntry {
+            id: id.into(),
+            text: text.into(),
+            done: false,
+            priority: 0,
+            tags: Vec::new(),
+            entity_refs,
+        };
+        let note_ref = || EntityRef::new(EntityKind::Note, "central-note", None);
+        let compare = |current: &Note, todos: &[TodoEntry], notes: &[Note]| {
+            let prepared = backlink_rows_for_note(current, todos, notes);
+            let actual = [
+                backlink_rows_signature(&prepared.linked_todos),
+                backlink_rows_signature(&prepared.related_notes),
+                backlink_rows_signature(&prepared.mentions),
+            ];
+            let expected = [
+                BacklinkTab::LinkedTodos,
+                BacklinkTab::RelatedNotes,
+                BacklinkTab::Mentions,
+            ]
+            .into_iter()
+            .map(|tab| {
+                backlink_rows_signature(&track_c_eager_note_rows(current, tab, todos, notes))
+            })
+            .collect::<Vec<_>>();
+            assert_eq!(actual.as_slice(), expected.as_slice());
+            prepared
+        };
+
+        let empty_current = make_note("Current", "central-note", "# Current", Vec::new());
+        let empty_prepared = compare(&empty_current, &[], &[]);
+        assert!(empty_prepared.linked_todos.is_empty());
+        let self_only = vec![empty_current.clone()];
+        let self_prepared = compare(&empty_current, &[], &self_only);
+        assert!(self_prepared.related_notes.is_empty());
+        assert!(self_prepared.mentions.is_empty());
+
+        let current = make_note(
+            "Central Note",
+            "central-note",
+            "# Central Note\nAlias: Primary Alias\nAliases: Secondary Alias\n\n@todo:todo-draft",
+            vec![EntityRef::new(EntityKind::Todo, "todo-typed", None)],
+        );
+        let raw_notes = vec![
+            current.clone(),
+            make_note(
+                "Primary Link",
+                "primary-link",
+                "# Primary Link\n\n**nested [[Primary Alias]] and [[Secondary Alias]], duplicate [[Primary Alias]]**",
+                Vec::new(),
+            ),
+            make_note(
+                "Wiki Wins",
+                "wiki-wins",
+                "# Wiki Wins\n\n[[Central Note]] @note:central-note",
+                vec![note_ref()],
+            ),
+            make_note(
+                "Entity Wins",
+                "entity-wins",
+                "# Entity Wins\n\n@note:central-note [[Unknown Target]]",
+                vec![note_ref()],
+            ),
+            make_note(
+                "Text Mention",
+                "text-mention",
+                &format!(
+                    "# Text Mention\n\nUnicode 東京 before @note:central-note {}",
+                    "z".repeat(60)
+                ),
+                Vec::new(),
+            ),
+            make_note(
+                "Fenced Wiki",
+                "fenced-wiki",
+                "# Fenced Wiki\n\n```md\n[[Central Note]]\n```",
+                Vec::new(),
+            ),
+            make_note(
+                "Fenced Prose",
+                "fenced-prose",
+                "# Fenced Prose\n\n```md\n@note:central-note\n```",
+                Vec::new(),
+            ),
+            make_note(
+                "Ambiguous Source",
+                "ambiguous-source",
+                "# Ambiguous Source\n\n[[Ambiguous Alias]]",
+                Vec::new(),
+            ),
+            make_note(
+                "Collision One",
+                "collision-one",
+                "# Collision One\nAlias: Ambiguous Alias",
+                Vec::new(),
+            ),
+            make_note(
+                "Collision Two",
+                "collision-two",
+                "# Collision Two\nAlias: Ambiguous Alias",
+                Vec::new(),
+            ),
+        ];
+        let mut todos = vec![
+            make_todo(
+                "todo-overlap",
+                "Both [[Central Note]] and @note:central-note",
+                vec![note_ref()],
+            ),
+            make_todo(
+                "todo-needle-order",
+                "Both [[Central Note]] and @note:central-note",
+                Vec::new(),
+            ),
+            make_todo("todo-draft", "Draft-only todo", Vec::new()),
+            make_todo("todo-typed", "Typed outgoing todo", Vec::new()),
+            make_todo(
+                "",
+                "Empty identity with persisted reference",
+                vec![note_ref()],
+            ),
+            make_todo("unrelated", "No relationship", Vec::new()),
+        ];
+        todos.push(make_todo(
+            "todo-overlap",
+            "Second source with duplicate TODO ID",
+            vec![note_ref()],
+        ));
+        todos.push(todos[1].clone());
+
+        let base_cache = crate::plugins::note::publish_note_cache_for_test(raw_notes.clone());
+        let (_, canonical_notes) = crate::plugins::note::note_cache_snapshot_with_version()
+            .expect("canonical fixture publication is healthy");
+        let canonical_current = &canonical_notes[0];
+        assert_eq!(canonical_current.alias.as_deref(), Some("Primary Alias"));
+        assert!(
+            canonical_current
+                .aliases
+                .iter()
+                .any(|alias| alias.as_str() == "Secondary Alias")
+        );
+        let prepared = compare(canonical_current, &todos, &canonical_notes);
+        let linked = backlink_rows_signature(&prepared.linked_todos);
+        let mentions = backlink_rows_signature(&prepared.mentions);
+        let related = backlink_rows_signature(&prepared.related_notes);
+        let ordered_todo_rows = |rows: &[BacklinkRow]| {
+            rows.iter()
+                .map(|row| (row.title.clone(), row.todo_id.clone()))
+                .collect::<Vec<_>>()
+        };
+        let expected_todo_order = [
+            (
+                "Both [[Central Note]] and @note:central-note",
+                Some("todo-overlap"),
+            ),
+            (
+                "Both [[Central Note]] and @note:central-note",
+                Some("todo-needle-order"),
+            ),
+            ("Draft-only todo", Some("todo-draft")),
+            ("Typed outgoing todo", Some("todo-typed")),
+            ("Empty identity with persisted reference", Some("")),
+            ("Second source with duplicate TODO ID", Some("todo-overlap")),
+            (
+                "Both [[Central Note]] and @note:central-note",
+                Some("todo-needle-order"),
+            ),
+        ]
+        .into_iter()
+        .map(|(title, id)| (title.to_owned(), id.map(str::to_owned)))
+        .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_todo_rows(&prepared.linked_todos),
+            expected_todo_order
+        );
+        assert_eq!(
+            ordered_todo_rows(&prepared.mentions[..linked.len()]),
+            expected_todo_order,
+            "Mentions retains the complete ordered TODO prefix"
+        );
+        assert_eq!(
+            prepared
+                .related_notes
+                .iter()
+                .map(|row| row.note_slug.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["primary-link", "wiki-wins", "fenced-wiki"]
+        );
+        assert_eq!(
+            prepared
+                .mentions
+                .iter()
+                .filter_map(|row| row.note_slug.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["entity-wins", "text-mention"]
+        );
+        assert!(
+            prepared
+                .related_notes
+                .iter()
+                .find(|row| row.note_slug.as_deref() == Some("fenced-wiki"))
+                .is_some_and(|row| row.reason == "wiki link"),
+            "raw canonical wiki links retain precedence even when their source text is fenced"
+        );
+        assert_eq!(prepared.linked_todos[0].reason, "todo linked to note");
+        assert_eq!(prepared.linked_todos[1].reason, "note mention");
+        assert_eq!(prepared.linked_todos[2].reason, "note mentions todo");
+        assert_eq!(prepared.linked_todos[4].todo_id.as_deref(), Some(""));
+        assert_eq!(prepared.related_notes[1].reason, "wiki link");
+        assert_eq!(prepared.mentions[7].reason, "entity reference");
+        assert_eq!(prepared.mentions[8].reason, "note mention");
+        assert!(prepared.mentions.iter().all(|row| {
+            row.note_slug.as_deref() != Some("fenced-prose")
+                && row.note_slug.as_deref() != Some("ambiguous-source")
+        }));
+        assert!(
+            prepared
+                .mentions
+                .iter()
+                .find(|row| row.note_slug.as_deref() == Some("text-mention"))
+                .is_some_and(|row| row.snippet.contains("東京"))
+        );
+        assert_eq!(linked.as_slice(), &mentions[..linked.len()]);
+        assert_ne!(
+            linked[0], linked[5],
+            "distinct source TODOs with the same ID retain their separate complete rows"
+        );
+        assert_eq!(
+            linked[1], linked[6],
+            "an exact repeated source TODO retains its duplicate complete row"
+        );
+        assert_eq!(
+            linked.len(),
+            7,
+            "matched todos keep source order and no dedup"
+        );
+        assert_eq!(related.len(), 3);
+        assert_eq!(mentions.len(), 9);
+
+        let mut transitioned_notes = raw_notes;
+        transitioned_notes[0].content =
+            "# Central Note\nAlias: Secondary Alias\nAliases: Primary Alias\n\n@todo:todo-draft"
+                .into();
+        let transitioned_cache =
+            crate::plugins::note::publish_note_cache_for_test(transitioned_notes);
+        let (_, transitioned) = crate::plugins::note::note_cache_snapshot_with_version()
+            .expect("primary/secondary alias transition publishes canonically");
+        let transitioned_current = &transitioned[0];
+        assert_eq!(
+            transitioned_current.alias.as_deref(),
+            Some("Secondary Alias")
+        );
+        assert!(
+            transitioned_current
+                .aliases
+                .iter()
+                .any(|alias| alias.as_str() == "Primary Alias")
+        );
+        let transitioned_rows = compare(transitioned_current, &todos, &transitioned);
+        assert_eq!(
+            backlink_rows_signature(&transitioned_rows.linked_todos),
+            linked
+        );
+        assert_eq!(
+            backlink_rows_signature(&transitioned_rows.related_notes),
+            related
+        );
+        assert_eq!(
+            backlink_rows_signature(&transitioned_rows.mentions),
+            mentions
+        );
+        drop(transitioned_cache);
+        drop(base_cache);
     }
 
     #[test]
@@ -10131,6 +10526,7 @@ Body visible always",
 
     #[test]
     fn backlink_setting_transitions_rebuild_only_when_enabled_and_preserve_rows() {
+        let _workspace = crate::performance::workloads::IsolatedWorkspace::new();
         let notes_dir = TempNotesDir::new();
         notes_dir.write_note("current.md", "# Current\n\nBody");
         notes_dir.write_note("other.md", "# Other\n\n[[Current]]");
@@ -10223,12 +10619,17 @@ link://note/central-note
         };
         let notes = vec![current, coded, linked];
 
-        let related = backlink_rows_for_note(&notes[0], BacklinkTab::RelatedNotes, &[], &notes);
-        let titles: Vec<_> = related.iter().map(|row| row.title.as_str()).collect();
+        let prepared = backlink_rows_for_note(&notes[0], &[], &notes);
+        let titles: Vec<_> = prepared
+            .related_notes
+            .iter()
+            .map(|row| row.title.as_str())
+            .collect();
 
         assert_eq!(titles, vec!["linked"]);
         assert!(
-            related
+            prepared
+                .related_notes
                 .iter()
                 .any(|row| row.reason == "link id" || row.reason == "wiki alias")
         );
