@@ -1,6 +1,6 @@
 # Track C C1-D alias-warning cost gate
 
-Status IN_PROGRESS;7/29 closed. Base8b6b8b9d487bae3154d5304f35bef099291f1019; LOCAL ONLY. Planner packet inspected; sole source writer c0_docs. Parent owns this report, ledger, collectors, execution and Git. Ordinary3/3, Small1/1 and exact-source Full1/1 PASS, independently reviewed. Baseline cost gate GO; narrow production query implementation pending.
+Status PASS;8/29 closed. Base8b6b8b9d487bae3154d5304f35bef099291f1019; LOCAL ONLY. Planner packet inspected; sole source writer c0_docs. Parent owns this report, ledger, collectors, execution and Git. Ordinary3/3, Small1/1 and exact-source Full1/1 PASS, independently reviewed. Narrow production query implemented and verified; source2c35a2e4f2a9a61fd81ab41e71716c2d34128b3f, optimized ordinary7/7,Small1/1,Full1/1 PASS with independent source/numerical/privacy/gate CLEAR.
 
 ## Objective and scope
 
@@ -110,3 +110,27 @@ Ordinary retry session5524 terminal exit0, run d794f7f5-179f-4a2b-8511-678470aae
 Small terminal exit0, run2e146fe7-868c-4178-8099-b9427d4da91c, build0.87s/test4.551s/execution4.566s,1/1PASS,5175skipped. Three100-note cases/60samples collected with companion parser. Owner p50/p95/max ns: unique8800/11100/11900; duplicate42000/46100/60300; ambiguous43600/53400/58300. Actual canonical candidate visits1/1/2, note visits0/100/100, returned labels0/2/2, label bytes0/163/158, outputbytes0/217/209. All nine legacy snapshot controls zero. This remains uncommitted-source smoke, not exact-source Full or user-visible timing. Independent raw/numeric/privacy/hash continuity review pending; all Cargo terminal, writer paused. C1-D IN_PROGRESS,7/29closed.
 
 Independent optimized Small review CLEAR: every scalar/all72arrays×20/15nearest-rank triplets/raw correspondence/privacy and branch/timer receipts verified. Baseline100 fixture/warning hashes and output sizes exact; nine legacy snapshot controls zero. Unicode/type corrections focused-verified, no behavior change. Published track_c_c1d_query_small.json with honest REVIEWED_UNCOMMITTED_QUERY_SMOKE attribution. Parent comparison confirms track_c1d_notes/eager_warning/fixture_signature/output_signature source functions unchanged from0a88. Cumulative diff inspected, no obsolete warning snapshot/GUI formatter path. Source/collector/baseline/smoke/docs ready for coherent local production commit; exact-source Full remains required before C1-D closure.
+
+Production source/collector/baseline/reviewed smoke committed2c35a2e4f2a9a61fd81ab41e71716c2d34128b3f; working tree clean immediately after commit. Parent sole Cargo session15043 running exact-source Full, run25ac9eb7-e254-4615-aa70-2a7ded3b01dc, build0.87s, nine cases/180retained expected, raw query/nextest-full.log. Writers paused; no Full result accepted yet. C1-D remains IN_PROGRESS,7/29closed.
+
+## Optimized exact-source Full (review pending)
+
+Session15043 terminal exit0; run25ac9eb7-e254-4615-aa70-2a7ded3b01dc, source2c35a2e4f2a9a61fd81ab41e71716c2d34128b3f, fast-dev build0.87s/test115.807s/execution115.820s,1/1PASS,5175skipped. Companion collector accepted9cases180samples/216arrays/45timing triplets. No source change during/after run; all Cargo terminal, writers paused. Raw query/nextest-full.log; ignored full-candidate.json. Independent numerical/privacy/identity and final performance gate pending.
+
+|Count/case|Baseline owner p50/p95/max ms|Query owner p50/p95/max ms|
+|---|---|---|
+|100 unique|0.0950/0.1641/0.2043|0.0081/0.0115/0.0142|
+|100 duplicate|0.5794/0.6691/0.7130|0.0421/0.0488/0.0491|
+|100 ambiguous|0.4645/0.5968/0.6074|0.0430/0.0559/0.0671|
+|1000 unique|0.8759/1.0737/1.2867|0.0125/0.0175/0.0242|
+|1000 duplicate|4.6168/5.2103/6.4112|0.2824/0.3166/0.4835|
+|1000 ambiguous|4.5559/5.6104/6.1441|0.2835/0.3996/0.4153|
+|5000 unique|6.2566/6.9821/7.3732|0.0184/0.0204/0.0218|
+|5000 duplicate|26.4706/31.4618/31.8468|1.4829/1.5952/1.6159|
+|5000 ambiguous|26.1068/26.7714/28.1801|1.4709/1.6128/1.7966|
+
+Owner boundaries are comparable lookup/message work on matched fixtures/profiles. Phase subdivisions differ: baseline format includes cloned-note disposal; new query includes under-lock candidate/ordered-note lookup and label construction, followed by GUI join/message. Do not compare those subdivision timers as equivalent. Query returns labels without retaining an index; all old map/full-note snapshot call/entry/selected-byte/wait/hold controls zero. Selected logical bytes avoided are not allocator or RAM measurements. These are accepted-action owner results, not persistence/toast/frame/native/application-wide latency.
+
+## Final acceptance
+
+C1-D PASS,8/29closed. Independent exact-source Full review CLEAR/PASS: every scalar/all216arrays×20/45nearest-rank triplets/raw correspondence and all9 baseline fixture/warning hashes/output sizes verified. Actual successful one-query/revision/candidate/note/label receipts, all nine zero snapshot controls and timing containment valid. Every comparable owner p50/p95/max improves across all9scenarios. Parent accepts narrow coherent one-lock query: exact output/advisory save semantics, explicit failure diagnosis, no full-map/full-note copies, no retained state/publication overhead. Published track_c_c1d_evidence.json preserves all arrays and baseline comparisons. No further tests needed for closure; native/display/allocator/RAM remain NOT MEASURED. Next checkpoint C1-E action publication characterization, no action optimization preauthorized. LOCAL ONLY.
