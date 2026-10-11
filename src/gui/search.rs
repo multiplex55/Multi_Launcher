@@ -750,10 +750,10 @@ impl LauncherApp {
             .unwrap_or(false)
     }
 
-    pub(crate) fn maybe_run_note_search_debounce(&mut self) {
+    pub(crate) fn maybe_run_note_search_debounce(&mut self) -> bool {
         if !Self::is_note_search_query(&self.query) {
             self.last_note_search_change = None;
-            return;
+            return false;
         }
 
         if Self::note_search_debounce_ready(
@@ -763,7 +763,10 @@ impl LauncherApp {
         ) {
             self.search();
             self.last_note_search_change = None;
+            return true;
         }
+
+        false
     }
 
     pub(crate) fn clear_selected_after_results_replaced(&mut self) {
@@ -771,6 +774,7 @@ impl LauncherApp {
     }
 
     pub fn search(&mut self) {
+        self.track_c_query_observer.search_started();
         #[cfg(test)]
         let _track_c_search_total = super::track_c_action_observer::scope(
             super::track_c_action_observer::Phase::SearchTotal,
@@ -791,6 +795,7 @@ impl LauncherApp {
             .is_some_and(|query| query == self.query);
         if self.last_results_valid && self.query == self.last_search_query {
             self.clear_selected_after_results_replaced();
+            self.record_track_c_query_search_acceptance();
             crate::performance::log_elapsed("search.cached", total_started);
             crate::performance::log_elapsed("search.total", total_started);
             return;
@@ -815,6 +820,7 @@ impl LauncherApp {
             self.invalidate_root_list_results();
             self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
+            self.record_track_c_query_search_acceptance();
             crate::performance::log_elapsed("search.normalize", normalization_started);
             crate::performance::log_elapsed("search.total", total_started);
             return;
@@ -904,7 +910,20 @@ impl LauncherApp {
         let layout_started = crate::performance::started_if(perf_enabled);
         self.recompute_query_results_layout();
         crate::performance::log_elapsed("search.layout", layout_started);
+        self.record_track_c_query_search_acceptance();
         crate::performance::log_elapsed("search.total", total_started);
+    }
+
+    fn record_track_c_query_search_acceptance(&mut self) {
+        self.track_c_query_observer.accept_search(
+            &self.query,
+            self.root_list_geometry.result_generation(),
+            self.last_search_provider_revision,
+            self.last_search_result_catalog_versions,
+            self.last_search_result_catalog_versions_stable,
+            self.last_search_pending,
+            self.last_search_provider_deferral == ProviderSearchDeferral::Capacity,
+        );
     }
 
     pub(super) fn request_background_query_refresh(&mut self) {
@@ -3981,8 +4000,14 @@ mod tests {
 
     #[test]
     fn screen_draw_priority_fixture_requires_normal_app_query_without_read_only_effects() {
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let mut app = new_inert_app(&ctx, workspace.root());
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.dashboard_initial_refresh_queued = true;
         let label = "Radial Acceptance Screen Draw Priority Smoke";
         let fixture_action = Action {
             label: label.into(),
@@ -4034,6 +4059,8 @@ mod tests {
             ),
             before,
         );
+        drop(app);
+        drop(workspace);
     }
 
     #[test]

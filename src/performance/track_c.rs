@@ -22,10 +22,11 @@ pub enum Phase {
     EventDrain,
     StartupCatalogReady,
     HotkeyFirstUsableFrame,
+    GuiQueryToUsableCpuFrame,
 }
 
 impl Phase {
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
     const ALL: [Self; Self::COUNT] = [
         Self::NoteRelationshipRefresh,
         Self::NoteMentionsScan,
@@ -39,6 +40,7 @@ impl Phase {
         Self::EventDrain,
         Self::StartupCatalogReady,
         Self::HotkeyFirstUsableFrame,
+        Self::GuiQueryToUsableCpuFrame,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -55,6 +57,7 @@ impl Phase {
             Self::EventDrain => "event.drain",
             Self::StartupCatalogReady => "startup.catalog_ready",
             Self::HotkeyFirstUsableFrame => "hotkey.to_first_usable_frame",
+            Self::GuiQueryToUsableCpuFrame => "gui.query_to_usable_cpu_frame",
         }
     }
 }

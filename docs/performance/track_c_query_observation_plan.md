@@ -1,7 +1,7 @@
 # C2-G query-to-usable CPU viewport plan
 
-State: implementation authorized; execution protocol still to be frozen before
-tests/benchmarks. LOCAL ONLY. Accepted sourcef246958ced8d3be8b712e222461311824880e48c.
+State: protocol frozen; v6 source/ordinary/check/Small independently cleared.
+Implementation source commit ready; exact committed-source Full pending. LOCAL ONLY. Accepted sourcef246958ced8d3be8b712e222461311824880e48c.
 C2-F is closed SKIPPED;17/29 checkpoints closed. C2-G is one bounded observation
 milestone, with no query/search/scheduling/layout optimization.
 
@@ -63,10 +63,10 @@ limit fails a sample. No real providers, network, native input or sleep-driven t
 
 | Record | Sequence and expected intent outcomes |
 |---|---|
-| typed_suffix_sequence | Settled app seed; actual TextEdit edits yield suffix lengths1/2/3/5; four completed intents. |
-| app_provider_supersession | App completes; controlled provider becomes capacity-deferred; release and supersede before old output paints; app completes then provider completes. Four intents: completed/superseded/completed/completed. |
+| typed_suffix_sequence | Settled `app ` seed; actual suffix TextEdit events `0`,`00`,`000`,`00009` yield four completed intents. |
+| app_provider_supersession | Settled `app` seed, append-space edit completes; controlled provider becomes capacity-deferred; release/mutate args/notify once, then beta edit supersedes before old output paints; beta empty output completes, then provider completes. Four intents: completed/superseded/completed/completed. |
 | equivalent_filter_sequence | Actual edits alternate two absent exclusion filters preserving complete catalog; two completed intents, unchanged raw-query invalidation semantics. |
-| viewport_controls | Settled catalog,960→480→960 at640 height; first→middle→last selection; last context-menu open/close. Seven controls, no new intent. |
+| viewport_controls | Settled catalog,960→480→960 at640 height; first→middle→last selection; an actually visible row context-menu open/close. Seven controls, no new intent. |
 
 Fixture preparation/canonical publication/initial settling and independent references
 stay outside the sequence clock. Pending release/supersession and returned egui
@@ -113,3 +113,51 @@ Resolve concrete failures at their owner and preserve failed logs. Done means
 exactly-once current usable completion, honest cancellation/source/rebuild accounting,
 unchanged complete output/interaction semantics, inert disabled observation and
 strict exact-source evidence. Parent then closes C2-G and proceeds to C2-H.
+
+
+## Frozen collector and exact protocol
+
+The source/method review cleared the four actual-egui recipes and fixed schema.
+`track_c_query_observation/protocol_freeze.json` binds the pre-measurement source
+and collector hashes; the adjacent independent files bind twelve fixture recipes
+and51 full ordered Action/count/logical UTF8 step outputs. Eight parser and20 nested
+synthetic controls test rejection behavior only; they are not Rust or timing evidence.
+The collector requires committed source for Full, exact inventory/sample counts,
+current accepted/painted generation and sources, correct superseded disposition,
+per-recipe actual rebuild work, and bounded whole/frame/intent timing. It preserves
+all20 samples and separates completed latency from abandoned diagnostic elapsed.
+
+Whole sequence elapsed includes interstep validation. Each actual frame duration
+includes Context::run and FullOutput retirement; completed intent terminal time
+must fit inside its terminal frame. These overlapping durations are not additive
+CPU phases. No native input delivery, GPU composition or production typing-frequency
+claim follows from this controlled headless protocol.
+
+After an owned serial benchmark run, collect from repository root with:
+
+```text
+python docs/performance/track_c_query_observation/collect_query.py --source <exact-source-SHA-or-UNCOMMITTED_SOURCE-for-Small> --mode <small-or-full> --output <new-output.json> <raw-log>
+```
+
+Raw logs remain ignored under target. Only sanitized controlled receipts and
+summaries are committed. Existing eager/reference/oracle bodies remain frozen;
+root_list_app_at has only the reviewed dashboard-initial-queue suppression exception.
+
+### Precommit command/pending handoff correction
+
+Final source review found a no-doublebegin gap when one normalized outcome explicitly
+supplies matching QueryPolicy::Set and PendingQueryPolicy::Set. Current todo handlers
+publish pending refreshes with QueryPolicy::Keep; the four measured Small recipes use
+TextEdit and did not expose this composition. Use one observer-local sequence token
+for the paired outcome, consumed once only while that same intent/query remains
+active. Unrelated pending publication or supersession clears it. Independent same-text
+pending requests remain distinct; existing pending refreshes still begin at consumption.
+An owned actual command/pending root-frame contract and corrected-source Small rerun
+are required before source commit. Historical v5 Small remains preserved.
+
+V6 corrected-source evidence:23distinct ordinary tests PASS (earlier unchanged cases
+reused plus exact new handoff/lifecycle execution), non-test library check PASS, Small
+owner/strict collector/independent review PASS4records80sequences200intents340frames.
+Small has180completed20superseded/0cancelled; all40 timing triplets independently
+recalculated. The viewport sequence maximum192.3688ms is retained. Full is pending
+exact clean committed source; this checkpoint is not closed by Small alone.

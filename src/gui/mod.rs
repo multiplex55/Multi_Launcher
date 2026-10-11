@@ -66,6 +66,7 @@ mod todo_dialog;
 mod todo_view_dialog;
 #[cfg(test)]
 mod track_c_action_observer;
+mod track_c_query_observer;
 pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
@@ -994,6 +995,7 @@ pub struct LauncherApp {
     track_c_test_provider_change_at_frame_end: bool,
     #[cfg(test)]
     track_c_test_catalog_version_change_at_frame_end: bool,
+    track_c_query_observer: track_c_query_observer::Observer,
     background_query_refresh_pending: bool,
     last_search_provider_deferral: search::ProviderSearchDeferral,
     last_plugin_search_generation: u64,
@@ -2468,6 +2470,9 @@ impl LauncherApp {
             track_c_test_provider_change_at_frame_end: false,
             #[cfg(test)]
             track_c_test_catalog_version_change_at_frame_end: false,
+            track_c_query_observer: track_c_query_observer::Observer::new(
+                crate::performance::enabled(),
+            ),
             background_query_refresh_pending: false,
             last_search_provider_deferral: Default::default(),
             last_plugin_search_generation: 0,
@@ -2603,6 +2608,11 @@ impl LauncherApp {
         {
             let old_suggestions = self.suggestions.clone();
             let old_index = self.autocomplete_index;
+            self.track_c_query_observer.begin_from(
+                self.track_c_query_observer.tentative_start(),
+                track_c_query_observer::Origin::Suggestion,
+                &s,
+            );
             self.query = s;
             self.move_cursor_end = true;
             self.search();
@@ -3824,6 +3834,13 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
+    /// Publish a query for the next root frame, invalidating any one-shot
+    /// command-to-pending association before the independent request is stored.
+    pub(super) fn publish_pending_query(&mut self, query: String) {
+        self.track_c_query_observer.pending_query_published();
+        self.pending_query = Some(query);
+    }
+
     pub fn install_root_window_bridge(&mut self, bridge: RootWindowBridge) {
         self.root_window_bridge = bridge;
     }
@@ -4113,7 +4130,7 @@ impl LauncherApp {
                         );
                     }
                     if self.query.trim_start().starts_with("note list") {
-                        self.pending_query = Some(self.query.clone());
+                        self.publish_pending_query(self.query.clone());
                         self.search();
                     }
                     self.notes_dialog.open();

@@ -75,3 +75,21 @@ The historical note counter description above records frozen G0 three-pass scope
 Unchanged frozen search matrix: five cases sparse exact alias tie, dense exact empty term, dense fuzzy usage, empty browse, sparse pending provider;100/1k/10k actions Full and100 Small. Captured provider is one owned Action, with no invocation inside the snapshot owner; ordinary controlled-provider invocation checked separately. Even empty browse projects that provider's three lowercase String values/79 UTF-8 bytes before discarding its scored vector, then materializes all app-prefixed catalog outputs. Catalog early copy payload is13496/136657/1372759bytes in dense cases; sparse290/276/276; browse13896/140657/1412759. Logical String counts dense/browse313/3125/31250, sparse10/9/9. Exact strings/bytes are independently reconstructed fixture expectations, not allocator/RSS measurements. All15 fixture identities bound to frozenG0 by the new supplementary collector; original5/15search and1/3queryCPUframe owner inventories retain prior meanings. New compact ordinary edge fixtures cover full args/duplicateIDs/stableusage/ties/filter/mode/providerfallback/pending/revision/catalogdrift, owned inert setup and read-only root-state nonmutation. C2-A is not an optimization or geometry campaign; complete accepted data and exact command selections in track_c_search_contract.md.
 
 C2-B staged eager baseline accepted at source1bc5204e9107e3137830a7f9994f9484936a62c8, fast-dev. Distinct C2B_SEARCH_RESULT stage search_materialization:34arrays (32numeric+2identity), explicit eager/earlyH/final0/totalH, provider moves/browse separate; rank_record_bytes104 is type-size only. Small6records120samples/Full16records320samples include one fixed1k/128provider case, hashd5a1cd254a205e24, fullpayload15816/469 and projection14976/384. Independentreview and C2Asharednon-timingcontinuity CLEAR. This is baseline characterization within IN_PROGRESS C2-B, not optimization or native/allocator evidence. Fulltimings and scopes are in track_c_search_materialization_gate.md and baseline_full.json; historicalC2A/TrackA metric meanings unchanged.
+
+## C2-G controlled query/viewport sequences
+
+Four actual-egui cases use an owned inert synthetic catalog: typed suffix lengths
+1/2/3/5, app/provider capacity-deferral and supersession, two equal-output exclusion
+filters, and seven resize/selection/context-menu controls without new query intents.
+Small has four records at100 actions; Full has twelve at100/1000/10000. Each has
+five warmups/twenty retained samples/zero exclusions and an eight-frame settling bound.
+Full requires exact clean committed source and fast-dev; Small source hashes are
+explicitly bound when uncommitted. Controlled provider data changes only args and
+notifies exactly once; no real provider/native activation/network/sleep is used.
+
+Independent bindings cover all12 recipes and51 step outputs; actual eager full
+Action/state/geometry/widget/extent assertions execute in the owner. Hash format and
+final-step consistency alone are not semantic parity evidence. The strict collector
+validates source/acceptance/paint/work/timing/disposition accounting. Reproduction and
+exact recipes are in track_c_query_observation_plan.md. Whole sequence elapsed includes
+interstep validation and is not production typing latency.

@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "status": "CLEAR_SOURCE_AND_FIXTURE_EXECUTION",
+  "reviewer": "independent_repository_reviewer",
+  "source_binding": "protocol_source_correction_v6.json",
+  "findings_resolved": [
+    {
+      "finding": "Temporary provider MutexGuard reference escaped expected-action call",
+      "resolution": "Clone controlled Action outside timed sequence"
+    },
+    {
+      "finding": "Pre-frame selection could not establish navigation attribution",
+      "resolution": "Actual ArrowDown event during width-changing frame"
+    },
+    {
+      "finding": "Viewport hashes did not prove actual widget identity parity",
+      "resolution": "Assert pinned egui SelectableLabel ID from generation and absolute row scope"
+    },
+    {
+      "finding": "Compact lifecycle lacked same-generation paint invalidation and acceptance precedence protection",
+      "resolution": "Reject completion before fresh paint after direct reaccept, search-start and result invalidation; current-source retry, direct-to-search precedence, valid empty and hide cases retained"
+    },
+    {
+      "finding": "Empty controlled output reached nonempty frozen eager helper",
+      "resolution": "New validator asserts all empty geometry/cache vectors, zero height/offset, actual width without editing frozen helper"
+    },
+    {
+      "finding": "Visible-range model used expanded clip and final scroll offset",
+      "resolution": "Test-only actual show_viewport callback rectangle/paint origin, independent eager range and rectangles; keep final extent separately"
+    },
+    {
+      "finding": "Final popup owner can differ from paint-time owner",
+      "resolution": "Capture paint-time popup union owner, validate index/Action, independently union and hash separately from final popup state"
+    },
+    {
+      "finding": "Supported paired normalized QuerySet/PendingSet doublebegin; not current handler or measured TextEdit failure",
+      "resolution": "Observer-local one-shot sequence handoff armed immediately after own publication; independent publication/newintent/terminal clear; same-text independent and mismatched query contracts"
+    }
+  ],
+  "parent_compile_correction": {
+    "error": "E0509",
+    "scope": "Observer new/reset initialization only",
+    "resolution": "Mutable default then preserve enabled/phase_enabled flags; no struct update from Drop type",
+    "first_attempt_tests_executed": 0
+  },
+  "protected_helpers": {
+    "count": 42,
+    "status": "PASS",
+    "exception": "root_list_app_at dashboard_initial_refresh_queued=true before first frame"
+  },
+  "notes_source_sha256": "0434242a6894f558902a0189c2273d108cab63c3336186f6b5ed7de5923a171b",
+  "fixture_safety": "Owned workspace, inert plugin manager, controlled synthetic provider, no native action activation; selected virtual-desktop path exits via cfg(test) completion before native worker",
+  "execution": "V6 exact2 handoff/lifecyclePASS, total23distinct ordinaryPASS with unchanged earlier evidence; non-testlibcheckPASS14.24s; Small02 ownerPASS/collectorPASS/independent source+evidenceCLEAR. Full pending exact committed source.",
+  "limits": [
+    "Source review does not substitute for compiler/test results",
+    "Headless CPU root frame does not establish native input/GPU display latency"
+  ]
+}

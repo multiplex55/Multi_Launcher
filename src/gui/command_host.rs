@@ -1053,24 +1053,85 @@ impl LauncherApp {
             .map(str::to_owned)
             .unwrap_or_else(|| self.query.clone());
 
+        let observe_query = self.track_c_query_observer.is_enabled();
+        let paired_command_pending_query = if observe_query {
+            match (&outcome.query, &outcome.pending_query) {
+                (QueryPolicy::Set(command_query), PendingQueryPolicy::Set(pending_query))
+                    if command_query == pending_query =>
+                {
+                    Some(command_query.clone())
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let has_command_set_query = observe_query && matches!(&outcome.query, QueryPolicy::Set(_));
+        let mut command_set_sequence = None;
         if let QueryPolicy::Set(query) = outcome.query {
+            command_set_sequence = self.track_c_query_observer.begin_from(
+                self.track_c_query_observer.tentative_start(),
+                super::track_c_query_observer::Origin::CommandSet,
+                &query,
+            );
             self.last_timer_query =
                 query.starts_with("timer list") || query.starts_with("alarm list");
             self.query = query;
         }
         if let PendingQueryPolicy::Set(query) = outcome.pending_query {
-            self.pending_query = Some(query);
+            self.publish_pending_query(query);
+            if let Some(query) = paired_command_pending_query.as_deref()
+                && self.query == query
+                && self.pending_query.as_deref() == Some(query)
+            {
+                self.track_c_query_observer
+                    .arm_command_pending_handoff(command_set_sequence, query);
+            }
         }
         if let ResultsPolicy::Replace(results) = outcome.results {
+            let sources_before = observe_query.then(|| {
+                (
+                    self.plugins.search_generation(),
+                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                )
+            });
+            if !has_command_set_query {
+                self.track_c_query_observer.begin_from(
+                    self.track_c_query_observer.tentative_start(),
+                    super::track_c_query_observer::Origin::CommandReplacement,
+                    &self.query,
+                );
+            }
             self.results = results;
             self.invalidate_root_list_results();
+            let sources_after = sources_before.map(|_| {
+                (
+                    self.plugins.search_generation(),
+                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                )
+            });
             self.selected = None;
             self.last_search_query = self.query.clone();
             self.last_results_valid = true;
             self.last_search_provider_deferral = super::search::ProviderSearchDeferral::None;
             self.update_suggestions();
+            if let (
+                Some((provider_before, catalog_before)),
+                Some((provider_after, catalog_after)),
+            ) = (sources_before, sources_after)
+            {
+                self.track_c_query_observer.accept_command_replacement(
+                    &self.query,
+                    self.root_list_geometry.result_generation(),
+                    provider_before,
+                    provider_after,
+                    catalog_before,
+                    catalog_after,
+                );
+            }
         }
         if outcome.invalidate_results {
+            self.track_c_query_observer.results_invalidated();
             self.last_results_valid = false;
         }
         if outcome.search {
@@ -1172,6 +1233,36 @@ fn allow_radial_queryexec_activation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inert_test_app(root: &std::path::Path) -> LauncherApp {
+        let ctx = eframe::egui::Context::default();
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        let mut app = LauncherApp::new(
+            &ctx,
+            std::sync::Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.dashboard_initial_refresh_queued = true;
+        app
+    }
 
     fn test_app() -> LauncherApp {
         let temp = tempfile::tempdir().unwrap();
@@ -1685,7 +1776,8 @@ mod tests {
 
     #[test]
     fn immediate_virtual_desktop_hide_does_not_mutate_preserved_launcher_root() {
-        let mut app = test_app();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = inert_test_app(workspace.root());
         app.hide_after_run = true;
         app.clear_query_after_run = true;
         app.command_root_policy =
@@ -1714,11 +1806,14 @@ mod tests {
         assert!(!app.restore_flag.load(Ordering::SeqCst));
         assert!(!app.focus_query);
         assert!(app.test_recorded_history_queries.is_empty());
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
     fn legacy_command_outcome_still_applies_query_and_hide() {
-        let mut app = test_app();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = inert_test_app(workspace.root());
         app.query = "before".into();
         app.visible_flag.store(true, Ordering::SeqCst);
         app.command_root_policy = crate::universal_actions::RootLauncherPolicy::Legacy;
@@ -1735,11 +1830,14 @@ mod tests {
 
         assert_eq!(app.query, "after");
         assert!(!app.visible_flag.load(Ordering::SeqCst));
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
     fn radial_virtual_desktop_dispatch_records_captured_query_after_deferred_completion_once() {
-        let mut app = test_app();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = inert_test_app(workspace.root());
         app.query = "ROOT query".into();
         app.hide_after_run = true;
         app.clear_query_after_run = true;
@@ -1772,6 +1870,8 @@ mod tests {
         app.process_watch_events();
         assert_eq!(app.test_recorded_history_queries, ["captured radial query"]);
         assert_eq!(app.usage.get("vd:create"), Some(&1));
+        drop(app);
+        drop(workspace);
     }
 
     #[test]

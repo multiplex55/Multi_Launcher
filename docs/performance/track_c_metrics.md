@@ -2,7 +2,7 @@
 
 Track C diagnostics are a fixed-cardinality addition in `performance::track_c`.
 The historical `performance::Metric` collector remains at 15 entries and keeps
-its existing frame-recording behavior. Track C has 12 named phase counters and
+its existing frame-recording behavior. Track C has 13 named phase counters (the original12 retain their IDs) and
 an 8-by-9 event class/origin matrix; it stores no payloads, paths, queries, or
 producer-provided labels.
 
@@ -40,6 +40,7 @@ alone.
 | `event.drain` | One complete GUI event-drain invocation; work units are events dispatched. Static class/origin handler durations are available separately in the event matrix. |
 | `startup.catalog_ready` | Startup indexed catalog completion and custom-first assembly; units are actions in the complete catalog. Failure is recorded as an error. |
 | `hotkey.to_first_usable_frame` | A visibility invocation/revision from show publication to the first eligible, visible ROOT frame whose captured result generation is still current. Empty browse/dashboard frames qualify. |
+| `gui.query_to_usable_cpu_frame` | Appended thirteenth phase (zero-based ID12): accepted GUI query mutation through the first complete current usable ROOT CPU frame, including provider/debounce waiting. Units are intervening root frames; superseded/cancelled dispositions are not completed latency. |
 
 The hotkey phase is CPU-side GUI completion: it ends after the normal root
 render path and OCR surface call. It excludes the OCR early-return path and
@@ -91,3 +92,20 @@ C2-E reviewed Full baseline: source a098d685857cb2c4e7c47e90b20aad4b3c6c838d, fa
 
 
 C2-E SKIPPED(measuredgate). Candidate1936c89b32545058c8f3ab069b4cf2d59b61b1ff:13ordinary/non-testlibcheckPASS; Small9/180 andFull27/540PASS728.789test728.830exe. Independent567arrays11340entries486scalars135triplets540statehashes/297baselinecommon/144Smallarrays144scalars CLEAR.31/32frozengatesPASS; warm1kp951.4944→1.6729ms (+11.9446%) exceeds5% despite20%shrink10kp50/p95481.0998/514.6584→355.2499/391.5868ms. All favorable/contrary tails retained, no waiver/noise claim. Partialold/newgeometry+presentation peakmax4,977,280B, notRSS/allocator. Exact5e/a098eager render restored SHA08AA135652DABF2534807C37BB21E163515D72DA6188E19D9F8572D69127099F; reuse identical-source priorverification, no redundantCargo. AcceptedC2C retained; no grid optimization accepted.16/29closed, nextC2F. Native/productionfrequency NOTMEASURED. See grid gate and reviewed rejected candidate_full.json. LOCALONLY.
+
+## C2-G causal query observation
+
+Private app-local observation retains only the current query intent and eight terminal
+receipts. It captures exact acceptance and paint sequence/frame/generation, stable
+provider/catalog sources, and actual geometry rebuild/row work by fixed causes.
+Disabled observation reads no clock and copies no query. A paired normalized command
+query/pending update shares one intent; independent same-text requests remain distinct.
+Search acceptance and direct command replacement have separate provenance.
+
+The four controlled actual-egui recipes are a new measurement domain, with no G0
+ratio or optimization benefit claim. Whole sequence elapsed includes interstep test
+validation; per-intent completion ends at the usable root CPU frame. Abandoned elapsed
+is diagnostic only, and overlapping frame/intent/sequence intervals are not additive
+CPU phases. No physical input, GPU composition or native display timing is measured.
+See track_c_query_observation_plan.md and the strict collector/source bindings in
+track_c_query_observation/. Historical Track A and hotkey metric meanings are unchanged.

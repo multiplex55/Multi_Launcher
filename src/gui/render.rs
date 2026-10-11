@@ -342,6 +342,10 @@ impl RootListGeometryCache {
         self.invalidate_geometry();
     }
 
+    pub(super) fn result_generation(&self) -> u64 {
+        self.result_generation
+    }
+
     #[cfg(test)]
     pub(super) fn result_generation_for_test(&self) -> u64 {
         self.result_generation
@@ -399,7 +403,7 @@ impl RootListGeometryCache {
         folder_aliases: &HashMap<String, Option<String>>,
         show_full_paths: bool,
         is_grid: bool,
-    ) {
+    ) -> bool {
         let spacing = ui.spacing();
         let effective_text_style = ui
             .style()
@@ -433,7 +437,7 @@ impl RootListGeometryCache {
                 .as_ref()
                 .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
         {
-            return;
+            return false;
         }
 
         let mut track_c_timer = crate::performance::track_c::Timer::start(
@@ -515,9 +519,10 @@ impl RootListGeometryCache {
                 .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
             self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         }
+        true
     }
 
-    fn ensure_grid(&mut self, ui: &egui::Ui, results: &[Action], columns: usize) {
+    fn ensure_grid(&mut self, ui: &egui::Ui, results: &[Action], columns: usize) -> bool {
         let spacing = ui.spacing();
         let columns = columns.max(1);
         let grid_spacing_x = 8.0_f32;
@@ -559,7 +564,7 @@ impl RootListGeometryCache {
                 .as_ref()
                 .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
         {
-            return;
+            return false;
         }
 
         let mut track_c_timer = crate::performance::track_c::Timer::start(
@@ -712,6 +717,7 @@ impl RootListGeometryCache {
                 .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
             self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         }
+        true
     }
 
     fn visible_range(&self, viewport: egui::Rect) -> std::ops::Range<usize> {
@@ -1441,7 +1447,24 @@ impl LauncherApp {
         Some(direction)
     }
 
+    fn begin_track_c_query_intent(
+        &mut self,
+        started: Option<Instant>,
+        origin: super::track_c_query_observer::Origin,
+    ) {
+        self.track_c_query_observer
+            .begin_from(started, origin, &self.query);
+    }
+
     fn handle_query_text_changed(&mut self) {
+        self.begin_track_c_query_intent(
+            self.track_c_query_observer.tentative_start(),
+            super::track_c_query_observer::Origin::TextEdit,
+        );
+        self.handle_query_text_changed_after_intent();
+    }
+
+    fn handle_query_text_changed_after_intent(&mut self) {
         self.autocomplete_index = 0;
         if Self::is_note_search_query(&self.query) {
             self.last_note_search_change = Some(Instant::now());
@@ -1452,10 +1475,15 @@ impl LauncherApp {
     }
 
     fn apply_history_query(&mut self, query: String) {
+        self.track_c_query_observer.begin_from(
+            self.track_c_query_observer.tentative_start(),
+            super::track_c_query_observer::Origin::History,
+            &query,
+        );
         self.query = query;
         self.selected = None;
         self.suggestions.clear();
-        self.handle_query_text_changed();
+        self.handle_query_text_changed_after_intent();
         self.move_cursor_end = true;
         self.focus_input();
     }
@@ -1850,6 +1878,7 @@ impl LauncherApp {
             return LauncherCommandResponse::Activated;
         };
 
+        self.track_c_query_observer.supersede_external();
         self.query = query.clone();
         self.last_timer_query =
             self.query.starts_with("timer list") || self.query.starts_with("alarm list");
@@ -1915,6 +1944,7 @@ impl LauncherApp {
         let Some(pending) = broker.take_pending() else {
             return;
         };
+        self.track_c_query_observer.supersede_external();
         self.query = pending.query.clone();
         self.last_results_valid = false;
         self.search();
@@ -2004,7 +2034,44 @@ impl LauncherApp {
 
 impl LauncherApp {
     pub(super) fn invalidate_root_list_results(&mut self) {
+        self.track_c_query_observer.results_invalidated();
         self.root_list_geometry.invalidate_results();
+    }
+
+    fn record_query_geometry_rebuild(
+        &mut self,
+        source_state_before_frame: Option<(
+            u64,
+            crate::radial::dynamic::MutableResultCatalogVersions,
+            Option<usize>,
+        )>,
+        mut cause: super::track_c_query_observer::GeometryCause,
+    ) {
+        if !self.track_c_query_observer.is_enabled() {
+            return;
+        }
+        if cause == super::track_c_query_observer::GeometryCause::Other
+            && let Some(hint) = self.track_c_query_observer.geometry_cause_hint()
+        {
+            cause = hint;
+        }
+        let provider_revision = self.plugins.search_generation();
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        if let Some((provider_before, catalog_before, selected_before)) = source_state_before_frame
+        {
+            if provider_before != provider_revision || catalog_before != catalog_versions {
+                cause = super::track_c_query_observer::GeometryCause::ProviderOrCatalog;
+            } else if cause == super::track_c_query_observer::GeometryCause::Other
+                && selected_before != self.selected
+            {
+                cause = super::track_c_query_observer::GeometryCause::Navigation;
+            }
+        }
+        if cause == super::track_c_query_observer::GeometryCause::Other {
+            cause = super::track_c_query_observer::GeometryCause::DisplayOrResize;
+        }
+        self.track_c_query_observer
+            .note_geometry_rebuild(cause, self.results.len());
     }
 
     pub(super) fn queue_popup_cleanup_after_preserved_results(&mut self) {
@@ -2018,10 +2085,20 @@ impl LauncherApp {
     pub(super) fn render_root_frame(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use egui::*;
 
+        self.track_c_query_observer.begin_frame();
         let track_c_enabled = crate::performance::enabled();
         #[cfg(test)]
         let track_c_enabled = track_c_enabled || self.track_c_test_force_enabled;
         let mut painted_root_generation = None;
+        let mut painted_query_results = false;
+        let mut query_geometry_cause = super::track_c_query_observer::GeometryCause::Other;
+        let source_state_before_frame = self.track_c_query_observer.is_enabled().then(|| {
+            (
+                self.plugins.search_generation(),
+                crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                self.selected,
+            )
+        });
 
         #[cfg(test)]
         self.test_root_rendered_rows.clear();
@@ -2096,6 +2173,7 @@ impl LauncherApp {
         if plugin_search_generation != self.last_plugin_search_generation
             && !self.ocr_defers_launcher_query_refresh()
         {
+            query_geometry_cause = super::track_c_query_observer::GeometryCause::ProviderOrCatalog;
             self.last_plugin_search_generation = plugin_search_generation;
             self.last_results_valid = false;
             self.search();
@@ -2171,12 +2249,14 @@ impl LauncherApp {
         let frame_time = Duration::from_secs_f32(ctx.input(|i| i.unstable_dt).max(0.0));
         self.dashboard.update_frame_timing(frame_time);
         if let Some(pending) = self.pending_query.take() {
+            self.track_c_query_observer.begin_pending_query(&pending);
             self.query = pending;
+            query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
             self.search();
             self.focus_input();
         }
-        if !self.ocr_defers_launcher_query_refresh() {
-            self.maybe_run_note_search_debounce();
+        if !self.ocr_defers_launcher_query_refresh() && self.maybe_run_note_search_debounce() {
+            query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
         }
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref())
             && t.elapsed().as_secs_f32() >= 3.0
@@ -2593,6 +2673,7 @@ impl LauncherApp {
                     )
                 });
 
+                let text_edit_started = self.track_c_query_observer.tentative_start();
                 let mut query_output = egui::TextEdit::singleline(&mut self.query)
                     .id(input_id)
                     .interactive(!action_sheet_blocks_launcher_input)
@@ -2626,7 +2707,12 @@ impl LauncherApp {
 
                 self.query_history.synchronize(&self.query);
                 if query_response.changed() {
-                    self.handle_query_text_changed();
+                    self.begin_track_c_query_intent(
+                        text_edit_started,
+                        super::track_c_query_observer::Origin::TextEdit,
+                    );
+                    query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
+                    self.handle_query_text_changed_after_intent();
                 }
 
                 let history_direction = if action_sheet_blocks_launcher_input {
@@ -2821,10 +2907,15 @@ impl LauncherApp {
                             #[cfg(test)]
                             {
                                 let available_width = ui.available_width();
+                                let content_origin = ui.max_rect().min;
                                 ui.ctx().data_mut(|data| {
                                     data.insert_temp(
                                         egui::Id::new("track-c-root-list-available-width"),
                                         available_width,
+                                    );
+                                    data.insert_temp(
+                                        egui::Id::new("track-c2g-root-content-viewport"),
+                                        (viewport, content_origin),
                                     );
                                 });
                             }
@@ -2843,10 +2934,17 @@ impl LauncherApp {
                             let mut rows_built = 0_u64;
                             if self.resolved_grid_layout {
                                 let cols = self.query_results_layout.cols.max(1);
-                                self.root_list_geometry.ensure_grid(ui, &self.results, cols);
-                                if track_c_enabled {
+                                let geometry_rebuilt =
+                                    self.root_list_geometry.ensure_grid(ui, &self.results, cols);
+                                if track_c_enabled || self.track_c_query_observer.is_enabled() {
                                     painted_root_generation =
                                         Some(self.root_list_geometry.result_generation);
+                                }
+                                if geometry_rebuilt && self.track_c_query_observer.is_enabled() {
+                                    self.record_query_geometry_rebuild(
+                                        source_state_before_frame,
+                                        query_geometry_cause,
+                                    );
                                 }
                                 let content_origin = ui.max_rect().min;
                                 let total_height = self.root_list_geometry.total_height;
@@ -2960,16 +3058,22 @@ impl LauncherApp {
                                     egui::vec2(content_width, total_height),
                                 ));
                             } else {
-                                self.root_list_geometry.ensure(
+                                let geometry_rebuilt = self.root_list_geometry.ensure(
                                     ui,
                                     &self.results,
                                     &self.folder_aliases,
                                     show_full,
                                     false,
                                 );
-                                if track_c_enabled {
+                                if track_c_enabled || self.track_c_query_observer.is_enabled() {
                                     painted_root_generation =
                                         Some(self.root_list_geometry.result_generation);
+                                }
+                                if geometry_rebuilt && self.track_c_query_observer.is_enabled() {
+                                    self.record_query_geometry_rebuild(
+                                        source_state_before_frame,
+                                        query_geometry_cause,
+                                    );
                                 }
                                 let total_height = self.root_list_geometry.total_height;
                                 let content_width = self.root_list_geometry.content_width;
@@ -3001,7 +3105,16 @@ impl LauncherApp {
                                     .root_list_geometry
                                     .visible_range(viewport)
                                     .collect::<Vec<_>>();
-                                if let Some(owner) = self.root_list_geometry.popup_owner() {
+                                let popup_owner_for_paint =
+                                    self.root_list_geometry.popup_owner();
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(
+                                        egui::Id::new("track-c2g-root-popup-owner-for-paint"),
+                                        popup_owner_for_paint,
+                                    );
+                                });
+                                if let Some(owner) = popup_owner_for_paint {
                                     visible_rows.push(owner);
                                     visible_rows.sort_unstable();
                                     visible_rows.dedup();
@@ -3022,10 +3135,12 @@ impl LauncherApp {
                                             self.root_list_geometry.row_heights[idx],
                                         ),
                                     );
+                                    let row_widget_id =
+                                        self.root_list_geometry.row_widget_id(ui.id(), idx);
                                     let mut row_ui = egui::Ui::new(
                                         ui.ctx().clone(),
                                         ui.layer_id(),
-                                        self.root_list_geometry.row_widget_id(ui.id(), idx),
+                                        row_widget_id,
                                         row_rect,
                                         ui.clip_rect(),
                                     );
@@ -3044,6 +3159,22 @@ impl LauncherApp {
                                             },
                                         )
                                         .inner;
+                                    #[cfg(test)]
+                                    {
+                                        // Ui::new scopes the row by generation and absolute
+                                        // index; with_layout creates one child UI before the
+                                        // SelectableLabel allocates its response ID.
+                                        let row_auto_id_source =
+                                            row_widget_id.with("auto").value();
+                                        let label_auto_id_source = egui::Id::new(row_auto_id_source)
+                                            .with("child")
+                                            .value();
+                                        assert_eq!(
+                                            resp.id,
+                                            egui::Id::new(label_auto_id_source),
+                                            "painted response ID retains its absolute generation/row scope"
+                                        );
+                                    }
                                     #[cfg(test)]
                                     self.test_root_rendered_rows.push((idx, a.action.clone()));
                                     #[cfg(test)]
@@ -3106,6 +3237,12 @@ impl LauncherApp {
                                     egui::vec2(content_width, total_height),
                                 ));
                             }
+                            if self.track_c_query_observer.is_enabled() {
+                                let generation = self.root_list_geometry.result_generation;
+                                painted_root_generation = Some(generation);
+                                painted_query_results =
+                                    self.track_c_query_observer.note_painted_root(generation);
+                            }
                             rows_timer.set_work_units(rows_built);
                             drop(rows_timer);
                             if refresh {
@@ -3166,6 +3303,18 @@ impl LauncherApp {
             self.enforce_pinned();
             self.update_panel_stack();
             self.show_ocr_surface(ctx);
+            if self.track_c_query_observer.is_enabled() {
+                self.track_c_query_observer.finish_frame(
+                    &self.query,
+                    self.visible_flag.load(Ordering::Relaxed),
+                    should_be_visible,
+                    false,
+                    self.plugins.search_generation(),
+                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                    painted_root_generation,
+                );
+            }
+            self.track_c_query_observer.end_frame_boundary();
             return;
         }
         let show_editor = self.show_editor;
@@ -3563,6 +3712,38 @@ impl LauncherApp {
                 track_c_enabled,
             );
         }
+
+        if self.track_c_query_observer.is_enabled() {
+            let root_visible = self.visible_flag.load(Ordering::Relaxed);
+            let root_owned = should_be_visible;
+            let query_root_gates_clear = painted_query_results
+                && self.pending_query.is_none()
+                && !self.background_query_refresh_pending
+                && self.last_note_search_change.is_none()
+                && !self.radial_provider_search_capacity.is_occupied()
+                && !self.ocr_defers_launcher_query_refresh()
+                && !self.ocr_owns_root()
+                && !self.ocr_surface_visible()
+                && !self.color_pick_owns_root()
+                && self.coordinate_capture_parking.is_none()
+                && self.screen_draw_launcher_parking.is_none()
+                && !self.action_sheet.is_open()
+                && !self.snippet_prompt_dialog.is_open()
+                && !self.confirm_modal.is_open()
+                && !self.file_search_dialog.open
+                && !self.any_panel_open()
+                && !self.should_show_dashboard(self.query.as_str());
+            self.track_c_query_observer.finish_frame(
+                &self.query,
+                root_visible,
+                root_owned,
+                query_root_gates_clear,
+                self.plugins.search_generation(),
+                crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                painted_root_generation,
+            );
+        }
+        self.track_c_query_observer.end_frame_boundary();
     }
 }
 
@@ -5400,6 +5581,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        // The first root frame otherwise starts the production dashboard's
+        // all-sources refresh even though the dashboard is disabled. This
+        // isolated observer fixture intentionally keeps that worker dormant.
+        app.dashboard_initial_refresh_queued = true;
         app.actions = Arc::new(results.clone());
         app.results = results;
         app.invalidate_root_list_results();
@@ -9404,6 +9589,1558 @@ mod tests {
         let _output = track_c_run_root_query_owner(&mut state);
         let _ = track_c_validate_root_query_frame(&state, &_output);
         drop(state);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2g_pending_query_does_not_absorb_later_geometry_causes() {
+        use crate::gui::track_c_query_observer::{GeometryCause, Origin};
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let ctx = egui::Context::default();
+        let actions = (0..100).map(root_list_action).collect::<Vec<_>>();
+        let mut app = root_list_app_at(&ctx, actions, workspace.root());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.track_c_query_observer.enable_for_test();
+        app.track_c_query_observer.begin_from(
+            app.track_c_query_observer.tentative_start(),
+            Origin::TextEdit,
+            &app.query,
+        );
+
+        // The first pending frame owns its cold geometry rebuild as query work.
+        let _ = run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new());
+        assert!(app.track_c_query_observer.has_pending());
+        assert_eq!(
+            app.track_c_query_observer.snapshot().geometry[GeometryCause::Query as usize].rebuilds,
+            1
+        );
+
+        // The same still-pending intent must not relabel later, independent
+        // display and navigation rebuilds as query work.
+        let _ = run_root_list_frame(&ctx, &mut app, 1, 480.0, 640.0, Vec::new());
+        assert!(app.track_c_query_observer.has_pending());
+        let _ = run_root_list_frame(
+            &ctx,
+            &mut app,
+            2,
+            520.0,
+            640.0,
+            vec![key_press(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+        );
+
+        let geometry = app.track_c_query_observer.snapshot().geometry;
+        assert_eq!(geometry[GeometryCause::Query as usize].rebuilds, 1);
+        assert_eq!(
+            geometry[GeometryCause::DisplayOrResize as usize].rebuilds,
+            1
+        );
+        assert_eq!(geometry[GeometryCause::Navigation as usize].rebuilds, 1);
+        assert!(app.track_c_query_observer.has_pending());
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2g_command_pending_query_handoff_is_one_shot_and_query_bound() {
+        use crate::commands::{
+            ActivationSource, Command, CommandInvocation, CommandOutcome, LauncherCommand,
+            PendingQueryPolicy, QueryPolicy,
+        };
+        use crate::gui::track_c_query_observer::{Cause, Origin, Terminal};
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+        use crate::universal_actions::RootLauncherPolicy;
+
+        let workspace = TrackCWorkspace::new();
+        let mut state =
+            track_c2g_prepare_state(workspace.root(), 100, TrackC2GCase::TypedSuffixSequence);
+        let invocation = CommandInvocation {
+            command: Command::Launcher(LauncherCommand::Show { query: None }),
+            original_action: root_list_action(0),
+            query_override: None,
+            source: ActivationSource::Enter,
+        };
+        let paired_query = "app 00009";
+
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                query: QueryPolicy::Set(paired_query.to_owned()),
+                pending_query: PendingQueryPolicy::Set(paired_query.to_owned()),
+                search: true,
+                invalidate_results: true,
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        let first_started = state
+            .app
+            .track_c_query_observer
+            .pending_started_at_for_test()
+            .expect("the normalized command query starts one observed intent");
+        assert_eq!(state.app.track_c_query_observer.snapshot().intent_count, 1);
+        assert_eq!(state.app.pending_query.as_deref(), Some(paired_query));
+
+        let _ = track_c2g_run_frame(
+            &mut state,
+            0,
+            "paired_command_pending_query",
+            paired_query,
+            false,
+            None,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let first_snapshot = state.app.track_c_query_observer.snapshot();
+        assert_eq!(first_snapshot.intent_count, 1);
+        assert_eq!(first_snapshot.completed_count, 1);
+        assert_eq!(first_snapshot.receipt_count, 1);
+        let first_receipt = first_snapshot.receipts[0].unwrap();
+        assert_eq!(first_receipt.origin, Origin::CommandSet);
+        assert_eq!(first_receipt.terminal, Terminal::Completed);
+        assert_eq!(first_receipt.cause, Cause::FirstUsableRootFrame);
+        assert_eq!(first_receipt.started_at, first_started);
+        assert!(first_receipt.completion_latency_ns.is_some());
+
+        // A later QueryKeep/PendingSet outcome publishing the same text is an
+        // independent pending request. It clears the one-shot pair association;
+        // text equality alone must not absorb this new intent.
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                query: QueryPolicy::Set(paired_query.to_owned()),
+                pending_query: PendingQueryPolicy::Set(paired_query.to_owned()),
+                search: true,
+                invalidate_results: true,
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        let second_command_started = state
+            .app
+            .track_c_query_observer
+            .pending_started_at_for_test()
+            .expect("the second normalized command starts a new intent");
+        assert_eq!(state.app.track_c_query_observer.snapshot().intent_count, 2);
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                pending_query: PendingQueryPolicy::Set(paired_query.to_owned()),
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        assert_eq!(state.app.pending_query.as_deref(), Some(paired_query));
+        assert_eq!(state.app.track_c_query_observer.snapshot().intent_count, 2);
+        assert_eq!(
+            state
+                .app
+                .track_c_query_observer
+                .pending_started_at_for_test(),
+            Some(second_command_started),
+            "publishing pending text clears the handoff without changing the active command start"
+        );
+
+        let _ = track_c2g_run_frame(
+            &mut state,
+            1,
+            "independent_same_text_pending_query",
+            paired_query,
+            false,
+            None,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let second_snapshot = state.app.track_c_query_observer.snapshot();
+        assert_eq!(second_snapshot.intent_count, 3);
+        assert_eq!(second_snapshot.completed_count, 2);
+        assert_eq!(second_snapshot.superseded_count, 1);
+        assert_eq!(second_snapshot.receipt_count, 3);
+        let superseded_command = second_snapshot.receipts[1].unwrap();
+        assert_eq!(superseded_command.origin, Origin::CommandSet);
+        assert_eq!(superseded_command.terminal, Terminal::Superseded);
+        assert_eq!(superseded_command.cause, Cause::SupersededByQuery);
+        assert_eq!(superseded_command.started_at, second_command_started);
+        let independent_pending = second_snapshot.receipts[2].unwrap();
+        assert_eq!(independent_pending.origin, Origin::PendingQuery);
+        assert_eq!(independent_pending.terminal, Terminal::Completed);
+
+        // A single normalized outcome with different command/pending text is
+        // also deliberately not paired, even though both policies are Set.
+        let changed_pending = "app 00010";
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                query: QueryPolicy::Set(paired_query.to_owned()),
+                pending_query: PendingQueryPolicy::Set(changed_pending.to_owned()),
+                search: true,
+                invalidate_results: true,
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        let _ = track_c2g_run_frame(
+            &mut state,
+            2,
+            "mismatched_command_pending_query",
+            changed_pending,
+            false,
+            None,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let final_snapshot = state.app.track_c_query_observer.snapshot();
+        assert_eq!(final_snapshot.intent_count, 5);
+        assert_eq!(final_snapshot.completed_count, 3);
+        assert_eq!(final_snapshot.superseded_count, 2);
+        assert_eq!(final_snapshot.receipt_count, 5);
+        assert_eq!(
+            final_snapshot.receipts[3].unwrap().origin,
+            Origin::CommandSet
+        );
+        assert_eq!(
+            final_snapshot.receipts[3].unwrap().terminal,
+            Terminal::Superseded
+        );
+        assert_eq!(
+            final_snapshot.receipts[4].unwrap().origin,
+            Origin::PendingQuery
+        );
+        assert_eq!(
+            final_snapshot.receipts[4].unwrap().terminal,
+            Terminal::Completed
+        );
+
+        drop(state);
+        drop(workspace);
+    }
+
+    const TRACK_C2G_PROVIDER_NAME: &str = "track_c2g_provider";
+    const TRACK_C2G_PROVIDER_SOURCE: &str = "track_c2g_provider";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2GCase {
+        TypedSuffixSequence,
+        AppProviderSupersession,
+        EquivalentFilterSequence,
+        ViewportControls,
+    }
+
+    impl TrackC2GCase {
+        const ALL: [Self; 4] = [
+            Self::TypedSuffixSequence,
+            Self::AppProviderSupersession,
+            Self::EquivalentFilterSequence,
+            Self::ViewportControls,
+        ];
+
+        fn token(self) -> &'static str {
+            match self {
+                Self::TypedSuffixSequence => "typed_suffix_sequence",
+                Self::AppProviderSupersession => "app_provider_supersession",
+                Self::EquivalentFilterSequence => "equivalent_filter_sequence",
+                Self::ViewportControls => "viewport_controls",
+            }
+        }
+
+        fn initial_query(self) -> &'static str {
+            match self {
+                Self::TypedSuffixSequence => "app ",
+                Self::AppProviderSupersession
+                | Self::EquivalentFilterSequence
+                | Self::ViewportControls => "app",
+            }
+        }
+
+        fn intent_count(self) -> usize {
+            match self {
+                Self::TypedSuffixSequence | Self::AppProviderSupersession => 4,
+                Self::EquivalentFilterSequence => 2,
+                Self::ViewportControls => 0,
+            }
+        }
+
+        fn step_count(self) -> usize {
+            match self {
+                Self::TypedSuffixSequence | Self::AppProviderSupersession => 4,
+                Self::EquivalentFilterSequence => 2,
+                Self::ViewportControls => 7,
+            }
+        }
+
+        fn uses_provider(self) -> bool {
+            self == Self::AppProviderSupersession
+        }
+    }
+
+    struct TrackC2GControlledProvider {
+        action: Arc<Mutex<Action>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for TrackC2GControlledProvider {
+        fn search(&self, query: &str) -> Vec<Action> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if query.to_lowercase().contains("provider") {
+                vec![self.action.lock().unwrap().clone()]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn name(&self) -> &str {
+            TRACK_C2G_PROVIDER_NAME
+        }
+
+        fn description(&self) -> &str {
+            "Synthetic Track C query-observation provider"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn always_search(&self) -> bool {
+            true
+        }
+    }
+
+    fn track_c2g_provider_action(generation: &'static str) -> Action {
+        Action {
+            label: "C2G controlled provider result".into(),
+            desc: "Synthetic C2G provider result".into(),
+            action: "track-c:controlled-provider-result".into(),
+            args: Some(generation.into()),
+        }
+    }
+
+    fn track_c2g_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        value: &str,
+    ) {
+        signature.number(value.len() as u64);
+        signature.bytes(value.as_bytes());
+    }
+
+    fn track_c2g_signature_action(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        action: &Action,
+    ) {
+        track_c2g_signature_string(signature, &action.label);
+        track_c2g_signature_string(signature, &action.desc);
+        track_c2g_signature_string(signature, &action.action);
+        match action.args.as_deref() {
+            Some(args) => {
+                signature.number(1);
+                track_c2g_signature_string(signature, args);
+            }
+            None => signature.number(0),
+        }
+    }
+
+    fn track_c2g_fixture_signature(case: TrackC2GCase, count: usize, catalog: &[Action]) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-query-sequence-fixture",
+            count,
+        );
+        track_c2g_signature_string(&mut signature, case.token());
+        signature.number(action_fixture_identity(catalog));
+        track_c2g_signature_string(&mut signature, case.initial_query());
+        signature.number(1); // exact matching
+        signature.number(0.0_f32.to_bits() as u64); // fuzzy weight
+        signature.number(0.0_f32.to_bits() as u64); // usage weight
+        signature.number(0); // autocomplete disabled in the controlled fixture
+        signature.number(case.uses_provider() as u64);
+        signature.number(960.0_f32.to_bits() as u64);
+        signature.number(640.0_f32.to_bits() as u64);
+        signature.number(8); // maximum frames allowed for a completed intent
+        // Bind the actual control recipe, not merely its case name. These
+        // private strings are hashed into the fixture identity and never
+        // included in the emitted record.
+        let recipe: &[&str] = match case {
+            TrackC2GCase::TypedSuffixSequence => &["text_suffix", "0", "00", "000", "00009"],
+            TrackC2GCase::AppProviderSupersession => &[
+                "text_append",
+                " ",
+                "provider",
+                "hold_capacity",
+                "text_suffix",
+                "provider",
+                "release_capacity",
+                "mutate_args:generation-0->generation-1",
+                "notify_source:track_c2g_provider",
+                "text_suffix",
+                "beta",
+                "text_suffix",
+                "provider",
+            ],
+            TrackC2GCase::EquivalentFilterSequence => &[
+                "text_replace_all",
+                "app !id:track-c2g-absent-a",
+                "text_replace_all",
+                "app !id:track-c2g-absent-b",
+            ],
+            TrackC2GCase::ViewportControls => &[
+                "resize:480x640",
+                "resize:960x640",
+                "select:first",
+                "select:middle",
+                "select:last",
+                "secondary_click:visible_row",
+                "primary_click:outside_scroll_area",
+            ],
+        };
+        signature.number(recipe.len() as u64);
+        for token in recipe {
+            track_c2g_signature_string(&mut signature, token);
+        }
+        signature.number(0); // viewport controls do not mutate query weights
+        if case == TrackC2GCase::ViewportControls {
+            signature.number(0);
+            signature.number((count / 2) as u64);
+            signature.number(count.saturating_sub(1) as u64);
+        }
+        if case.uses_provider() {
+            track_c2g_signature_action(&mut signature, &track_c2g_provider_action("generation-0"));
+            track_c2g_signature_action(&mut signature, &track_c2g_provider_action("generation-1"));
+        }
+        signature.finish()
+    }
+
+    fn track_c2g_expected_actions(
+        catalog: &[Action],
+        query: &str,
+        provider_action: Option<&Action>,
+        capacity_deferred: bool,
+    ) -> Vec<Action> {
+        let trimmed = query.trim();
+        assert!(trimmed == "app" || trimmed.starts_with("app "));
+        let mut term = trimmed
+            .strip_prefix("app")
+            .expect("the controlled query uses the app prefix")
+            .trim()
+            .split_whitespace()
+            .filter(|token| !token.starts_with("!id:"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        term.make_ascii_lowercase();
+        let mut expected = if term.is_empty() {
+            catalog.to_vec()
+        } else {
+            track_c_expected_root_query_actions(catalog, &term)
+        };
+        if !capacity_deferred
+            && trimmed.to_lowercase().contains("provider")
+            && let Some(action) = provider_action
+        {
+            expected.push(action.clone());
+        }
+        expected
+    }
+
+    fn track_c2g_catalog_versions(
+        versions: crate::radial::dynamic::MutableResultCatalogVersions,
+    ) -> [u64; 3] {
+        [versions.clipboard, versions.todo, versions.notes]
+    }
+
+    fn track_c2g_geometry_pairs(
+        before: crate::gui::track_c_query_observer::Snapshot,
+        after: crate::gui::track_c_query_observer::Snapshot,
+    ) -> [[u64; 2]; 5] {
+        std::array::from_fn(|index| {
+            [
+                after.geometry[index]
+                    .rebuilds
+                    .saturating_sub(before.geometry[index].rebuilds),
+                after.geometry[index]
+                    .rows
+                    .saturating_sub(before.geometry[index].rows),
+            ]
+        })
+    }
+
+    fn track_c2g_geometry_id(app: &LauncherApp) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let cache = &app.root_list_geometry;
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-root-geometry",
+            app.results.len(),
+        );
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.row_x_offsets,
+            &cache.row_response_x_offsets,
+            &cache.row_widths,
+            &cache.row_response_widths,
+        ] {
+            signature.number(values.len() as u64);
+            for value in values {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        signature.number(cache.result_generation);
+        signature.finish()
+    }
+
+    fn track_c2g_full_state_id(app: &LauncherApp) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-full-output-state",
+            app.results.len(),
+        );
+        signature.number(action_fixture_identity(&app.actions));
+        signature.number(action_fixture_identity(&app.results));
+        track_c2g_signature_string(&mut signature, &app.query);
+        track_c2g_signature_string(&mut signature, &app.last_search_query);
+        signature.number(app.selected.map_or(u64::MAX, |index| index as u64));
+        signature.number(app.last_results_valid as u64);
+        signature.number(app.last_search_pending as u64);
+        signature.number(app.last_search_result_catalog_versions_stable as u64);
+        signature.number(app.pending_query.is_some() as u64);
+        if let Some(pending) = app.pending_query.as_deref() {
+            track_c2g_signature_string(&mut signature, pending);
+        }
+        signature.number(app.background_query_refresh_pending as u64);
+        signature.number(match app.last_search_provider_deferral {
+            search::ProviderSearchDeferral::None => 0,
+            search::ProviderSearchDeferral::Capacity => 1,
+        });
+        signature.number(app.last_search_provider_revision);
+        signature.number(app.plugins.search_generation());
+        if let Some(versions) = app.last_search_result_catalog_versions {
+            signature.number(1);
+            for value in track_c2g_catalog_versions(versions) {
+                signature.number(value);
+            }
+        } else {
+            signature.number(0);
+        }
+        let current_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        for value in track_c2g_catalog_versions(current_versions) {
+            signature.number(value);
+        }
+        signature.number(app.root_list_geometry.result_generation);
+        signature.number(app.query_autocomplete as u64);
+        signature.number(app.autocomplete_index as u64);
+        signature.number(app.suggestions.len() as u64);
+        for suggestion in &app.suggestions {
+            track_c2g_signature_string(&mut signature, suggestion);
+        }
+        signature.number(app.last_note_search_change.is_some() as u64);
+        signature.number(app.radial_provider_search_capacity.is_occupied() as u64);
+        signature.finish()
+    }
+
+    fn track_c2g_viewport_id(app: &LauncherApp) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-root-viewport",
+            app.test_root_rendered_rows.len(),
+        );
+        if let Some((inner_rect, content_size, offset)) = app.test_root_scroll_area_extent {
+            signature.number(1);
+            for value in [
+                inner_rect.min.x,
+                inner_rect.min.y,
+                inner_rect.max.x,
+                inner_rect.max.y,
+                content_size.x,
+                content_size.y,
+                offset.x,
+                offset.y,
+            ] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        } else {
+            signature.number(0);
+        }
+        if let Some(viewport) = app.test_root_scroll_viewport_rect {
+            signature.number(1);
+            for value in [
+                viewport.min.x,
+                viewport.min.y,
+                viewport.max.x,
+                viewport.max.y,
+            ] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        } else {
+            signature.number(0);
+        }
+        if let Some((content_viewport, content_origin)) = app.egui_ctx.data(|data| {
+            data.get_temp::<(egui::Rect, egui::Pos2)>(egui::Id::new(
+                "track-c2g-root-content-viewport",
+            ))
+        }) {
+            signature.number(1);
+            for value in [
+                content_viewport.min.x,
+                content_viewport.min.y,
+                content_viewport.max.x,
+                content_viewport.max.y,
+                content_origin.x,
+                content_origin.y,
+            ] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        } else {
+            signature.number(0);
+        }
+        if let Some(popup_owner) = app.egui_ctx.data(|data| {
+            data.get_temp::<Option<usize>>(egui::Id::new("track-c2g-root-popup-owner-for-paint"))
+        }) {
+            signature.number(1);
+            signature.number(popup_owner.map_or(u64::MAX, |index| index as u64));
+        } else {
+            signature.number(0);
+        }
+        for (((index, action), (id_index, id)), (rect_index, rect)) in app
+            .test_root_rendered_rows
+            .iter()
+            .zip(&app.test_root_rendered_row_ids)
+            .zip(&app.test_root_rendered_row_rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            signature.number(*index as u64);
+            track_c2g_signature_string(&mut signature, action);
+            track_c2g_signature_string(&mut signature, &format!("{id:?}"));
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        signature.number(
+            app.root_list_geometry
+                .popup_owner()
+                .map_or(u64::MAX, |index| index as u64),
+        );
+        signature.number(app.egui_ctx.is_context_menu_open() as u64);
+        signature.finish()
+    }
+
+    struct TrackC2GState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        catalog: Vec<Action>,
+        provider_action: Option<Arc<Mutex<Action>>>,
+        provider_calls: Arc<AtomicUsize>,
+        capacity: Option<crate::radial::handoff::DeferredProviderSearchPermit>,
+        case: TrackC2GCase,
+        count: usize,
+        fixture_signature: u64,
+        provider_generation: u64,
+        catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
+        frame_index: usize,
+    }
+
+    fn track_c2g_prepare_state(
+        root: &std::path::Path,
+        count: usize,
+        case: TrackC2GCase,
+    ) -> TrackC2GState {
+        use crate::performance::track_c_workloads::action_fixture;
+
+        let catalog = action_fixture(count).values;
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, catalog.clone(), root);
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.actions = Arc::new(catalog.clone());
+        app.match_exact = true;
+        app.fuzzy_weight = 0.0;
+        app.usage_weight = 0.0;
+        app.usage.clear();
+        app.query_autocomplete = false;
+        app.query = case.initial_query().to_owned();
+
+        let mut provider_action = None;
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        if case.uses_provider() {
+            let initial_action = track_c2g_provider_action("generation-0");
+            let action = Arc::new(Mutex::new(initial_action));
+            app.plugins.register(Box::new(TrackC2GControlledProvider {
+                action: Arc::clone(&action),
+                calls: Arc::clone(&provider_calls),
+            }));
+            app.enabled_plugins = Some(std::collections::HashSet::from([
+                TRACK_C2G_PROVIDER_NAME.to_owned()
+            ]));
+            provider_action = Some(action);
+        } else {
+            app.enabled_plugins = Some(std::collections::HashSet::new());
+        }
+        app.last_plugin_search_generation = app.plugins.search_generation();
+        app.update_action_cache();
+        app.rebuild_completion_index_now();
+        assert!(app.completion_index.is_some());
+        assert!(app.completion_rebuild_after.is_none());
+        assert!(!app.action_completion_dirty && !app.command_completion_dirty);
+        app.search();
+
+        let expected_provider_action = provider_action
+            .as_ref()
+            .map(|action| action.lock().unwrap().clone());
+        let expected_initial = track_c2g_expected_actions(
+            &catalog,
+            case.initial_query(),
+            expected_provider_action.as_ref(),
+            false,
+        );
+        assert_eq!(app.results, expected_initial);
+        assert_eq!(app.query, case.initial_query());
+        assert_eq!(app.last_search_query, case.initial_query());
+        assert!(app.last_results_valid && !app.last_search_pending);
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert!(app.pending_query.is_none() && !app.background_query_refresh_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(
+            provider_calls.load(Ordering::SeqCst),
+            usize::from(case.uses_provider()),
+            "the captured provider is invoked only by the initial setup search"
+        );
+        let provider_generation = app.plugins.search_generation();
+        assert_eq!(app.last_search_provider_revision, provider_generation);
+        assert_eq!(app.last_plugin_search_generation, provider_generation);
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.follow_mouse = false;
+        focus_launcher_query(&ctx, &mut app);
+        for frame in 0..9 {
+            drop(run_root_list_frame(
+                &ctx,
+                &mut app,
+                frame,
+                960.0,
+                640.0,
+                Vec::new(),
+            ));
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert_eq!(app.plugins.search_generation(), provider_generation);
+        assert_eq!(app.results, expected_initial);
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        set_query_cursor(&ctx, app.query.chars().count(), app.query.chars().count());
+        app.track_c_query_observer.enable_for_test();
+        assert_eq!(app.track_c_query_observer.snapshot().frame_count, 0);
+        provider_calls.store(0, Ordering::SeqCst);
+
+        let fixture_signature = track_c2g_fixture_signature(case, count, &catalog);
+        TrackC2GState {
+            app,
+            ctx,
+            catalog,
+            provider_action,
+            provider_calls,
+            capacity: None,
+            case,
+            count,
+            fixture_signature,
+            provider_generation,
+            catalog_versions,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c2g_expected_state_for_query(
+        state: &TrackC2GState,
+        query: &str,
+        capacity_deferred: bool,
+    ) -> Vec<Action> {
+        let provider_action = state.provider_action.as_ref().map(|action| {
+            if state.provider_generation == state.app.plugins.search_generation() {
+                action.lock().unwrap().clone()
+            } else {
+                track_c2g_provider_action("generation-1")
+            }
+        });
+        track_c2g_expected_actions(
+            &state.catalog,
+            query,
+            provider_action.as_ref(),
+            capacity_deferred,
+        )
+    }
+
+    fn track_c2g_validate_frame(
+        state: &TrackC2GState,
+        expected_query: &str,
+        expected_actions: &[Action],
+        capacity_deferred: bool,
+        expected_selected: Option<usize>,
+    ) -> (u64, u64, u64) {
+        let app = &state.app;
+        assert_eq!(app.query, expected_query);
+        assert_eq!(app.last_search_query, expected_query);
+        assert_eq!(app.actions.as_ref(), &state.catalog);
+        assert_eq!(app.results, expected_actions);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.last_search_pending, capacity_deferred);
+        assert_eq!(app.last_results_valid, !capacity_deferred);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            if capacity_deferred {
+                search::ProviderSearchDeferral::Capacity
+            } else {
+                search::ProviderSearchDeferral::None
+            }
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(state.catalog_versions)
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions_stable,
+            !capacity_deferred
+        );
+        assert_eq!(app.plugins.search_generation(), state.provider_generation);
+        assert_eq!(app.last_plugin_search_generation, state.provider_generation);
+        assert_eq!(app.last_search_provider_revision, state.provider_generation);
+        assert_eq!(
+            crate::radial::dynamic::MutableResultCatalogVersions::current(),
+            state.catalog_versions
+        );
+        assert_eq!(app.selected, expected_selected);
+
+        let available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the current root frame records its actual row width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let style = state.ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let (outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            expected_actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        if expected_actions.is_empty() {
+            let cache = &app.root_list_geometry;
+            assert!(eager.rows.is_empty());
+            assert!(eager.available_widths.is_empty());
+            assert!(cache.row_tops.is_empty());
+            assert!(cache.row_heights.is_empty());
+            assert!(cache.row_x_offsets.is_empty());
+            assert!(cache.row_response_x_offsets.is_empty());
+            assert!(cache.row_widths.is_empty());
+            assert!(cache.row_response_widths.is_empty());
+            assert_eq!(cache.total_height, 0.0);
+            assert_eq!(cache.content_x_offset, 0.0);
+            assert!(
+                (cache.content_width - available_width).abs() <= 1.0,
+                "empty list content width matches the actual available width"
+            );
+        } else {
+            assert_root_list_cache_matches_eager(
+                &app.root_list_geometry,
+                &eager,
+                outer,
+                "C2-G actual query frame against the frozen eager list oracle",
+            );
+        }
+
+        let rows = &app.test_root_rendered_rows;
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        let (_, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("the actual root frame records ScrollArea content extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        let clip_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the actual root frame records the visible viewport");
+        let popup_owner_for_paint = state
+            .ctx
+            .data(|data| {
+                data.get_temp::<Option<usize>>(egui::Id::new(
+                    "track-c2g-root-popup-owner-for-paint",
+                ))
+            })
+            .expect("the actual root frame records its paint-time popup owner");
+        let (content_viewport, content_origin) = state
+            .ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Pos2)>(egui::Id::new(
+                    "track-c2g-root-content-viewport",
+                ))
+            })
+            .expect("the actual scaled root frame records its content viewport and origin");
+        let visible_start = eager
+            .rows
+            .partition_point(|row| row.bottom() - outer.top() <= content_viewport.min.y);
+        let visible_end = eager
+            .rows
+            .partition_point(|row| row.top() - outer.top() < content_viewport.max.y);
+        let mut expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(expected_actions.len()))
+            .collect::<Vec<_>>();
+        if let Some(owner) = popup_owner_for_paint {
+            assert!(owner < expected_actions.len());
+            assert_eq!(app.results.get(owner), expected_actions.get(owner));
+            expected_indices.push(owner);
+            expected_indices.sort_unstable();
+            expected_indices.dedup();
+        }
+        assert_eq!(
+            rows.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            expected_indices,
+            "actual rows are the eager visible rows plus the documented overscan"
+        );
+        for (((index, action_id), (id_index, _)), (rect_index, rect)) in
+            rows.iter().zip(ids).zip(rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &expected_actions[*index].action);
+            let expected = egui::Rect::from_min_size(
+                content_origin + (eager.rows[*index].min - outer.min),
+                eager.rows[*index].size(),
+            );
+            assert!(
+                rect.min.distance(expected.min) <= 1.0 && rect.max.distance(expected.max) <= 1.0,
+                "painted row {index} matches eager geometry"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(clip_viewport.intersects(*rect));
+            }
+        }
+        (
+            track_c2g_full_state_id(app),
+            track_c2g_geometry_id(app),
+            track_c2g_viewport_id(app),
+        )
+    }
+
+    struct TrackC2GFrameObservation {
+        json: serde_json::Value,
+        provider_calls_delta: u64,
+    }
+
+    fn track_c2g_action_payload_bytes(actions: &[Action]) -> u64 {
+        actions
+            .iter()
+            .map(|action| {
+                action.label.len() as u64
+                    + action.desc.len() as u64
+                    + action.action.len() as u64
+                    + action.args.as_ref().map_or(0, |args| args.len() as u64)
+            })
+            .sum()
+    }
+
+    fn track_c2g_acceptance_json(
+        acceptance: Option<crate::gui::track_c_query_observer::AcceptanceReceipt>,
+    ) -> serde_json::Value {
+        use crate::gui::track_c_query_observer::AcceptanceKind;
+
+        match acceptance {
+            Some(acceptance) => serde_json::json!({
+                "kind": match acceptance.kind {
+                    AcceptanceKind::Search => "search",
+                    AcceptanceKind::CommandReplacement => "command_replacement",
+                },
+                "frame": acceptance.frame,
+                "result_generation": acceptance.result_generation,
+                "provider_revision": acceptance.provider_revision,
+                "catalog_versions": acceptance.catalog_versions.map(track_c2g_catalog_versions),
+                "catalog_versions_stable": acceptance.catalog_versions_stable,
+                "search_pending": acceptance.search_pending,
+                "capacity_deferred": acceptance.capacity_deferred,
+                "direct_source_before": acceptance.direct_provider_before,
+                "direct_source_after": acceptance.direct_provider_after,
+                "direct_catalog_before": acceptance.direct_catalog_before.map(track_c2g_catalog_versions),
+                "direct_catalog_after": acceptance.direct_catalog_after.map(track_c2g_catalog_versions),
+            }),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn track_c2g_receipt_json(
+        receipt: crate::gui::track_c_query_observer::Receipt,
+    ) -> serde_json::Value {
+        use crate::gui::track_c_query_observer::GeometryCause;
+
+        let geometry_by_cause = (0..5)
+            .map(|index| {
+                serde_json::json!([
+                    receipt.geometry_by_cause[index].rebuilds,
+                    receipt.geometry_by_cause[index].rows
+                ])
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "sequence": receipt.sequence,
+            "origin": receipt.origin.token(),
+            "terminal": receipt.terminal.token(),
+            "cause": receipt.cause.token(),
+            "started_frame": receipt.started_frame,
+            "terminal_frame": receipt.terminal_frame,
+            "frame_count": receipt.frames,
+            "terminal_elapsed_ns": receipt.terminal_elapsed_ns,
+            "completion_latency_ns": receipt.completion_latency_ns,
+            "acceptance": track_c2g_acceptance_json(receipt.acceptance),
+            "painted_sequence": receipt.painted_sequence,
+            "painted_acceptance_frame": receipt.painted_acceptance_frame,
+            "painted_frame": receipt.painted_frame,
+            "painted_generation": receipt.painted_generation,
+            "geometry_rebuilds": receipt.geometry_rebuilds,
+            "geometry_rows": receipt.geometry_rows,
+            "geometry_by_cause": geometry_by_cause,
+            "geometry_cause_order": [
+                GeometryCause::Query.token(),
+                GeometryCause::ProviderOrCatalog.token(),
+                GeometryCause::DisplayOrResize.token(),
+                GeometryCause::Navigation.token(),
+                GeometryCause::Other.token(),
+            ],
+        })
+    }
+
+    fn track_c2g_run_frame(
+        state: &mut TrackC2GState,
+        step_index: usize,
+        kind: &'static str,
+        expected_query: &str,
+        capacity_deferred: bool,
+        expected_selected: Option<usize>,
+        width: f32,
+        height: f32,
+        events: Vec<egui::Event>,
+    ) -> TrackC2GFrameObservation {
+        let before = state.app.track_c_query_observer.snapshot();
+        let provider_calls_before = state.provider_calls.load(Ordering::SeqCst) as u64;
+        let provider_generation_before = state.app.plugins.search_generation();
+        let frame = state.frame_index;
+        state.frame_index = state.frame_index.saturating_add(1);
+        let started = Instant::now();
+        let output = run_root_list_frame(&state.ctx, &mut state.app, frame, width, height, events);
+        drop(output);
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let after = state.app.track_c_query_observer.snapshot();
+        let provider_calls_after = state.provider_calls.load(Ordering::SeqCst) as u64;
+        let (full_state_id, geometry_id, viewport_id) = track_c2g_validate_frame(
+            state,
+            expected_query,
+            &track_c2g_expected_state_for_query(state, expected_query, capacity_deferred),
+            capacity_deferred,
+            expected_selected,
+        );
+        let app = &state.app;
+        let geometry_by_cause = track_c2g_geometry_pairs(before, after);
+        let geometry_rebuilds = geometry_by_cause.iter().map(|pair| pair[0]).sum::<u64>();
+        let geometry_rows = geometry_by_cause.iter().map(|pair| pair[1]).sum::<u64>();
+        let (screen_width, screen_height) = app
+            .test_root_scroll_viewport_rect
+            .map(|rect| (rect.width(), rect.height()))
+            .expect("the actual root frame records its clipped viewport");
+        let actions_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results);
+        let payload_bytes = track_c2g_action_payload_bytes(&app.results);
+        let popup_open = state.ctx.is_context_menu_open();
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+        let json = serde_json::json!({
+            "frame": after.frame_count,
+            "step": step_index,
+            "kind": kind,
+            "elapsed_ns": elapsed_ns,
+            "viewport_milli": [
+                (screen_width * 1000.0).round() as u64,
+                (screen_height * 1000.0).round() as u64,
+            ],
+            "visible": app.visible_flag.load(Ordering::SeqCst),
+            "root_owned": app.last_visible,
+            "current_result_generation": app.root_list_geometry.result_generation,
+            "provider_revision": app.plugins.search_generation(),
+            "catalog_versions": track_c2g_catalog_versions(state.catalog_versions),
+            "catalog_versions_stable": app.last_search_result_catalog_versions_stable,
+            "pending_query": app.pending_query.is_some(),
+            "background_refresh_pending": app.background_query_refresh_pending,
+            "search_pending": app.last_search_pending,
+            "capacity_deferred": app.last_search_provider_deferral == search::ProviderSearchDeferral::Capacity,
+            "selected_index": app.selected,
+            "popup_open": popup_open,
+            "painted_generation": Some(app.root_list_geometry.result_generation),
+            "geometry_rebuilds": geometry_rebuilds,
+            "geometry_rows": geometry_rows,
+            "geometry_by_cause": geometry_by_cause,
+            "provider_calls_before": provider_calls_before,
+            "provider_calls_after": provider_calls_after,
+            "provider_calls_delta": provider_calls_after.saturating_sub(provider_calls_before),
+            "provider_generation_before": provider_generation_before,
+            "provider_generation_after": app.plugins.search_generation(),
+            "action_count": app.results.len(),
+            "action_payload_utf8_bytes": payload_bytes,
+            "action_output_id": format!("{actions_id:016x}"),
+            "full_state_id": format!("{full_state_id:016x}"),
+            "geometry_id": format!("{geometry_id:016x}"),
+            "viewport_id": format!("{viewport_id:016x}"),
+        });
+        TrackC2GFrameObservation {
+            json,
+            provider_calls_delta: provider_calls_after.saturating_sub(provider_calls_before),
+        }
+    }
+
+    fn track_c2g_text_frame(
+        state: &mut TrackC2GState,
+        step_index: usize,
+        kind: &'static str,
+        expected_query: &str,
+        capacity_deferred: bool,
+        replace_from: usize,
+        replacement: &str,
+    ) -> TrackC2GFrameObservation {
+        let end = state.app.query.chars().count();
+        set_query_cursor(&state.ctx, replace_from, end);
+        track_c2g_run_frame(
+            state,
+            step_index,
+            kind,
+            expected_query,
+            capacity_deferred,
+            None,
+            960.0,
+            640.0,
+            vec![egui::Event::Text(replacement.to_owned())],
+        )
+    }
+
+    fn track_c2g_step_json(
+        index: usize,
+        kind: &'static str,
+        observation: TrackC2GFrameObservation,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "index": index,
+            "kind": kind,
+            "provider_calls_delta": observation.provider_calls_delta,
+            "frame": observation.json,
+        })
+    }
+
+    fn track_c2g_run_sequence(state: &mut TrackC2GState) -> serde_json::Value {
+        use crate::gui::track_c_query_observer::{Cause, Terminal};
+
+        let started = Instant::now();
+        let mut steps = Vec::with_capacity(state.case.step_count());
+        match state.case {
+            TrackC2GCase::TypedSuffixSequence => {
+                for (index, suffix) in ["0", "00", "000", "00009"].into_iter().enumerate() {
+                    let query = format!("app {suffix}");
+                    let observation = track_c2g_text_frame(
+                        state,
+                        index,
+                        "text_edit_suffix",
+                        &query,
+                        false,
+                        4,
+                        suffix,
+                    );
+                    steps.push(track_c2g_step_json(index, "text_edit_suffix", observation));
+                }
+            }
+            TrackC2GCase::AppProviderSupersession => {
+                let first =
+                    track_c2g_text_frame(state, 0, "append_app_space", "app ", false, 3, " ");
+                steps.push(track_c2g_step_json(0, "append_app_space", first));
+
+                state.capacity = Some(
+                    state
+                        .app
+                        .radial_provider_search_capacity
+                        .try_acquire()
+                        .expect("the controlled fixture owns the free provider slot"),
+                );
+                let pending = track_c2g_text_frame(
+                    state,
+                    1,
+                    "capacity_deferred_provider_query",
+                    "app provider",
+                    true,
+                    4,
+                    "provider",
+                );
+                steps.push(track_c2g_step_json(
+                    1,
+                    "capacity_deferred_provider_query",
+                    pending,
+                ));
+
+                drop(state.capacity.take());
+                *state
+                    .provider_action
+                    .as_ref()
+                    .expect("provider case has one captured action")
+                    .lock()
+                    .unwrap() = track_c2g_provider_action("generation-1");
+                state
+                    .app
+                    .plugins
+                    .notify_search_update_for_test(TRACK_C2G_PROVIDER_SOURCE);
+                state.provider_generation = state.app.plugins.search_generation();
+                let supersede = track_c2g_text_frame(
+                    state,
+                    2,
+                    "provider_refresh_then_superseding_beta_edit",
+                    "app beta",
+                    false,
+                    4,
+                    "beta",
+                );
+                assert!(
+                    state.app.results.is_empty(),
+                    "the accepted app beta query is a valid empty-result search"
+                );
+                steps.push(track_c2g_step_json(
+                    2,
+                    "provider_refresh_then_superseding_beta_edit",
+                    supersede,
+                ));
+
+                let finish = track_c2g_text_frame(
+                    state,
+                    3,
+                    "final_provider_query",
+                    "app provider",
+                    false,
+                    4,
+                    "provider",
+                );
+                steps.push(track_c2g_step_json(3, "final_provider_query", finish));
+            }
+            TrackC2GCase::EquivalentFilterSequence => {
+                for (index, query) in ["app !id:track-c2g-absent-a", "app !id:track-c2g-absent-b"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let observation = track_c2g_text_frame(
+                        state,
+                        index,
+                        "whole_query_filter_replacement",
+                        query,
+                        false,
+                        0,
+                        query,
+                    );
+                    steps.push(track_c2g_step_json(
+                        index,
+                        "whole_query_filter_replacement",
+                        observation,
+                    ));
+                }
+            }
+            TrackC2GCase::ViewportControls => {
+                for (index, (kind, width, height, selected)) in [
+                    ("resize_narrow", 480.0, 640.0, None),
+                    ("resize_restore", 960.0, 640.0, None),
+                    ("select_first", 960.0, 640.0, Some(0)),
+                    ("select_middle", 960.0, 640.0, Some(state.count / 2)),
+                    ("select_last", 960.0, 640.0, Some(state.count - 1)),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    state.app.selected = selected;
+                    let observation = track_c2g_run_frame(
+                        state,
+                        index,
+                        kind,
+                        "app",
+                        false,
+                        selected,
+                        width,
+                        height,
+                        Vec::new(),
+                    );
+                    steps.push(track_c2g_step_json(index, kind, observation));
+                }
+                let viewport = state
+                    .app
+                    .test_root_scroll_viewport_rect
+                    .expect("the prior actual frame records its visible viewport");
+                let target = state
+                    .app
+                    .test_root_rendered_row_rects
+                    .iter()
+                    .find_map(|(_, rect)| viewport.intersects(*rect).then_some(rect.center()))
+                    .expect("the current viewport contains a controlled catalog row");
+                let open = track_c2g_run_frame(
+                    state,
+                    5,
+                    "open_result_context_menu",
+                    "app",
+                    false,
+                    Some(state.count - 1),
+                    960.0,
+                    640.0,
+                    vec![
+                        egui::Event::PointerMoved(target),
+                        egui::Event::PointerButton {
+                            pos: target,
+                            button: egui::PointerButton::Secondary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: target,
+                            button: egui::PointerButton::Secondary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                assert!(
+                    state.ctx.is_context_menu_open(),
+                    "the result menu opens through a real secondary click"
+                );
+                steps.push(track_c2g_step_json(5, "open_result_context_menu", open));
+
+                let outside = egui::pos2(1.0, 1.0);
+                let close = track_c2g_run_frame(
+                    state,
+                    6,
+                    "close_result_context_menu",
+                    "app",
+                    false,
+                    Some(state.count - 1),
+                    960.0,
+                    640.0,
+                    vec![
+                        egui::Event::PointerMoved(outside),
+                        egui::Event::PointerButton {
+                            pos: outside,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: outside,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                assert!(
+                    !state.ctx.is_context_menu_open(),
+                    "an outside click closes the result menu"
+                );
+                steps.push(track_c2g_step_json(6, "close_result_context_menu", close));
+            }
+        }
+
+        let sequence_elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let snapshot = state.app.track_c_query_observer.snapshot();
+        let receipts = snapshot
+            .receipts
+            .iter()
+            .flatten()
+            .copied()
+            .map(track_c2g_receipt_json)
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), state.case.intent_count());
+        let terminals = snapshot
+            .receipts
+            .iter()
+            .flatten()
+            .map(|receipt| (receipt.terminal, receipt.cause))
+            .collect::<Vec<_>>();
+        let expected_terminals: Vec<(Terminal, Cause)> = match state.case {
+            TrackC2GCase::AppProviderSupersession => vec![
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Superseded, Cause::SupersededByQuery),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+            ],
+            TrackC2GCase::ViewportControls => Vec::new(),
+            _ => vec![
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+            ][..state.case.intent_count()]
+                .to_vec(),
+        };
+        assert_eq!(terminals, expected_terminals);
+        for receipt in snapshot.receipts.iter().flatten() {
+            assert!(receipt.terminal_elapsed_ns <= sequence_elapsed_ns);
+            assert!(receipt.frames <= 8);
+            assert_eq!(receipt.origin.token(), "text_edit");
+            if receipt.terminal == Terminal::Completed {
+                assert_eq!(receipt.painted_sequence, Some(receipt.sequence));
+                assert_eq!(receipt.painted_frame, Some(receipt.terminal_frame));
+                assert!(
+                    receipt
+                        .completion_latency_ns
+                        .is_some_and(|latency| latency > 0)
+                );
+            } else {
+                assert!(receipt.completion_latency_ns.is_none());
+            }
+        }
+        if state.case == TrackC2GCase::AppProviderSupersession {
+            assert_eq!(state.provider_calls.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                state.app.plugins.search_generation(),
+                state.provider_generation
+            );
+        } else {
+            assert_eq!(state.provider_calls.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(steps.len(), state.case.step_count());
+        let last_actions_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&state.app.results);
+        serde_json::json!({
+            "sequence_elapsed_ns": sequence_elapsed_ns,
+            "sequence_frame_count": snapshot.frame_count,
+            "intents": receipts,
+            "steps": steps,
+            "provider_calls_total": state.provider_calls.load(Ordering::SeqCst),
+            "provider_generation": state.app.plugins.search_generation(),
+            "catalog_versions": track_c2g_catalog_versions(state.catalog_versions),
+            "action_count": state.app.results.len(),
+            "action_payload_utf8_bytes": track_c2g_action_payload_bytes(&state.app.results),
+            "action_output_id": format!("{last_actions_id:016x}"),
+            "full_state_id": format!("{:016x}", track_c2g_full_state_id(&state.app)),
+            "geometry_id": format!("{:016x}", track_c2g_geometry_id(&state.app)),
+            "viewport_id": format!("{:016x}", track_c2g_viewport_id(&state.app)),
+        })
+    }
+
+    fn track_c2g_run_record(
+        case: TrackC2GCase,
+        count: usize,
+        root: &std::path::Path,
+    ) -> serde_json::Value {
+        let mut state = track_c2g_prepare_state(root, count, case);
+        let sample = track_c2g_run_sequence(&mut state);
+        drop(state.capacity.take());
+        drop(state);
+        sample
+    }
+
+    #[test]
+    fn track_c2g_oracle_query_sequences_match_usable_cpu_frames() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        for case in TrackC2GCase::ALL {
+            let sample = track_c2g_run_record(case, 100, workspace.root());
+            assert_eq!(sample["steps"].as_array().unwrap().len(), case.step_count());
+            assert_eq!(
+                sample["intents"].as_array().unwrap().len(),
+                case.intent_count()
+            );
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C GUI query-to-usable-frame attribution owner"]
+    fn track_c2g_benchmark_gui_query_to_usable_cpu_viewport() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let sizes: &[usize] = match mode {
+            BenchmarkMode::Small => &[100],
+            BenchmarkMode::Full => &[100, 1_000, 10_000],
+        };
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        assert!(source == "UNCOMMITTED_SOURCE" || source.len() == 40);
+        assert_eq!(profile, "fast-dev");
+        let workspace = TrackCWorkspace::new();
+        for count in sizes {
+            let catalog = action_fixture(*count).values;
+            for case in TrackC2GCase::ALL {
+                let fixture_signature = track_c2g_fixture_signature(case, *count, &catalog);
+                let mut samples = Vec::with_capacity(20);
+                for sample_index in 0..25 {
+                    let sample = track_c2g_run_record(case, *count, workspace.root());
+                    if sample_index >= 5 {
+                        samples.push(sample);
+                    }
+                }
+                assert_eq!(samples.len(), 20);
+                let output = serde_json::json!({
+                    "schema": 1,
+                    "stage": "gui_query_to_usable_cpu_viewport",
+                    "owner": "egui_Context_run+LauncherApp::render_root_frame",
+                    "owner_scope": "accepted_gui_mutation_to_first_usable_cpu_root_frame",
+                    "sequence_elapsed_scope": "whole_controlled_sequence_including_interstep_validation",
+                    "provider_scope": "captured_controlled_snapshot_no_other_provider_calls",
+                    "fixture": "synthetic_action_catalog_controlled_provider",
+                    "source": source,
+                    "profile": profile,
+                    "mode": match mode { BenchmarkMode::Small => "small", BenchmarkMode::Full => "full" },
+                    "telemetry_enabled": true,
+                    "observer_enabled": true,
+                    "warmups": 5,
+                    "samples": 20,
+                    "exclusions": 0,
+                    "frame_limit": 8,
+                    "case": case.token(),
+                    "count": count,
+                    "fixture_signature": format!("{fixture_signature:016x}"),
+                    "sample_records": samples,
+                });
+                eprintln!("TRACK_C2G_QUERY_RESULT {}", output);
+            }
+        }
         drop(workspace);
     }
 
@@ -16829,8 +18566,9 @@ mod tests {
 
     #[test]
     fn query_history_recall_reuses_search_selection_autocomplete_focus_and_cursor_paths() {
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let mut app = root_list_app_at(&ctx, two_results(), workspace.root());
         app.query = "draft".into();
         app.results = two_results();
         app.selected = Some(1);
@@ -16849,6 +18587,8 @@ mod tests {
         assert!(app.last_results_valid);
         assert!(app.focus_query);
         assert!(app.move_cursor_end);
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
@@ -17990,9 +19730,9 @@ mod tests {
 
     #[test]
     fn keyboard_navigation_is_consistent_between_grid_and_list_modes() {
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.results = (0..8)
+        let results = (0..8)
             .map(|i| Action {
                 label: format!("A{i}"),
                 desc: "d".into(),
@@ -18000,6 +19740,7 @@ mod tests {
                 args: None,
             })
             .collect();
+        let mut app = root_list_app_at(&ctx, results, workspace.root());
 
         app.resolved_grid_layout = false;
         app.selected = Some(1);
@@ -18019,6 +19760,8 @@ mod tests {
         assert_eq!(app.selected, Some(1));
         app.handle_key(egui::Key::ArrowDown);
         assert_eq!(app.selected, Some(4));
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
