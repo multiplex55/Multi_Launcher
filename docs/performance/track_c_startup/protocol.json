@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "status": "PRE_EXECUTION_PROTOCOL_FROZEN_INDEPENDENT_SOURCE_METHOD_CLEAR",
+  "source_parent": "d23e57384da453b3e3281e8c09d19630b1d39347",
+  "profile": "fast-dev",
+  "telemetry_enabled": true,
+  "thread_count": 1,
+  "warmups": 5,
+  "retained_samples": 20,
+  "exclusions": 0,
+  "small_counts": [
+    16
+  ],
+  "full_counts": [
+    16,
+    1000,
+    10000
+  ],
+  "series": [
+    "actual_startup_action_catalog_original_and_supplement",
+    "ready_catalog_restricted_search_real_Omni_constructor_one_CPU_frame"
+  ],
+  "native_process_hotkey_display": "NOT RUN / NOT MEASURED",
+  "summation": "Series must not be added as process latency",
+  "component_query": "o list ",
+  "frame_policy": "Exactly one measured actual root ctx.run, FullOutput disposal inside clock; no presearch beyond inherent constructor search, font settling, retries or exclusions; posttimer eager ctx.run is validation only",
+  "context_allocation_phase": "launcher_app_construct_and_transfer includes fresh Context construction",
+  "teardown": "Untimed app/provider/coordinator destruction then deadline-bounded final notify event-handler release; does not join detached native thread; incomplete release preserves workspace/env in failing child",
+  "cache_state": "Fixed owned root per25 series; process-global caches/registries and OS filesystem cache warm; no first-process/cold-disk/RSS claim",
+  "scan_scope": "Sum IndexBatchIter::next_step durations; calls ceil(N/512)+1; workN, completed1/errors0/abandoned0; overlaps caller wait, not additive",
+  "identity": "Full real-path Actions and independent flat enumeration checked first; only owned prefixes normalized for structural binding; raw Action and payloadbytes fixed across20; geometry/viewport per real root",
+  "methods_sha256": {
+    "track_c_collect_startup_results.py": "0266ee346cd042ada56a5870c06a45ff9efc51f7e64c64bd94adf2f1db325f2e",
+    "track_c_compare_startup_catalog.py": "603fd5730f7bc91829f097d8a9b134bfb618f108fcf45cffd1ef48d178864d1d"
+  },
+  "runner_sha256": "4eed4625b27673fb1f5b3a0a60e1d484b8feeba10b5a9caf8f111e70c302140b",
+  "controls": {
+    "original": 17,
+    "startup_supplement": 21,
+    "component": 28
+  },
+  "measurements_executed": 0,
+  "copy_count_scope": "N inferred structurally from unchanged cloned extension plus full output parity; no intercepted clone counter; historical work counters unchanged"
+}

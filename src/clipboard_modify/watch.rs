@@ -31,8 +31,17 @@ impl ClipboardModifyWatcher {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
         let (tx, rx) = mpsc::channel();
+        #[cfg(test)]
+        let release = crate::performance::track_c_watcher_lifecycle::capture(
+            crate::performance::track_c_watcher_lifecycle::HandlerKind::ClipboardModify,
+            &watch_path,
+        );
+        #[cfg(test)]
+        let release_registration = release.as_ref().map(|sentinel| sentinel.registration());
         let mut watcher = RecommendedWatcher::new(
             move |res| {
+                #[cfg(test)]
+                let _keep_handler_release = &release;
                 if tx.send(res).is_ok() {
                     repaint();
                 }
@@ -40,6 +49,10 @@ impl ClipboardModifyWatcher {
             Config::default(),
         )?;
         watcher.watch(&watch_path, RecursiveMode::NonRecursive)?;
+        #[cfg(test)]
+        if let Some(registration) = release_registration {
+            registration.registered();
+        }
         Ok(Self {
             watcher,
             path,

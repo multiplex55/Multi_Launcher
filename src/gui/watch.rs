@@ -21,9 +21,15 @@ pub(super) fn watch_file_with_wake(
     let tx = tx.with_origin(EventOrigin::FileWatcher);
     let target = path.to_path_buf();
     let target_is_directory = path.is_dir();
+    #[cfg(test)]
+    let release = track_c_gui_handler_release(path, &event);
+    #[cfg(test)]
+    let release_registration = release.as_ref().map(|sentinel| sentinel.registration());
     let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| match res {
             Ok(ev) => {
+                #[cfg(test)]
+                let _keep_handler_release = &release;
                 if matches!(
                     ev.kind,
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
@@ -47,7 +53,28 @@ pub(super) fn watch_file_with_wake(
         path.parent().unwrap_or_else(|| Path::new("."))
     };
     watcher.watch(watch_root, RecursiveMode::NonRecursive)?;
+    #[cfg(test)]
+    if let Some(registration) = release_registration {
+        registration.registered();
+    }
     Ok(watcher)
+}
+
+#[cfg(test)]
+fn track_c_gui_handler_release(
+    path: &Path,
+    event: &WatchEvent,
+) -> Option<crate::performance::track_c_watcher_lifecycle::HandlerReleaseSentinel> {
+    use crate::performance::track_c_watcher_lifecycle::HandlerKind;
+
+    let kind = match event {
+        WatchEvent::Folders => HandlerKind::GuiFolders,
+        WatchEvent::Bookmarks => HandlerKind::GuiBookmarks,
+        WatchEvent::Todos => HandlerKind::GuiTodos,
+        WatchEvent::Notes => HandlerKind::GuiNotes,
+        _ => return None,
+    };
+    crate::performance::track_c_watcher_lifecycle::capture(kind, path)
 }
 
 impl LauncherApp {

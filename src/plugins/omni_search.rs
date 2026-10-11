@@ -367,10 +367,269 @@ impl OmniSearchPlugin {
 #[cfg(test)]
 mod tests {
     use super::{OmniSearchPlugin, OmniSearchSettings};
+    use crate::actions::Action;
     use crate::plugin::Plugin;
     use eframe::egui;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::sync::Arc;
+    use std::time::Duration;
+
+    fn track_c_reference_normalized_label(label: &str) -> String {
+        let mut normalized = String::new();
+        let mut pending_space = false;
+        for ch in label.chars() {
+            if ch.is_whitespace() {
+                pending_space |= !normalized.is_empty();
+                continue;
+            }
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.extend(ch.to_lowercase());
+        }
+        normalized
+    }
+
+    fn track_c_reference_deduplicate(actions: impl IntoIterator<Item = Action>) -> Vec<Action> {
+        let mut seen = HashSet::new();
+        let mut result = Vec::new();
+        for action in actions {
+            let key = format!(
+                "{}\x1f{}",
+                action.action,
+                track_c_reference_normalized_label(&action.label)
+            );
+            if seen.insert(key) {
+                result.push(action);
+            }
+        }
+        result
+    }
+
+    fn track_c_reference_byte_subsequence(needle: &[u8], haystack: &[u8]) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
+        let mut needle_index = 0;
+        for byte in haystack {
+            if *byte == needle[needle_index] {
+                needle_index += 1;
+                if needle_index == needle.len() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Independent linear model of the constructor's first-writer key table,
+    /// sorted FST stream order, and final action de-duplication.
+    fn track_c_reference_fst_search(actions: &[Action], query: &str) -> Vec<Action> {
+        let mut seen_keys = HashSet::new();
+        let mut keys = Vec::new();
+        for (index, action) in actions.iter().enumerate() {
+            let label = action.label.to_lowercase();
+            if seen_keys.insert(label.clone()) {
+                keys.push((label.clone(), index));
+            }
+            if !action.desc.is_empty() {
+                let description = action.desc.to_lowercase();
+                if description != label && seen_keys.insert(description.clone()) {
+                    keys.push((description, index));
+                }
+            }
+        }
+        keys.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut seen_indices = HashSet::new();
+        let mut matching = Vec::new();
+        for (key, index) in keys {
+            if track_c_reference_byte_subsequence(query.as_bytes(), key.as_bytes())
+                && seen_indices.insert(index)
+            {
+                matching.push(actions[index].clone());
+            }
+        }
+        track_c_reference_deduplicate(matching)
+    }
+
+    /// The intentional no-FST fallback is substring matching in original
+    /// catalog order, which differs from the sorted FST stream semantics.
+    fn track_c_reference_linear_fallback(actions: &[Action], query: &str) -> Vec<Action> {
+        let query = query.to_lowercase();
+        track_c_reference_deduplicate(actions.iter().filter_map(|action| {
+            (action.label.to_lowercase().contains(&query)
+                || action.desc.to_lowercase().contains(&query))
+            .then(|| action.clone())
+        }))
+    }
+
+    fn track_c_omni_actions() -> Vec<Action> {
+        vec![
+            Action {
+                label: "Track C custom entry".into(),
+                desc: "synthetic startup prefix".into(),
+                action: "custom:track-c-startup".into(),
+                args: None,
+            },
+            Action {
+                label: "Primary Alpha".into(),
+                desc: "Alpha executable".into(),
+                action: "app:primary-alpha".into(),
+                args: None,
+            },
+            Action {
+                label: "Beta primary".into(),
+                desc: "Beta application".into(),
+                action: "app:beta-primary".into(),
+                args: Some(String::new()),
+            },
+            Action {
+                label: "Application exact".into(),
+                desc: "Primary-only-description".into(),
+                action: "app:description-match".into(),
+                args: Some("--source=description".into()),
+            },
+            // Duplicate label and description keys are first-writer-wins in
+            // the index; all-app listing still retains this distinct Action.
+            Action {
+                label: "Primary Alpha".into(),
+                desc: "Alpha executable".into(),
+                action: "app:duplicate-keys".into(),
+                args: Some("duplicate".into()),
+            },
+            // Final output de-duplication independently drops this exact
+            // repeated action while preserving the Some-empty args row above.
+            Action {
+                label: " primary   alpha ".into(),
+                desc: "another source row".into(),
+                action: "app:primary-alpha".into(),
+                args: None,
+            },
+            Action {
+                label: "entry-00000.bin".into(),
+                desc: "C:\\owned\\entry-00000.bin".into(),
+                action: "C:\\owned\\entry-00000.bin".into(),
+                args: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn track_c3a_search_contract_matches_independent_fst_and_linear_references() {
+        use crate::performance::track_c_watcher_lifecycle::{
+            HandlerKind, HandlerOwnedWorkspace, HandlerReleaseProbe,
+        };
+        use std::fs;
+
+        let mut workspace = HandlerOwnedWorkspace::new();
+        let root = workspace.root().to_path_buf();
+        for (name, bytes) in [
+            (crate::plugins::folders::FOLDERS_FILE, b"[]".as_slice()),
+            (crate::plugins::bookmarks::BOOKMARKS_FILE, b"[]".as_slice()),
+            (crate::plugins::todo::TODO_FILE, b"[]".as_slice()),
+        ] {
+            fs::write(root.join(name), bytes).expect("create an empty owned provider store");
+        }
+        fs::create_dir_all(workspace.root().join("notes"))
+            .expect("create the owned empty notes store");
+        fs::create_dir_all(workspace.root().join("templates"))
+            .expect("create the owned empty templates store");
+
+        workspace.callbacks_may_use_paths();
+        let probe = HandlerReleaseProbe::begin(workspace.root());
+        let actions = track_c_omni_actions();
+        let mut plugin = OmniSearchPlugin::new(Arc::new(actions.clone()));
+        plugin.apply_settings(&json!({
+            "include_apps": true,
+            "include_notes": false,
+            "include_todos": false,
+            "include_calendar": false,
+            "include_folders": false,
+            "include_bookmarks": false
+        }));
+
+        let all_apps = track_c_reference_deduplicate(actions.clone());
+        assert_eq!(plugin.search("o list "), all_apps);
+        let first_indexed = &actions[6];
+        assert!(
+            plugin
+                .search(&format!("o {}", first_indexed.label))
+                .iter()
+                .any(|action| action == first_indexed)
+        );
+        assert!(
+            plugin
+                .search("o custom entry")
+                .iter()
+                .any(|action| action == &actions[0])
+        );
+
+        let fst_primary = track_c_reference_fst_search(&actions, "primary");
+        assert_eq!(
+            plugin.search("o primary"),
+            fst_primary,
+            "the FST result follows its independently sorted key stream"
+        );
+        assert_eq!(
+            fst_primary,
+            vec![actions[5].clone(), actions[2].clone(), actions[3].clone()]
+        );
+        let fst_subsequence = track_c_reference_fst_search(&actions, "prmry");
+        assert_eq!(plugin.search("o prmry"), fst_subsequence);
+        assert!(
+            !fst_subsequence.is_empty(),
+            "FST matching is subsequence-based"
+        );
+
+        plugin.index = None;
+        let linear_primary = track_c_reference_linear_fallback(&actions, "primary");
+        assert_eq!(plugin.search("o primary"), linear_primary);
+        assert_eq!(
+            linear_primary,
+            vec![
+                actions[1].clone(),
+                actions[2].clone(),
+                actions[3].clone(),
+                actions[4].clone()
+            ]
+        );
+        let linear_subsequence = track_c_reference_linear_fallback(&actions, "prmry");
+        assert_eq!(plugin.search("o prmry"), linear_subsequence);
+        assert!(
+            linear_subsequence.is_empty(),
+            "fallback matching is substring-based"
+        );
+        assert_eq!(plugin.search("o list "), all_apps);
+
+        drop(plugin);
+        let lifecycle = probe.wait(Duration::from_secs(5));
+        workspace.callbacks_released(&lifecycle);
+        let mut expected = [
+            HandlerKind::JsonFolders,
+            HandlerKind::JsonBookmarks,
+            HandlerKind::JsonTodos,
+            HandlerKind::NotePlugin,
+        ]
+        .map(|kind| kind.token().to_owned())
+        .to_vec();
+        expected.sort();
+        let sorted_tokens = |kinds: &[HandlerKind]| {
+            let mut tokens = kinds
+                .iter()
+                .map(|kind| kind.token().to_owned())
+                .collect::<Vec<_>>();
+            tokens.sort();
+            tokens
+        };
+        assert!(lifecycle.complete);
+        assert!(!lifecycle.overflowed);
+        assert_eq!(sorted_tokens(&lifecycle.attempts), expected);
+        assert_eq!(sorted_tokens(&lifecycle.created), expected);
+        assert_eq!(sorted_tokens(&lifecycle.released), expected);
+    }
 
     #[test]
     fn settings_ui_reseeds_defaults_for_malformed_json() {

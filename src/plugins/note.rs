@@ -2051,6 +2051,13 @@ impl NotePlugin {
         let watch_target = dir.clone();
         let coordinator = NoteReloadCoordinator::start(refresh_cache).ok();
         let requester = coordinator.as_ref().map(NoteReloadCoordinator::requester);
+        #[cfg(test)]
+        let release = crate::performance::track_c_watcher_lifecycle::capture(
+            crate::performance::track_c_watcher_lifecycle::HandlerKind::NotePlugin,
+            &watch_target,
+        );
+        #[cfg(test)]
+        let release_registration = release.as_ref().map(|sentinel| sentinel.registration());
         let watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| match res {
                 Ok(event)
@@ -2063,10 +2070,19 @@ impl NotePlugin {
                         true,
                     ) && let Some(requester) = &requester =>
                 {
+                    #[cfg(test)]
+                    let _keep_handler_release = &release;
                     NoteReloadCoordinator::request(requester);
                 }
-                Ok(_) => {}
-                Err(error) => tracing::error!(%error, "notes watcher notification failed"),
+                Ok(_) => {
+                    #[cfg(test)]
+                    let _keep_handler_release = &release;
+                }
+                Err(error) => {
+                    #[cfg(test)]
+                    let _keep_handler_release = &release;
+                    tracing::error!(%error, "notes watcher notification failed");
+                }
             },
             Config::default(),
         )
@@ -2082,6 +2098,12 @@ impl NotePlugin {
                 .is_ok()
                 .then_some(watcher)
         });
+        #[cfg(test)]
+        if watcher.is_some()
+            && let Some(registration) = release_registration
+        {
+            registration.registered();
+        }
         let watcher = match (watcher, coordinator) {
             (Some(watcher), Some(coordinator)) => Some(NoteWatcher {
                 watcher: Some(watcher),

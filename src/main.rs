@@ -883,6 +883,94 @@ struct StartupIndexingTransfer {
     generation: u64,
 }
 
+#[cfg(test)]
+mod track_c_startup_phase_observer {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    const PHASE_COUNT: usize = 7;
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Phase {
+        CoordinatorConstruct = 0,
+        Submit = 1,
+        Wait = 2,
+        TakeResult = 3,
+        ValidateTransfer = 4,
+        CloneIndexedActions = 5,
+        WrapCatalogArc = 6,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Rc<RefCell<[u64; PHASE_COUNT]>>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Observation {
+        values: Rc<RefCell<[u64; PHASE_COUNT]>>,
+    }
+
+    impl Observation {
+        pub(super) fn begin() -> Self {
+            let values = Rc::new(RefCell::new([0; PHASE_COUNT]));
+            ACTIVE.with(|active| {
+                assert!(
+                    active.borrow().is_none(),
+                    "startup phase observers do not nest"
+                );
+                *active.borrow_mut() = Some(Rc::clone(&values));
+            });
+            Self { values }
+        }
+
+        pub(super) fn finish(self) -> [u64; PHASE_COUNT] {
+            ACTIVE.with(|active| {
+                let current = active.borrow_mut().take();
+                assert!(current.is_some_and(|current| Rc::ptr_eq(&current, &self.values)));
+            });
+            *self.values.borrow()
+        }
+    }
+
+    impl Drop for Observation {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| {
+                let mut active = active.borrow_mut();
+                if active
+                    .as_ref()
+                    .is_some_and(|current| Rc::ptr_eq(current, &self.values))
+                {
+                    *active = None;
+                }
+            });
+        }
+    }
+
+    pub(super) struct PhaseTimer {
+        phase: Phase,
+        started: Instant,
+        values: Rc<RefCell<[u64; PHASE_COUNT]>>,
+    }
+
+    pub(super) fn start(phase: Phase) -> Option<PhaseTimer> {
+        ACTIVE.with(|active| {
+            active.borrow().as_ref().map(|values| PhaseTimer {
+                phase,
+                started: Instant::now(),
+                values: Rc::clone(values),
+            })
+        })
+    }
+
+    impl Drop for PhaseTimer {
+        fn drop(&mut self) {
+            let elapsed = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            let slot = &mut self.values.borrow_mut()[self.phase as usize];
+            *slot = slot.saturating_add(elapsed);
+        }
+    }
+}
+
 /// Complete the initial index on the main thread before plugin registration.
 /// The returned coordinator has acknowledged its startup result and is ready
 /// to own later configuration changes after transfer to the GUI app.
@@ -893,22 +981,44 @@ fn startup_indexed_actions(
         return Ok((Arc::new(Vec::new()), None));
     }
 
+    #[cfg(test)]
+    let phase = track_c_startup_phase_observer::start(
+        track_c_startup_phase_observer::Phase::CoordinatorConstruct,
+    );
     let coordinator = multi_launcher::indexer::coordinator::IndexCoordinator::new()
         .context("failed to create startup index coordinator")?;
+    #[cfg(test)]
+    drop(phase);
+
+    #[cfg(test)]
+    let phase =
+        track_c_startup_phase_observer::start(track_c_startup_phase_observer::Phase::Submit);
     let generation = coordinator
         .submit(config.clone())
         .context("failed to submit startup index request")?;
+    #[cfg(test)]
+    drop(phase);
+
+    #[cfg(test)]
+    let phase = track_c_startup_phase_observer::start(track_c_startup_phase_observer::Phase::Wait);
     let waited = coordinator
         .wait_for_completion(generation)
         .context("startup index request did not complete")?;
+    #[cfg(test)]
+    drop(phase);
     anyhow::ensure!(
         waited.generation() == generation && waited.config() == &config,
         "startup index completion did not match its submitted identity"
     );
 
+    #[cfg(test)]
+    let phase =
+        track_c_startup_phase_observer::start(track_c_startup_phase_observer::Phase::TakeResult);
     let completion = coordinator
         .take_result()
         .context("startup index completion was not retained for acknowledgement")?;
+    #[cfg(test)]
+    drop(phase);
     anyhow::ensure!(
         completion.generation() == generation && completion.config() == &config,
         "startup index result changed before acknowledgement"
@@ -918,9 +1028,15 @@ fn startup_indexed_actions(
         .as_ref()
         .map(Arc::clone)
         .map_err(|error| anyhow::anyhow!("startup index scan failed: {error}"))?;
+    #[cfg(test)]
+    let phase = track_c_startup_phase_observer::start(
+        track_c_startup_phase_observer::Phase::ValidateTransfer,
+    );
     coordinator
         .validate_acknowledged_result(generation, &config)
         .context("startup index result failed transfer validation")?;
+    #[cfg(test)]
+    drop(phase);
 
     Ok((
         indexed_actions,
@@ -950,9 +1066,21 @@ fn startup_action_catalog(
             return Err(error);
         }
     };
+    #[cfg(test)]
+    let phase = track_c_startup_phase_observer::start(
+        track_c_startup_phase_observer::Phase::CloneIndexedActions,
+    );
     custom_actions.extend(indexed_actions.iter().cloned());
+    #[cfg(test)]
+    drop(phase);
     let work_units = custom_actions.len();
+    #[cfg(test)]
+    let phase = track_c_startup_phase_observer::start(
+        track_c_startup_phase_observer::Phase::WrapCatalogArc,
+    );
     let catalog = Arc::new(custom_actions);
+    #[cfg(test)]
+    drop(phase);
     timer.set_work_units(work_units);
     timer.finish(multi_launcher::performance::track_c::Outcome::Completed);
     Ok((catalog, custom_len, transfer))
@@ -3217,7 +3345,7 @@ fn hold_acceptance_prepare_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use multi_launcher::{plugin::Plugin, plugins::omni_search::OmniSearchPlugin};
+    use multi_launcher::performance::{Metric, snapshot_metrics};
     use tempfile::tempdir;
 
     const TRACK_C_STARTUP_WARMUPS: usize = 5;
@@ -3459,6 +3587,7 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
     struct TrackCStartupSample {
         elapsed_nanos: u64,
         complete_output_state_id: u64,
@@ -3466,6 +3595,22 @@ mod tests {
         generation: u64,
         work_units: u64,
         work_counters: [u64; 3],
+    }
+
+    #[derive(Clone, Copy)]
+    struct TrackCStartupIndexScan {
+        calls: u64,
+        work_units: u64,
+        elapsed_ns_total: u64,
+        completed: u64,
+        errors: u64,
+        abandoned: u64,
+    }
+
+    struct TrackCStartupAttributedSample {
+        sample: TrackCStartupSample,
+        phase_ns: [u64; 7],
+        index_scan: TrackCStartupIndexScan,
     }
 
     fn run_track_c_startup_action_catalog_owner(
@@ -3554,6 +3699,124 @@ mod tests {
         // leave scope; its worker has completed and no result remains queued.
         drop(transfer);
         sample
+    }
+
+    fn run_track_c_startup_action_catalog_attributed_owner(
+        fixture: &TrackCStartupFixture,
+    ) -> TrackCStartupAttributedSample {
+        let before = snapshot_metrics()[Metric::IndexScan as usize];
+        let observation = track_c_startup_phase_observer::Observation::begin();
+        let sample = run_track_c_startup_action_catalog_owner(fixture);
+        let phase_ns = observation.finish();
+        let after = snapshot_metrics()[Metric::IndexScan as usize];
+        let index_scan = TrackCStartupIndexScan {
+            calls: after.calls.saturating_sub(before.calls),
+            work_units: after.work_units.saturating_sub(before.work_units),
+            elapsed_ns_total: after
+                .elapsed_nanos_total
+                .saturating_sub(before.elapsed_nanos_total),
+            completed: after.completed.saturating_sub(before.completed),
+            errors: after.errors.saturating_sub(before.errors),
+            abandoned: after.abandoned.saturating_sub(before.abandoned),
+        };
+        TrackCStartupAttributedSample {
+            sample,
+            phase_ns,
+            index_scan,
+        }
+    }
+
+    fn emit_track_c_startup_attribution(
+        mode: TrackCStartupMode,
+        fixture: &TrackCStartupFixture,
+        samples: &[TrackCStartupAttributedSample],
+    ) {
+        assert_eq!(samples.len(), TRACK_C_STARTUP_SAMPLES);
+        let phase_names = [
+            "coordinator_construct",
+            "submit",
+            "wait",
+            "take_result",
+            "validate_transfer",
+            "clone_indexed_actions",
+            "wrap_catalog_arc",
+        ];
+        let elapsed_ns = samples
+            .iter()
+            .map(|sample| sample.sample.elapsed_nanos)
+            .collect::<Vec<_>>();
+        let phase_ns = samples
+            .iter()
+            .map(|sample| sample.phase_ns)
+            .collect::<Vec<_>>();
+        for sample in samples {
+            let scan = sample.index_scan;
+            assert!(scan.calls > 0);
+            assert_eq!(scan.work_units, fixture.indexed_len() as u64);
+            assert_eq!(scan.completed, 1);
+            assert_eq!(scan.errors, 0);
+            assert_eq!(scan.abandoned, 0);
+        }
+        let index_scan_calls = samples
+            .iter()
+            .map(|sample| sample.index_scan.calls)
+            .collect::<Vec<_>>();
+        let index_scan_work_units = samples
+            .iter()
+            .map(|sample| sample.index_scan.work_units)
+            .collect::<Vec<_>>();
+        let index_scan_elapsed_ns_total = samples
+            .iter()
+            .map(|sample| sample.index_scan.elapsed_ns_total)
+            .collect::<Vec<_>>();
+        let index_scan_completed = samples
+            .iter()
+            .map(|sample| sample.index_scan.completed)
+            .collect::<Vec<_>>();
+        let index_scan_errors = samples
+            .iter()
+            .map(|sample| sample.index_scan.errors)
+            .collect::<Vec<_>>();
+        let index_scan_abandoned = samples
+            .iter()
+            .map(|sample| sample.index_scan.abandoned)
+            .collect::<Vec<_>>();
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        let mode = match mode {
+            TrackCStartupMode::Small => "Small",
+            TrackCStartupMode::Full => "Full",
+        };
+        let record = serde_json::json!({
+            "schema": 1,
+            "stage": "startup_action_catalog_phase_attribution",
+            "owner": "startup_action_catalog",
+            "fixture": "owned_synthetic_index_tree",
+            "source": source,
+            "profile": profile,
+            "mode": mode,
+            "telemetry_enabled": multi_launcher::performance::enabled(),
+            "fixture_signature": format!("{:016x}", fixture.fixture_signature),
+            "count": fixture.indexed_len(),
+            "warmups": TRACK_C_STARTUP_WARMUPS,
+            "samples": TRACK_C_STARTUP_SAMPLES,
+            "exclusions": 0,
+            "phase_names": phase_names,
+            "elapsed_ns": elapsed_ns,
+            "phase_ns": phase_ns,
+            "index_scan_calls": index_scan_calls,
+            "index_scan_work_units": index_scan_work_units,
+            "index_scan_elapsed_ns_total": index_scan_elapsed_ns_total,
+            "index_scan_completed": index_scan_completed,
+            "index_scan_errors": index_scan_errors,
+            "index_scan_abandoned": index_scan_abandoned,
+            "index_scan_scope": "sum_of_index_batch_iter_next_step",
+            "index_scan_timing_relation": "overlaps_wait",
+            "latency_claim": "not_process_startup",
+        });
+        eprintln!("TRACK_C3A_STARTUP_RESULT {record}");
     }
 
     fn track_c_startup_nearest_rank(samples: &[u64], percentile: usize) -> u64 {
@@ -3686,26 +3949,6 @@ mod tests {
             transfer.coordinator.take_result().is_none(),
             "startup result is acknowledged exactly once before transfer"
         );
-        let mut omni = OmniSearchPlugin::new(Arc::clone(&catalog));
-        omni.apply_settings(&serde_json::json!({
-            "include_apps": true,
-            "include_notes": false,
-            "include_todos": false,
-            "include_calendar": false,
-            "include_folders": false,
-            "include_bookmarks": false
-        }));
-        let indexed_sample = &indexed[0];
-        assert!(
-            omni.search(&format!("o {}", indexed_sample.label))
-                .iter()
-                .any(|action| action == indexed_sample)
-        );
-        assert!(
-            omni.search("o custom entry")
-                .iter()
-                .any(|action| action == &catalog[0])
-        );
     }
 
     #[test]
@@ -3775,13 +4018,21 @@ mod tests {
         for indexed_file_count in mode.indexed_file_sizes() {
             let fixture = TrackCStartupFixture::new(indexed_file_count);
             for _ in 0..TRACK_C_STARTUP_WARMUPS {
-                let _ = run_track_c_startup_action_catalog_owner(&fixture);
+                let _ = run_track_c_startup_action_catalog_attributed_owner(&fixture);
             }
 
             let samples = (0..TRACK_C_STARTUP_SAMPLES)
-                .map(|_| run_track_c_startup_action_catalog_owner(&fixture))
+                .map(|_| run_track_c_startup_action_catalog_attributed_owner(&fixture))
                 .collect::<Vec<_>>();
-            emit_track_c_startup_samples(mode, &fixture, &samples);
+            emit_track_c_startup_samples(
+                mode,
+                &fixture,
+                &samples
+                    .iter()
+                    .map(|sample| sample.sample)
+                    .collect::<Vec<_>>(),
+            );
+            emit_track_c_startup_attribution(mode, &fixture, &samples);
         }
     }
 

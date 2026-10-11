@@ -16,6 +16,9 @@ pub mod track_c;
 pub(crate) mod workloads;
 
 #[cfg(test)]
+pub(crate) mod track_c_watcher_lifecycle;
+
+#[cfg(test)]
 pub(crate) mod track_c_workloads;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

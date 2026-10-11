@@ -480,3 +480,48 @@ Planner/writer preparing read-only; source authorization waits closure. Existing
 binary Omni consumer test needs new safety qualification before execution because
 its temp index root alone does not isolate nested constructor CWD/cache/watchers.
 No public production test bridge. Local only; incident UNKNOWN unchanged.
+
+
+C2-H closure commit is d23e57384da453b3e3281e8c09d19630b1d39347 (clean after commit).
+C3-A now IN_PROGRESS,19/29closed, public plan track_c_startup_characterization_plan.md.
+Sole writer c0_docs authorized one cfgtest characterization milestone; parent owns
+collector/docs/Cargo/Git. Callback-release fixture first, four actual notify owners,
+exact10 typed owned-root handlers. One fresh actual root frame/no retries; real Omni
+constructor included, ready-catalog component separate from binary catalog timing.
+Unsafe binary Omni consumer tail moves to owned library contract; catalog/ack checks
+remain. Timeout must keep owned workspace/env in failing child before callbacks can
+reach external paths. Source/schema not ready; no C3 Cargo/tests/measurements run.
+Parent original startup subset comparator plus15syntheticcontrols PASS, method review
+pending. Original G0 and TrackA/B unchanged; no native process launch or recycle probe.
+
+C3-A interim: original subset comparator independently CLEAR17syntheticcontrols;
+startup supplement parser/validate_startup independently CLEAR15syntheticcontrols.
+No measurement or Cargo. Corrected callback helper/four captures independently CLEAR
+only: common canonical root/absent-target normalization, await every attempt including
+failed registration, fixed32attempt sync_channel/nonblocking release/overflow failclosed.
+Caller-owned workspace/env preservation and exact10/four inventory still pending source.
+Writer continues same milestone render/Omni fixtures, binary consumer migration and
+emitters; final component schema/collector not complete. New cfgtest helper is
+src/performance/track_c_watcher_lifecycle.rs. Real app constructor empty-query search
+stays inside construction clock; enable/reset observer after ctor, then one pending
+`o list ` accepted/painted CPU frame. No constructor skip seam. IndexScan next_step
+calls2/3/21 for N16/1000/10000 at batch512, workN, completed1, errors/abandoned0;
+summed traversal-step time overlaps wait. Original metrics preserved.
+
+C3-A pre-execution update: source milestone implemented but still uncommitted and
+under independent source/safety review. Collector method findings resolved; original,
+startup supplement and component synthetic controls17/21/28 PASS, none are measurements.
+Component fixture/normalized catalog bindings independently derived before execution
+and match frozen startup G0 identities for16/1000/10000. Exact ordinary runner is
+prepared for9 library and3 binary tests; none executed yet. Reviewer caught the new
+viewport hook Action.action/label mismatch and actual-context borrow, both corrected
+by sole writer. Callback teardown/error/unwind and final source review remain gates.
+19/29 closed; no native or Cargo process started for C3-A.
+
+C3-A source readiness: independent source/lifecycle/protocol CLEAR,12 distinct
+ordinary tests PASS (13 executions including one corrected fixture assertion fail).
+Initial compiler ownership error failed before any tests; fixed/reviewed. Exact
+empty-provider Omni command fallback is asserted separately from zero catalog
+overlap; real first-frame full Actions/eager viewport proof PASS. Binary3 tests
+PASS and normal production library compiled. Small/Full measurements still pending,
+source/protocol fixture commit next;19/29closed.

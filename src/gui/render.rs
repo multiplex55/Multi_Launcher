@@ -19986,4 +19986,886 @@ mod tests {
         assert!(app.close_front_dialog());
         assert!(!app.clipboard_dialog.open);
     }
+
+    const TRACK_C3A_WARMUPS: usize = 5;
+    const TRACK_C3A_SAMPLES: usize = 20;
+    const TRACK_C3A_QUERY: &str = "o list ";
+    const TRACK_C3A_HANDLER_TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct TrackC3ASignature(u64);
+
+    impl TrackC3ASignature {
+        fn new(domain: &str) -> Self {
+            let mut signature = Self(0xcbf2_9ce4_8422_2325);
+            signature.string(domain);
+            signature
+        }
+
+        fn raw(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        fn bytes(&mut self, bytes: &[u8]) {
+            self.raw(&(bytes.len() as u64).to_le_bytes());
+            self.raw(bytes);
+        }
+
+        fn string(&mut self, value: &str) {
+            self.bytes(value.as_bytes());
+        }
+
+        fn number(&mut self, value: u64) {
+            self.bytes(&value.to_le_bytes());
+        }
+
+        fn finish(self) -> u64 {
+            self.0
+        }
+    }
+
+    struct TrackC3AFixture {
+        workspace: crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace,
+        index_root: std::path::PathBuf,
+        root_text: String,
+        custom_actions: Vec<Action>,
+        indexed_actions: Vec<Action>,
+        config: crate::indexer::coordinator::IndexConfig,
+        fixture_signature: u64,
+        indexed_count: usize,
+    }
+
+    impl TrackC3AFixture {
+        fn new(indexed_count: usize) -> Self {
+            use std::fs;
+
+            let workspace =
+                crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace::new();
+            let root = workspace.root().to_path_buf();
+            let index_root = root.join("startup-index-root");
+            fs::create_dir_all(&index_root).expect("create the owned flat index root");
+            let index_root = fs::canonicalize(index_root).expect("canonicalize the owned root");
+            let root_text = index_root.to_string_lossy().into_owned();
+            let custom_actions = track_c3a_custom_actions();
+            let config = crate::indexer::coordinator::IndexConfig::new(
+                vec![root_text.clone()],
+                Some(indexed_count),
+            );
+
+            let mut fixture_signature =
+                TrackC3ASignature::new("multi-launcher-track-c-startup-fixture-v1");
+            fixture_signature.number(indexed_count as u64);
+            fixture_signature.string("$TRACK_C_ROOT");
+            fixture_signature.number(1);
+            fixture_signature.number(1);
+            fixture_signature.number(indexed_count as u64);
+            fixture_signature.number(custom_actions.len() as u64);
+            for action in &custom_actions {
+                track_c3a_hash_action(&mut fixture_signature, action, None);
+            }
+
+            for index in 0..indexed_count {
+                let name = format!("entry-{index:05}.bin");
+                let content = format!("Track C startup fixture\nindex={index:05}\n");
+                fs::write(index_root.join(&name), content.as_bytes())
+                    .expect("write the deterministic index input outside the owner");
+                fixture_signature.string(&name);
+                fixture_signature.bytes(content.as_bytes());
+            }
+
+            // The callback-owning providers use the process CWD and note
+            // overrides, so all stores exist before their constructors run.
+            fs::write(root.join(crate::plugins::folders::FOLDERS_FILE), b"[]")
+                .expect("write empty folders store");
+            fs::write(root.join(crate::plugins::bookmarks::BOOKMARKS_FILE), b"[]")
+                .expect("write empty bookmarks store");
+            fs::write(root.join(crate::plugins::todo::TODO_FILE), b"[]")
+                .expect("write empty todo store");
+            fs::write(
+                root.join("dashboard.json"),
+                br#"{"version":1,"grid":{"rows":1,"cols":1},"slots":[]}"#,
+            )
+            .expect("write the valid empty dashboard store");
+            fs::write(root.join("settings.json"), b"{}")
+                .expect("write the isolated settings document");
+            assert!(!root.join("actions.json").exists());
+
+            let mut indexed_actions = Vec::with_capacity(indexed_count);
+            for entry in fs::read_dir(&index_root).expect("read the flat owned index root") {
+                let entry = entry.expect("read an owned index entry");
+                if !entry
+                    .file_type()
+                    .expect("inspect an owned index entry")
+                    .is_file()
+                {
+                    continue;
+                }
+                let path = fs::canonicalize(entry.path()).expect("canonicalize indexed action");
+                let label = path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .expect("fixture filenames are valid Unicode")
+                    .to_owned();
+                let display = path.display().to_string();
+                indexed_actions.push(Action {
+                    label,
+                    desc: display.clone(),
+                    action: display,
+                    args: None,
+                });
+            }
+            assert_eq!(indexed_actions.len(), indexed_count);
+
+            Self {
+                workspace,
+                index_root,
+                root_text,
+                custom_actions,
+                indexed_actions,
+                config,
+                fixture_signature: fixture_signature.finish(),
+                indexed_count,
+            }
+        }
+
+        fn catalog(&self) -> Vec<Action> {
+            let mut catalog = self.custom_actions.clone();
+            catalog.extend(self.indexed_actions.iter().cloned());
+            catalog
+        }
+    }
+
+    fn track_c3a_custom_actions() -> Vec<Action> {
+        vec![
+            Action {
+                label: "Track C custom entry".into(),
+                desc: "synthetic startup prefix".into(),
+                action: "custom:track-c-startup".into(),
+                args: None,
+            },
+            Action {
+                label: "Track C empty arguments".into(),
+                desc: "preserve Some empty arguments".into(),
+                action: "custom:track-c-empty-args".into(),
+                args: Some(String::new()),
+            },
+            Action {
+                label: "Track C Unicode λ".into(),
+                desc: "synthetic startup Unicode payload".into(),
+                action: "custom:track-c-unicode".into(),
+                args: Some("--origin=synthetic".into()),
+            },
+        ]
+    }
+
+    fn track_c3a_hash_action(
+        signature: &mut TrackC3ASignature,
+        action: &Action,
+        root_prefix: Option<&str>,
+    ) {
+        for field in [&action.label, &action.desc, &action.action] {
+            let normalized = root_prefix
+                .and_then(|root| field.strip_prefix(root).map(|suffix| (root, suffix)))
+                .filter(|(_, suffix)| {
+                    suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('\\')
+                })
+                .map(|(_, suffix)| format!("$TRACK_C_ROOT{suffix}"));
+            signature.string(normalized.as_deref().unwrap_or(field));
+        }
+        match action.args.as_deref() {
+            Some(args) => {
+                signature.number(1);
+                signature.string(args);
+            }
+            None => signature.number(0),
+        }
+    }
+
+    fn track_c3a_fixture_signature(fixture: &TrackC3AFixture) -> u64 {
+        fixture.fixture_signature
+    }
+
+    fn track_c3a_structural_catalog_id(
+        catalog: &[Action],
+        custom_len: usize,
+        root_text: &str,
+        indexed_count: usize,
+    ) -> u64 {
+        let mut signature = TrackC3ASignature::new("track-c-startup-structural-output-v1");
+        signature.number(custom_len as u64);
+        signature.number(catalog.len() as u64);
+        for action in catalog {
+            track_c3a_hash_action(&mut signature, action, Some(root_text));
+        }
+        signature.number(1);
+        signature.string("$TRACK_C_ROOT");
+        signature.number(1);
+        signature.number(indexed_count as u64);
+        signature.number(1); // acknowledged generation
+        signature.number(1); // acknowledged-result validation succeeded
+        signature.number(1); // the acknowledged result is no longer queued
+        signature.finish()
+    }
+
+    fn track_c3a_normalized_label(label: &str) -> String {
+        let mut normalized = String::new();
+        let mut pending_space = false;
+        for ch in label.chars() {
+            if ch.is_whitespace() {
+                if !normalized.is_empty() {
+                    pending_space = true;
+                }
+                continue;
+            }
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.extend(ch.to_lowercase());
+        }
+        normalized
+    }
+
+    fn track_c3a_dedup_actions(actions: Vec<Action>) -> Vec<Action> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for action in actions {
+            let key = format!(
+                "{}\x1f{}",
+                action.action,
+                track_c3a_normalized_label(&action.label)
+            );
+            if seen.insert(key) {
+                result.push(action);
+            }
+        }
+        result
+    }
+
+    fn track_c3a_expected_app_list(catalog: &[Action]) -> Vec<Action> {
+        track_c3a_dedup_actions(catalog.to_vec())
+    }
+
+    fn track_c3a_settings(fixture: &TrackC3AFixture) -> Settings {
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.dashboard.show_when_query_empty = false;
+        settings.dashboard.config_path = Some(
+            fixture
+                .workspace
+                .root()
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        settings.index_paths = Some(vec![fixture.root_text.clone()]);
+        settings.max_indexed_items = Some(fixture.indexed_count);
+        settings.usage_weight = 0.0;
+        settings.match_exact = true;
+        settings.query_autocomplete = false;
+        settings.plugin_dirs = Some(Vec::new());
+        settings.enabled_plugins = Some(std::collections::HashSet::from(["omni_search".into()]));
+        settings.enabled_capabilities = Some(HashMap::new());
+        settings
+    }
+
+    fn track_c3a_prepare_acknowledged_catalog(
+        fixture: &TrackC3AFixture,
+    ) -> (
+        crate::indexer::coordinator::IndexCoordinator,
+        crate::indexer::coordinator::IndexConfig,
+        u64,
+        std::sync::Arc<Vec<Action>>,
+    ) {
+        use crate::indexer::coordinator::IndexCoordinator;
+
+        let coordinator = IndexCoordinator::new().expect("construct the real index coordinator");
+        let generation = coordinator
+            .submit(fixture.config.clone())
+            .expect("submit the fixture index configuration");
+        let waited = coordinator
+            .wait_for_completion(generation)
+            .expect("wait for the submitted generation");
+        assert_eq!(waited.generation(), generation);
+        assert_eq!(waited.config(), &fixture.config);
+        let indexed = waited
+            .outcome()
+            .as_ref()
+            .expect("the owned flat index scan succeeds");
+        assert_eq!(indexed.as_slice(), fixture.indexed_actions.as_slice());
+        let taken = coordinator
+            .take_result()
+            .expect("consume and acknowledge the completed scan exactly once");
+        assert_eq!(taken.generation(), generation);
+        assert_eq!(taken.config(), &fixture.config);
+        assert!(std::sync::Arc::ptr_eq(&waited, &taken));
+        coordinator
+            .validate_acknowledged_result(generation, &fixture.config)
+            .expect("validate the acknowledged exact generation/config");
+        assert!(coordinator.take_result().is_none());
+
+        let mut catalog = fixture.custom_actions.clone();
+        catalog.extend(indexed.as_ref().iter().cloned());
+        assert_eq!(catalog, fixture.catalog());
+        (
+            coordinator,
+            fixture.config.clone(),
+            generation,
+            std::sync::Arc::new(catalog),
+        )
+    }
+
+    struct TrackC3AComponentSample {
+        elapsed_ns: u64,
+        phase_ns: [u64; 7],
+        catalog_receipt: serde_json::Value,
+        query_receipt: serde_json::Value,
+        action_count: u64,
+        custom_count: u64,
+        action_payload_utf8_bytes: u64,
+        action_output_id: u64,
+        structural_catalog_id: u64,
+        full_state_id: u64,
+        geometry_id: u64,
+        viewport_id: u64,
+        result_generation_before_request: u64,
+        result_generation_after_frame: u64,
+        provider_revision_after_frame: u64,
+        catalog_versions_after_frame: [u64; 3],
+        handler_lifecycle: serde_json::Value,
+    }
+
+    fn track_c3a_component_owner(fixture: &mut TrackC3AFixture) -> TrackC3AComponentSample {
+        use crate::gui::track_c_query_observer::{AcceptanceKind, Cause, Origin, Terminal};
+        use crate::performance::track_c_watcher_lifecycle::{HandlerKind, HandlerReleaseProbe};
+        use crate::plugins::omni_search::{OmniSearchPlugin, OmniSearchSettings};
+        use std::sync::atomic::AtomicBool;
+
+        let (coordinator, config, generation, catalog) =
+            track_c3a_prepare_acknowledged_catalog(fixture);
+        let custom_len = fixture.custom_actions.len();
+        let expected = track_c3a_expected_app_list(&catalog);
+        assert_eq!(custom_len, 3);
+        assert_eq!(expected.len(), catalog.len());
+        let settings = track_c3a_settings(fixture);
+        assert_eq!(settings.usage_weight, 0.0);
+        assert!(settings.match_exact);
+        assert!(!settings.query_autocomplete);
+        assert!(
+            crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+                .expect("read the owned empty folder-alias input")
+                .is_empty()
+        );
+        assert!(
+            crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)
+                .expect("read the owned empty bookmark-alias input")
+                .is_empty()
+        );
+        let actions_path = fixture
+            .workspace
+            .root()
+            .join("actions.json")
+            .to_string_lossy()
+            .into_owned();
+        let settings_path = fixture
+            .workspace
+            .root()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let enabled_plugins = settings.enabled_plugins.clone();
+        let enabled_capabilities = settings.enabled_capabilities.clone();
+        let index_paths = settings.index_paths.clone();
+        let structural_catalog_id = track_c3a_structural_catalog_id(
+            &catalog,
+            custom_len,
+            &fixture.root_text,
+            fixture.indexed_count,
+        );
+        let expected_handler_tokens = HandlerKind::EXPECTED
+            .iter()
+            .map(|kind| kind.token().to_owned())
+            .collect::<Vec<_>>();
+        let mut expected_handler_tokens = expected_handler_tokens;
+        expected_handler_tokens.sort();
+
+        fixture.workspace.callbacks_may_use_paths();
+        let release_probe = HandlerReleaseProbe::begin(fixture.workspace.root());
+        let started = Instant::now();
+        let mut phase_ns = [0_u64; 7];
+
+        let phase_started = Instant::now();
+        let mut omni = OmniSearchPlugin::new(std::sync::Arc::clone(&catalog));
+        phase_ns[0] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let apps_only = OmniSearchSettings {
+            include_apps: true,
+            include_notes: false,
+            include_todos: false,
+            include_calendar: false,
+            include_folders: false,
+            include_bookmarks: false,
+        };
+        omni.apply_settings(&serde_json::to_value(apps_only).expect("serialize Omni settings"));
+        phase_ns[1] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let mut plugins = PluginManager::new_inert_for_test();
+        plugins.register(Box::new(omni));
+        phase_ns[2] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let ctx = egui::Context::default();
+        let visible_flag = Arc::new(AtomicBool::new(true));
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::clone(&catalog),
+            custom_len,
+            plugins,
+            actions_path,
+            settings_path,
+            settings,
+            Some(Vec::new()),
+            index_paths,
+            enabled_plugins,
+            enabled_capabilities,
+            Arc::clone(&visible_flag),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        // Keep the unrelated dashboard All refresh dormant before this one
+        // actual first root frame, without altering app construction.
+        app.dashboard_initial_refresh_queued = true;
+        app.track_c_query_observer.enable_for_test();
+        app.install_startup_indexing(coordinator, config, generation)
+            .expect("install the already acknowledged catalog without resubmitting");
+        let result_generation_before_request = app.root_list_geometry.result_generation_for_test();
+        phase_ns[3] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        app.publish_pending_query(TRACK_C3A_QUERY.to_owned());
+        phase_ns[4] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let output = run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new());
+        drop(output);
+        phase_ns[5] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let accounted = phase_ns[..6].iter().copied().sum::<u64>();
+        assert!(
+            accounted <= elapsed_ns,
+            "disjoint component phases fit the owner"
+        );
+        phase_ns[6] = elapsed_ns - accounted;
+
+        // Exercise exact command fallback after the measured owner. The `o`
+        // prefix does not activate the local `app` catalog-search route.
+        let provider_revision = app.plugins.search_generation();
+        let local_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let local_only = app.search_read_only_outcome_with_plugin_snapshot(
+            TRACK_C3A_QUERY,
+            crate::plugin::PluginSearchSnapshotResult {
+                actions: Vec::new(),
+                pending: false,
+                start_revision: provider_revision,
+                provider_revision,
+                catalog_versions_at_start: local_catalog_versions,
+                catalog_versions: local_catalog_versions,
+            },
+        );
+        assert!(app.match_exact);
+        assert!(!app.query_autocomplete);
+        assert_eq!(app.usage.len(), 0);
+        assert_eq!(
+            local_only.actions,
+            vec![Action {
+                label: "o list".into(),
+                desc: "Omni".into(),
+                action: "query:o list".into(),
+                args: None,
+            }],
+            "without a provider, exact `o list` yields only its command-cache suggestion"
+        );
+        let local_catalog_match_count = local_only
+            .actions
+            .iter()
+            .filter(|local_result| {
+                app.actions
+                    .iter()
+                    .any(|catalog_action| catalog_action.action == local_result.action)
+            })
+            .count();
+        assert_eq!(
+            local_catalog_match_count, 0,
+            "the exact `o list` local path has no catalog hits"
+        );
+
+        assert_eq!(app.query, TRACK_C3A_QUERY);
+        assert_eq!(app.last_search_query, TRACK_C3A_QUERY);
+        assert_eq!(app.actions.as_ref(), catalog.as_ref());
+        assert_eq!(app.results, expected);
+        assert_eq!(app.custom_len, custom_len);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(
+            app.last_search_provider_revision,
+            app.plugins.search_generation()
+        );
+        assert_eq!(
+            app.last_plugin_search_generation,
+            app.plugins.search_generation()
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+        assert_eq!(app.plugins.search_generation(), 0);
+        assert!(!app.radial_provider_search_capacity.is_occupied());
+        assert!(app.last_note_search_change.is_none());
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            result_generation_before_request + 1
+        );
+
+        let observation = app.track_c_query_observer.snapshot();
+        assert_eq!(observation.frame_count, 1);
+        assert_eq!(observation.intent_count, 1);
+        assert_eq!(observation.completed_count, 1);
+        assert_eq!(observation.superseded_count, 0);
+        assert_eq!(observation.cancelled_count, 0);
+        assert_eq!(observation.receipt_count, 1);
+        let query_receipt = observation.receipts[0].expect("one first-frame query receipt");
+        assert_eq!(query_receipt.origin, Origin::PendingQuery);
+        assert_eq!(query_receipt.terminal, Terminal::Completed);
+        assert_eq!(query_receipt.cause, Cause::FirstUsableRootFrame);
+        assert_eq!(query_receipt.started_frame, 1);
+        assert_eq!(query_receipt.terminal_frame, 1);
+        assert_eq!(query_receipt.frames, 1);
+        assert!(query_receipt.completion_latency_ns.is_some());
+        assert_eq!(query_receipt.painted_sequence, Some(query_receipt.sequence));
+        assert_eq!(query_receipt.painted_acceptance_frame, Some(1));
+        assert_eq!(query_receipt.painted_frame, Some(1));
+        assert_eq!(
+            query_receipt.painted_generation,
+            Some(app.root_list_geometry.result_generation_for_test())
+        );
+        let acceptance = query_receipt.acceptance.expect("normal Search acceptance");
+        assert_eq!(acceptance.kind, AcceptanceKind::Search);
+        assert_eq!(acceptance.frame, 1);
+        assert_eq!(
+            acceptance.result_generation,
+            app.root_list_geometry.result_generation_for_test()
+        );
+        assert_eq!(
+            acceptance.provider_revision,
+            app.plugins.search_generation()
+        );
+        assert_eq!(acceptance.catalog_versions, Some(catalog_versions));
+        assert!(acceptance.catalog_versions_stable);
+        assert!(!acceptance.search_pending);
+        assert!(!acceptance.capacity_deferred);
+        assert_eq!(
+            query_receipt.geometry_by_cause
+                [crate::gui::track_c_query_observer::GeometryCause::Query as usize],
+            crate::gui::track_c_query_observer::GeometryWork {
+                rebuilds: 1,
+                rows: expected.len() as u64,
+            }
+        );
+        assert_eq!(query_receipt.geometry_rebuilds, 1);
+        assert_eq!(query_receipt.geometry_rows, expected.len() as u64);
+
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the first actual root frame records available row width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let (content_viewport, content_origin) = ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Pos2)>(egui::Id::new(
+                    "track-c2g-root-content-viewport",
+                ))
+            })
+            .expect("the actual first frame records its content viewport and origin");
+        let style = ctx.style().as_ref().clone();
+        let (outer, eager) = track_c_eager_root_list_layout(
+            &ctx,
+            &expected,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            outer,
+            "C3-A actual first root frame matches the independent eager list layout",
+        );
+        let rendered_rows = &app.test_root_rendered_rows;
+        let rendered_ids = &app.test_root_rendered_row_ids;
+        let rendered_rects = &app.test_root_rendered_row_rects;
+        assert_eq!(rendered_rows.len(), rendered_ids.len());
+        assert_eq!(rendered_rows.len(), rendered_rects.len());
+        let (inner_rect, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("the first frame records ScrollArea extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        let clip = app
+            .test_root_scroll_viewport_rect
+            .expect("the first frame records the viewport clip");
+        let visible_start = eager
+            .rows
+            .partition_point(|row| row.bottom() - outer.top() <= content_viewport.min.y);
+        let visible_end = eager
+            .rows
+            .partition_point(|row| row.top() - outer.top() < content_viewport.max.y);
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(expected.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered_rows
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            expected_indices,
+            "the actual first-frame rows equal eager visible rows plus overscan"
+        );
+        for (((index, action_id), (id_index, _)), (rect_index, rect)) in
+            rendered_rows.iter().zip(rendered_ids).zip(rendered_rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &expected[*index].action);
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager.rows[*index].min - outer.min),
+                eager.rows[*index].size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "painted row {index} matches the independent eager viewport"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(clip.intersects(*rect));
+            }
+        }
+        assert!(inner_rect.is_positive());
+
+        let result_generation_after_frame = app.root_list_geometry.result_generation_for_test();
+        let provider_revision_after_frame = app.plugins.search_generation();
+        let catalog_versions_after_frame = [
+            catalog_versions.clipboard,
+            catalog_versions.todo,
+            catalog_versions.notes,
+        ];
+        let action_output_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&catalog);
+        let full_state_id = track_c2g_full_state_id(&app);
+        let geometry_id = track_c2g_geometry_id(&app);
+        let viewport_id = track_c2g_viewport_id(&app);
+        let action_payload_utf8_bytes = track_c2g_action_payload_bytes(&catalog);
+        let query_receipt_json = track_c2g_receipt_json(query_receipt);
+        let catalog_receipt = serde_json::json!({
+            "root_count": 1,
+            "max_items_present": 1,
+            "max_items": fixture.indexed_count,
+            "generation": generation,
+            "custom_count": custom_len,
+            "indexed_count": fixture.indexed_count,
+            "catalog_count": catalog.len(),
+            "wait_generation_matches": 1,
+            "taken_generation_matches": 1,
+            "acknowledged_validation_ok": 1,
+            "result_still_queued": 0,
+        });
+
+        drop(app);
+        let lifecycle = release_probe.wait(TRACK_C3A_HANDLER_TIMEOUT);
+        fixture.workspace.callbacks_released(&lifecycle);
+        let tokens = |kinds: &[HandlerKind]| {
+            let mut tokens = kinds
+                .iter()
+                .map(|kind| kind.token().to_owned())
+                .collect::<Vec<_>>();
+            tokens.sort();
+            tokens
+        };
+        let handler_lifecycle = serde_json::json!({
+            "attempts": tokens(&lifecycle.attempts),
+            "created": tokens(&lifecycle.created),
+            "released": tokens(&lifecycle.released),
+            "overflowed": lifecycle.overflowed,
+            "complete": lifecycle.complete,
+        });
+        assert!(
+            lifecycle.complete,
+            "all captured callback closures released"
+        );
+        assert!(!lifecycle.overflowed);
+        assert_eq!(tokens(&lifecycle.attempts), expected_handler_tokens);
+        assert_eq!(tokens(&lifecycle.created), expected_handler_tokens);
+        assert_eq!(tokens(&lifecycle.released), expected_handler_tokens);
+
+        TrackC3AComponentSample {
+            elapsed_ns,
+            phase_ns,
+            catalog_receipt,
+            query_receipt: query_receipt_json,
+            action_count: catalog.len() as u64,
+            custom_count: custom_len as u64,
+            action_payload_utf8_bytes,
+            action_output_id,
+            structural_catalog_id,
+            full_state_id,
+            geometry_id,
+            viewport_id,
+            result_generation_before_request,
+            result_generation_after_frame,
+            provider_revision_after_frame,
+            catalog_versions_after_frame,
+            handler_lifecycle,
+        }
+    }
+
+    fn emit_track_c3a_component(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        fixture: &TrackC3AFixture,
+        samples: &[TrackC3AComponentSample],
+    ) {
+        assert_eq!(samples.len(), TRACK_C3A_SAMPLES);
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.action_output_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1,
+            "the same owned root yields a stable raw Action identity"
+        );
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "Small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "Full",
+        };
+        let phase_names = [
+            "omni_construct",
+            "apply_apps_only_settings",
+            "inert_manager_register",
+            "launcher_app_construct_and_transfer",
+            "pending_query_publish",
+            "ctx_run_and_fulloutput_drop",
+            "residual",
+        ];
+        let sample_records = samples
+            .iter()
+            .map(|sample| {
+                serde_json::json!({
+                    "elapsed_ns": sample.elapsed_ns,
+                    "phase_ns": sample.phase_ns,
+                    "catalog_receipt": sample.catalog_receipt,
+                    "query_receipt": sample.query_receipt,
+                    "action_count": sample.action_count,
+                    "custom_count": sample.custom_count,
+                    "action_payload_utf8_bytes": sample.action_payload_utf8_bytes,
+                    "action_output_id": format!("{:016x}", sample.action_output_id),
+                    "structural_catalog_id": format!("{:016x}", sample.structural_catalog_id),
+                    "full_state_id": format!("{:016x}", sample.full_state_id),
+                    "geometry_id": format!("{:016x}", sample.geometry_id),
+                    "viewport_id": format!("{:016x}", sample.viewport_id),
+                    "result_generation_before_request": sample.result_generation_before_request,
+                    "result_generation_after_frame": sample.result_generation_after_frame,
+                    "provider_revision_after_frame": sample.provider_revision_after_frame,
+                    "catalog_versions_after_frame": sample.catalog_versions_after_frame,
+                    "handler_lifecycle": sample.handler_lifecycle,
+                })
+            })
+            .collect::<Vec<_>>();
+        let record = serde_json::json!({
+            "schema": 1,
+            "stage": "ready_catalog_restricted_omni_first_cpu_frame",
+            "owner": "real_omni_constructor+LauncherApp::new+one_egui_Context_run+FullOutput_drop",
+            "fixture": "owned_synthetic_index_tree",
+            "source": source,
+            "profile": profile,
+            "mode": mode,
+            "telemetry_enabled": crate::performance::enabled(),
+            "fixture_signature": format!("{:016x}", fixture.fixture_signature),
+            "count": fixture.indexed_count,
+            "warmups": TRACK_C3A_WARMUPS,
+            "samples": TRACK_C3A_SAMPLES,
+            "exclusions": 0,
+            "phase_names": phase_names,
+            "query_recipe": "omni_list_all_apps",
+            "constructor_empty_search_included": true,
+            "exactly_one_frame": true,
+            "sample_records": sample_records,
+        });
+        eprintln!("TRACK_C3A_READY_CATALOG_RESULT {record}");
+    }
+
+    #[test]
+    fn track_c3a_oracle_ready_catalog_runs_omni_first_query_and_releases_handlers() {
+        let mut fixture = TrackC3AFixture::new(16);
+        let sample = track_c3a_component_owner(&mut fixture);
+        assert_eq!(fixture.fixture_signature, 0xd6f2_eaec_0d1b_6dda);
+        assert_eq!(sample.action_count, 19);
+        assert_eq!(sample.custom_count, 3);
+        assert_eq!(sample.structural_catalog_id, 0x5648_9f61_f9fd_eb48);
+        assert_eq!(
+            sample.result_generation_after_frame,
+            sample.result_generation_before_request + 1
+        );
+        assert_eq!(sample.provider_revision_after_frame, 0);
+        assert!(sample.elapsed_ns > 0);
+        assert_eq!(sample.phase_ns.iter().sum::<u64>(), sample.elapsed_ns);
+        assert!(sample.handler_lifecycle["complete"].as_bool().unwrap());
+    }
+
+    #[test]
+    #[ignore = "opt-in C3-A ready-catalog/restricted-Omni first CPU frame benchmark"]
+    fn track_c3a_benchmark_ready_catalog_restricted_omni_first_cpu_frame() {
+        use crate::performance::track_c_workloads::BenchmarkMode;
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let counts: &[usize] = match mode {
+            BenchmarkMode::Small => &[16],
+            BenchmarkMode::Full => &[16, 1_000, 10_000],
+        };
+        for count in counts {
+            let mut fixture = TrackC3AFixture::new(*count);
+            for _ in 0..TRACK_C3A_WARMUPS {
+                let _ = track_c3a_component_owner(&mut fixture);
+            }
+            let samples = (0..TRACK_C3A_SAMPLES)
+                .map(|_| track_c3a_component_owner(&mut fixture))
+                .collect::<Vec<_>>();
+            emit_track_c3a_component(mode, &fixture, &samples);
+        }
+    }
 }
