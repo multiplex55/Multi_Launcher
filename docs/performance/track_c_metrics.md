@@ -154,3 +154,6 @@ claim. All72 distinct timing distributions and full raw arrays retained in
 [Startup report](track_c_startup/results.md), [catalogue G1](track_c_startup_g1.json)
 and companion attribution/component/review JSON. Initial compiler and invalid
 fixture assertion failures retained/corrected; no production defect. LOCAL ONLY.
+
+
+C3-B closes **SKIPPED (measured gate)** (plan: readiness contract),21/29closed, nextC3-C. Measured source `0fbd2f0327badf899e2bdd662616ac6d9d1228d5` remains identical through evidence HEAD `827990c99ca36d087eb8737979ed79f931b7bef2` across source/Cargo; all9reviewedhashes match. Required catalogue wait median96.885057%/99.386539%/99.426946%, indexed-bodyclone0.395089%/0.335859%/0.318219% at16/1k/10k. No specific material removable operation outside readiness barrier is established. Keep complete acknowledged catalog before immutable plugin initialization; no runtime candidate/new worker/cache. New Cargo/tests/benchmarks0; reuse accepted C3A12ordinaryPASS/160unique retained samples. Independent gate review CLEAR; adverse tails/nooptimality/no-benefit/nonadditiveclock/nativeNOTRUN limits retained. See [startup gate](track_c_startup_gate.md) and [decision](track_c_startup_gate.json). LOCAL ONLY.
