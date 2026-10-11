@@ -1,6 +1,6 @@
-# Track C native responsiveness protocol (draft, not executed)
+# Track C native responsiveness protocol (frozen C0-D, not executed)
 
-Status: NOT RUN. This protocol will be frozen at C0-D after fixture/source review. Native desktop control is unavailable in this session's configured computer-use surface; headless egui timing is CPU evidence only. Process/API observations cannot substitute for visible composition or input-to-display latency.
+Execution status: NOT RUN. Protocol FROZEN at C0-D after independent fixture/source/method review CLEAR. Native desktop control is unavailable in this session's configured computer-use surface; headless egui timing is CPU evidence only. Process/API observations cannot substitute for visible composition or input-to-display latency.
 
 ## Isolation and source identity
 
