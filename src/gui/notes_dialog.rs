@@ -9,6 +9,135 @@ use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good};
 use chrono::{DateTime, Local};
 use eframe::egui;
 
+#[cfg(test)]
+mod c2f_observation {
+    use std::cell::RefCell;
+    use std::time::Instant;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct Snapshot {
+        pub phase_ns: [u64; 6],
+        pub snapshot_calls: u64,
+        pub snapshot_successes: u64,
+        pub snapshot_errors: u64,
+        pub snapshot_entries: u64,
+        pub index_build_calls: u64,
+        pub index_entries: u64,
+        pub index_utf8_bytes: u64,
+        pub metadata_build_calls: u64,
+        pub metadata_entries: u64,
+        pub metadata_output_utf8_bytes: u64,
+        pub metadata_backlink_queries: u64,
+        pub metadata_checkbox_lines: u64,
+        pub metadata_preview_builds: u64,
+        pub projection_calls: u64,
+        pub projection_entries_scanned: u64,
+        pub projection_indices_materialized: u64,
+        pub geometry_ensure_calls: u64,
+        pub geometry_rebuilds: u64,
+        pub geometry_rows_measured: u64,
+        pub geometry_identity_entries: u64,
+        pub geometry_overlap_old_bytes: u64,
+        pub geometry_overlap_new_bytes: u64,
+        pub geometry_overlap_old_entries: u64,
+        pub geometry_overlap_new_entries: u64,
+        pub geometry_overlap_old_rows_vec_bytes: u64,
+        pub geometry_overlap_old_identity_bytes: u64,
+        pub geometry_overlap_old_map_key_bytes: u64,
+        pub geometry_overlap_new_rows_vec_bytes: u64,
+        pub geometry_overlap_new_identity_bytes: u64,
+        pub geometry_overlap_new_map_key_bytes: u64,
+        pub painted_rows: u64,
+    }
+
+    #[derive(Clone, Copy)]
+    #[repr(usize)]
+    pub(super) enum Phase {
+        Snapshot = 0,
+        SearchIndex = 1,
+        Metadata = 2,
+        Projection = 3,
+        EnsureGeometry = 4,
+        MeasureGeometry = 5,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Snapshot>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Scope {
+        previous: Option<Snapshot>,
+        finished: bool,
+    }
+
+    impl Scope {
+        pub(super) fn begin() -> Self {
+            let previous = ACTIVE.with(|active| active.replace(Some(Snapshot::default())));
+            Self {
+                previous,
+                finished: false,
+            }
+        }
+
+        pub(super) fn finish(&mut self) -> Snapshot {
+            let snapshot = ACTIVE.with(|active| {
+                let snapshot = active.borrow().unwrap_or_default();
+                active.replace(self.previous.take());
+                snapshot
+            });
+            self.finished = true;
+            snapshot
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            if !self.finished {
+                ACTIVE.with(|active| {
+                    active.replace(self.previous.take());
+                });
+            }
+        }
+    }
+
+    pub(super) struct Timer {
+        phase: Phase,
+        started: Option<Instant>,
+    }
+
+    impl Timer {
+        pub(super) fn start(phase: Phase) -> Self {
+            let started = active().then(Instant::now);
+            Self { phase, started }
+        }
+    }
+
+    impl Drop for Timer {
+        fn drop(&mut self) {
+            let Some(started) = self.started else {
+                return;
+            };
+            let nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            with_snapshot(|snapshot| {
+                let slot = &mut snapshot.phase_ns[self.phase as usize];
+                *slot = slot.saturating_add(nanos);
+            });
+        }
+    }
+
+    pub(super) fn active() -> bool {
+        ACTIVE.with(|active| active.borrow().is_some())
+    }
+
+    pub(super) fn with_snapshot(mut update: impl FnMut(&mut Snapshot)) {
+        ACTIVE.with(|active| {
+            if let Some(snapshot) = active.borrow_mut().as_mut() {
+                update(snapshot);
+            }
+        });
+    }
+}
+
 fn format_note_timestamp(dt: DateTime<Local>) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -81,19 +210,43 @@ fn short_preview(content: &str) -> String {
 }
 
 fn checkbox_count(content: &str) -> usize {
-    content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("- [ ] ")
-                || trimmed.starts_with("- [x] ")
-                || trimmed.starts_with("- [X] ")
-        })
-        .count()
+    let mut count = 0;
+    #[cfg(test)]
+    let observing = c2f_observation::active();
+    #[cfg(test)]
+    let mut visited_lines = 0_u64;
+    for line in content.lines() {
+        #[cfg(test)]
+        if observing {
+            visited_lines = visited_lines.saturating_add(1);
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("- [ ] ")
+            || trimmed.starts_with("- [x] ")
+            || trimmed.starts_with("- [X] ")
+        {
+            count += 1;
+        }
+    }
+    #[cfg(test)]
+    if observing {
+        c2f_observation::with_snapshot(|snapshot| {
+            snapshot.metadata_checkbox_lines = snapshot
+                .metadata_checkbox_lines
+                .saturating_add(visited_lines);
+        });
+    }
+    count
 }
 
 fn build_search_index(entries: &[Note]) -> Vec<String> {
-    entries
+    #[cfg(test)]
+    let observing = c2f_observation::active();
+    #[cfg(test)]
+    let _phase = c2f_observation::Timer::start(c2f_observation::Phase::SearchIndex);
+    #[cfg(test)]
+    let mut output_bytes = 0_u64;
+    let output = entries
         .iter()
         .map(|note| {
             let mut text = note.content.to_lowercase();
@@ -111,9 +264,22 @@ fn build_search_index(entries: &[Note]) -> Vec<String> {
                 text.push('\n');
                 text.push_str(&tag.to_lowercase());
             }
+            #[cfg(test)]
+            if observing {
+                output_bytes = output_bytes.saturating_add(text.len() as u64);
+            }
             text
         })
-        .collect()
+        .collect::<Vec<_>>();
+    #[cfg(test)]
+    if observing {
+        c2f_observation::with_snapshot(|snapshot| {
+            snapshot.index_build_calls = snapshot.index_build_calls.saturating_add(1);
+            snapshot.index_entries = snapshot.index_entries.saturating_add(output.len() as u64);
+            snapshot.index_utf8_bytes = snapshot.index_utf8_bytes.saturating_add(output_bytes);
+        });
+    }
+    output
 }
 
 fn build_row_metadata(
@@ -121,7 +287,21 @@ fn build_row_metadata(
     backlinks_enabled: bool,
     task_lists_enabled: bool,
 ) -> anyhow::Result<Vec<NoteRowMetadata>> {
-    entries
+    #[cfg(test)]
+    let observing = c2f_observation::active();
+    #[cfg(test)]
+    let _phase = c2f_observation::Timer::start(c2f_observation::Phase::Metadata);
+    #[cfg(test)]
+    if observing {
+        c2f_observation::with_snapshot(|snapshot| {
+            snapshot.metadata_build_calls = snapshot.metadata_build_calls.saturating_add(1);
+        });
+    }
+    #[cfg(test)]
+    let mut output_bytes = 0_u64;
+    #[cfg(test)]
+    let mut backlink_queries = 0_u64;
+    let output = entries
         .iter()
         .enumerate()
         .map(|(original_index, note)| {
@@ -137,6 +317,10 @@ fn build_row_metadata(
                 meta.push(format!("tags: {}", note.tags.join(", ")));
             }
             if backlinks_enabled && !note.slug.is_empty() {
+                #[cfg(test)]
+                if observing {
+                    backlink_queries = backlink_queries.saturating_add(1);
+                }
                 meta.push(format!("{} backlinks", note_backlink_count(&note.slug)?));
             }
             if task_lists_enabled {
@@ -145,14 +329,40 @@ fn build_row_metadata(
                     meta.push(format!("{count} checkboxes"));
                 }
             }
-            Ok(NoteRowMetadata {
+            let row = NoteRowMetadata {
                 original_index,
                 display_title: display_title(note).to_owned(),
                 meta: meta.join(" · "),
                 preview: short_preview(&note.content),
-            })
+            };
+            #[cfg(test)]
+            if observing {
+                output_bytes = output_bytes
+                    .saturating_add(row.display_title.len() as u64)
+                    .saturating_add(row.meta.len() as u64)
+                    .saturating_add(row.preview.len() as u64);
+            }
+            Ok(row)
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    #[cfg(test)]
+    if observing {
+        c2f_observation::with_snapshot(|snapshot| {
+            snapshot.metadata_entries = snapshot
+                .metadata_entries
+                .saturating_add(output.len() as u64);
+            snapshot.metadata_output_utf8_bytes = snapshot
+                .metadata_output_utf8_bytes
+                .saturating_add(output_bytes);
+            snapshot.metadata_backlink_queries = snapshot
+                .metadata_backlink_queries
+                .saturating_add(backlink_queries);
+            snapshot.metadata_preview_builds = snapshot
+                .metadata_preview_builds
+                .saturating_add(output.len() as u64);
+        });
+    }
+    Ok(output)
 }
 
 fn note_action(label: impl Into<String>, action: impl Into<String>) -> Action {
@@ -233,6 +443,10 @@ struct NotesGeometry {
     measured_rows: usize,
     #[cfg(test)]
     rebuild_nanos: u128,
+    #[cfg(test)]
+    row_identity_capacity_bytes: u64,
+    #[cfg(test)]
+    map_key_capacity_bytes: u64,
 }
 
 impl NotesGeometry {
@@ -251,6 +465,15 @@ impl NotesGeometry {
             .find(|row| row.visual_bottom > offset_y)
             .or_else(|| self.rows.last())?;
         Some((&row.identity, (offset_y - row.top).max(0.0)))
+    }
+
+    #[cfg(test)]
+    fn partial_capacity_bytes(&self) -> u64 {
+        (self.rows.capacity() * std::mem::size_of::<NoteRowGeometry>())
+            .saturating_add(self.row_identity_capacity_bytes as usize)
+            .saturating_add(self.map_key_capacity_bytes as usize)
+            .try_into()
+            .unwrap_or(u64::MAX)
     }
 }
 
@@ -339,6 +562,10 @@ fn measure_notes_geometry(
     let mut content_height = 0.0;
     let mut rows = Vec::with_capacity(filtered_indices.len());
     let mut row_by_identity = std::collections::HashMap::with_capacity(filtered_indices.len());
+    #[cfg(test)]
+    let mut row_identity_capacity_bytes = 0_u64;
+    #[cfg(test)]
+    let mut map_key_capacity_bytes = 0_u64;
 
     for &original_index in filtered_indices {
         let (Some(entry), Some(metadata)) = (
@@ -407,7 +634,15 @@ fn measure_notes_geometry(
         } else {
             entry.slug.clone()
         };
-        row_by_identity.insert(identity.clone(), rows.len());
+        let map_key = identity.clone();
+        #[cfg(test)]
+        {
+            row_identity_capacity_bytes =
+                row_identity_capacity_bytes.saturating_add(identity.capacity() as u64);
+            map_key_capacity_bytes =
+                map_key_capacity_bytes.saturating_add(map_key.capacity() as u64);
+        }
+        row_by_identity.insert(map_key, rows.len());
         rows.push(NoteRowGeometry {
             original_index,
             identity,
@@ -441,6 +676,10 @@ fn measure_notes_geometry(
         measured_rows: filtered_indices.len(),
         #[cfg(test)]
         rebuild_nanos,
+        #[cfg(test)]
+        row_identity_capacity_bytes,
+        #[cfg(test)]
+        map_key_capacity_bytes,
     }
 }
 
@@ -492,6 +731,16 @@ fn update_filtered_projection(
     filtered_indices: &mut Vec<usize>,
     projection_key: &mut Option<ProjectionKey>,
 ) -> bool {
+    #[cfg(test)]
+    let observing = c2f_observation::active();
+    #[cfg(test)]
+    let _phase = c2f_observation::Timer::start(c2f_observation::Phase::Projection);
+    #[cfg(test)]
+    if observing {
+        c2f_observation::with_snapshot(|snapshot| {
+            snapshot.projection_calls = snapshot.projection_calls.saturating_add(1);
+        });
+    }
     let raw_search_changed = projection_key
         .as_ref()
         .is_none_or(|key| key.raw_search != search);
@@ -514,6 +763,14 @@ fn update_filtered_projection(
         .as_ref()
         .is_none_or(|key| key.filter != filter);
     if filter_changed || generation_changed {
+        #[cfg(test)]
+        if observing {
+            c2f_observation::with_snapshot(|snapshot| {
+                snapshot.projection_entries_scanned = snapshot
+                    .projection_entries_scanned
+                    .saturating_add(index.len() as u64);
+            });
+        }
         *filtered_indices = index
             .iter()
             .enumerate()
@@ -527,6 +784,14 @@ fn update_filtered_projection(
         raw_search: search.to_owned(),
         filter,
     });
+    #[cfg(test)]
+    if observing && (filter_changed || generation_changed) {
+        c2f_observation::with_snapshot(|snapshot| {
+            snapshot.projection_indices_materialized = snapshot
+                .projection_indices_materialized
+                .saturating_add(filtered_indices.len() as u64);
+        });
+    }
     filter_changed || generation_changed
 }
 
@@ -779,13 +1044,41 @@ impl TemplateManagerState {
 impl NotesDialog {
     fn capture_note_snapshot(&mut self) -> anyhow::Result<(u64, Vec<Note>)> {
         #[cfg(test)]
+        let _phase = c2f_observation::Timer::start(c2f_observation::Phase::Snapshot);
+        #[cfg(test)]
         {
             self.test_note_snapshot_calls = self.test_note_snapshot_calls.saturating_add(1);
+            if c2f_observation::active() {
+                c2f_observation::with_snapshot(|snapshot| {
+                    snapshot.snapshot_calls = snapshot.snapshot_calls.saturating_add(1);
+                });
+            }
             if std::mem::take(&mut self.test_fail_next_snapshot) {
+                #[cfg(test)]
+                if c2f_observation::active() {
+                    c2f_observation::with_snapshot(|snapshot| {
+                        snapshot.snapshot_errors = snapshot.snapshot_errors.saturating_add(1);
+                    });
+                }
                 anyhow::bail!("injected Quick Notes snapshot failure");
             }
         }
-        note_cache_snapshot_with_version()
+        let result = note_cache_snapshot_with_version();
+        #[cfg(test)]
+        if c2f_observation::active() {
+            c2f_observation::with_snapshot(|snapshot| match &result {
+                Ok((_, entries)) => {
+                    snapshot.snapshot_successes = snapshot.snapshot_successes.saturating_add(1);
+                    snapshot.snapshot_entries = snapshot
+                        .snapshot_entries
+                        .saturating_add(entries.len() as u64);
+                }
+                Err(_) => {
+                    snapshot.snapshot_errors = snapshot.snapshot_errors.saturating_add(1);
+                }
+            });
+        }
+        result
     }
 
     fn install_candidate(
@@ -1014,6 +1307,16 @@ impl NotesDialog {
         style: &egui::Style,
         viewport_width: f32,
     ) -> Option<NotesGeometry> {
+        #[cfg(test)]
+        let observing = c2f_observation::active();
+        #[cfg(test)]
+        let _phase = c2f_observation::Timer::start(c2f_observation::Phase::EnsureGeometry);
+        #[cfg(test)]
+        if observing {
+            c2f_observation::with_snapshot(|snapshot| {
+                snapshot.geometry_ensure_calls = snapshot.geometry_ensure_calls.saturating_add(1);
+            });
+        }
         let key = geometry_key(
             self.entries_generation,
             self.metadata_generation,
@@ -1052,8 +1355,65 @@ impl NotesDialog {
                 .test_geometry_rows_measured
                 .saturating_add(geometry.measured_rows.try_into().unwrap_or(u64::MAX));
             self.test_last_geometry_rebuild_nanos = geometry.rebuild_nanos;
+            if observing {
+                c2f_observation::with_snapshot(|snapshot| {
+                    snapshot.phase_ns[c2f_observation::Phase::MeasureGeometry as usize] = snapshot
+                        .phase_ns[c2f_observation::Phase::MeasureGeometry as usize]
+                        .saturating_add(geometry.rebuild_nanos.min(u64::MAX as u128) as u64);
+                    snapshot.geometry_rebuilds = snapshot.geometry_rebuilds.saturating_add(1);
+                    snapshot.geometry_rows_measured = snapshot
+                        .geometry_rows_measured
+                        .saturating_add(geometry.rows.len() as u64);
+                    snapshot.geometry_identity_entries = snapshot
+                        .geometry_identity_entries
+                        .saturating_add(geometry.row_by_identity.len() as u64);
+                });
+            }
         }
         let result = self.notes_geometry.replace(geometry);
+        #[cfg(test)]
+        if observing {
+            let new_capacity = self
+                .notes_geometry
+                .as_ref()
+                .map_or(0, NotesGeometry::partial_capacity_bytes);
+            let old_capacity = result
+                .as_ref()
+                .map_or(0, NotesGeometry::partial_capacity_bytes);
+            let old_entries = result
+                .as_ref()
+                .map_or(0, |geometry| geometry.row_by_identity.len() as u64);
+            let new_entries = self
+                .notes_geometry
+                .as_ref()
+                .map_or(0, |geometry| geometry.row_by_identity.len() as u64);
+            let old_parts = result.as_ref().map_or([0; 3], |geometry| {
+                [
+                    (geometry.rows.capacity() * std::mem::size_of::<NoteRowGeometry>()) as u64,
+                    geometry.row_identity_capacity_bytes,
+                    geometry.map_key_capacity_bytes,
+                ]
+            });
+            let new_parts = self.notes_geometry.as_ref().map_or([0; 3], |geometry| {
+                [
+                    (geometry.rows.capacity() * std::mem::size_of::<NoteRowGeometry>()) as u64,
+                    geometry.row_identity_capacity_bytes,
+                    geometry.map_key_capacity_bytes,
+                ]
+            });
+            c2f_observation::with_snapshot(|snapshot| {
+                snapshot.geometry_overlap_old_bytes = old_capacity;
+                snapshot.geometry_overlap_new_bytes = new_capacity;
+                snapshot.geometry_overlap_old_entries = old_entries;
+                snapshot.geometry_overlap_new_entries = new_entries;
+                snapshot.geometry_overlap_old_rows_vec_bytes = old_parts[0];
+                snapshot.geometry_overlap_old_identity_bytes = old_parts[1];
+                snapshot.geometry_overlap_old_map_key_bytes = old_parts[2];
+                snapshot.geometry_overlap_new_rows_vec_bytes = new_parts[0];
+                snapshot.geometry_overlap_new_identity_bytes = new_parts[1];
+                snapshot.geometry_overlap_new_map_key_bytes = new_parts[2];
+            });
+        }
         track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         result
     }
@@ -1582,6 +1942,12 @@ impl NotesDialog {
                                 rows_timer.add_work_units(1);
                                 #[cfg(test)]
                                 {
+                                    if c2f_observation::active() {
+                                        c2f_observation::with_snapshot(|snapshot| {
+                                            snapshot.painted_rows =
+                                                snapshot.painted_rows.saturating_add(1);
+                                        });
+                                    }
                                     self.last_rendered_indices.push(idx);
                                     self.last_rendered_row_rects.push((
                                         idx,
@@ -4417,5 +4783,1708 @@ mod tests {
 
         assert_eq!(action.action, "note:open:alpha");
         assert_eq!(action.desc, "Note");
+    }
+
+    fn track_c2f_string_capacity_bytes(notes: &[Note]) -> u64 {
+        notes
+            .iter()
+            .map(|note| {
+                let mut bytes = note.title.capacity()
+                    + note.path.capacity()
+                    + note.content.capacity()
+                    + note.slug.capacity()
+                    + note.alias.as_ref().map_or(0, String::capacity);
+                bytes += note.tags.iter().map(String::capacity).sum::<usize>();
+                bytes += note.links.iter().map(String::capacity).sum::<usize>();
+                bytes += note.aliases.iter().map(String::capacity).sum::<usize>();
+                for entity in &note.entity_refs {
+                    bytes += entity.id.capacity();
+                    bytes += entity.title.as_ref().map_or(0, String::capacity);
+                }
+                bytes as u64
+            })
+            .sum()
+    }
+
+    fn track_c2f_nested_vector_capacity_bytes(notes: &[Note]) -> u64 {
+        notes
+            .iter()
+            .map(|note| {
+                note.tags.capacity() * std::mem::size_of::<String>()
+                    + note.links.capacity() * std::mem::size_of::<String>()
+                    + note.aliases.capacity() * std::mem::size_of::<String>()
+                    + note.entity_refs.capacity()
+                        * std::mem::size_of::<crate::common::entity_ref::EntityRef>()
+            })
+            .sum::<usize>() as u64
+    }
+
+    fn track_c2f_capacity_receipt(dialog: &NotesDialog) -> TrackC2FCapacityReceipt {
+        let index_string_capacity = dialog.index.iter().map(String::capacity).sum::<usize>();
+        let metadata_string_capacity = dialog
+            .row_metadata
+            .iter()
+            .map(|row| row.display_title.capacity() + row.meta.capacity() + row.preview.capacity())
+            .sum::<usize>();
+        let geometry = dialog.notes_geometry.as_ref();
+        TrackC2FCapacityReceipt([
+            (dialog.entries.capacity() * std::mem::size_of::<Note>()) as u64,
+            track_c2f_string_capacity_bytes(&dialog.entries),
+            track_c2f_nested_vector_capacity_bytes(&dialog.entries),
+            (dialog.index.capacity() * std::mem::size_of::<String>()) as u64,
+            index_string_capacity as u64,
+            (dialog.row_metadata.capacity() * std::mem::size_of::<super::NoteRowMetadata>()) as u64,
+            metadata_string_capacity as u64,
+            (dialog.filtered_indices.capacity() * std::mem::size_of::<usize>()) as u64,
+            geometry.map_or(0, |geometry| {
+                (geometry.rows.capacity() * std::mem::size_of::<super::NoteRowGeometry>()) as u64
+            }),
+            geometry.map_or(0, |geometry| geometry.row_identity_capacity_bytes),
+            geometry.map_or(0, |geometry| geometry.map_key_capacity_bytes),
+            geometry.map_or(0, |geometry| geometry.row_by_identity.len() as u64),
+        ])
+    }
+
+    fn track_c2f_note_identity(notes: &[Note]) -> u64 {
+        crate::performance::track_c_workloads::note_fixture_identity(notes)
+    }
+
+    fn track_c2f_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        value: &str,
+    ) {
+        signature.number(value.len() as u64);
+        signature.bytes(value.as_bytes());
+    }
+
+    fn track_c2f_fixture_signature(
+        raw_fixture: &[Note],
+        initial_notes: &[Note],
+        expected_notes: &[Note],
+        recipe: TrackC2FRecipe,
+        screen_width: f32,
+        screen_height: f32,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_5155_4943_4B46,
+            "track-c2f-input-fixture",
+            raw_fixture.len(),
+        );
+        track_c2f_signature_string(&mut signature, recipe.token());
+        signature.number(track_c2f_note_identity(raw_fixture));
+        signature.number(track_c2f_note_identity(initial_notes));
+        signature.number(track_c2f_note_identity(expected_notes));
+        track_c2f_signature_string(&mut signature, recipe.initial_query());
+        track_c2f_signature_string(&mut signature, recipe.measured_query());
+        let initial_width = if recipe == TrackC2FRecipe::Width960To300 {
+            960.0
+        } else {
+            screen_width
+        };
+        signature.number(u64::from(initial_width.to_bits()));
+        signature.number(u64::from(screen_width.to_bits()));
+        signature.number(u64::from(screen_height.to_bits()));
+        signature.number(1); // initial backlinks enabled
+        signature.number((recipe != TrackC2FRecipe::MetadataSettingsOnly) as u64);
+        signature.number(1); // initial task lists enabled
+        signature.number(1); // final task lists remain enabled
+        signature.finish()
+    }
+
+    fn track_c2f_input_values(fixture: &[Note], recipe: TrackC2FRecipe) -> Vec<Note> {
+        let mut notes = fixture.to_vec();
+        if recipe == TrackC2FRecipe::EarlyWideUnicode {
+            let first = notes.first_mut().expect("synthetic fixture is nonempty");
+            first.alias = None;
+            first.aliases.clear();
+            first.content = first
+                .content
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim_start();
+                    !trimmed.starts_with("Alias:") && !trimmed.starts_with("Aliases:")
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        notes
+    }
+
+    fn track_c2f_expected_values(initial: &[Note], recipe: TrackC2FRecipe) -> Vec<Note> {
+        let mut notes = initial.to_vec();
+        match recipe {
+            TrackC2FRecipe::RevisionFinalPreview => {
+                let last = notes.last_mut().expect("synthetic fixture is nonempty");
+                last.content = format!("C2F changed final preview 東京 🙂\r\n{}", last.content);
+            }
+            TrackC2FRecipe::EarlyWideUnicode => {
+                let first = notes.first_mut().expect("synthetic fixture is nonempty");
+                let title = "東京🙂W".repeat(256);
+                first.title = title.clone();
+                let (_, remainder) = first
+                    .content
+                    .split_once('\n')
+                    .expect("synthetic first note starts with a Markdown heading");
+                first.content = format!("# {title}\n{remainder}");
+            }
+            _ => {}
+        }
+        notes
+    }
+
+    fn track_c2f_geometry_identity(geometry: &super::NotesGeometry) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_5155_4943_4B46,
+            "track-c2f-notes-geometry",
+            geometry.rows.len(),
+        );
+        for value in [
+            geometry.key.viewport_width as u64,
+            geometry.key.pixels_per_point as u64,
+            geometry.key.spacing_x as u64,
+            geometry.key.spacing_y as u64,
+            geometry.key.interact_width as u64,
+            geometry.key.interact_height as u64,
+        ] {
+            signature.number(value);
+        }
+        track_c2f_signature_string(&mut signature, &format!("{:?}", geometry.key.title_font));
+        track_c2f_signature_string(&mut signature, &format!("{:?}", geometry.key.small_font));
+        match geometry.key.wrap {
+            Some(value) => {
+                signature.number(1);
+                signature.number(value as u64);
+            }
+            None => signature.number(0),
+        }
+        for row in &geometry.rows {
+            signature.number(row.original_index as u64);
+            track_c2f_signature_string(&mut signature, &row.identity);
+            for value in [
+                row.top,
+                row.header_height,
+                row.header_width,
+                row.body_width,
+                row.preview_height.unwrap_or(-1.0),
+                row.body_height,
+                row.separator_top,
+                row.visual_bottom,
+                row.width_before,
+                row.width_after,
+            ] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        signature.number(geometry.content_size.x.to_bits() as u64);
+        signature.number(geometry.content_size.y.to_bits() as u64);
+        let mut map_entries = geometry.row_by_identity.iter().collect::<Vec<_>>();
+        map_entries.sort_by(|left, right| left.0.cmp(right.0));
+        signature.number(map_entries.len() as u64);
+        for (identity, row_index) in map_entries {
+            track_c2f_signature_string(&mut signature, identity);
+            signature.number(*row_index as u64);
+        }
+        signature.finish()
+    }
+
+    fn track_c2f_metadata_identity(metadata: &[super::NoteRowMetadata]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_5155_4943_4B46,
+            "track-c2f-note-row-metadata",
+            metadata.len(),
+        );
+        for row in metadata {
+            signature.number(row.original_index as u64);
+            track_c2f_signature_string(&mut signature, &row.display_title);
+            track_c2f_signature_string(&mut signature, &row.meta);
+            track_c2f_signature_string(&mut signature, &row.preview);
+        }
+        signature.finish()
+    }
+
+    fn track_c2f_index_identity(index: &[String]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature =
+            StableSignature::new(0x435F_5155_4943_4B46, "track-c2f-search-index", index.len());
+        for text in index {
+            track_c2f_signature_string(&mut signature, text);
+        }
+        signature.finish()
+    }
+
+    fn track_c2f_projection_identity(indices: &[usize]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_5155_4943_4B46,
+            "track-c2f-filtered-projection",
+            indices.len(),
+        );
+        for index in indices {
+            signature.number(*index as u64);
+        }
+        signature.finish()
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2FRecipe {
+        RevisionFinalPreview,
+        MetadataSettingsOnly,
+        SearchSparse,
+        SearchCaseOnly,
+        GeometryCold,
+        WarmRepeat,
+        EarlyWideUnicode,
+        Width960To300,
+        AtlasReplacement,
+    }
+
+    impl TrackC2FRecipe {
+        fn token(self) -> &'static str {
+            match self {
+                Self::RevisionFinalPreview => "revision_final_preview",
+                Self::MetadataSettingsOnly => "metadata_settings_only",
+                Self::SearchSparse => "search_sparse",
+                Self::SearchCaseOnly => "search_case_only",
+                Self::GeometryCold => "geometry_cold",
+                Self::WarmRepeat => "warm_repeat",
+                Self::EarlyWideUnicode => "early_wide_unicode",
+                Self::Width960To300 => "width_960_to_300",
+                Self::AtlasReplacement => "atlas_replacement",
+            }
+        }
+
+        fn initial_query(self) -> &'static str {
+            match self {
+                Self::SearchCaseOnly => "track-a-note-00050",
+                _ => "",
+            }
+        }
+
+        fn measured_query(self) -> &'static str {
+            match self {
+                Self::SearchSparse => "track-a-note-00050",
+                Self::SearchCaseOnly => "TRACK-A-NOTE-00050",
+                _ => self.initial_query(),
+            }
+        }
+
+        fn screen_width(self) -> f32 {
+            match self {
+                Self::Width960To300 => 300.0,
+                _ => 960.0,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct TrackC2FCapacityReceipt([u64; 12]);
+
+    #[derive(Clone, Debug)]
+    struct TrackC2FSample {
+        elapsed_ns: u64,
+        observation: super::c2f_observation::Snapshot,
+        snapshot_estimated_clone_bytes: u64,
+        snapshot_metric_lock_wait_ns: u64,
+        snapshot_metric_hold_ns: u64,
+        fixture_id: u64,
+        canonical_id: u64,
+        index_id: u64,
+        metadata_id: u64,
+        projection_id: u64,
+        projection_selected_indices: u64,
+        geometry_id: u64,
+        viewport_id: u64,
+        complete_output_id: u64,
+        revision_receipt: [u64; 10],
+        settings_receipt: [u64; 4],
+        viewport_receipt: [i64; 8],
+        width_receipt: [u64; 4],
+        visible_indices: Vec<usize>,
+        capacity_before: TrackC2FCapacityReceipt,
+        capacity_after: TrackC2FCapacityReceipt,
+        geometry_overlap: [u64; 8],
+    }
+
+    struct TrackC2FState {
+        app: LauncherApp,
+        dialog: NotesDialog,
+        ctx: egui::Context,
+        expected_notes: Vec<Note>,
+        expected_index: Vec<String>,
+        expected_metadata: Vec<super::NoteRowMetadata>,
+        expected_indices: Vec<usize>,
+        eager: EagerNotesGeometry,
+        recipe: TrackC2FRecipe,
+        screen_width: f32,
+        screen_height: f32,
+        wide_scroll_width: Option<f32>,
+        wide_geometry_width: Option<u32>,
+        initial_second_width_before: Option<f32>,
+        target_viewport: egui::Vec2,
+        fixture_id: u64,
+        expected_revision: u64,
+        current_revision_before: u64,
+        dialog_revision_before: u64,
+        initial_backlinks: bool,
+        expected_backlinks: bool,
+        initial_tasks: bool,
+        initial_row_key_width_bits: u32,
+        initial_scroll_area_width_milli: u64,
+        capacity_before: TrackC2FCapacityReceipt,
+        cache_guard: Option<crate::plugins::note::NoteCachePublicationGuard>,
+        observer: Option<super::c2f_observation::Scope>,
+    }
+
+    fn track_c2f_reference_search_index(entries: &[Note]) -> Vec<String> {
+        let mut output = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let mut searchable = String::new();
+            searchable.push_str(&entry.content.to_lowercase());
+            if let Some(alias) = entry.alias.as_deref() {
+                searchable.push('\n');
+                searchable.push_str(&alias.to_lowercase());
+            }
+            for alias in &entry.aliases {
+                searchable.push('\n');
+                searchable.push_str(&alias.to_lowercase());
+            }
+            searchable.push('\n');
+            searchable.push_str(&entry.slug.to_lowercase());
+            for tag in &entry.tags {
+                searchable.push('\n');
+                searchable.push_str(&tag.to_lowercase());
+            }
+            output.push(searchable);
+        }
+        output
+    }
+
+    fn track_c2f_reference_checkbox_count(content: &str) -> usize {
+        let mut matches = 0;
+        for line in content.lines() {
+            let line = line.trim_start();
+            if line.starts_with("- [ ] ")
+                || line.starts_with("- [x] ")
+                || line.starts_with("- [X] ")
+            {
+                matches += 1;
+            }
+        }
+        matches
+    }
+
+    fn track_c2f_reference_preview(content: &str) -> String {
+        const LIMIT: usize = 120;
+        let mut result = String::new();
+        let mut characters = 0;
+        let mut pending_space = false;
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("# ") || trimmed.starts_with("Alias:") {
+                continue;
+            }
+            if !result.is_empty() {
+                pending_space = true;
+            }
+            for character in line.chars() {
+                if character.is_whitespace() {
+                    pending_space |= !result.is_empty();
+                    continue;
+                }
+                if pending_space {
+                    if characters == LIMIT {
+                        if result.ends_with(' ') {
+                            result.pop();
+                        }
+                        result.push('…');
+                        return result;
+                    }
+                    result.push(' ');
+                    characters += 1;
+                    pending_space = false;
+                }
+                if characters == LIMIT {
+                    result.push('…');
+                    return result;
+                }
+                result.push(character);
+                characters += 1;
+            }
+        }
+        result
+    }
+
+    fn track_c2f_reference_metadata(
+        notes: &[Note],
+        backlinks_enabled: bool,
+        task_lists_enabled: bool,
+    ) -> Vec<super::NoteRowMetadata> {
+        use std::collections::{HashMap, HashSet};
+
+        let mut sources_by_target: HashMap<&str, HashSet<&str>> = HashMap::new();
+        for source in notes {
+            for target in &source.links {
+                if source.slug != *target {
+                    sources_by_target
+                        .entry(target.as_str())
+                        .or_default()
+                        .insert(source.slug.as_str());
+                }
+            }
+        }
+        notes
+            .iter()
+            .enumerate()
+            .map(|(original_index, note)| {
+                let mut fields = vec![format!(
+                    "slug: {}",
+                    if note.slug.is_empty() {
+                        "unsaved"
+                    } else {
+                        &note.slug
+                    }
+                )];
+                if !note.tags.is_empty() {
+                    fields.push(format!("tags: {}", note.tags.join(", ")));
+                }
+                if backlinks_enabled && !note.slug.is_empty() {
+                    let count = sources_by_target
+                        .get(note.slug.as_str())
+                        .map_or(0, HashSet::len);
+                    fields.push(format!("{count} backlinks"));
+                }
+                if task_lists_enabled {
+                    let count = track_c2f_reference_checkbox_count(&note.content);
+                    if count != 0 {
+                        fields.push(format!("{count} checkboxes"));
+                    }
+                }
+                super::NoteRowMetadata {
+                    original_index,
+                    display_title: note.alias.as_deref().unwrap_or(&note.title).to_owned(),
+                    meta: fields.join(" · "),
+                    preview: track_c2f_reference_preview(&note.content),
+                }
+            })
+            .collect()
+    }
+
+    fn track_c2f_reference_indices(entries: &[Note], raw_search: &str) -> Vec<usize> {
+        let needle = raw_search.to_lowercase();
+        track_c2f_reference_search_index(entries)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, text)| {
+                (needle.is_empty() || text.contains(&needle)).then_some(index)
+            })
+            .collect()
+    }
+
+    fn track_c2f_prepare_state(
+        root: &std::path::Path,
+        raw_fixture: &[Note],
+        recipe: TrackC2FRecipe,
+        screen_height: f32,
+    ) -> TrackC2FState {
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, root);
+        app.note_settings.backlinks_enabled = true;
+        app.note_settings.task_lists_enabled = true;
+
+        let initial_input = track_c2f_input_values(raw_fixture, recipe);
+        let mut cache_guard = Some(crate::plugins::note::publish_note_cache_for_test(
+            initial_input,
+        ));
+        let (initial_revision, initial_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("the owned synthetic cache is healthy");
+        assert_eq!(initial_notes.len(), raw_fixture.len());
+
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        dialog.search = recipe.initial_query().to_owned();
+        for frame in 0..8 {
+            render_notes_frame_at(
+                &ctx,
+                &mut dialog,
+                &mut app,
+                1.0 + frame as f64 / 60.0,
+                960.0,
+                screen_height,
+            );
+        }
+        assert_eq!(dialog.entries, initial_notes);
+        assert_eq!(dialog.entries_revision, Some(initial_revision));
+        let wide_rect = dialog
+            .test_scroll_area_inner_rect
+            .expect("the settled Quick Notes ScrollArea has a real viewport");
+        let wide_geometry_width = dialog
+            .notes_geometry
+            .as_ref()
+            .expect("the initial geometry is settled")
+            .key
+            .viewport_width;
+        let initial_second_width_before = (recipe == TrackC2FRecipe::EarlyWideUnicode).then(|| {
+            dialog
+                .notes_geometry
+                .as_ref()
+                .and_then(|geometry| geometry.rows.get(1))
+                .expect("the wide-title fixture has a following row")
+                .width_before
+        });
+        let mut target_viewport = wide_rect.size();
+
+        if recipe == TrackC2FRecipe::Width960To300 {
+            let calibration_ctx = egui::Context::default();
+            let mut calibration_app = new_isolated_app(&calibration_ctx, root);
+            calibration_app.note_settings.clone_from(&app.note_settings);
+            let mut calibration_dialog = NotesDialog::default();
+            calibration_dialog.open();
+            for frame in 0..8 {
+                render_notes_frame_at(
+                    &calibration_ctx,
+                    &mut calibration_dialog,
+                    &mut calibration_app,
+                    1.0 + frame as f64 / 60.0,
+                    960.0,
+                    screen_height,
+                );
+            }
+            render_notes_frame_at(
+                &calibration_ctx,
+                &mut calibration_dialog,
+                &mut calibration_app,
+                2.0,
+                300.0,
+                screen_height,
+            );
+            let narrow_rect = calibration_dialog
+                .test_scroll_area_inner_rect
+                .expect("the separate calibration app rendered a narrow ScrollArea");
+            assert!(narrow_rect.width() + 0.5 < wide_rect.width());
+            let (calibrated_revision, calibrated_notes) =
+                crate::plugins::note::note_cache_snapshot_with_version()
+                    .expect("the calibration app did not poison the synthetic note cache");
+            assert_eq!(calibrated_revision, initial_revision);
+            assert_eq!(calibrated_notes, initial_notes);
+            assert_eq!(crate::plugins::note::note_version(), initial_revision);
+            target_viewport = narrow_rect.size();
+            drop(calibration_dialog);
+            drop(calibration_app);
+        }
+
+        let dialog_revision_before = dialog.entries_revision.unwrap_or_default();
+        let expected_input = track_c2f_expected_values(&initial_notes, recipe);
+        let changed = expected_input != initial_notes;
+        let (expected_revision, expected_notes) = if changed {
+            drop(cache_guard.take());
+            cache_guard = Some(crate::plugins::note::publish_note_cache_for_test(
+                expected_input,
+            ));
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("the changed owned synthetic cache is healthy")
+        } else {
+            (initial_revision, initial_notes.clone())
+        };
+        let expected_backlinks = recipe != TrackC2FRecipe::MetadataSettingsOnly;
+        let initial_tasks = app.note_settings.task_lists_enabled;
+        let expected_index = track_c2f_reference_search_index(&expected_notes);
+        let expected_metadata =
+            track_c2f_reference_metadata(&expected_notes, expected_backlinks, initial_tasks);
+        let expected_indices =
+            track_c2f_reference_indices(&expected_notes, recipe.measured_query());
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let eager = eager_notes_geometry_for_projection(
+            &oracle_ctx,
+            &expected_notes,
+            &expected_indices,
+            target_viewport,
+            &style,
+            expected_backlinks,
+            initial_tasks,
+        );
+        let fixture_id = track_c2f_fixture_signature(
+            raw_fixture,
+            &initial_notes,
+            &expected_notes,
+            recipe,
+            recipe.screen_width(),
+            screen_height,
+        );
+        let current_revision_before = crate::plugins::note::note_version();
+        assert_eq!(current_revision_before, expected_revision);
+        let capacity_before = track_c2f_capacity_receipt(&dialog);
+
+        TrackC2FState {
+            app,
+            dialog,
+            ctx,
+            expected_notes,
+            expected_index,
+            expected_metadata,
+            expected_indices,
+            eager,
+            recipe,
+            screen_width: recipe.screen_width(),
+            screen_height,
+            wide_scroll_width: (recipe == TrackC2FRecipe::Width960To300)
+                .then_some(wide_rect.width()),
+            wide_geometry_width: (recipe == TrackC2FRecipe::Width960To300)
+                .then_some(wide_geometry_width),
+            initial_second_width_before,
+            target_viewport,
+            fixture_id,
+            expected_revision,
+            current_revision_before,
+            dialog_revision_before,
+            initial_backlinks: true,
+            expected_backlinks,
+            initial_tasks,
+            initial_row_key_width_bits: wide_geometry_width,
+            initial_scroll_area_width_milli: (wide_rect.width() * 1_000.0).round() as u64,
+            capacity_before,
+            cache_guard,
+            observer: None,
+        }
+    }
+
+    fn track_c2f_run_owner(state: &mut TrackC2FState, frame: usize) -> egui::FullOutput {
+        match state.recipe {
+            TrackC2FRecipe::MetadataSettingsOnly => {
+                state.app.note_settings.backlinks_enabled = false;
+            }
+            TrackC2FRecipe::SearchSparse | TrackC2FRecipe::SearchCaseOnly => {
+                state.dialog.search = state.recipe.measured_query().to_owned();
+            }
+            TrackC2FRecipe::GeometryCold => {
+                drop(state.dialog.notes_geometry.take());
+            }
+            TrackC2FRecipe::RevisionFinalPreview
+            | TrackC2FRecipe::WarmRepeat
+            | TrackC2FRecipe::EarlyWideUnicode
+            | TrackC2FRecipe::Width960To300
+            | TrackC2FRecipe::AtlasReplacement => {}
+        }
+        run_track_c_notes_frame(
+            &state.ctx,
+            &mut state.dialog,
+            &mut state.app,
+            3.0 + frame as f64 / 60.0,
+            state.screen_width,
+            state.screen_height,
+        )
+    }
+
+    fn track_c2f_viewport_receipt(dialog: &NotesDialog) -> ([i64; 8], Vec<usize>, u64) {
+        let inner = dialog
+            .test_scroll_area_inner_rect
+            .expect("the measured ScrollArea has a viewport");
+        let content = dialog.test_scroll_area_content_size;
+        let offset = dialog.test_scroll_area_offset;
+        let key_width = dialog
+            .notes_geometry
+            .as_ref()
+            .expect("the measured geometry is installed")
+            .key
+            .viewport_width;
+        let milli = |value: f32| (value * 1_000.0).round() as i64;
+        let receipt = [
+            key_width as i64,
+            milli(inner.width()),
+            milli(inner.height()),
+            milli(content.x),
+            milli(content.y),
+            milli(offset.x),
+            milli(offset.y),
+            dialog.last_rendered_indices.len() as i64,
+        ];
+        let visible = dialog.last_rendered_indices.clone();
+        let mut signature = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_5155_4943_4B46,
+            "track-c2f-visible-viewport",
+            visible.len(),
+        );
+        for value in receipt {
+            signature.number(value as u64);
+        }
+        for (index, rects) in &dialog.last_rendered_row_rects {
+            signature.number(*index as u64);
+            for actual_rect in [
+                Some(rects.outer),
+                Some(rects.header),
+                Some(rects.title),
+                Some(rects.meta),
+                rects.preview,
+                Some(rects.separator),
+            ] {
+                match actual_rect {
+                    Some(rect) => {
+                        signature.number(1);
+                        for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                            signature.number(value.to_bits() as u64);
+                        }
+                    }
+                    None => signature.number(0),
+                }
+            }
+        }
+        (receipt, visible, signature.finish())
+    }
+
+    fn track_c2f_assert_actual_widgets_match_eager(
+        dialog: &NotesDialog,
+        eager: &EagerNotesGeometry,
+        expected_indices: &[usize],
+    ) {
+        assert!(
+            (dialog.test_scroll_area_content_size.x - eager.content_size.x).abs() <= 1.0
+                && (dialog.test_scroll_area_content_size.y - eager.content_size.y).abs() <= 1.0,
+            "the actual Quick Notes ScrollArea exposes the eager full extent: actual={:?} eager={:?}",
+            dialog.test_scroll_area_content_size,
+            eager.content_size
+        );
+
+        let viewport = dialog
+            .test_scroll_area_inner_rect
+            .expect("the production Quick Notes ScrollArea rendered");
+        let eager_rows = &eager.rows;
+        let content_origin = dialog.test_content_origin;
+        let first_visible = eager_rows.partition_point(|row| {
+            content_origin.y + row.separator.bottom() - eager.content_origin.y <= viewport.min.y
+        });
+        let after_visible = eager_rows.partition_point(|row| {
+            content_origin.y + row.outer.top() - eager.content_origin.y <= viewport.max.y
+        });
+        let first = first_visible.saturating_sub(2);
+        let after = after_visible.saturating_add(2).min(eager_rows.len());
+        let expected_visible_indices = eager_rows[first..after]
+            .iter()
+            .map(|row| row.original_index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            dialog.last_rendered_indices, expected_visible_indices,
+            "the actual dialog renders exactly the eager visible range plus two overscan rows"
+        );
+        assert!(!dialog.last_rendered_indices.is_empty());
+        assert!(
+            dialog.last_rendered_indices.len() < 64,
+            "the actual dialog builds a bounded set of visible rows"
+        );
+        assert!(
+            dialog
+                .last_rendered_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+        assert_eq!(
+            dialog.last_rendered_row_rects.len(),
+            expected_visible_indices.len(),
+            "each built row has a captured set of actual widget rectangles"
+        );
+
+        for (actual_index, actual) in &dialog.last_rendered_row_rects {
+            let position = expected_indices
+                .binary_search(actual_index)
+                .expect("rendered original index remains in the full projection");
+            let expected = &eager.rows[position];
+            assert_eq!(*actual_index, expected.original_index);
+            let offset = content_origin - eager.content_origin;
+            let compare_rect = |label: &str, actual: egui::Rect, expected: egui::Rect| {
+                let expected = expected.translate(offset);
+                assert!(
+                    actual.min.distance(expected.min) <= 1.0
+                        && actual.max.distance(expected.max) <= 1.0,
+                    "rendered note {actual_index} {label} differs from eager widget: actual={actual:?} eager={expected:?}"
+                );
+            };
+            compare_rect("outer", actual.outer, expected.outer);
+            compare_rect("header", actual.header, expected.header);
+            compare_rect("title", actual.title, expected.title);
+            compare_rect("meta", actual.meta, expected.meta);
+            compare_rect("separator", actual.separator, expected.separator);
+            match (actual.preview, expected.preview) {
+                (Some(actual), Some(expected)) => compare_rect("preview", actual, expected),
+                (None, None) => {}
+                mismatch => panic!("rendered note {actual_index} preview differs: {mismatch:?}"),
+            }
+        }
+    }
+
+    fn track_c2f_validate_sample(
+        state: &mut TrackC2FState,
+        elapsed_ns: u64,
+        observation: super::c2f_observation::Snapshot,
+        note_snapshot_metric: crate::performance::MetricSnapshot,
+    ) -> TrackC2FSample {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let dialog = &state.dialog;
+        assert!(dialog.open);
+        assert_eq!(dialog.entries, state.expected_notes);
+        assert_eq!(dialog.entries_revision, Some(state.expected_revision));
+        assert_eq!(dialog.index, state.expected_index);
+        assert_eq!(dialog.row_metadata, state.expected_metadata);
+        assert_eq!(dialog.filtered_indices, state.expected_indices);
+        assert_eq!(
+            track_c2f_reference_indices(&dialog.entries, &dialog.search),
+            state.expected_indices
+        );
+        assert_eq!(dialog.search, state.recipe.measured_query());
+        assert_eq!(
+            state.app.note_settings.backlinks_enabled,
+            state.expected_backlinks
+        );
+        assert_eq!(
+            state.app.note_settings.task_lists_enabled,
+            state.initial_tasks
+        );
+        assert_eq!(state.app.note_settings.task_lists_enabled, true);
+        let (global_revision, global_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("the current synthetic note cache remains healthy");
+        assert_eq!(global_revision, state.expected_revision);
+        assert_eq!(global_notes, state.expected_notes);
+        assert_eq!(
+            crate::plugins::note::note_version(),
+            state.expected_revision
+        );
+        assert_eq!(
+            dialog.entries_revision,
+            Some(crate::plugins::note::note_version())
+        );
+        assert_eq!(
+            dialog.row_metadata,
+            track_c2f_reference_metadata(
+                &state.expected_notes,
+                state.expected_backlinks,
+                state.initial_tasks,
+            )
+        );
+        let geometry = dialog
+            .notes_geometry
+            .as_ref()
+            .expect("geometry is installed");
+        assert_quick_notes_geometry_matches_eager(dialog, &state.eager, &state.expected_indices);
+        track_c2f_assert_actual_widgets_match_eager(dialog, &state.eager, &state.expected_indices);
+        assert_eq!(geometry.rows.len(), state.expected_indices.len());
+        assert_eq!(geometry.row_by_identity.len(), geometry.rows.len());
+        for (index, row) in geometry.rows.iter().enumerate() {
+            assert_eq!(row.original_index, state.expected_indices[index]);
+            assert_eq!(geometry.row_by_identity.get(&row.identity), Some(&index));
+        }
+        assert_eq!(
+            observation.painted_rows,
+            dialog.last_rendered_indices.len() as u64
+        );
+        if state.recipe == TrackC2FRecipe::Width960To300 {
+            let actual_width = dialog.test_scroll_area_inner_rect.unwrap().width();
+            assert!(actual_width + 0.5 < state.wide_scroll_width.unwrap());
+            assert_ne!(
+                geometry.key.viewport_width,
+                state.wide_geometry_width.unwrap()
+            );
+            assert!((actual_width - state.target_viewport.x).abs() < 1.0);
+        } else if matches!(
+            state.recipe,
+            TrackC2FRecipe::WarmRepeat
+                | TrackC2FRecipe::SearchCaseOnly
+                | TrackC2FRecipe::GeometryCold
+        ) {
+            assert_eq!(
+                geometry.key.viewport_width,
+                state.initial_row_key_width_bits
+            );
+            assert_eq!(
+                (dialog.test_scroll_area_inner_rect.unwrap().width() * 1_000.0).round() as u64,
+                state.initial_scroll_area_width_milli
+            );
+        }
+        if state.recipe == TrackC2FRecipe::EarlyWideUnicode {
+            let first = &geometry.rows[0];
+            let later = geometry
+                .rows
+                .get(1)
+                .expect("the fixture contains later rows");
+            assert!(first.width_after > first.width_before);
+            assert!(later.width_before > state.initial_second_width_before.unwrap() + 0.5);
+            assert!(state.expected_notes[0].title.starts_with("東京🙂W"));
+        }
+        if state.recipe == TrackC2FRecipe::RevisionFinalPreview {
+            assert!(
+                state
+                    .expected_notes
+                    .last()
+                    .unwrap()
+                    .content
+                    .starts_with("C2F changed final preview 東京 🙂\r\n")
+            );
+        }
+
+        let capacity_after = track_c2f_capacity_receipt(dialog);
+        let (viewport_receipt, visible_indices, viewport_id) = track_c2f_viewport_receipt(dialog);
+        let width_receipt = [
+            u64::from(state.initial_row_key_width_bits),
+            u64::from(geometry.key.viewport_width),
+            state.initial_scroll_area_width_milli,
+            (dialog.test_scroll_area_inner_rect.unwrap().width() * 1_000.0).round() as u64,
+        ];
+        if state.recipe == TrackC2FRecipe::Width960To300 {
+            assert_ne!(width_receipt[0], width_receipt[1]);
+            assert!(width_receipt[3] < width_receipt[2]);
+        }
+        let canonical_id = track_c2f_note_identity(&state.expected_notes);
+        let index_id = track_c2f_index_identity(&state.expected_index);
+        let metadata_id = track_c2f_metadata_identity(&state.expected_metadata);
+        let projection_id = track_c2f_projection_identity(&state.expected_indices);
+        let geometry_id = track_c2f_geometry_identity(geometry);
+        let mut complete = StableSignature::new(
+            0x435F_5155_4943_4B46,
+            "track-c2f-complete-owner-state",
+            dialog.entries.len(),
+        );
+        for value in [
+            canonical_id,
+            index_id,
+            metadata_id,
+            projection_id,
+            geometry_id,
+            viewport_id,
+            state.app.note_settings.backlinks_enabled as u64,
+            state.app.note_settings.task_lists_enabled as u64,
+            state.dialog.edit_idx.map_or(u64::MAX, |index| index as u64),
+            state.dialog.refresh_requested as u64,
+            state.dialog.refresh_retry.is_some() as u64,
+            state.dialog.menu_owner.is_some() as u64,
+        ] {
+            complete.number(value);
+        }
+        track_c2f_signature_string(&mut complete, &dialog.search);
+        let settings_receipt = [
+            state.initial_backlinks as u64,
+            state.expected_backlinks as u64,
+            state.initial_tasks as u64,
+            state.initial_tasks as u64,
+        ];
+        let revision_receipt = [
+            state.dialog_revision_before,
+            state.current_revision_before,
+            crate::plugins::note::note_version(),
+            dialog.entries_revision.unwrap_or_default(),
+            dialog.entries_generation,
+            dialog.metadata_generation,
+            dialog.projection_generation,
+            geometry.key.entries_generation,
+            geometry.key.metadata_generation,
+            geometry.key.projection_generation,
+        ];
+        let complete_output_id = complete.finish();
+        let geometry_overlap = [
+            observation.geometry_overlap_old_rows_vec_bytes,
+            observation.geometry_overlap_old_identity_bytes,
+            observation.geometry_overlap_old_map_key_bytes,
+            observation.geometry_overlap_old_entries,
+            observation.geometry_overlap_new_rows_vec_bytes,
+            observation.geometry_overlap_new_identity_bytes,
+            observation.geometry_overlap_new_map_key_bytes,
+            observation.geometry_overlap_new_entries,
+        ];
+        assert_eq!(
+            observation.geometry_rebuilds,
+            match state.recipe {
+                TrackC2FRecipe::RevisionFinalPreview
+                | TrackC2FRecipe::MetadataSettingsOnly
+                | TrackC2FRecipe::SearchSparse
+                | TrackC2FRecipe::GeometryCold
+                | TrackC2FRecipe::EarlyWideUnicode
+                | TrackC2FRecipe::Width960To300
+                | TrackC2FRecipe::AtlasReplacement => 1,
+                _ => 0,
+            }
+        );
+        assert_eq!(
+            observation.snapshot_successes,
+            u64::from(matches!(
+                state.recipe,
+                TrackC2FRecipe::RevisionFinalPreview | TrackC2FRecipe::EarlyWideUnicode
+            ))
+        );
+        assert_eq!(
+            observation.index_build_calls,
+            u64::from(matches!(
+                state.recipe,
+                TrackC2FRecipe::RevisionFinalPreview | TrackC2FRecipe::EarlyWideUnicode
+            ))
+        );
+        assert_eq!(
+            observation.metadata_build_calls,
+            u64::from(matches!(
+                state.recipe,
+                TrackC2FRecipe::RevisionFinalPreview
+                    | TrackC2FRecipe::EarlyWideUnicode
+                    | TrackC2FRecipe::MetadataSettingsOnly
+            )),
+            "unexpected metadata build work for recipe {}",
+            state.recipe.token()
+        );
+        if matches!(
+            state.recipe,
+            TrackC2FRecipe::WarmRepeat | TrackC2FRecipe::SearchCaseOnly
+        ) {
+            assert_eq!(observation.snapshot_calls, 0);
+            assert_eq!(observation.snapshot_successes, 0);
+            assert_eq!(observation.snapshot_errors, 0);
+            assert_eq!(observation.snapshot_entries, 0);
+            assert_eq!(observation.index_build_calls, 0);
+            assert_eq!(observation.index_entries, 0);
+            assert_eq!(observation.index_utf8_bytes, 0);
+            assert_eq!(
+                observation.metadata_build_calls,
+                0,
+                "warm recipe {} must not rebuild metadata",
+                state.recipe.token()
+            );
+            assert_eq!(observation.metadata_entries, 0);
+            assert_eq!(observation.metadata_output_utf8_bytes, 0);
+            assert_eq!(observation.metadata_backlink_queries, 0);
+            assert_eq!(observation.metadata_checkbox_lines, 0);
+            assert_eq!(observation.metadata_preview_builds, 0);
+            assert_eq!(observation.projection_entries_scanned, 0);
+            assert_eq!(observation.projection_indices_materialized, 0);
+            assert_eq!(observation.geometry_rebuilds, 0);
+            assert_eq!(observation.geometry_rows_measured, 0);
+            assert_eq!(observation.geometry_identity_entries, 0);
+        }
+
+        TrackC2FSample {
+            elapsed_ns,
+            snapshot_estimated_clone_bytes: note_snapshot_metric.work_units,
+            snapshot_metric_lock_wait_ns: note_snapshot_metric.lock_wait_nanos_total,
+            snapshot_metric_hold_ns: note_snapshot_metric.elapsed_nanos_total,
+            fixture_id: state.fixture_id,
+            canonical_id,
+            index_id,
+            metadata_id,
+            projection_id,
+            projection_selected_indices: state.expected_indices.len() as u64,
+            geometry_id,
+            viewport_id,
+            complete_output_id,
+            revision_receipt,
+            settings_receipt,
+            viewport_receipt,
+            width_receipt,
+            visible_indices,
+            capacity_before: state.capacity_before.clone(),
+            capacity_after,
+            geometry_overlap,
+            observation,
+        }
+    }
+
+    fn track_c2f_sample(state: &mut TrackC2FState, frame: usize) -> TrackC2FSample {
+        crate::performance::reset_metrics();
+        state.observer = Some(super::c2f_observation::Scope::begin());
+        let started = std::time::Instant::now();
+        let output = track_c2f_run_owner(state, frame);
+        drop(output);
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let observation = state
+            .observer
+            .take()
+            .expect("observer spans exactly one owner sample")
+            .finish();
+        let note_snapshot_metric = crate::performance::snapshot_metrics()
+            [crate::performance::Metric::NoteSnapshot as usize];
+        track_c2f_validate_sample(state, elapsed_ns, observation, note_snapshot_metric)
+    }
+
+    fn track_c2f_validate_benchmark_args(
+        telemetry_enabled: bool,
+        profile: &str,
+        mode: Option<&str>,
+        source: &str,
+    ) -> Result<crate::performance::track_c_workloads::BenchmarkMode, &'static str> {
+        use crate::performance::track_c_workloads::BenchmarkMode;
+
+        if !telemetry_enabled {
+            return Err("telemetry must be enabled");
+        }
+        if profile != "fast-dev" {
+            return Err("profile must be fast-dev");
+        }
+        let mode = mode.ok_or("benchmark mode must be explicit")?;
+        let mode = BenchmarkMode::parse(mode).map_err(|_| "invalid benchmark mode")?;
+        if source == "UNCOMMITTED_SOURCE" {
+            if mode != BenchmarkMode::Small {
+                return Err("uncommitted source is eligible only for Small mode");
+            }
+        } else if source.len() != 40 || !source.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("source must be a 40-character hexadecimal commit");
+        }
+        Ok(mode)
+    }
+
+    fn track_c2f_emit(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        recipe: TrackC2FRecipe,
+        count: usize,
+        height: f32,
+        samples: &[TrackC2FSample],
+    ) {
+        assert_eq!(
+            samples.len(),
+            crate::performance::track_c_workloads::MEASURED_SAMPLES
+        );
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        for token in [&source, &profile, recipe.token()] {
+            assert!(!token.chars().any(char::is_whitespace));
+        }
+        let times = |select: fn(&TrackC2FSample) -> u64| {
+            samples
+                .iter()
+                .map(select)
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let work = |select: fn(&TrackC2FSample) -> u64| {
+            samples
+                .iter()
+                .map(|sample| select(sample))
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ids = |select: fn(&TrackC2FSample) -> u64| {
+            samples
+                .iter()
+                .map(|sample| format!("{:016x}", select(sample)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let tuple_u64 = |select: fn(&TrackC2FSample) -> Vec<u64>| {
+            samples
+                .iter()
+                .map(|sample| {
+                    select(sample)
+                        .iter()
+                        .map(u64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(":")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let tuple_i64 = |select: fn(&TrackC2FSample) -> Vec<i64>| {
+            samples
+                .iter()
+                .map(|sample| {
+                    select(sample)
+                        .iter()
+                        .map(i64::to_string)
+                        .collect::<Vec<_>>()
+                        .join(":")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let residual_ns = samples
+            .iter()
+            .map(|sample| {
+                sample.elapsed_ns.saturating_sub(
+                    sample.observation.phase_ns[0]
+                        .saturating_add(sample.observation.phase_ns[1])
+                        .saturating_add(sample.observation.phase_ns[2])
+                        .saturating_add(sample.observation.phase_ns[3])
+                        .saturating_add(sample.observation.phase_ns[4]),
+                )
+            })
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        let settings = if recipe == TrackC2FRecipe::MetadataSettingsOnly {
+            "backlinks_off_tasks_on"
+        } else {
+            "backlinks_on_tasks_on"
+        };
+        let viewport = match (recipe, height as u32) {
+            (TrackC2FRecipe::Width960To300, _) => "screen_300x640_transition_960x640",
+            (_, 180) => "screen_960x180",
+            _ => "screen_960x640",
+        };
+        let visible_indices = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .visible_indices
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let fields = vec![
+            "schema=1".to_owned(),
+            "stage=quick_notes_refresh_characterization".to_owned(),
+            "owner=egui_Context_run+NotesDialog::ui".to_owned(),
+            format!("source={source}"),
+            format!("profile={profile}"),
+            format!("mode={mode}"),
+            format!("telemetry_enabled={}", crate::performance::enabled()),
+            "observer_enabled=true".to_owned(),
+            "warmups=5".to_owned(),
+            "samples=20".to_owned(),
+            "exclusions=0".to_owned(),
+            "fixture=quick_notes_note_fixture".to_owned(),
+            format!("recipe={}", recipe.token()),
+            format!("count={count}"),
+            format!(
+                "screen_width_milli={}",
+                (recipe.screen_width() * 1_000.0) as u64
+            ),
+            format!("screen_height_milli={}", (height * 1_000.0) as u64),
+            format!("viewport={viewport}"),
+            format!("settings={settings}"),
+            format!("fixture_signature={:016x}", samples[0].fixture_id),
+            format!("fixture_ids=[{}]", ids(|s| s.fixture_id)),
+            format!("canonical_ids=[{}]", ids(|s| s.canonical_id)),
+            format!("search_index_ids=[{}]", ids(|s| s.index_id)),
+            format!("metadata_ids=[{}]", ids(|s| s.metadata_id)),
+            format!("projection_ids=[{}]", ids(|s| s.projection_id)),
+            format!("geometry_ids=[{}]", ids(|s| s.geometry_id)),
+            format!("viewport_ids=[{}]", ids(|s| s.viewport_id)),
+            format!("complete_output_ids=[{}]", ids(|s| s.complete_output_id)),
+            format!("elapsed_ns=[{}]", times(|s| s.elapsed_ns)),
+            format!("snapshot_ns=[{}]", times(|s| s.observation.phase_ns[0])),
+            format!("search_index_ns=[{}]", times(|s| s.observation.phase_ns[1])),
+            format!(
+                "metadata_build_ns=[{}]",
+                times(|s| s.observation.phase_ns[2])
+            ),
+            format!(
+                "filtered_projection_ns=[{}]",
+                times(|s| s.observation.phase_ns[3])
+            ),
+            format!(
+                "ensure_geometry_ns=[{}]",
+                times(|s| s.observation.phase_ns[4])
+            ),
+            format!(
+                "measure_geometry_ns=[{}]",
+                times(|s| s.observation.phase_ns[5])
+            ),
+            format!("owner_residual_ns=[{residual_ns}]"),
+            format!(
+                "snapshot_calls=[{}]",
+                work(|s| s.observation.snapshot_calls)
+            ),
+            format!(
+                "snapshot_successes=[{}]",
+                work(|s| s.observation.snapshot_successes)
+            ),
+            format!(
+                "snapshot_errors=[{}]",
+                work(|s| s.observation.snapshot_errors)
+            ),
+            format!(
+                "snapshot_note_entries=[{}]",
+                work(|s| s.observation.snapshot_entries)
+            ),
+            format!(
+                "snapshot_estimated_clone_bytes=[{}]",
+                work(|s| s.snapshot_estimated_clone_bytes)
+            ),
+            format!(
+                "snapshot_metric_lock_wait_ns=[{}]",
+                work(|s| s.snapshot_metric_lock_wait_ns)
+            ),
+            format!(
+                "snapshot_metric_hold_ns=[{}]",
+                work(|s| s.snapshot_metric_hold_ns)
+            ),
+            format!(
+                "search_index_build_calls=[{}]",
+                work(|s| s.observation.index_build_calls)
+            ),
+            format!(
+                "search_index_entries=[{}]",
+                work(|s| s.observation.index_entries)
+            ),
+            format!(
+                "search_index_utf8_bytes=[{}]",
+                work(|s| s.observation.index_utf8_bytes)
+            ),
+            format!(
+                "metadata_build_calls=[{}]",
+                work(|s| s.observation.metadata_build_calls)
+            ),
+            format!(
+                "metadata_entries=[{}]",
+                work(|s| s.observation.metadata_entries)
+            ),
+            format!(
+                "metadata_output_utf8_bytes=[{}]",
+                work(|s| s.observation.metadata_output_utf8_bytes)
+            ),
+            format!(
+                "metadata_backlink_queries=[{}]",
+                work(|s| s.observation.metadata_backlink_queries)
+            ),
+            format!(
+                "metadata_checkbox_lines_visited=[{}]",
+                work(|s| s.observation.metadata_checkbox_lines)
+            ),
+            format!(
+                "metadata_preview_builds=[{}]",
+                work(|s| s.observation.metadata_preview_builds)
+            ),
+            format!(
+                "projection_calls=[{}]",
+                work(|s| s.observation.projection_calls)
+            ),
+            format!(
+                "projection_entries_scanned=[{}]",
+                work(|s| s.observation.projection_entries_scanned)
+            ),
+            format!(
+                "projection_indices_materialized=[{}]",
+                work(|s| s.observation.projection_indices_materialized)
+            ),
+            format!(
+                "projection_selected_indices=[{}]",
+                work(|s| s.projection_selected_indices)
+            ),
+            format!(
+                "geometry_ensure_calls=[{}]",
+                work(|s| s.observation.geometry_ensure_calls)
+            ),
+            format!(
+                "geometry_rebuilds=[{}]",
+                work(|s| s.observation.geometry_rebuilds)
+            ),
+            format!(
+                "geometry_rows_measured=[{}]",
+                work(|s| s.observation.geometry_rows_measured)
+            ),
+            format!(
+                "geometry_identity_entries=[{}]",
+                work(|s| s.observation.geometry_identity_entries)
+            ),
+            format!("painted_rows=[{}]", work(|s| s.observation.painted_rows)),
+            format!(
+                "revision_receipts=[{}]",
+                tuple_u64(|s| s.revision_receipt.to_vec())
+            ),
+            format!(
+                "settings_receipts=[{}]",
+                tuple_u64(|s| s.settings_receipt.to_vec())
+            ),
+            format!(
+                "viewport_receipts=[{}]",
+                tuple_i64(|s| s.viewport_receipt.to_vec())
+            ),
+            format!(
+                "width_receipts=[{}]",
+                tuple_u64(|s| s.width_receipt.to_vec())
+            ),
+            format!("visible_original_indices=[{visible_indices}]"),
+            format!(
+                "capacity_before=[{}]",
+                tuple_u64(|s| s.capacity_before.0.to_vec())
+            ),
+            format!(
+                "capacity_after=[{}]",
+                tuple_u64(|s| s.capacity_after.0.to_vec())
+            ),
+            format!(
+                "geometry_overlap=[{}]",
+                tuple_u64(|s| s.geometry_overlap.to_vec())
+            ),
+        ];
+        assert!(
+            fields
+                .iter()
+                .all(|field| !field.chars().any(char::is_whitespace))
+        );
+        eprintln!("TRACK_C2F_NOTES_RESULT {}", fields.join(" "));
+    }
+
+    #[test]
+    fn track_c2f_oracle_quick_notes_recipe_contract() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, note_fixture};
+
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let workspace = TrackCWorkspace::new();
+        assert_eq!(
+            track_c2f_validate_benchmark_args(
+                true,
+                "fast-dev",
+                Some("small"),
+                "UNCOMMITTED_SOURCE",
+            ),
+            Ok(crate::performance::track_c_workloads::BenchmarkMode::Small)
+        );
+        assert_eq!(
+            track_c2f_validate_benchmark_args(
+                true,
+                "fast-dev",
+                Some("full"),
+                "0123456789abcdef0123456789abcdef01234567",
+            ),
+            Ok(crate::performance::track_c_workloads::BenchmarkMode::Full)
+        );
+        assert!(
+            track_c2f_validate_benchmark_args(
+                false,
+                "fast-dev",
+                Some("small"),
+                "UNCOMMITTED_SOURCE",
+            )
+            .is_err()
+        );
+        assert!(
+            track_c2f_validate_benchmark_args(
+                true,
+                "unspecified-profile",
+                Some("small"),
+                "UNCOMMITTED_SOURCE",
+            )
+            .is_err()
+        );
+        assert!(
+            track_c2f_validate_benchmark_args(true, "fast-dev", None, "UNCOMMITTED_SOURCE",)
+                .is_err()
+        );
+        assert!(
+            track_c2f_validate_benchmark_args(
+                true,
+                "fast-dev",
+                Some("large"),
+                "UNCOMMITTED_SOURCE",
+            )
+            .is_err()
+        );
+        assert!(track_c2f_validate_benchmark_args(
+            true,
+            "fast-dev",
+            Some("full"),
+            "UNCOMMITTED_SOURCE",
+        )
+        .is_err());
+        assert!(
+            track_c2f_validate_benchmark_args(true, "fast-dev", Some("small"), "not-a-commit",)
+                .is_err()
+        );
+
+        let mut text = format!("# Ignored\r\nAlias: Hidden\r\n{}   tail", "界".repeat(120));
+        text.push_str("\r\n- [ ] final task");
+        let preview = track_c2f_reference_preview(&text);
+        assert_eq!(preview, format!("{}…", "界".repeat(120)));
+        assert_eq!(preview.chars().count(), 121);
+        assert!(text.contains("\r\n"));
+        assert_eq!(track_c2f_reference_checkbox_count(&text), 1);
+        assert_eq!(short_preview(&text), preview);
+        let preview_note = note("Preview boundary", "preview-boundary", &text);
+        let preview_metadata = super::build_row_metadata(&[preview_note], false, true).unwrap();
+        assert_eq!(preview_metadata[0].preview, preview);
+
+        let space_boundary = format!(
+            "# Ignored\r\nAlias: Hidden\r\n{} z\r\n- [ ] task",
+            "界".repeat(119)
+        );
+        let expected_space_boundary = format!("{} …", "界".repeat(119));
+        assert_eq!(
+            track_c2f_reference_preview(&space_boundary),
+            expected_space_boundary
+        );
+        assert_eq!(short_preview(&space_boundary), expected_space_boundary);
+        assert_eq!(expected_space_boundary.chars().nth(119), Some(' '));
+        assert_eq!(expected_space_boundary.chars().nth(120), Some('…'));
+
+        for recipe in [
+            TrackC2FRecipe::RevisionFinalPreview,
+            TrackC2FRecipe::MetadataSettingsOnly,
+            TrackC2FRecipe::SearchSparse,
+            TrackC2FRecipe::SearchCaseOnly,
+            TrackC2FRecipe::GeometryCold,
+            TrackC2FRecipe::WarmRepeat,
+            TrackC2FRecipe::EarlyWideUnicode,
+            TrackC2FRecipe::Width960To300,
+        ] {
+            let fixture = note_fixture(100);
+            for height in if matches!(
+                recipe,
+                TrackC2FRecipe::GeometryCold | TrackC2FRecipe::WarmRepeat
+            ) {
+                vec![640.0, 180.0]
+            } else {
+                vec![640.0]
+            } {
+                let mut state =
+                    track_c2f_prepare_state(workspace.root(), &fixture.values, recipe, height);
+                let sample = track_c2f_sample(&mut state, 0);
+                assert_ne!(sample.complete_output_id, 0);
+                assert_eq!(sample.fixture_id, state.fixture_id);
+                drop(state);
+            }
+        }
+
+        let fixture = note_fixture(100);
+        let mut atlas_state = track_c2f_prepare_state(
+            workspace.root(),
+            &fixture.values,
+            TrackC2FRecipe::AtlasReplacement,
+            640.0,
+        );
+        let old_atlas = atlas_state
+            .dialog
+            .notes_geometry
+            .as_ref()
+            .expect("setup settled the old geometry")
+            .font_atlas
+            .clone();
+        let old_geometry_key = atlas_state
+            .dialog
+            .notes_geometry
+            .as_ref()
+            .expect("setup settled the old geometry")
+            .key
+            .clone();
+        let mut definitions = egui::FontDefinitions::default();
+        let duplicate = definitions
+            .font_data
+            .get("Ubuntu-Light")
+            .expect("egui default font definitions contain Ubuntu-Light")
+            .clone();
+        definitions
+            .font_data
+            .insert("C2F-unused-atlas-rejection".to_owned(), duplicate);
+        atlas_state.ctx.set_fonts(definitions.clone());
+
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_fonts(definitions);
+        let style = atlas_state.ctx.style().as_ref().clone();
+        atlas_state.eager = eager_notes_geometry_for_projection(
+            &oracle_ctx,
+            &atlas_state.expected_notes,
+            &atlas_state.expected_indices,
+            atlas_state.target_viewport,
+            &style,
+            atlas_state.expected_backlinks,
+            atlas_state.initial_tasks,
+        );
+        let atlas_sample = track_c2f_sample(&mut atlas_state, 99);
+        assert_eq!(atlas_sample.observation.geometry_rebuilds, 1);
+        assert_eq!(atlas_sample.observation.geometry_rows_measured, 100);
+        let replacement_atlas = atlas_state.ctx.fonts(|fonts| fonts.texture_atlas());
+        assert!(
+            !std::sync::Arc::ptr_eq(&old_atlas, &replacement_atlas),
+            "egui applies the queued font definitions during the measured frame"
+        );
+        let installed_geometry = atlas_state
+            .dialog
+            .notes_geometry
+            .as_ref()
+            .expect("geometry was rebuilt against the replacement atlas");
+        assert_eq!(installed_geometry.key, old_geometry_key);
+        assert!(std::sync::Arc::ptr_eq(
+            &installed_geometry.font_atlas,
+            &replacement_atlas
+        ));
+        drop(atlas_state);
+    }
+
+    #[test]
+    #[ignore = "opt-in C2-F Quick Notes characterization; owned synthetic fixtures only"]
+    fn track_c2f_benchmark_quick_notes_characterization() {
+        use crate::performance::track_c_workloads::{BenchmarkMode, TrackCWorkspace, note_fixture};
+
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        let mode_argument = std::env::var("ML_TRACK_C_BENCH_MODE").ok();
+        let mode = track_c2f_validate_benchmark_args(
+            crate::performance::enabled(),
+            &profile,
+            mode_argument.as_deref(),
+            &source,
+        )
+        .unwrap_or_else(|error| panic!("invalid C2-F benchmark invocation: {error}"));
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let workspace = TrackCWorkspace::new();
+        for count in mode.note_sizes() {
+            let fixture = note_fixture(*count);
+            for recipe in [
+                TrackC2FRecipe::RevisionFinalPreview,
+                TrackC2FRecipe::MetadataSettingsOnly,
+                TrackC2FRecipe::SearchSparse,
+                TrackC2FRecipe::SearchCaseOnly,
+                TrackC2FRecipe::GeometryCold,
+                TrackC2FRecipe::WarmRepeat,
+                TrackC2FRecipe::EarlyWideUnicode,
+                TrackC2FRecipe::Width960To300,
+            ] {
+                let heights: &[f32] = if matches!(
+                    recipe,
+                    TrackC2FRecipe::GeometryCold | TrackC2FRecipe::WarmRepeat
+                ) {
+                    &[640.0, 180.0]
+                } else {
+                    &[640.0]
+                };
+                for height in heights {
+                    let mut warmups =
+                        Vec::with_capacity(crate::performance::track_c_workloads::WARMUPS);
+                    for frame in 0..crate::performance::track_c_workloads::WARMUPS {
+                        let mut state = track_c2f_prepare_state(
+                            workspace.root(),
+                            &fixture.values,
+                            recipe,
+                            *height,
+                        );
+                        let sample = track_c2f_sample(&mut state, frame);
+                        warmups.push(sample);
+                        drop(state);
+                    }
+                    assert_eq!(
+                        warmups.len(),
+                        crate::performance::track_c_workloads::WARMUPS
+                    );
+                    let mut samples =
+                        Vec::with_capacity(crate::performance::track_c_workloads::MEASURED_SAMPLES);
+                    for frame in 0..crate::performance::track_c_workloads::MEASURED_SAMPLES {
+                        let mut state = track_c2f_prepare_state(
+                            workspace.root(),
+                            &fixture.values,
+                            recipe,
+                            *height,
+                        );
+                        let sample = track_c2f_sample(&mut state, frame);
+                        samples.push(sample);
+                        drop(state);
+                    }
+                    track_c2f_emit(mode, recipe, *count, *height, &samples);
+                }
+            }
+        }
+        drop(workspace);
     }
 }
