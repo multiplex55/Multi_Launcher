@@ -1005,6 +1005,83 @@ struct NoteDerivedView {
     todo_label_map: HashMap<String, String>,
 }
 
+#[cfg(test)]
+mod alias_warning_test_observer {
+    use std::cell::RefCell;
+    use std::time::Instant;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct Stats {
+        pub lookup_calls: u64,
+        pub formatting_calls: u64,
+        pub formatting_nanos: u64,
+        pub output_bytes: u64,
+    }
+
+    thread_local! {
+        static STATS: RefCell<Option<Stats>> = RefCell::new(None);
+    }
+
+    pub(super) struct Scope;
+
+    impl Scope {
+        pub(super) fn begin() -> Self {
+            STATS.with(|stats| {
+                let mut stats = stats.borrow_mut();
+                assert!(stats.is_none(), "alias warning observer is already active");
+                *stats = Some(Stats::default());
+            });
+            Self
+        }
+
+        pub(super) fn snapshot(&self) -> Stats {
+            STATS.with(|stats| {
+                stats
+                    .borrow()
+                    .as_ref()
+                    .copied()
+                    .expect("alias warning observer remains active")
+            })
+        }
+    }
+
+    pub(super) fn lookup_called() {
+        STATS.with(|stats| {
+            if let Some(stats) = stats.borrow_mut().as_mut() {
+                stats.lookup_calls = stats.lookup_calls.saturating_add(1);
+            }
+        });
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            STATS.with(|stats| {
+                stats.borrow_mut().take();
+            });
+        }
+    }
+
+    pub(super) fn formatting_started() -> Option<Instant> {
+        STATS.with(|stats| stats.borrow().is_some().then(Instant::now))
+    }
+
+    pub(super) fn formatting_finished(started: Option<Instant>, output_bytes: usize) {
+        let Some(started) = started else {
+            return;
+        };
+        let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        STATS.with(|stats| {
+            if let Some(stats) = stats.borrow_mut().as_mut() {
+                stats.formatting_calls = stats.formatting_calls.saturating_add(1);
+                stats.formatting_nanos = stats.formatting_nanos.saturating_add(elapsed);
+                stats.output_bytes = stats
+                    .output_bytes
+                    .saturating_add(output_bytes.min(u64::MAX as usize) as u64);
+            }
+        });
+    }
+}
+
 impl NotePanel {
     fn section_key_for_slug(note_slug: &str, section: &MarkdownSection) -> String {
         format!(
@@ -1379,6 +1456,8 @@ impl NotePanel {
     }
 
     fn alias_collision_warning(&self, alias: &str) -> Option<String> {
+        #[cfg(test)]
+        alias_warning_test_observer::lookup_called();
         let alias = alias.trim();
         if alias.is_empty() {
             return None;
@@ -1395,13 +1474,19 @@ impl NotePanel {
         if conflicting_slugs.is_empty() {
             return None;
         }
-        let labels = note_cache_snapshot()
+        let notes = note_cache_snapshot();
+        #[cfg(test)]
+        let formatting_started = alias_warning_test_observer::formatting_started();
+        let labels = notes
             .into_iter()
             .filter(|note| conflicting_slugs.contains(note.slug.as_str()))
             .map(|note| note_display_with_secondary(&note))
             .collect::<Vec<_>>()
             .join(", ");
-        Some(format!("Alias \"{alias}\" is already used by {labels}"))
+        let message = format!("Alias \"{alias}\" is already used by {labels}");
+        #[cfg(test)]
+        alias_warning_test_observer::formatting_finished(formatting_started, message.len());
+        Some(message)
     }
 
     fn warn_alias_collision(&self, app: &mut LauncherApp, alias: &str) {
@@ -13282,5 +13367,511 @@ body"
         panel.discard_changes();
         assert!(!panel.open);
         assert!(!panel.discard_unsaved_prompt);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC1DAliasCase {
+        Unique,
+        Duplicate,
+        Ambiguous,
+    }
+
+    impl TrackC1DAliasCase {
+        const ALL: [Self; 3] = [Self::Unique, Self::Duplicate, Self::Ambiguous];
+
+        fn label(self) -> &'static str {
+            match self {
+                Self::Unique => "unique",
+                Self::Duplicate => "duplicate",
+                Self::Ambiguous => "ambiguous",
+            }
+        }
+
+        fn query(self) -> &'static str {
+            match self {
+                Self::Unique => "  C1D unique alias 2026  ",
+                Self::Duplicate => "  C1D COLLISION alias 2026  ",
+                Self::Ambiguous => "  C1D shared ALIAS 2026  ",
+            }
+        }
+    }
+
+    const TRACK_C1D_CURRENT_SLUG: &str = "current-note-00000";
+
+    fn track_c1d_note(index: usize, title: String, slug: String, aliases: Vec<String>) -> Note {
+        Note {
+            alias: aliases.first().cloned(),
+            aliases,
+            title: title.clone(),
+            path: PathBuf::from(format!("notes/source-{index:05}.md")),
+            content: format!("# {title}\nSynthetic alias characterization source {index}.\n"),
+            tags: Vec::new(),
+            links: Vec::new(),
+            slug,
+            entity_refs: Vec::new(),
+        }
+    }
+
+    fn track_c1d_notes(count: usize, case: TrackC1DAliasCase) -> Vec<Note> {
+        assert!(count >= 3);
+        let mut notes = crate::performance::track_c_workloads::note_fixture(count).values;
+        let set_aliases = |note: &mut Note, primary: &str, secondary: &str| {
+            note.alias = Some(primary.to_string());
+            note.aliases = vec![primary.to_string(), secondary.to_string()];
+        };
+
+        notes[0].slug = TRACK_C1D_CURRENT_SLUG.into();
+        match case {
+            TrackC1DAliasCase::Unique => {
+                set_aliases(&mut notes[0], "Current primary", "C1D unique alias 2026");
+            }
+            TrackC1DAliasCase::Duplicate => {
+                set_aliases(&mut notes[0], "Current primary", "Current only");
+                notes[1].slug = "duplicate-target".into();
+                notes[2].slug = "duplicate-target".into();
+                set_aliases(
+                    &mut notes[1],
+                    "Primary duplicate first",
+                    "C1D Collision Alias 2026",
+                );
+                set_aliases(
+                    &mut notes[2],
+                    "Primary duplicate second",
+                    "C1D COLLISION ALIAS 2026",
+                );
+            }
+            TrackC1DAliasCase::Ambiguous => {
+                set_aliases(&mut notes[0], "Current primary", "Current only");
+                notes[1].slug = "ambiguous-target-a".into();
+                notes[2].slug = "ambiguous-target-b".into();
+                set_aliases(
+                    &mut notes[1],
+                    "Primary ambiguous A",
+                    "C1D Shared Alias 2026",
+                );
+                set_aliases(
+                    &mut notes[2],
+                    "Primary ambiguous B",
+                    "C1D shared alias 2026",
+                );
+            }
+        }
+
+        notes
+    }
+
+    fn track_c1d_alias_map(notes: &[Note]) -> HashMap<String, Vec<String>> {
+        let mut aliases = HashMap::<String, Vec<String>>::new();
+        for note in notes {
+            for alias in &note.aliases {
+                let slugs = aliases.entry(alias.to_lowercase()).or_default();
+                if !slugs.contains(&note.slug) {
+                    slugs.push(note.slug.clone());
+                }
+            }
+        }
+        aliases
+    }
+
+    fn track_c1d_eager_warning(alias: &str, excluded_slug: &str, notes: &[Note]) -> Option<String> {
+        let alias = alias.trim();
+        if alias.is_empty() {
+            return None;
+        }
+        let alias_map = track_c1d_alias_map(notes);
+        let slugs = alias_map.get(&alias.to_lowercase())?;
+        let conflicting_slugs = slugs
+            .iter()
+            .map(String::as_str)
+            .filter(|slug| *slug != excluded_slug)
+            .collect::<HashSet<_>>();
+        if conflicting_slugs.is_empty() {
+            return None;
+        }
+
+        let labels = notes
+            .iter()
+            .filter(|note| conflicting_slugs.contains(note.slug.as_str()))
+            .map(|note| {
+                if let Some(primary) = note
+                    .alias
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    format!("{primary} ({} · {})", note.title, note.slug)
+                } else {
+                    format!("{} ({})", note.title, note.slug)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("Alias \"{alias}\" is already used by {labels}"))
+    }
+
+    fn track_c1d_output_signature(output: Option<&str>) -> u64 {
+        let mut signature = crate::performance::workloads::StableSignature::new(
+            0,
+            "track-c1d-alias-warning-output",
+            1,
+        );
+        match output {
+            Some(output) => {
+                signature.number(1);
+                signature.bytes(output.as_bytes());
+            }
+            None => signature.number(0),
+        }
+        signature.finish()
+    }
+
+    fn track_c1d_numeric_array(values: &[u64]) -> String {
+        values
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn track_c1d_fixture_signature(notes: &[Note], case: TrackC1DAliasCase) -> u64 {
+        let mut signature = crate::performance::workloads::StableSignature::new(
+            0,
+            "track-c1d-alias-warning-fixture",
+            notes.len(),
+        );
+        signature.bytes(case.label().as_bytes());
+        signature.bytes(case.query().as_bytes());
+        signature.number(crate::performance::track_c_workloads::note_fixture_identity(notes));
+        signature.finish()
+    }
+
+    fn track_c1d_alias_payload(alias_map: &HashMap<String, Vec<String>>) -> (u64, u64, u64) {
+        use std::mem::size_of;
+
+        let slug_entries = alias_map.values().map(Vec::len).sum::<usize>();
+        let selected_bytes = alias_map.iter().fold(0usize, |total, (alias, slugs)| {
+            total
+                .saturating_add(size_of::<String>())
+                .saturating_add(alias.len())
+                .saturating_add(size_of::<Vec<String>>())
+                .saturating_add(
+                    slugs
+                        .iter()
+                        .map(|slug| size_of::<String>().saturating_add(slug.len()))
+                        .fold(0usize, usize::saturating_add),
+                )
+        });
+        (
+            alias_map.len() as u64,
+            slug_entries as u64,
+            selected_bytes as u64,
+        )
+    }
+
+    fn track_c1d_note_snapshot_metric() -> crate::performance::MetricSnapshot {
+        crate::performance::snapshot_metrics()
+            .into_iter()
+            .find(|sample| sample.metric == crate::performance::Metric::NoteSnapshot)
+            .expect("the fixed metric collector contains NoteSnapshot")
+    }
+
+    #[test]
+    fn alias_collision_warning_matches_frozen_reference_for_semantic_edges() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let _notes_env_guard = NOTES_ENV_LOCK.lock().expect("notes environment lock");
+        let context = egui::Context::default();
+        let _app = track_c1a_make_inert_app(&context, &workspace);
+        let raw_notes = vec![
+            track_c1d_note(
+                0,
+                "Current Café".into(),
+                TRACK_C1D_CURRENT_SLUG.into(),
+                vec![
+                    "Current primary".into(),
+                    "Self only".into(),
+                    "Éclair, 東京".into(),
+                    "Alias + punctuation!".into(),
+                ],
+            ),
+            track_c1d_note(
+                1,
+                "Duplicate first".into(),
+                "duplicate-source".into(),
+                vec!["Duplicate primary one".into(), "éclair, 東京".into()],
+            ),
+            track_c1d_note(
+                2,
+                "Duplicate second".into(),
+                "duplicate-source".into(),
+                vec!["Duplicate primary two".into(), "ÉCLAIR, 東京".into()],
+            ),
+            track_c1d_note(
+                3,
+                "Ambiguous A".into(),
+                "ambiguous-a".into(),
+                vec!["Ambiguous primary A".into(), "Éclair, 東京".into()],
+            ),
+            track_c1d_note(
+                4,
+                "Ambiguous B".into(),
+                "ambiguous-b".into(),
+                vec!["Ambiguous primary B".into(), "éclair, 東京".into()],
+            ),
+        ];
+        let _cache_guard = crate::plugins::note::publish_note_cache_for_test(raw_notes);
+        let canonical = crate::plugins::note::note_cache_snapshot();
+        let current = canonical
+            .iter()
+            .find(|note| note.slug == TRACK_C1D_CURRENT_SLUG)
+            .expect("synthetic cache includes current note")
+            .clone();
+        let mut panel = NotePanel::from_note(current);
+
+        let blank_observer = alias_warning_test_observer::Scope::begin();
+        let blank_alias_observer = crate::plugins::note::NoteAliasSnapshotTestObserver::begin();
+        assert_eq!(panel.alias_collision_warning("  \t "), None);
+        assert_eq!(blank_observer.snapshot().lookup_calls, 1);
+        assert_eq!(blank_alias_observer.snapshot().calls, 0);
+        drop(blank_alias_observer);
+        drop(blank_observer);
+
+        let self_observer = alias_warning_test_observer::Scope::begin();
+        let self_alias_observer = crate::plugins::note::NoteAliasSnapshotTestObserver::begin();
+        assert_eq!(panel.alias_collision_warning(" Self only "), None);
+        let self_stats = self_observer.snapshot();
+        assert_eq!(self_stats.lookup_calls, 1);
+        assert_eq!(self_stats.formatting_calls, 0);
+        let self_alias_stats = self_alias_observer.snapshot();
+        assert_eq!(self_alias_stats.calls, 1);
+        assert_eq!(self_alias_stats.failures, 0);
+        drop(self_alias_observer);
+        drop(self_observer);
+
+        let unicode_query = "  ÉCLAIR, 東京  ";
+        let unicode_output = panel.alias_collision_warning(unicode_query);
+        assert_eq!(
+            unicode_output,
+            track_c1d_eager_warning(unicode_query, TRACK_C1D_CURRENT_SLUG, &canonical)
+        );
+        assert_eq!(
+            unicode_output.as_deref(),
+            Some(
+                "Alias \"ÉCLAIR, 東京\" is already used by Duplicate primary one (Duplicate first · duplicate-source), Duplicate primary two (Duplicate second · duplicate-source), Ambiguous primary A (Ambiguous A · ambiguous-a), Ambiguous primary B (Ambiguous B · ambiguous-b)"
+            )
+        );
+
+        let punctuation_query = " Alias + punctuation! ";
+        assert_eq!(panel.alias_collision_warning(punctuation_query), None);
+        panel.note.slug = "unsaved-current-slug".into();
+        let self_slug_is_now_conflicting = panel.alias_collision_warning("Self only");
+        assert_eq!(
+            self_slug_is_now_conflicting,
+            track_c1d_eager_warning("Self only", "unsaved-current-slug", &canonical)
+        );
+        assert_eq!(
+            self_slug_is_now_conflicting.as_deref(),
+            Some(
+                "Alias \"Self only\" is already used by Current primary (Current Café · current-note-00000)"
+            )
+        );
+    }
+
+    #[test]
+    #[ignore = "fixed-sample C1-D owner characterization; run through the Track C controlled runner"]
+    fn track_c_c1d_benchmark_alias_collision_warning_costs() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, MEASURED_SAMPLES, TrackCWorkspace, WARMUPS,
+        };
+        use crate::performance::{Metric, reset_metrics, snapshot_metrics};
+        use crate::plugins::note::NoteAliasSnapshotTestObserver;
+        use std::time::Instant;
+
+        assert!(
+            crate::performance::enabled(),
+            "the alias warning owner run requires MULTI_LAUNCHER_PERF=1"
+        );
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        for (name, value) in [("source", source.as_str()), ("profile", profile.as_str())] {
+            assert!(
+                !value.bytes().any(|byte| byte.is_ascii_whitespace()),
+                "Track C {name} metadata must be a single token"
+            );
+        }
+
+        for count in mode.note_sizes() {
+            for case in TrackC1DAliasCase::ALL {
+                let mut owner_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut lookup_calls = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut format_calls = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut format_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut alias_map_snapshot_calls = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut alias_map_snapshot_key_entries = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut alias_map_snapshot_slug_entries = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut alias_map_selected_clone_bytes = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut note_snapshot_calls = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut note_snapshot_entries = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut note_snapshot_estimated_clone_bytes = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut note_snapshot_lock_wait_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut note_snapshot_lock_hold_ns = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut warning_output_bytes = Vec::with_capacity(MEASURED_SAMPLES);
+                let mut fixture_signature = None;
+                let mut warning_signature = None;
+
+                for sample_index in 0..(WARMUPS + MEASURED_SAMPLES) {
+                    // Preserve the established order: owned CWD first, note
+                    // environment lock second, inert app before cache publish.
+                    let workspace = TrackCWorkspace::new();
+                    let _notes_env_guard = NOTES_ENV_LOCK.lock().expect("notes environment lock");
+                    let context = egui::Context::default();
+                    let _app = track_c1a_make_inert_app(&context, &workspace);
+                    let raw_notes = track_c1d_notes(*count, case);
+                    let _cache_guard = crate::plugins::note::publish_note_cache_for_test(raw_notes);
+                    let (revision, canonical) =
+                        crate::plugins::note::note_cache_snapshot_with_version()
+                            .expect("controlled alias fixture snapshot is healthy");
+                    assert_eq!(canonical.len(), *count);
+                    let current = canonical
+                        .iter()
+                        .find(|note| note.slug == TRACK_C1D_CURRENT_SLUG)
+                        .expect("controlled alias fixture has a current note")
+                        .clone();
+                    let panel = NotePanel::from_note(current);
+                    let expected =
+                        track_c1d_eager_warning(case.query(), &panel.note.slug, &canonical);
+                    match case {
+                        TrackC1DAliasCase::Unique => {
+                            assert!(expected.is_none(), "self-only alias is not a collision");
+                        }
+                        TrackC1DAliasCase::Duplicate | TrackC1DAliasCase::Ambiguous => {
+                            assert!(expected.is_some(), "collision fixture has other slugs");
+                        }
+                    }
+                    let signature = track_c1d_fixture_signature(&canonical, case);
+                    let output_id = track_c1d_output_signature(expected.as_deref());
+                    let expected_alias_map = track_c1d_alias_map(&canonical);
+                    let actual_alias_map = crate::plugins::note::note_alias_map_snapshot();
+                    assert_eq!(actual_alias_map, expected_alias_map);
+                    let (expected_key_entries, expected_slug_entries, selected_clone_bytes) =
+                        track_c1d_alias_payload(&expected_alias_map);
+                    assert!(expected_key_entries > 0);
+                    assert!(expected_slug_entries >= expected_key_entries);
+                    assert!(selected_clone_bytes > 0);
+                    assert_eq!(crate::plugins::note::note_version(), revision);
+                    assert_eq!(
+                        fixture_signature.get_or_insert(signature),
+                        &signature,
+                        "fresh owned workspaces preserve the same fixture identity"
+                    );
+                    assert_eq!(
+                        warning_signature.get_or_insert(output_id),
+                        &output_id,
+                        "the frozen full warning remains stable across samples"
+                    );
+
+                    reset_metrics();
+                    if sample_index < WARMUPS {
+                        let actual = panel.alias_collision_warning(case.query());
+                        assert_eq!(actual, expected, "warmup output matches full oracle");
+                        let metric = track_c1d_note_snapshot_metric();
+                        let expected_calls: u64 = if expected.is_some() { 1 } else { 0 };
+                        assert_eq!(metric.calls, expected_calls);
+                        continue;
+                    }
+
+                    let formatting_observer = alias_warning_test_observer::Scope::begin();
+                    let alias_snapshot_observer = NoteAliasSnapshotTestObserver::begin();
+                    let started = Instant::now();
+                    let actual = panel.alias_collision_warning(case.query());
+                    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                    let observer_stats = formatting_observer.snapshot();
+                    let alias_stats = alias_snapshot_observer.snapshot();
+                    drop(alias_snapshot_observer);
+                    drop(formatting_observer);
+
+                    // All full-output/oracle checks and telemetry collection
+                    // occur after the exact owner interval.
+                    assert_eq!(actual, expected, "measured output equals frozen warning");
+                    assert_eq!(crate::plugins::note::note_version(), revision);
+                    assert_eq!(observer_stats.lookup_calls, 1);
+                    assert_eq!(alias_stats.calls, 1);
+                    assert_eq!(alias_stats.failures, 0, "owned cache lock stays healthy");
+                    assert_eq!(alias_stats.key_entries, expected_key_entries);
+                    let expected_format_calls: u64 = if expected.is_some() { 1 } else { 0 };
+                    assert_eq!(observer_stats.formatting_calls, expected_format_calls);
+                    assert_eq!(
+                        observer_stats.output_bytes,
+                        expected.as_ref().map_or(0, |message| message.len() as u64)
+                    );
+
+                    let metrics = snapshot_metrics();
+                    let snapshot = metrics
+                        .iter()
+                        .find(|metric| metric.metric == Metric::NoteSnapshot)
+                        .expect("NoteSnapshot metric is present");
+                    let expected_snapshot_calls: u64 = if expected.is_some() { 1 } else { 0 };
+                    assert_eq!(snapshot.calls, expected_snapshot_calls);
+                    assert_eq!(snapshot.errors, 0);
+                    assert_eq!(snapshot.abandoned, 0);
+                    if expected_snapshot_calls == 0 {
+                        assert_eq!(snapshot.work_units, 0);
+                    } else {
+                        assert!(snapshot.work_units > 0);
+                    }
+
+                    owner_ns.push(elapsed);
+                    lookup_calls.push(observer_stats.lookup_calls);
+                    format_calls.push(observer_stats.formatting_calls);
+                    format_ns.push(observer_stats.formatting_nanos);
+                    alias_map_snapshot_calls.push(alias_stats.calls);
+                    alias_map_snapshot_key_entries.push(alias_stats.key_entries);
+                    alias_map_snapshot_slug_entries
+                        .push(expected_slug_entries.saturating_mul(alias_stats.calls));
+                    alias_map_selected_clone_bytes
+                        .push(selected_clone_bytes.saturating_mul(alias_stats.calls));
+                    note_snapshot_calls.push(snapshot.calls);
+                    note_snapshot_entries.push(snapshot.calls.saturating_mul(*count as u64));
+                    note_snapshot_estimated_clone_bytes.push(snapshot.work_units);
+                    note_snapshot_lock_wait_ns.push(snapshot.lock_wait_nanos_total);
+                    note_snapshot_lock_hold_ns.push(snapshot.elapsed_nanos_total);
+                    warning_output_bytes.push(observer_stats.output_bytes);
+                }
+
+                let fixture_signature = fixture_signature.expect("measured fixture signature");
+                let warning_signature = warning_signature.expect("measured warning signature");
+                let owner_ns = track_c1d_numeric_array(&owner_ns);
+                let lookup_calls = track_c1d_numeric_array(&lookup_calls);
+                let format_calls = track_c1d_numeric_array(&format_calls);
+                let format_ns = track_c1d_numeric_array(&format_ns);
+                let alias_map_snapshot_calls = track_c1d_numeric_array(&alias_map_snapshot_calls);
+                let alias_map_snapshot_key_entries =
+                    track_c1d_numeric_array(&alias_map_snapshot_key_entries);
+                let alias_map_snapshot_slug_entries =
+                    track_c1d_numeric_array(&alias_map_snapshot_slug_entries);
+                let alias_map_selected_clone_bytes =
+                    track_c1d_numeric_array(&alias_map_selected_clone_bytes);
+                let note_snapshot_calls = track_c1d_numeric_array(&note_snapshot_calls);
+                let note_snapshot_entries = track_c1d_numeric_array(&note_snapshot_entries);
+                let note_snapshot_estimated_clone_bytes =
+                    track_c1d_numeric_array(&note_snapshot_estimated_clone_bytes);
+                let note_snapshot_lock_wait_ns =
+                    track_c1d_numeric_array(&note_snapshot_lock_wait_ns);
+                let note_snapshot_lock_hold_ns =
+                    track_c1d_numeric_array(&note_snapshot_lock_hold_ns);
+                let warning_output_bytes = track_c1d_numeric_array(&warning_output_bytes);
+                eprintln!(
+                    "C1D_ALIAS_RESULT schema=1 stage=alias_collision_characterization owner=NotePanel_alias_collision_warning source={source} profile={profile} mode={} telemetry_enabled=true observer_enabled=true fixture=synthetic_alias_collision fixture_signature={fixture_signature:016x} warning_signature={warning_signature:016x} case={} count={count} warmups={WARMUPS} samples={MEASURED_SAMPLES} exclusions=0 owner_scope=lookup_and_message_only invocation_scope=accepted_Add_or_Rename_not_keystrokes estimate_scope=selected_logical_payload_not_allocator_or_RSS snapshot_hold_scope=existing_PERF1_estimate_plus_clone legacy_error_scope=empty_snapshot_defaults_not_coherence_proof owner_ns=[{owner_ns}] lookup_calls=[{lookup_calls}] format_calls=[{format_calls}] format_ns=[{format_ns}] alias_map_snapshot_calls=[{alias_map_snapshot_calls}] alias_map_snapshot_key_entries=[{alias_map_snapshot_key_entries}] alias_map_snapshot_slug_entries=[{alias_map_snapshot_slug_entries}] alias_map_selected_clone_bytes=[{alias_map_selected_clone_bytes}] note_snapshot_calls=[{note_snapshot_calls}] note_snapshot_entries=[{note_snapshot_entries}] note_snapshot_estimated_clone_bytes=[{note_snapshot_estimated_clone_bytes}] note_snapshot_lock_wait_ns=[{note_snapshot_lock_wait_ns}] note_snapshot_lock_hold_ns=[{note_snapshot_lock_hold_ns}] warning_output_bytes=[{warning_output_bytes}]",
+                    match mode {
+                        BenchmarkMode::Small => "small",
+                        BenchmarkMode::Full => "full",
+                    },
+                    case.label(),
+                );
+            }
+        }
     }
 }

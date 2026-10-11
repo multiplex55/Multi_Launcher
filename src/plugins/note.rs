@@ -1243,7 +1243,71 @@ fn estimated_note_clone_bytes(note: &Note) -> usize {
 
 /// Return the cached lowercased alias -> note slug map without hitting disk.
 pub fn note_alias_map_snapshot() -> HashMap<String, Vec<String>> {
-    CACHE.lock().map(|c| c.aliases.clone()).unwrap_or_default()
+    let snapshot = CACHE.lock().map(|cache| cache.aliases.clone());
+    #[cfg(test)]
+    record_note_alias_snapshot_for_test(snapshot.as_ref().ok().map(|aliases| aliases.len()));
+    snapshot.unwrap_or_default()
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NoteAliasSnapshotTestStats {
+    pub calls: u64,
+    pub key_entries: u64,
+    pub failures: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static NOTE_ALIAS_SNAPSHOT_TEST_STATS: std::cell::RefCell<Option<NoteAliasSnapshotTestStats>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct NoteAliasSnapshotTestObserver;
+
+#[cfg(test)]
+impl NoteAliasSnapshotTestObserver {
+    pub(crate) fn begin() -> Self {
+        NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "alias snapshot observer is already active");
+            *slot = Some(NoteAliasSnapshotTestStats::default());
+        });
+        Self
+    }
+
+    pub(crate) fn snapshot(&self) -> NoteAliasSnapshotTestStats {
+        NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .copied()
+                .expect("alias snapshot observer remains active")
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoteAliasSnapshotTestObserver {
+    fn drop(&mut self) {
+        NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_note_alias_snapshot_for_test(key_entries: Option<usize>) {
+    NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+        if let Some(stats) = slot.borrow_mut().as_mut() {
+            stats.calls = stats.calls.saturating_add(1);
+            if let Some(key_entries) = key_entries {
+                stats.key_entries = stats.key_entries.saturating_add(key_entries as u64);
+            } else {
+                stats.failures = stats.failures.saturating_add(1);
+            }
+        }
+    });
 }
 
 /// Return lightweight note link menu targets from the in-memory cache without hitting disk.
