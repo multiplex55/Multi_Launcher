@@ -525,3 +525,27 @@ empty-provider Omni command fallback is asserted separately from zero catalog
 overlap; real first-frame full Actions/eager viewport proof PASS. Binary3 tests
 PASS and normal production library compiled. Small/Full measurements still pending,
 source/protocol fixture commit next;19/29closed.
+
+
+C3-A closes PASS at exact clean measured source
+`0fbd2f0327badf899e2bdd662616ac6d9d1228d5`;20/29closed, nextC3-B.
+Twelve distinct ordinary tests PASS; four serial Small/Full owner executions PASS,
+160unique retained owner samples (catalogue supplemental elapsed duplicates its
+original), independent source/method/identity/timing/privacy/lifecycle CLEAR.
+Full10k catalogue G0 p50/p95/max860.8644/922.7792/956.3962→
+863.8380/958.9180/1103.8792ms; all3 medians,2p95s,1max adverse, retained.
+Separate readycatalog10k731.0757/773.2051/793.3050ms; nested pending-consumption
+CPU completion554.0840/584.6513/593.9332ms. Never add series or claim process/native
+latency. All80 retained component samples prove current accepted+painted one-frame
+query, complete acknowledged catalog and exact ten final-handler releases.
+Source constructor search, global cache/OS warmth, posttimer eager validation and
+detached-native-thread limits disclosed. No startup optimization/native/allocator
+claim. All72 distinct timing distributions and full raw arrays retained in
+[Startup report](track_c_startup/results.md), [catalogue G1](track_c_startup_g1.json)
+and companion attribution/component/review JSON. Initial compiler and invalid
+fixture assertion failures retained/corrected; no production defect. LOCAL ONLY.
+
+C3-B separate gate next: planner/reviewer see no concrete removable operation;
+required scan/wait dominates catalogue and indexed-body copy phase is small.
+Measured-skip opinion is not yet its closure. C3-C prospective packet already
+exists under ignored target/performance/track-c/next-packets; use only afterB.
