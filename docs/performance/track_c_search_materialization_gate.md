@@ -49,3 +49,32 @@ Exact ordinary3 PASS, run f8fbe451-0ebb-4324-b631-cd0b19c57c75, fast-dev build1m
 Strict collector accepted all34 arrays and fixed schemas/hashes/payload/work; independent evidence review CLEAR:204 arrays/4080 values,138 scalars,12 nearest-rank timing triplets and all five C2-A shared non-timing arrays/complete and structural identities. Corrected assertion and literal heavyhash verified. Sanitized track_c_search_materialization_baseline_small.json retains REVIEWED_UNCOMMITTED_SMOKE status and UNCOMMITTED_SOURCE; it is not committed Full evidence. Eager sort-record type104bytes; earlyH/final0/totalH catalog copies, provider moves separate; no allocator/RSS/native/display measurement. No performance benefit claim, no runtime candidate authorization. Commit and exact-source Full baseline remain gated on evidence review.
 
 Independent reviewer cleared the baseline harness commit after ordinary3/3 and Small6records120samples. Exact-source Full baseline16records320samples remains mandatory before runtime candidate authorization. This is one C2-B checkpoint, still IN_PROGRESS;12/29closedLOCALONLY.
+
+Baseline harness committed locally as1bc5204e9107e3137830a7f9994f9484936a62c8; sourceunchangedafterreview, cleanpostcommit. Exact-source Full staged owner running (run195c3800-442e-41ff-8d52-ad345c124244) with16records320retainedsamples expected. Full results not yet accepted; no runtimecandidateauthorized.
+
+## Accepted committed Full baseline
+
+Source1bc5204e9107e3137830a7f9994f9484936a62c8; exact clean source during run. One staged owner PASS, run195c3800-442e-41ff-8d52-ad345c124244, fast-dev build.86s/test63.256s/execution63.274s. Sixteen records320retainedsamples; fivewarmups/twentyretained/zeroexclusions. Strict collector and independent evidence review CLEAR:544 arrays10880values,368scalars,32nearest-rank timing triplets; all15C2Asharednon-timingarrays/fixture and sixSmalloverlays unchanged. Sanitized track_c_search_materialization_baseline_full.json statusC2_B_EAGER_BASELINE_REVIEWED. Baseline accepted before separate runtime candidate handoff. Same three existing render-test warnings. No runtime candidate authorized.
+
+| Case | N/P | Owner p50/p95/max ms | Sort p50 ms |
+|---|---:|---:|---:|
+| sparse-exact-alias-tie | 100/1 | 0.1228/0.1416/0.1482 | 0.0006 |
+| dense-exact-empty-term | 100/1 | 0.0985/0.1299/0.1823 | 0.0124 |
+| dense-fuzzy-usage-weighted | 100/1 | 3.9416/4.5223/4.8793 | 0.0150 |
+| empty-query-browse | 100/1 | 0.0510/0.0715/0.1239 | 0.0000 |
+| sparse-exact-pending-provider | 100/1 | 0.1577/0.1935/0.2192 | 0.0007 |
+| sparse-exact-alias-tie | 1000/1 | 0.9820/1.2832/1.7191 | 0.0007 |
+| dense-exact-empty-term | 1000/1 | 0.5562/0.6162/0.6359 | 0.0252 |
+| dense-fuzzy-usage-weighted | 1000/1 | 39.3400/43.3123/53.4920 | 0.0284 |
+| empty-query-browse | 1000/1 | 0.3121/0.7223/0.7304 | 0.0000 |
+| sparse-exact-pending-provider | 1000/1 | 0.9648/1.2202/1.3895 | 0.0006 |
+| sparse-exact-alias-tie | 10000/1 | 9.5660/10.1932/10.2011 | 0.0012 |
+| dense-exact-empty-term | 10000/1 | 5.8547/6.5496/6.6072 | 0.1778 |
+| dense-fuzzy-usage-weighted | 10000/1 | 399.1597/408.5767/454.5630 | 0.1751 |
+| empty-query-browse | 10000/1 | 3.0195/3.8371/5.5074 | 0.0000 |
+| sparse-exact-pending-provider | 10000/1 | 9.3387/10.2716/11.8337 | 0.0012 |
+| plugin-heavy-dense | 1000/128 | 0.6982/0.9244/1.0155 | 0.0687 |
+
+All measured tails retained, including fuzzy1kmax53.4920ms, browse1kp95.7223ms and pending10kmax11.8337ms. Baseline characterization only, no speedup claim. Eager104-byte sort-record type, earlyH/final0/totalH copies; provider and empty-browse work separate. No allocation/RSS/native/display measurements. Both benchmark sessions terminal; do not poll99143 or83121.
+
+Full staged eager baseline accepted independently; baseline evidence commit next. Runtime candidate may be separately dispatched only after that local commit, against its exact HEAD and with the already defined source ownership/oracle/work/timing/keep-or-revert gates. C2-B remains IN_PROGRESS,12/29closedLOCALONLY.
