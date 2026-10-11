@@ -30,6 +30,9 @@ mod c2a_search_observer {
         pub sort_input_len: u64,
         pub sort_ns: u64,
         pub final_scored_entries_moved: u64,
+        pub final_local_action_clones: u64,
+        pub final_local_clone_logical_bytes: u64,
+        pub final_local_clone_strings: u64,
         pub empty_browse_command_cache_cloned: u64,
         pub empty_browse_catalog_materialized: u64,
         pub empty_browse_logical_bytes: u64,
@@ -69,11 +72,50 @@ mod c2a_search_observer {
                 self.outcome_state,
             ]
         }
+
+        pub(super) fn materialization_arrays(self) -> [u64; 31] {
+            [
+                self.local_catalog_visits,
+                self.local_filter_passes,
+                self.local_score_attempts,
+                self.local_hits,
+                self.local_action_clones,
+                self.local_clone_logical_bytes,
+                self.local_clone_strings,
+                self.provider_input_actions,
+                self.provider_filter_rejections,
+                self.provider_actions_retained_moved,
+                self.provider_projection_strings,
+                self.provider_projection_bytes,
+                self.command_fallback_actions_visited,
+                self.command_fallback_hits_cloned,
+                self.command_fallback_clone_logical_bytes,
+                self.command_fallback_clone_strings,
+                self.sort_input_len,
+                self.sort_ns,
+                self.final_scored_entries_moved,
+                self.final_local_action_clones,
+                self.empty_browse_command_cache_cloned,
+                self.empty_browse_catalog_materialized,
+                self.empty_browse_logical_bytes,
+                self.empty_browse_strings,
+                self.final_output_count,
+                self.outcome_state,
+                self.final_local_clone_logical_bytes,
+                self.final_local_clone_strings,
+                self.local_action_clones
+                    .saturating_add(self.final_local_action_clones),
+                self.local_clone_logical_bytes
+                    .saturating_add(self.final_local_clone_logical_bytes),
+                self.local_clone_strings
+                    .saturating_add(self.final_local_clone_strings),
+            ]
+        }
     }
 
     #[derive(Default)]
     struct Counters {
-        values: [Cell<u64>; 25],
+        values: [Cell<u64>; 28],
         empty_cache_payload_bytes: u64,
         empty_cache_payload_strings: u64,
     }
@@ -100,6 +142,9 @@ mod c2a_search_observer {
         SortInputLen,
         SortNanoseconds,
         FinalScoredEntriesMoved,
+        FinalLocalActionClones,
+        FinalLocalCloneLogicalBytes,
+        FinalLocalCloneStrings,
         EmptyBrowseCommandCacheCloned,
         EmptyBrowseCatalogMaterialized,
         EmptyBrowseLogicalBytes,
@@ -146,6 +191,10 @@ mod c2a_search_observer {
                 sort_input_len: v[Counter::SortInputLen as usize].get(),
                 sort_ns: v[Counter::SortNanoseconds as usize].get(),
                 final_scored_entries_moved: v[Counter::FinalScoredEntriesMoved as usize].get(),
+                final_local_action_clones: v[Counter::FinalLocalActionClones as usize].get(),
+                final_local_clone_logical_bytes: v[Counter::FinalLocalCloneLogicalBytes as usize]
+                    .get(),
+                final_local_clone_strings: v[Counter::FinalLocalCloneStrings as usize].get(),
                 empty_browse_command_cache_cloned: v
                     [Counter::EmptyBrowseCommandCacheCloned as usize]
                     .get(),
@@ -1250,6 +1299,9 @@ impl LauncherApp {
                 observer.set(c2a_search_observer::Metric::ProviderActionsRetainedMoved, 0);
                 observer.set(c2a_search_observer::Metric::SortInputLen, 0);
                 observer.set(c2a_search_observer::Metric::FinalScoredEntriesMoved, 0);
+                observer.set(c2a_search_observer::Metric::FinalLocalActionClones, 0);
+                observer.set(c2a_search_observer::Metric::FinalLocalCloneLogicalBytes, 0);
+                observer.set(c2a_search_observer::Metric::FinalLocalCloneStrings, 0);
                 observer.set(
                     c2a_search_observer::Metric::EmptyBrowseCommandCacheCloned,
                     self.command_cache.len() as u64,
@@ -1344,6 +1396,12 @@ impl LauncherApp {
                 c2a_search_observer::Metric::FinalScoredEntriesMoved,
                 materialized as u64,
             );
+            // Eager scoring already owns every hit Action. The final pass
+            // transfers those values into the result vector; it does not clone
+            // a catalog Action a second time.
+            observer.set(c2a_search_observer::Metric::FinalLocalActionClones, 0);
+            observer.set(c2a_search_observer::Metric::FinalLocalCloneLogicalBytes, 0);
+            observer.set(c2a_search_observer::Metric::FinalLocalCloneStrings, 0);
             observer.set(
                 c2a_search_observer::Metric::FinalOutputCount,
                 actions.len() as u64,
@@ -1508,6 +1566,37 @@ mod tests {
         }
     }
 
+    struct StaticSearchResultsPlugin {
+        name: &'static str,
+        results: Vec<Action>,
+        searched: Option<Arc<AtomicBool>>,
+    }
+
+    impl crate::plugin::Plugin for StaticSearchResultsPlugin {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            if let Some(searched) = &self.searched {
+                searched.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            self.results.clone()
+        }
+
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn description(&self) -> &str {
+            self.name
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+
+        fn always_search(&self) -> bool {
+            true
+        }
+    }
+
     fn g_search_plugin(name: &'static str, label: &str) -> StaticSearchPlugin {
         StaticSearchPlugin {
             name,
@@ -1567,6 +1656,7 @@ mod tests {
         scenario: TrackCSearchCase,
         query: String,
         plugin_snapshot: Option<crate::plugin::PluginSearchSnapshotResult>,
+        provider_search_was_called: Option<Arc<AtomicBool>>,
         expected: LauncherSearchOutcome,
         expected_local_hits: u64,
         fixture_signature: u64,
@@ -1575,6 +1665,7 @@ mod tests {
     struct TrackC2ASearchState {
         frozen: TrackCSearchState,
         observer: c2a_search_observer::Scope,
+        provider_action_ids: HashSet<String>,
         provider_input_actions: u64,
         provider_projection_strings: u64,
         provider_projection_bytes: u64,
@@ -1785,7 +1876,7 @@ mod tests {
         actions: &[Action],
         scenario: TrackCSearchCase,
     ) -> TrackC2ASearchState {
-        let frozen = track_c_prepare_search_state(root, actions, scenario);
+        let mut frozen = track_c_prepare_search_state(root, actions, scenario);
         let captured_provider = frozen
             .plugin_snapshot
             .as_ref()
@@ -1796,7 +1887,12 @@ mod tests {
             companion_expected, frozen.expected,
             "C2-A companion eager oracle agrees with the frozen C0 reference"
         );
+        frozen.expected = companion_expected;
         let provider_actions = &captured_provider.actions;
+        let provider_action_ids = provider_actions
+            .iter()
+            .map(|action| action.action.clone())
+            .collect();
         let provider_input_actions = provider_actions.len() as u64;
         let (provider_projection_strings, provider_projection_bytes) = provider_actions
             .iter()
@@ -1814,10 +1910,163 @@ mod tests {
         TrackC2ASearchState {
             frozen,
             observer,
+            provider_action_ids,
             provider_input_actions,
             provider_projection_strings,
             provider_projection_bytes,
         }
+    }
+
+    fn track_c2b_plugin_heavy_provider_actions() -> Vec<Action> {
+        (0..128)
+            .map(|index| {
+                let args = match index % 3 {
+                    0 => None,
+                    1 => Some(String::new()),
+                    _ => Some(format!("--provider-index {index:03}")),
+                };
+                Action {
+                    label: format!("Synthetic provider heavy result {index:03}"),
+                    desc: format!(
+                        "Captured provider payload row {index:03} for launcher query app"
+                    ),
+                    action: format!("track_c_heavy_provider:{index:03}"),
+                    args,
+                }
+            })
+            .collect()
+    }
+
+    fn track_c2b_prepare_plugin_heavy_state(
+        root: &std::path::Path,
+        actions: &[Action],
+    ) -> TrackC2ASearchState {
+        let provider_actions = track_c2b_plugin_heavy_provider_actions();
+        let provider_searched = Arc::new(AtomicBool::new(false));
+        let ctx = egui::Context::default();
+        let mut app = track_c_search_app_with_provider_results(
+            &ctx,
+            root,
+            actions.to_vec(),
+            provider_actions.clone(),
+            Some(Arc::clone(&provider_searched)),
+        );
+
+        // This case is intentionally independent of whatever aliases or
+        // command state a future app-constructor fixture may add.
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.command_cache.clear();
+        app.command_search_cache.clear();
+        app.usage.clear();
+        for index in [1, 7, 13] {
+            if let Some(action) = actions.get(index) {
+                app.usage.insert(action.action.clone(), 8);
+            }
+            if let Some(action) = provider_actions.get(index) {
+                app.usage.insert(action.action.clone(), 8);
+            }
+        }
+        app.fuzzy_weight = 0.25;
+        app.match_exact = true;
+        app.usage_weight = 0.25;
+
+        // LauncherApp construction may have performed an initial search. The
+        // measured owner must consume only the immutable snapshot captured
+        // below, never call the provider itself.
+        provider_searched.store(false, std::sync::atomic::Ordering::SeqCst);
+        let query = "app";
+        let captured = app
+            .plugins
+            .search_snapshot(
+                app.enabled_plugins.as_ref(),
+                app.enabled_capabilities.as_ref(),
+            )
+            .search(query);
+        assert_eq!(captured.actions, provider_actions);
+        assert!(provider_searched.load(std::sync::atomic::Ordering::SeqCst));
+        provider_searched.store(false, std::sync::atomic::Ordering::SeqCst);
+
+        let frozen_expected = track_c_eager_search_outcome(&app, query, &captured);
+        let companion_expected = track_c2a_eager_search_outcome(&app, query, &captured);
+        assert_eq!(
+            frozen_expected, companion_expected,
+            "plugin-heavy C2-B setup agrees with both unchanged eager references"
+        );
+        assert_eq!(
+            frozen_expected.actions.len(),
+            actions.len() + provider_actions.len()
+        );
+        let provider_action_ids = captured
+            .actions
+            .iter()
+            .map(|action| action.action.clone())
+            .collect::<HashSet<_>>();
+        let expected_local_hits = frozen_expected
+            .actions
+            .iter()
+            .filter(|action| !provider_action_ids.contains(&action.action))
+            .count() as u64;
+        let fixture_signature = track_c_search_fixture_signature(
+            &app,
+            query,
+            TrackCSearchCase::DenseExact,
+            &captured.actions,
+        );
+        let provider_input_actions = captured.actions.len() as u64;
+        let (provider_projection_strings, provider_projection_bytes) = captured
+            .actions
+            .iter()
+            .fold((0_u64, 0_u64), |(strings, bytes), action| {
+                let projected = CachedSearchEntry::from_action(action);
+                (
+                    strings.saturating_add(3),
+                    bytes
+                        .saturating_add(projected.label_lc.len() as u64)
+                        .saturating_add(projected.desc_lc.len() as u64)
+                        .saturating_add(projected.action_lc.len() as u64),
+                )
+            });
+        let observer = c2a_search_observer::Scope::new(&app.command_cache);
+        crate::performance::track_c::reset();
+        let frozen = TrackCSearchState {
+            app,
+            scenario: TrackCSearchCase::DenseExact,
+            query: query.to_string(),
+            plugin_snapshot: Some(captured),
+            provider_search_was_called: Some(provider_searched),
+            expected: frozen_expected,
+            expected_local_hits,
+            fixture_signature,
+        };
+        TrackC2ASearchState {
+            frozen,
+            observer,
+            provider_action_ids,
+            provider_input_actions,
+            provider_projection_strings,
+            provider_projection_bytes,
+        }
+    }
+
+    fn track_c2b_validate_search_state(
+        state: &mut TrackC2ASearchState,
+        actual: &LauncherSearchOutcome,
+        require_metrics: bool,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        let mut observation = track_c2a_validate_search_state(state, actual, require_metrics);
+        if let Some(provider_searched) = &state.frozen.provider_search_was_called {
+            assert!(
+                !provider_searched.load(std::sync::atomic::Ordering::SeqCst),
+                "the captured provider was not invoked from the shared search owner"
+            );
+        }
+        let receipt = state.observer.receipt();
+        observation.work_counters = receipt.materialization_arrays().to_vec();
+        assert_eq!(observation.work_counters.len(), 31);
+        observation
     }
 
     fn track_c2a_run_search_owner(state: &mut TrackC2ASearchState) -> LauncherSearchOutcome {
@@ -1851,7 +2100,7 @@ mod tests {
                 .expected
                 .actions
                 .iter()
-                .filter(|action| action.action != "track_c_provider:marker")
+                .filter(|action| !state.provider_action_ids.contains(&action.action))
                 .collect::<Vec<_>>()
         };
         let expected_local_bytes = expected_local_actions.iter().fold(0_u64, |sum, action| {
@@ -1864,7 +2113,7 @@ mod tests {
             .expected
             .actions
             .iter()
-            .filter(|action| action.action == "track_c_provider:marker")
+            .filter(|action| state.provider_action_ids.contains(&action.action))
             .count() as u64;
         let expected_empty_bytes = frozen.expected.actions.iter().fold(0_u64, |sum, action| {
             sum.saturating_add(c2a_search_observer::action_payload_bytes(action))
@@ -1912,6 +2161,9 @@ mod tests {
         );
         assert_eq!(receipt.local_clone_logical_bytes, expected_local_bytes);
         assert_eq!(receipt.local_clone_strings, expected_local_strings);
+        assert_eq!(receipt.final_local_action_clones, 0);
+        assert_eq!(receipt.final_local_clone_logical_bytes, 0);
+        assert_eq!(receipt.final_local_clone_strings, 0);
         assert_eq!(receipt.provider_input_actions, state.provider_input_actions);
         assert_eq!(receipt.provider_filter_rejections, 0);
         assert_eq!(
@@ -2087,6 +2339,105 @@ mod tests {
         );
     }
 
+    fn emit_track_c2b_samples(
+        case: &str,
+        count: usize,
+        provider_count: usize,
+        fixture_signature: u64,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.work_counters.len() == 31)
+        );
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_string());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_string());
+        for value in [&source, &profile, case] {
+            assert!(!value.bytes().any(|byte| byte.is_ascii_whitespace()));
+        }
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        let array = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| sample.work_counters[index].to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let complete_output_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.output_identity))
+            .collect::<Vec<_>>()
+            .join(",");
+        let structural_output_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.structural_signature))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        eprintln!(
+            "C2B_SEARCH_RESULT schema=1 stage=search_materialization materialization=eager owner=search_read_only_outcome_with_plugin_snapshot fixture=synthetic_action_catalog_captured_provider source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 provider_scope=captured_snapshot_no_provider_invocation materialization_scope=catalog_hit_copies_once_staged_provider_owned_moves_browse_separate empty_browse_scope=command_cache_and_catalog_actions_materialized_provider_input_discarded payload_scope=logical_utf8_and_string_values_not_allocator_or_rss outcome_scope=noresults_0_results_1_pending_2 case={} count={} provider_count={} rank_record_bytes={} fixture_signature={:016x} elapsed_ns=[{}] local_catalog_visits=[{}] local_filter_passes=[{}] local_score_attempts=[{}] local_hits=[{}] local_action_clones=[{}] local_clone_logical_bytes=[{}] local_clone_strings=[{}] provider_input_actions=[{}] provider_filter_rejections=[{}] provider_actions_retained_moved=[{}] provider_projection_strings=[{}] provider_projection_bytes=[{}] command_fallback_actions_visited=[{}] command_fallback_hits_cloned=[{}] command_fallback_clone_logical_bytes=[{}] command_fallback_clone_strings=[{}] sort_input_len=[{}] sort_ns=[{}] final_scored_entries_moved=[{}] final_local_action_clones=[{}] empty_browse_command_cache_cloned=[{}] empty_browse_catalog_materialized=[{}] empty_browse_logical_bytes=[{}] empty_browse_strings=[{}] final_output_count=[{}] outcome_state=[{}] final_local_clone_logical_bytes=[{}] final_local_clone_strings=[{}] hit_action_clone_total=[{}] hit_clone_logical_bytes_total=[{}] hit_clone_strings_total=[{}] complete_output_ids=[{}] structural_output_ids=[{}]",
+            source,
+            profile,
+            mode,
+            WARMUPS,
+            samples.len(),
+            case,
+            count,
+            provider_count,
+            std::mem::size_of::<(Action, f32)>(),
+            fixture_signature,
+            elapsed,
+            array(0),
+            array(1),
+            array(2),
+            array(3),
+            array(4),
+            array(5),
+            array(6),
+            array(7),
+            array(8),
+            array(9),
+            array(10),
+            array(11),
+            array(12),
+            array(13),
+            array(14),
+            array(15),
+            array(16),
+            array(17),
+            array(18),
+            array(19),
+            array(20),
+            array(21),
+            array(22),
+            array(23),
+            array(24),
+            array(25),
+            array(26),
+            array(27),
+            array(28),
+            array(29),
+            array(30),
+            complete_output_ids,
+            structural_output_ids,
+        );
+    }
+
     fn track_c_search_app(
         ctx: &egui::Context,
         root: &std::path::Path,
@@ -2105,6 +2456,49 @@ mod tests {
             name: "track_c_fixture_provider",
             result: provider_result,
             always: true,
+            searched,
+        }));
+        let mut app = LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            plugins,
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(HashSet::from(["track_c_fixture_provider".into()])),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.actions = Arc::new(actions);
+        app.update_action_cache();
+        app.match_exact = true;
+        app.usage_weight = 0.25;
+        app.usage.clear();
+        app
+    }
+
+    fn track_c_search_app_with_provider_results(
+        ctx: &egui::Context,
+        root: &std::path::Path,
+        actions: Vec<Action>,
+        provider_results: Vec<Action>,
+        searched: Option<Arc<AtomicBool>>,
+    ) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        let mut plugins = PluginManager::new_inert_for_test();
+        plugins.register(Box::new(StaticSearchResultsPlugin {
+            name: "track_c_fixture_provider",
+            results: provider_results,
             searched,
         }));
         let mut app = LauncherApp::new(
@@ -2352,14 +2746,14 @@ mod tests {
         actions: &[Action],
         scenario: TrackCSearchCase,
     ) -> TrackCSearchState {
-        let query = scenario.query();
-        let ctx = egui::Context::default();
         let provider_result = Action {
             label: "Track C marker provider result".into(),
             desc: "controlled provider marker".into(),
             action: "track_c_provider:marker".into(),
             args: Some(String::new()),
         };
+        let query = scenario.query();
+        let ctx = egui::Context::default();
         let mut app = track_c_search_app(&ctx, root, actions.to_vec(), provider_result, None);
         if matches!(
             scenario,
@@ -2424,10 +2818,15 @@ mod tests {
             captured.pending = true;
         }
         let expected = track_c_eager_search_outcome(&app, query, &captured);
+        let provider_action_ids = captured
+            .actions
+            .iter()
+            .map(|action| action.action.as_str())
+            .collect::<HashSet<_>>();
         let expected_local_hits = expected
             .actions
             .iter()
-            .filter(|action| action.action != "track_c_provider:marker")
+            .filter(|action| !provider_action_ids.contains(action.action.as_str()))
             .count() as u64;
         let fixture_signature =
             track_c_search_fixture_signature(&app, query, scenario, &captured.actions);
@@ -2437,6 +2836,7 @@ mod tests {
             scenario,
             query: query.to_string(),
             plugin_snapshot: Some(captured),
+            provider_search_was_called: None,
             expected,
             expected_local_hits,
             fixture_signature,
@@ -2959,6 +3359,118 @@ mod tests {
                 emit_track_c2a_samples(scenario, *count, fixture_signature, mode, &samples);
             }
         }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2b_oracle_plugin_heavy_search_matches_c2a_reference() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(1_000);
+        let mut state = track_c2b_prepare_plugin_heavy_state(workspace.root(), &fixture.values);
+        assert_eq!(state.provider_input_actions, 128);
+        assert_eq!(state.provider_projection_strings, 384);
+        assert_eq!(state.provider_projection_bytes, 14_976);
+        let provider_payload = state
+            .frozen
+            .plugin_snapshot
+            .as_ref()
+            .expect("provider snapshot is captured during setup")
+            .actions
+            .iter()
+            .fold((0_u64, 0_u64), |(bytes, strings), action| {
+                (
+                    bytes.saturating_add(c2a_search_observer::action_payload_bytes(action)),
+                    strings.saturating_add(c2a_search_observer::action_payload_strings(action)),
+                )
+            });
+        assert_eq!(provider_payload, (15_816, 469));
+        assert_eq!(state.frozen.expected.actions.len(), 1_128);
+        let signature = state.frozen.fixture_signature;
+        assert_eq!(signature, 0xd5a1_cd25_4a20_5e24);
+        let actual = track_c2a_run_search_owner(&mut state);
+        let observation = track_c2b_validate_search_state(&mut state, &actual, false);
+        assert_eq!(state.frozen.fixture_signature, signature);
+        assert_eq!(actual.actions.len(), 1_128);
+        assert_eq!(observation.work_counters.len(), 31);
+        assert_eq!(observation.work_counters[4], 1_000);
+        assert_eq!(observation.work_counters[7], 128);
+        assert_eq!(observation.work_counters[8], 0);
+        assert_eq!(observation.work_counters[9], 128);
+        assert_eq!(observation.work_counters[10], 384);
+        assert_eq!(observation.work_counters[11], 14_976);
+        assert_eq!(observation.work_counters[16], 1_128);
+        assert_eq!(observation.work_counters[19], 0);
+        assert_eq!(observation.work_counters[28], 1_000);
+        drop(state);
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in C2-B eager materialization baseline; isolated synthetic catalog and captured provider actions only"]
+    fn track_c2b_benchmark_search_materialization() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for scenario in [
+                TrackCSearchCase::SparseExact,
+                TrackCSearchCase::DenseExact,
+                TrackCSearchCase::DenseFuzzy,
+                TrackCSearchCase::EmptyBrowse,
+                TrackCSearchCase::PendingExact,
+            ] {
+                let fixture_state =
+                    track_c2a_prepare_search_state(workspace.root(), &fixture.values, scenario);
+                let fixture_signature = fixture_state.frozen.fixture_signature;
+                let provider_count = fixture_state.provider_input_actions as usize;
+                drop(fixture_state);
+                let samples = measure_owner(
+                    || track_c2a_prepare_search_state(workspace.root(), &fixture.values, scenario),
+                    track_c2a_run_search_owner,
+                    |state, actual| {
+                        assert_eq!(state.frozen.fixture_signature, fixture_signature);
+                        track_c2b_validate_search_state(state, actual, true)
+                    },
+                );
+                emit_track_c2b_samples(
+                    scenario.name(),
+                    *count,
+                    provider_count,
+                    fixture_signature,
+                    mode,
+                    &samples,
+                );
+            }
+        }
+
+        let fixture = action_fixture(1_000);
+        let fixture_state = track_c2b_prepare_plugin_heavy_state(workspace.root(), &fixture.values);
+        let fixture_signature = fixture_state.frozen.fixture_signature;
+        let provider_count = fixture_state.provider_input_actions as usize;
+        drop(fixture_state);
+        let samples = measure_owner(
+            || track_c2b_prepare_plugin_heavy_state(workspace.root(), &fixture.values),
+            track_c2a_run_search_owner,
+            |state, actual| {
+                assert_eq!(state.frozen.fixture_signature, fixture_signature);
+                track_c2b_validate_search_state(state, actual, true)
+            },
+        );
+        emit_track_c2b_samples(
+            "plugin-heavy-dense",
+            1_000,
+            provider_count,
+            fixture_signature,
+            mode,
+            &samples,
+        );
         drop(workspace);
     }
 
