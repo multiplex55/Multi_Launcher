@@ -2028,7 +2028,6 @@ mod tests {
     use eframe::egui;
     use once_cell::sync::Lazy;
     use std::sync::{Arc, Mutex, atomic::AtomicBool};
-    use tempfile::tempdir;
 
     #[derive(Debug)]
     struct EagerNoteRowRects {
@@ -3783,25 +3782,6 @@ mod tests {
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-    fn new_app(ctx: &egui::Context) -> LauncherApp {
-        LauncherApp::new(
-            ctx,
-            Arc::new(Vec::new()),
-            0,
-            PluginManager::new(),
-            "actions.json".into(),
-            "settings.json".into(),
-            Settings::default(),
-            None,
-            None,
-            None,
-            None,
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
-        )
-    }
-
     fn new_isolated_app(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
         let mut settings = Settings::default();
         settings.enable_toasts = false;
@@ -3969,20 +3949,39 @@ mod tests {
     }
 
     fn setup() -> (
-        tempfile::TempDir,
-        std::path::PathBuf,
+        crate::performance::workloads::IsolatedWorkspace,
         egui::Context,
         LauncherApp,
     ) {
-        let dir = tempdir().unwrap();
-        let notes_dir = dir.path().join("notes");
-        std::fs::create_dir_all(&notes_dir).unwrap();
-        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
-        unsafe { std::env::set_var("HOME", dir.path()) };
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
         save_notes(&[]).unwrap();
         let ctx = egui::Context::default();
-        let app = new_app(&ctx);
-        (dir, notes_dir, ctx, app)
+        let app = new_isolated_app(&ctx, workspace.root());
+        (workspace, ctx, app)
+    }
+
+    struct NotesDirOverride {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl NotesDirOverride {
+        fn new(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("ML_NOTES_DIR");
+            unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+            Self { previous }
+        }
+    }
+
+    impl Drop for NotesDirOverride {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(previous) = self.previous.take() {
+                    std::env::set_var("ML_NOTES_DIR", previous);
+                } else {
+                    std::env::remove_var("ML_NOTES_DIR");
+                }
+            }
+        }
     }
 
     #[test]
@@ -4303,7 +4302,7 @@ mod tests {
     #[test]
     fn quick_notes_wrap_links_mutates_open_unsaved_content_from_memory() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let (_workspace, _ctx, mut app) = setup();
         let mut alpha = note("Alpha", "alpha", "disk https://disk.example");
         save_note(&mut alpha, true).unwrap();
         let mut panel = NotePanel::from_note(alpha);
@@ -4328,7 +4327,7 @@ mod tests {
     #[test]
     fn quick_notes_wrap_links_noop_preserves_content_and_modification_state() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let (_workspace, _ctx, mut app) = setup();
         let mut alpha = note("Alpha", "alpha", "already [link](https://example.com)");
         save_note(&mut alpha, true).unwrap();
         let mut panel = NotePanel::from_note(alpha);
@@ -4349,7 +4348,7 @@ mod tests {
     #[test]
     fn quick_notes_wrap_links_preserves_open_panel_and_view_mode() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let (_dir, _notes_dir, _ctx, mut app) = setup();
+        let (_workspace, _ctx, mut app) = setup();
         let mut alpha = note("Alpha", "alpha", "visit https://example.com");
         save_note(&mut alpha, true).unwrap();
         let mut panel = NotePanel::from_note(alpha);
@@ -4367,7 +4366,7 @@ mod tests {
     #[test]
     fn stale_quick_notes_edit_retains_a_later_added_note() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let (_dir, _notes_dir, ctx, mut app) = setup();
+        let (_workspace, ctx, mut app) = setup();
         let mut alpha = note("Alpha", "alpha", "# Alpha\n\noriginal");
         save_note(&mut alpha, true).unwrap();
         let mut dialog = NotesDialog::default();
@@ -4393,7 +4392,7 @@ mod tests {
     #[test]
     fn failed_quick_notes_edit_retains_dialog_and_committed_note() {
         let _lock = TEST_MUTEX.lock().unwrap();
-        let (dir, notes_dir, ctx, mut app) = setup();
+        let (workspace, ctx, mut app) = setup();
         let mut alpha = note("Alpha", "alpha", "# Alpha\n\noriginal");
         save_note(&mut alpha, true).unwrap();
         let mut dialog = NotesDialog::default();
@@ -4402,9 +4401,9 @@ mod tests {
         dialog.open_edit(0);
         dialog.text = "unsaved draft retained on failure".into();
         let entries_before = dialog.entries.clone();
-        let blocker = dir.path().join("not-a-directory");
+        let blocker = workspace.root().join("not-a-directory");
         std::fs::write(&blocker, "block note directory creation").unwrap();
-        unsafe { std::env::set_var("ML_NOTES_DIR", &blocker) };
+        let notes_dir_override = NotesDirOverride::new(&blocker);
 
         let saved = dialog.save_note_draft(
             PendingNoteSave::Existing {
@@ -4413,7 +4412,7 @@ mod tests {
             },
             &mut app,
         );
-        unsafe { std::env::set_var("ML_NOTES_DIR", &notes_dir) };
+        drop(notes_dir_override);
 
         assert!(!saved);
         assert!(dialog.open);

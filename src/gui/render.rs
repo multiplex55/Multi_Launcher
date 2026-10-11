@@ -13358,6 +13358,7 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(AtomicBool::new(false)),
             );
+            app.dashboard_initial_refresh_queued = true;
             app.actions = Arc::new(fixture.values.clone());
             app.results = fixture.values.clone();
             app.invalidate_root_list_results();
