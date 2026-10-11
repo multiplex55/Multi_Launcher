@@ -5529,6 +5529,1197 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2DRecipe {
+        FreshContextFirstOpen,
+        SharedPrefixFivePercent,
+        SharedPrefixTwentyPercent,
+        IdenticalPresentationNewGeneration,
+        LastRowTextEdit,
+        FirstRowWidthExpansionNoWrap,
+        FullPathsToggle,
+        WrapChange,
+        FontAtlasReplacement,
+        PixelsPerPointChange,
+        ViewportWidthChange,
+        WarmRepeat,
+    }
+
+    impl TrackC2DRecipe {
+        const ALL: [Self; 12] = [
+            Self::FreshContextFirstOpen,
+            Self::SharedPrefixFivePercent,
+            Self::SharedPrefixTwentyPercent,
+            Self::IdenticalPresentationNewGeneration,
+            Self::LastRowTextEdit,
+            Self::FirstRowWidthExpansionNoWrap,
+            Self::FullPathsToggle,
+            Self::WrapChange,
+            Self::FontAtlasReplacement,
+            Self::PixelsPerPointChange,
+            Self::ViewportWidthChange,
+            Self::WarmRepeat,
+        ];
+
+        fn token(self) -> &'static str {
+            match self {
+                Self::FreshContextFirstOpen => "fresh_context_first_open",
+                Self::SharedPrefixFivePercent => "shared_prefix_5_percent",
+                Self::SharedPrefixTwentyPercent => "shared_prefix_20_percent",
+                Self::IdenticalPresentationNewGeneration => "identical_presentation_new_generation",
+                Self::LastRowTextEdit => "last_row_text_edit",
+                Self::FirstRowWidthExpansionNoWrap => "first_row_width_expansion_no_wrap",
+                Self::FullPathsToggle => "full_paths_toggle",
+                Self::WrapChange => "wrap_change",
+                Self::FontAtlasReplacement => "font_atlas_replacement",
+                Self::PixelsPerPointChange => "pixels_per_point_change",
+                Self::ViewportWidthChange => "viewport_width_change",
+                Self::WarmRepeat => "warm_repeat",
+            }
+        }
+
+        fn installs_new_results(self) -> bool {
+            matches!(
+                self,
+                Self::SharedPrefixFivePercent
+                    | Self::SharedPrefixTwentyPercent
+                    | Self::IdenticalPresentationNewGeneration
+                    | Self::LastRowTextEdit
+                    | Self::FirstRowWidthExpansionNoWrap
+            )
+        }
+
+        fn first_open(self) -> bool {
+            self == Self::FreshContextFirstOpen
+        }
+
+        fn old_screen_width(self) -> f32 {
+            960.0
+        }
+
+        fn new_screen_width(self) -> f32 {
+            if self == Self::ViewportWidthChange {
+                720.0
+            } else {
+                960.0
+            }
+        }
+
+        fn old_wrap(self, default: bool) -> bool {
+            match self {
+                Self::FirstRowWidthExpansionNoWrap => false,
+                Self::WrapChange => true,
+                _ => default,
+            }
+        }
+
+        fn new_wrap(self, old: bool) -> bool {
+            if self == Self::WrapChange { !old } else { old }
+        }
+
+        fn old_pixels_per_point(self) -> f32 {
+            1.0
+        }
+
+        fn new_pixels_per_point(self) -> f32 {
+            if self == Self::PixelsPerPointChange {
+                1.25
+            } else {
+                1.0
+            }
+        }
+
+        fn new_full_paths(self) -> bool {
+            self == Self::FullPathsToggle
+        }
+
+        fn expects_cold_geometry(self) -> bool {
+            self != Self::WarmRepeat
+        }
+    }
+
+    fn track_c2d_frame_texts(
+        actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+    ) -> Vec<String> {
+        actions
+            .iter()
+            .map(|action| root_list_display_text(action, aliases, show_full_paths).into_owned())
+            .collect()
+    }
+
+    fn track_c2d_frame_signature(domain: &'static str, values: &[String]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(0x4332_445F_4C49_5354, domain, values.len());
+        for value in values {
+            signature.number(value.len() as u64);
+            signature.bytes(value.as_bytes());
+        }
+        signature.finish()
+    }
+
+    fn track_c2d_fixture_signature(
+        recipe: TrackC2DRecipe,
+        source_actions: &[Action],
+        old_actions: &[Action],
+        new_actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        old_screen: (f32, f32),
+        new_screen: (f32, f32),
+        old_ppp: f32,
+        new_ppp: f32,
+        old_wrap: bool,
+        new_wrap: bool,
+        old_full_paths: bool,
+        new_full_paths: bool,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-root-list-recipe",
+            source_actions.len(),
+        );
+        for text in [recipe.token()] {
+            signature.number(text.len() as u64);
+            signature.bytes(text.as_bytes());
+        }
+        signature.number(action_fixture_identity(source_actions));
+        signature.number(action_fixture_identity(old_actions));
+        signature.number(action_fixture_identity(new_actions));
+        let old_presentation = track_c2d_frame_texts(old_actions, aliases, old_full_paths);
+        let new_presentation = track_c2d_frame_texts(new_actions, aliases, new_full_paths);
+        let prefix = if recipe.first_open() {
+            0
+        } else {
+            old_presentation
+                .iter()
+                .zip(&new_presentation)
+                .take_while(|(old, new)| old == new)
+                .count()
+        };
+        signature.number(prefix as u64);
+        for value in [old_screen.0, old_screen.1, new_screen.0, new_screen.1] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for value in [old_ppp, new_ppp] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for value in [old_wrap, new_wrap, old_full_paths, new_full_paths] {
+            signature.number(value as u64);
+        }
+        let mut ordered_aliases = aliases.iter().collect::<Vec<_>>();
+        ordered_aliases.sort_by(|left, right| left.0.cmp(right.0));
+        signature.number(ordered_aliases.len() as u64);
+        for (action_id, alias) in ordered_aliases {
+            signature.number(action_id.len() as u64);
+            signature.bytes(action_id.as_bytes());
+            match alias {
+                Some(alias) => {
+                    signature.number(1);
+                    signature.number(alias.len() as u64);
+                    signature.bytes(alias.as_bytes());
+                }
+                None => signature.number(0),
+            }
+        }
+        signature.finish()
+    }
+
+    fn track_c2d_geometry_capacity_bytes(cache: &RootListGeometryCache) -> u64 {
+        [
+            cache.row_tops.capacity(),
+            cache.row_heights.capacity(),
+            cache.row_x_offsets.capacity(),
+            cache.row_response_x_offsets.capacity(),
+            cache.row_widths.capacity(),
+            cache.row_response_widths.capacity(),
+        ]
+        .into_iter()
+        .map(|capacity| (capacity * std::mem::size_of::<f32>()) as u64)
+        .sum()
+    }
+
+    fn track_c2d_font_signature(key: Option<&RootListGeometryKey>) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-button-font",
+            if key.is_some() { 1 } else { 0 },
+        );
+        if let Some(key) = key {
+            let value = format!("{:?}", key.button_font);
+            signature.number(value.len() as u64);
+            signature.bytes(value.as_bytes());
+        }
+        signature.finish()
+    }
+
+    struct TrackC2DListState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        recipe: TrackC2DRecipe,
+        old_actions: Vec<Action>,
+        expected_actions: Vec<Action>,
+        prepared_catalog: Option<Arc<Vec<Action>>>,
+        prepared_results: Option<Vec<Action>>,
+        aliases: HashMap<String, Option<String>>,
+        old_action_id: u64,
+        new_action_id: u64,
+        fixture_signature: u64,
+        prefix_len: usize,
+        old_screen_width: f32,
+        new_screen_width: f32,
+        screen_height: f32,
+        old_key: Option<RootListGeometryKey>,
+        // A non-owning receipt keeps the old atlas eligible for destruction
+        // inside the measured transition instead of extending its lifetime.
+        old_atlas: Option<std::sync::Weak<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
+        old_geometry: RootListGeometryObservation,
+        old_result_generation: u64,
+        old_capacity_bytes: u64,
+        old_first_response_width: f32,
+        old_next_row_width: f32,
+        old_next_row_x_offset: f32,
+        old_second_downstream_x_offset: f32,
+        old_visible_row_ids: Vec<(usize, egui::Id)>,
+        old_wrap: bool,
+        old_full_paths: bool,
+        new_wrap: bool,
+        new_full_paths: bool,
+        new_style: Option<egui::Style>,
+        new_capabilities: Option<HashMap<String, Vec<String>>>,
+        new_font_definitions: Option<egui::FontDefinitions>,
+        expected_font_definitions: egui::FontDefinitions,
+        frame_index: usize,
+    }
+
+    fn track_c2d_expected_actions(
+        source_actions: &[Action],
+        recipe: TrackC2DRecipe,
+    ) -> Vec<Action> {
+        let mut actions = source_actions.to_vec();
+        match recipe {
+            TrackC2DRecipe::SharedPrefixFivePercent | TrackC2DRecipe::SharedPrefixTwentyPercent => {
+                let percent = if recipe == TrackC2DRecipe::SharedPrefixFivePercent {
+                    5
+                } else {
+                    20
+                };
+                let changed = source_actions.len() * percent / 100;
+                for action in actions.iter_mut().skip(changed) {
+                    action.label.push_str(" [C2-D display edit]");
+                }
+            }
+            TrackC2DRecipe::IdenticalPresentationNewGeneration => {
+                for (index, action) in actions.iter_mut().enumerate() {
+                    action.args = Some(format!("c2d-args-{index:05}"));
+                }
+            }
+            TrackC2DRecipe::LastRowTextEdit => {
+                actions
+                    .last_mut()
+                    .expect("the Track C2-D fixtures are nonempty")
+                    .desc
+                    .push_str(" [C2-D last-row edit]");
+            }
+            TrackC2DRecipe::FirstRowWidthExpansionNoWrap => {
+                actions[0].desc.push_str(&" early-wide-segment/".repeat(24));
+            }
+            _ => {}
+        }
+        actions
+    }
+
+    fn track_c2d_aliases(
+        source_actions: &[Action],
+        recipe: TrackC2DRecipe,
+    ) -> HashMap<String, Option<String>> {
+        let mut aliases = HashMap::new();
+        if recipe == TrackC2DRecipe::FullPathsToggle {
+            for (index, action) in source_actions
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index % 17 == 0)
+            {
+                aliases.insert(
+                    action.action.clone(),
+                    Some(format!("C2D folder alias {index:05}")),
+                );
+            }
+        }
+        aliases
+    }
+
+    fn track_c2d_prepare_list_state(
+        root: &std::path::Path,
+        source_actions: &[Action],
+        recipe: TrackC2DRecipe,
+    ) -> TrackC2DListState {
+        use crate::performance::track_c_workloads::action_fixture_identity;
+
+        let old_actions = source_actions.to_vec();
+        let new_actions = track_c2d_expected_actions(source_actions, recipe);
+        let aliases = track_c2d_aliases(source_actions, recipe);
+
+        let default_font_definitions = egui::FontDefinitions::default();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(default_font_definitions.clone());
+        let mut app = root_list_app_at(&ctx, old_actions.clone(), root);
+        // Keep the synthetic fixture independent from constructor-time host
+        // aliases and bookmarks. The selected recipe installs only its own
+        // deterministic aliases below.
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.folder_aliases.clone_from(&aliases);
+        app.enabled_capabilities = Some(HashMap::new());
+        app.enabled_plugins = Some(std::collections::HashSet::new());
+
+        let mut old_style = ctx.style().as_ref().clone();
+        let default_wrap = old_style.wrap.unwrap_or(true);
+        assert!(default_wrap, "C2-D default root list wrapping is enabled");
+        let old_wrap = recipe.old_wrap(default_wrap);
+        old_style.wrap = Some(old_wrap);
+        if recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap
+            || recipe == TrackC2DRecipe::WrapChange
+        {
+            ctx.set_style(old_style);
+        }
+        ctx.set_pixels_per_point(recipe.old_pixels_per_point());
+
+        if !recipe.first_open() {
+            for frame in 0..9 {
+                let _ = run_root_list_frame(
+                    &ctx,
+                    &mut app,
+                    frame,
+                    recipe.old_screen_width(),
+                    640.0,
+                    Vec::new(),
+                );
+            }
+            app.dashboard_data_cache.wait_for_refresh();
+        }
+        app.rebuild_completion_index_now();
+        app.dashboard_data_cache.wait_for_refresh();
+
+        let old_geometry = app.root_list_geometry.test_observation();
+        let old_result_generation = app.root_list_geometry.result_generation;
+        if recipe.first_open() {
+            assert!(app.root_list_geometry.key.is_none());
+            assert_eq!(old_geometry.rebuild_count, 0);
+            assert_eq!(old_geometry.measured_rows, 0);
+        } else {
+            assert!(app.root_list_geometry.key.is_some());
+            assert_eq!(old_geometry.measured_rows, source_actions.len() as u64);
+        }
+        let old_key = app.root_list_geometry.key.clone();
+        // Keep only an identity receipt: a strong Arc here would move old-atlas
+        // destruction out of the timed environment transition.
+        let old_atlas = app
+            .root_list_geometry
+            .font_atlas
+            .as_ref()
+            .map(Arc::downgrade);
+        let old_capacity_bytes = track_c2d_geometry_capacity_bytes(&app.root_list_geometry);
+        let (
+            old_first_response_width,
+            old_next_row_width,
+            old_next_row_x_offset,
+            old_second_downstream_x_offset,
+        ) = if recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap {
+            (
+                app.root_list_geometry.row_response_widths[0],
+                app.root_list_geometry.row_widths[1],
+                app.root_list_geometry.row_x_offsets[1],
+                app.root_list_geometry.row_x_offsets[2],
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+        let old_visible_row_ids = if recipe.first_open() {
+            Vec::new()
+        } else {
+            app.test_root_rendered_row_ids.clone()
+        };
+
+        let new_wrap = recipe.new_wrap(old_wrap);
+        let new_full_paths = recipe.new_full_paths();
+        let new_style = if recipe == TrackC2DRecipe::WrapChange {
+            let mut style = ctx.style().as_ref().clone();
+            style.wrap = Some(new_wrap);
+            Some(style)
+        } else {
+            None
+        };
+        let new_capabilities: Option<HashMap<String, Vec<String>>> = (recipe
+            == TrackC2DRecipe::FullPathsToggle)
+            .then(|| HashMap::from([("folders".into(), vec!["show_full_path".into()])]));
+        let new_font_definitions = if recipe == TrackC2DRecipe::FontAtlasReplacement {
+            let mut definitions = default_font_definitions.clone();
+            let duplicate = definitions
+                .font_data
+                .get("Ubuntu-Light")
+                .expect("egui default definitions include Ubuntu-Light")
+                .clone();
+            definitions
+                .font_data
+                .insert("TrackC2D-unused-atlas-reset".into(), duplicate);
+            Some(definitions)
+        } else {
+            None
+        };
+        let expected_font_definitions = new_font_definitions
+            .as_ref()
+            .unwrap_or(&default_font_definitions)
+            .clone();
+
+        let prepared_catalog = recipe
+            .installs_new_results()
+            .then(|| Arc::new(new_actions.clone()));
+        let prepared_results = recipe.installs_new_results().then_some(new_actions.clone());
+        let old_action_id = action_fixture_identity(&old_actions);
+        let new_action_id = action_fixture_identity(&new_actions);
+        let old_full_paths = false;
+        let old_screen_width = recipe.old_screen_width();
+        let new_screen_width = recipe.new_screen_width();
+        let screen_height = 640.0;
+        let fixture_signature = track_c2d_fixture_signature(
+            recipe,
+            source_actions,
+            &old_actions,
+            &new_actions,
+            &aliases,
+            (old_screen_width, screen_height),
+            (new_screen_width, screen_height),
+            recipe.old_pixels_per_point(),
+            recipe.new_pixels_per_point(),
+            old_wrap,
+            new_wrap,
+            old_full_paths,
+            new_full_paths,
+        );
+        let old_texts = track_c2d_frame_texts(&old_actions, &aliases, old_full_paths);
+        let new_texts = track_c2d_frame_texts(&new_actions, &aliases, new_full_paths);
+        let prefix_len = if recipe.first_open() {
+            0
+        } else {
+            old_texts
+                .iter()
+                .zip(&new_texts)
+                .take_while(|(old, new)| old == new)
+                .count()
+        };
+
+        TrackC2DListState {
+            app,
+            ctx,
+            recipe,
+            old_actions,
+            expected_actions: new_actions,
+            prepared_catalog,
+            prepared_results,
+            aliases,
+            old_action_id,
+            new_action_id,
+            fixture_signature,
+            prefix_len,
+            old_screen_width,
+            new_screen_width,
+            screen_height,
+            old_key,
+            old_atlas,
+            old_geometry,
+            old_result_generation,
+            old_capacity_bytes,
+            old_first_response_width,
+            old_next_row_width,
+            old_next_row_x_offset,
+            old_second_downstream_x_offset,
+            old_visible_row_ids,
+            old_wrap,
+            old_full_paths,
+            new_wrap,
+            new_full_paths,
+            new_style,
+            new_capabilities,
+            new_font_definitions,
+            expected_font_definitions,
+            frame_index: if recipe.first_open() { 0 } else { 9 },
+        }
+    }
+
+    fn track_c2d_run_list_owner(state: &mut TrackC2DListState) -> egui::FullOutput {
+        if state.recipe.installs_new_results() {
+            state.app.actions = state
+                .prepared_catalog
+                .take()
+                .expect("changed presentation fixture has a prepared catalog");
+            state.app.results = state
+                .prepared_results
+                .take()
+                .expect("changed presentation fixture has prepared results");
+            state.app.invalidate_root_list_results();
+        }
+        if state.recipe == TrackC2DRecipe::FullPathsToggle {
+            state.app.enabled_capabilities = Some(
+                state
+                    .new_capabilities
+                    .take()
+                    .expect("full-path recipe has prepared capabilities"),
+            );
+        }
+        if let Some(style) = state.new_style.take() {
+            state.ctx.set_style(style);
+        }
+        if let Some(definitions) = state.new_font_definitions.take() {
+            state.ctx.set_fonts(definitions);
+        }
+        if state.recipe == TrackC2DRecipe::PixelsPerPointChange {
+            state
+                .ctx
+                .set_pixels_per_point(TrackC2DRecipe::PixelsPerPointChange.new_pixels_per_point());
+        }
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        run_root_list_frame(
+            &state.ctx,
+            &mut state.app,
+            frame,
+            state.new_screen_width,
+            state.screen_height,
+            Vec::new(),
+        )
+    }
+
+    fn track_c2d_geometry_signature(cache: &RootListGeometryCache) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-list-geometry-projection",
+            cache.row_tops.len(),
+        );
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.row_x_offsets,
+            &cache.row_response_x_offsets,
+            &cache.row_widths,
+            &cache.row_response_widths,
+        ] {
+            signature.number(values.len() as u64);
+            for value in values {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.content_x_offset,
+            cache.content_width,
+            cache.total_height,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        signature.finish()
+    }
+
+    fn track_c2d_viewport_signature(app: &LauncherApp) -> (u64, usize) {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let rows = &app.test_root_rendered_rows;
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert_eq!(rows.len(), ids.len());
+        assert_eq!(rows.len(), rects.len());
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("actual root-list frame records its viewport");
+        let (inner, extent, offset) = app
+            .test_root_scroll_area_extent
+            .expect("actual root-list frame records its scroll extent");
+        let mut signature =
+            StableSignature::new(0x4332_445F_4C49_5354, "track-c2d-list-viewport", rows.len());
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner.min.x,
+            inner.min.y,
+            inner.max.x,
+            inner.max.y,
+            extent.x,
+            extent.y,
+            offset.x,
+            offset.y,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            signature.number(*index as u64);
+            signature.number(action_id.len() as u64);
+            signature.bytes(action_id.as_bytes());
+            let id = format!("{id:?}");
+            signature.number(id.len() as u64);
+            signature.bytes(id.as_bytes());
+        }
+        for ((index, _), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        (signature.finish(), rows.len())
+    }
+
+    fn track_c2d_assert_eager_geometry(
+        state: &TrackC2DListState,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        assert_eq!(state.app.results, state.expected_actions);
+        assert_eq!(
+            state.app.actions.as_slice(),
+            state.expected_actions.as_slice()
+        );
+        assert_eq!(state.app.folder_aliases, state.aliases);
+        assert!(state.app.selected.is_none());
+        assert_eq!(state.app.query, "root list fixture");
+        assert_eq!(state.app.last_search_query, "root list fixture");
+        assert!(state.app.last_results_valid);
+        assert!(state.app.pending_query.is_none());
+        assert!(!state.app.background_query_refresh_pending);
+        let rendered_row_ids = &state.app.test_root_rendered_row_ids;
+        let unique_row_ids = rendered_row_ids
+            .iter()
+            .map(|(_, id)| id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique_row_ids.len(), rendered_row_ids.len());
+        for (new_index, new_id) in rendered_row_ids {
+            if let Some((_, old_id)) = state
+                .old_visible_row_ids
+                .iter()
+                .find(|(old_index, _)| old_index == new_index)
+            {
+                if state.old_result_generation == state.app.root_list_geometry.result_generation {
+                    assert_eq!(old_id, new_id, "stable generation retains row widget IDs");
+                } else {
+                    assert_ne!(
+                        old_id, new_id,
+                        "new result generation changes row widget IDs"
+                    );
+                }
+            }
+        }
+        let actual_full_paths = state
+            .app
+            .enabled_capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.get("folders"))
+            .is_some_and(|capabilities| capabilities.iter().any(|cap| cap == "show_full_path"));
+        assert_eq!(actual_full_paths, state.new_full_paths);
+        assert_eq!(
+            state.ctx.style().wrap.unwrap_or(true),
+            state.new_wrap,
+            "the measured context has the requested effective wrapping policy"
+        );
+        let available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("actual root-list frame records available width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let style = state.ctx.style().as_ref().clone();
+        let ppp = state.ctx.pixels_per_point();
+        assert!((ppp - state.recipe.new_pixels_per_point()).abs() <= f32::EPSILON);
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_fonts(state.expected_font_definitions.clone());
+        oracle_ctx.set_style(style.clone());
+        oracle_ctx.set_pixels_per_point(ppp);
+        let (outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            &state.expected_actions,
+            &state.aliases,
+            actual_full_paths,
+            available_width,
+            &style,
+            state.app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &state.app.root_list_geometry,
+            &eager,
+            outer,
+            "C2-D actual root-list cache against independent eager geometry",
+        );
+        let cache = &state.app.root_list_geometry;
+        assert_eq!(cache.row_x_offsets.len(), eager.rows.len());
+        for (index, response) in eager.rows.iter().enumerate() {
+            let expected_left = response.left() - outer.left()
+                + (response.width() - eager.available_widths[index]) * 0.5;
+            assert!(
+                (cache.row_x_offsets[index] - expected_left).abs() <= 1.0,
+                "C2-D row {index} content x offset differs: actual={} eager={expected_left}",
+                cache.row_x_offsets[index]
+            );
+        }
+        let (inner, content_extent, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("real root ScrollArea records full extent");
+        assert!((content_extent.x - cache.content_width).abs() <= 1.0);
+        assert!((content_extent.y - cache.total_height).abs() <= 1.0);
+        assert!(inner.width() > 0.0 && inner.height() > 0.0);
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("real root ScrollArea records viewport");
+        let content_origin = inner.min - offset;
+        let visible_start = eager
+            .rows
+            .partition_point(|row| content_origin.y + row.bottom() - outer.top() <= viewport.min.y);
+        let visible_end = eager
+            .rows
+            .partition_point(|row| content_origin.y + row.top() - outer.top() < viewport.max.y);
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(eager.rows.len()))
+            .collect::<Vec<_>>();
+        let rows = &state.app.test_root_rendered_rows;
+        let actual_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(actual_indices, expected_indices);
+        for ((index, action_id), (rect_index, rect)) in
+            rows.iter().zip(&state.app.test_root_rendered_row_rects)
+        {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager_rect = eager.rows[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_rect.min - outer.min),
+                eager_rect.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "painted root row {index} differs from the independent eager rectangle"
+            );
+        }
+        let after = state.app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.old_geometry.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.old_geometry.measured_rows);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.old_geometry.measured_cells);
+        if state.recipe.expects_cold_geometry() {
+            assert_eq!(
+                rebuilds, 1,
+                "one changed or first-open recipe rebuilds once"
+            );
+            assert_eq!(measured_rows, state.expected_actions.len() as u64);
+        } else {
+            assert_eq!(rebuilds, 0, "warm repeat reuses the list geometry");
+            assert_eq!(measured_rows, 0);
+        }
+        assert_eq!(measured_cells, 0, "list recipes do not measure grid cells");
+        let actual_action_id = action_fixture_identity(&state.app.results);
+        assert_eq!(actual_action_id, state.new_action_id);
+        let presentation =
+            track_c2d_frame_texts(&state.app.results, &state.aliases, actual_full_paths);
+        let presentation_id = track_c2d_frame_signature("track-c2d-presentation", &presentation);
+        let old_presentation =
+            track_c2d_frame_texts(&state.old_actions, &state.aliases, state.old_full_paths);
+        let prefix_len = if state.recipe.first_open() {
+            0
+        } else {
+            old_presentation
+                .iter()
+                .zip(&presentation)
+                .take_while(|(old, new)| old == new)
+                .count()
+        };
+        assert_eq!(prefix_len, state.prefix_len);
+        if state.recipe == TrackC2DRecipe::FullPathsToggle {
+            assert_ne!(
+                track_c2d_frame_signature("track-c2d-presentation", &old_presentation),
+                presentation_id,
+                "full-path capability changes the actual presentation"
+            );
+        }
+        if state.recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap {
+            assert!(cache.row_response_widths[0] > state.old_first_response_width);
+            assert_ne!(cache.row_widths[1], state.old_next_row_width);
+            assert_ne!(cache.row_x_offsets[1], state.old_next_row_x_offset);
+            assert_ne!(cache.row_x_offsets[2], state.old_second_downstream_x_offset);
+        }
+        let viewport_id = track_c2d_viewport_signature(&state.app).0;
+        let geometry_id = track_c2d_geometry_signature(cache);
+        let mut output = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-complete-root-list-state",
+            state.app.results.len(),
+        );
+        output.number(actual_action_id);
+        output.number(presentation_id);
+        output.number(cache.result_generation);
+        output.number(
+            state
+                .app
+                .selected
+                .map_or(u64::MAX, |selected| selected as u64),
+        );
+        output.number(state.app.last_results_valid as u64);
+        output.number(state.app.pending_query.is_some() as u64);
+        output.number(state.app.background_query_refresh_pending as u64);
+        output.number(state.app.query.len() as u64);
+        output.bytes(state.app.query.as_bytes());
+        output.number(state.app.last_search_query.len() as u64);
+        output.bytes(state.app.last_search_query.as_bytes());
+        output.number(u64::from(available_width.to_bits()));
+        output.number(u64::from(ppp.to_bits()));
+        output.number(actual_full_paths as u64);
+        output.number(state.new_wrap as u64);
+        output.number(u64::from(state.new_screen_width.to_bits()));
+        output.number(u64::from(state.screen_height.to_bits()));
+        let old_key = state.old_key.as_ref();
+        let new_key = cache.key.as_ref();
+        assert!(new_key.is_some());
+        if let Some(old_key) = old_key {
+            assert_eq!(old_key.wrap, state.old_wrap);
+            assert_eq!(
+                old_key.pixels_per_point_bits,
+                state.recipe.old_pixels_per_point().to_bits()
+            );
+        }
+        let key_changed = old_key != new_key;
+        let atlas_changed = match (state.old_atlas.as_ref(), cache.font_atlas.as_ref()) {
+            (Some(old), Some(new)) => !std::sync::Weak::ptr_eq(old, &Arc::downgrade(new)),
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
+        };
+        let old_generation = state.old_result_generation;
+        let new_generation = cache.result_generation;
+        if state.recipe.installs_new_results() {
+            assert_eq!(new_generation, old_generation.wrapping_add(1));
+        } else {
+            assert_eq!(new_generation, old_generation);
+        }
+        match state.recipe {
+            TrackC2DRecipe::FreshContextFirstOpen => {
+                assert!(key_changed, "first open changes None into an accepted key");
+                assert!(atlas_changed, "first open installs the initial font atlas");
+            }
+            TrackC2DRecipe::WarmRepeat => {
+                assert!(!key_changed && !atlas_changed);
+            }
+            TrackC2DRecipe::FontAtlasReplacement => {
+                assert!(
+                    !key_changed,
+                    "unused font data leaves the geometry key intact"
+                );
+                assert!(
+                    atlas_changed,
+                    "egui actually replaces the retained font atlas"
+                );
+            }
+            TrackC2DRecipe::PixelsPerPointChange => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key
+                        .expect("settled ppp recipe has an old key")
+                        .pixels_per_point_bits,
+                    new_key.expect("new frame has a key").pixels_per_point_bits,
+                    "pixels-per-point transition changes that exact geometry-key field"
+                );
+            }
+            TrackC2DRecipe::ViewportWidthChange => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key
+                        .expect("settled width recipe has an old key")
+                        .width_bits,
+                    new_key.expect("new frame has a key").width_bits,
+                    "viewport transition changes the measured geometry-key width"
+                );
+            }
+            TrackC2DRecipe::WrapChange => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key.expect("settled wrap recipe has an old key").wrap,
+                    new_key.expect("new frame has a key").wrap,
+                    "wrap transition changes that exact geometry-key field"
+                );
+            }
+            TrackC2DRecipe::FullPathsToggle => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key
+                        .expect("settled full-path recipe has an old key")
+                        .show_full_paths,
+                    new_key.expect("new frame has a key").show_full_paths,
+                    "full-path transition changes that exact geometry-key field"
+                );
+            }
+            _ => assert!(
+                key_changed,
+                "the selected presentation transition changes its key"
+            ),
+        }
+        let transitions = vec![
+            state.old_action_id,
+            state.new_action_id,
+            old_generation,
+            new_generation,
+            old_key.is_some() as u64,
+            new_key.is_some() as u64,
+            key_changed as u64,
+            state.old_atlas.is_some() as u64,
+            cache.font_atlas.is_some() as u64,
+            atlas_changed as u64,
+            old_key.map_or(0, |key| u64::from(key.width_bits)),
+            new_key.map_or(0, |key| u64::from(key.width_bits)),
+            old_key.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
+            new_key.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
+            old_key.map_or(0, |key| track_c2d_font_signature(Some(key))),
+            new_key.map_or(0, |key| track_c2d_font_signature(Some(key))),
+            old_key.map_or(0, |key| key.wrap as u64),
+            new_key.map_or(state.new_wrap as u64, |key| key.wrap as u64),
+            old_key.map_or(0, |key| key.show_full_paths as u64),
+            new_key.map_or(state.new_full_paths as u64, |key| {
+                key.show_full_paths as u64
+            }),
+            u64::from(state.old_screen_width.to_bits()),
+            u64::from(state.new_screen_width.to_bits()),
+            u64::from(state.screen_height.to_bits()),
+            u64::from(state.screen_height.to_bits()),
+        ];
+        // The full state identity binds the actual effective font-key receipt.
+        output.number(track_c2d_font_signature(new_key));
+        let geometry_ns = if rebuilds == 0 {
+            0
+        } else {
+            after.last_rebuild_nanos
+        };
+        let capacity_after = track_c2d_geometry_capacity_bytes(cache);
+        let painted_rows = state.app.test_root_rendered_rows.len();
+        let counters = vec![
+            rebuilds,
+            measured_rows,
+            measured_cells,
+            geometry_ns,
+            painted_rows as u64,
+            prefix_len as u64,
+            state.old_capacity_bytes,
+            capacity_after,
+            presentation_id,
+            actual_action_id,
+        ];
+        assert_eq!(transitions.len(), 24);
+        crate::performance::track_c_workloads::OwnerObservation {
+            output_identity: output.finish(),
+            structural_signature: geometry_id,
+            revision_receipts: transitions,
+            viewport_receipt: Some(viewport_id),
+            work_units: measured_rows,
+            work_counters: counters,
+        }
+    }
+
+    fn track_c2d_emit_samples(
+        recipe: TrackC2DRecipe,
+        count: usize,
+        fixture_signature: u64,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(crate::performance::enabled());
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        for (field, value) in [("source", source.as_str()), ("profile", profile.as_str())] {
+            assert!(
+                !value.bytes().any(|byte| byte.is_ascii_whitespace()),
+                "C2-D {field} metadata must be a single token"
+            );
+        }
+        let counters = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| {
+                    assert_eq!(sample.work_counters.len(), 10);
+                    sample.work_counters[index].to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let counter_ids = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| {
+                    assert_eq!(sample.work_counters.len(), 10);
+                    format!("{:016x}", sample.work_counters[index])
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ids = |value: fn(&crate::performance::track_c_workloads::SampleRecord) -> u64| {
+            samples
+                .iter()
+                .map(|sample| format!("{:016x}", value(sample)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let viewport_receipts = samples
+            .iter()
+            .map(|sample| {
+                format!(
+                    "{:016x}",
+                    sample
+                        .viewport_receipt
+                        .expect("C2-D records actual viewport output")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let transition_receipts = samples
+            .iter()
+            .map(|sample| {
+                assert_eq!(sample.revision_receipts.len(), 24);
+                sample
+                    .revision_receipts
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let case = recipe.token();
+        assert!(!case.bytes().any(|byte| byte.is_ascii_whitespace()));
+        eprintln!(
+            "C2D_LIST_RESULT schema=1 stage=cold_list_geometry_characterization installation=eager_list_geometry owner=RootListGeometryCache::ensure measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_root_list_geometry source={source} profile={profile} mode={mode} telemetry_enabled=true observer_enabled=false warmups={WARMUPS} samples={} exclusions=0 case={case} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] presentation_prefix_len=[{}] geometry_capacity_before_bytes=[{}] geometry_capacity_after_bytes=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{viewport_receipts}] transition_receipts=[{transition_receipts}]",
+            samples.len(),
+            counters(0),
+            counters(1),
+            counters(2),
+            counters(3),
+            counters(4),
+            counters(5),
+            counters(6),
+            counters(7),
+            ids(|sample| sample.output_identity),
+            counter_ids(9),
+            counter_ids(8),
+            ids(|sample| sample.structural_signature),
+        );
+    }
+
+    fn track_c2d_assert_independent_n100_bindings(
+        state: &TrackC2DListState,
+        observation: &crate::performance::track_c_workloads::OwnerObservation,
+    ) {
+        let expected = match state.recipe {
+            TrackC2DRecipe::FreshContextFirstOpen => Some((
+                0xbced_459d_451b_8ce6,
+                0xc374_5052_c657_97f2,
+                0x6b20_5379_e46a_ddc3,
+            )),
+            TrackC2DRecipe::SharedPrefixFivePercent => Some((
+                0x8489_a2c8_3fcf_50e4,
+                0x3948_b637_4a90_077a,
+                0xd10d_4701_5e04_d833,
+            )),
+            TrackC2DRecipe::SharedPrefixTwentyPercent => Some((
+                0xae25_df48_1aa4_82bd,
+                0x5a78_f8dd_bda6_bd22,
+                0x1c91_0b44_35b1_775b,
+            )),
+            _ => None,
+        };
+        if let Some((fixture, actions, presentation)) = expected {
+            assert_eq!(state.fixture_signature, fixture);
+            assert_eq!(observation.work_counters[9], actions);
+            assert_eq!(observation.work_counters[8], presentation);
+        }
+    }
+
+    #[test]
+    fn track_c2d_oracle_root_list_recipes_match_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for recipe in TrackC2DRecipe::ALL {
+            let mut state = track_c2d_prepare_list_state(workspace.root(), &fixture.values, recipe);
+            let output = track_c2d_run_list_owner(&mut state);
+            let observation = track_c2d_assert_eager_geometry(&state);
+            track_c2d_assert_independent_n100_bindings(&state, &observation);
+            drop(output);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "bounded Track C2-D owner characterization; run through the explicit Track C runner"]
+    fn track_c2d_benchmark_root_list_cold_geometry_recipes() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for recipe in TrackC2DRecipe::ALL {
+                let fixture_signature = track_c2d_fixture_signature(
+                    recipe,
+                    &fixture.values,
+                    &fixture.values,
+                    &track_c2d_expected_actions(&fixture.values, recipe),
+                    &track_c2d_aliases(&fixture.values, recipe),
+                    (recipe.old_screen_width(), 640.0),
+                    (recipe.new_screen_width(), 640.0),
+                    recipe.old_pixels_per_point(),
+                    recipe.new_pixels_per_point(),
+                    recipe.old_wrap(true),
+                    recipe.new_wrap(recipe.old_wrap(true)),
+                    false,
+                    recipe.new_full_paths(),
+                );
+                let samples = measure_owner(
+                    || track_c2d_prepare_list_state(workspace.root(), &fixture.values, recipe),
+                    track_c2d_run_list_owner,
+                    |state, _output| track_c2d_assert_eager_geometry(state),
+                );
+                track_c2d_emit_samples(recipe, *count, fixture_signature, mode, &samples);
+            }
+        }
+        drop(workspace);
+    }
+
     struct TrackCRootGridState {
         app: LauncherApp,
         ctx: egui::Context,
