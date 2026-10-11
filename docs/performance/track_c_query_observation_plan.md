@@ -1,7 +1,8 @@
 # C2-G query-to-usable CPU viewport plan
 
 State: protocol frozen; v6 source/ordinary/check/Small independently cleared.
-Implementation source commit ready; exact committed-source Full pending. LOCAL ONLY. Accepted sourcef246958ced8d3be8b712e222461311824880e48c.
+Source committed d161e8da; Full01 failed at large viewport menu fixture.
+Bounded clipped-hit fixture correction and new-source verification pending. LOCAL ONLY. Accepted sourcef246958ced8d3be8b712e222461311824880e48c.
 C2-F is closed SKIPPED;17/29 checkpoints closed. C2-G is one bounded observation
 milestone, with no query/search/scheduling/layout optimization.
 
@@ -161,3 +162,59 @@ owner/strict collector/independent review PASS4records80sequences200intents340fr
 Small has180completed20superseded/0cancelled; all40 timing triplets independently
 recalculated. The viewport sequence maximum192.3688ms is retained. Full is pending
 exact clean committed source; this checkpoint is not closed by Small alone.
+
+### Historical Full01 clipped-click correction (superseded by schema2)
+
+Exact d161 Full01 failed the1k viewport real-menu-open assertion after seven emitted
+records. No partial subset is accepted as Full evidence. Planner and reviewer found
+a concrete fixture defect: intersecting response rectangles were admitted, then
+their full centers used even when outside the actual clickable clip. Choose a
+positive-area clipped intersection interior, retain real menu/eager assertions, and
+verify owned large viewport cases. No new frames, sleep, animation or production
+change is justified. The seven-step generic visible-row protocol and signature
+bindings remain; actual owner/viewport receipts may change consistently with the
+corrected hit. Preserve failed Full01 and disclose new source before rerunning.
+
+The first clipped-hit oracle retry opened the real menu but failed a newly added
+current-rectangle containment assertion. Pinned egui hit-tests previous-frame
+widgets, then attaches interaction by ID to current response rectangles; scrolling
+can move those rectangles. Correct the new assertion to bind the clicked prior ID
+to the current popup owner/index/action, while retaining prior clipped-point
+containment, real menu checks and current eager geometry parity. No settling or
+production change follows. Preserve oracle_attempt_07_failure.json.
+
+### Adopted schema2 controlled viewport protocol
+
+Oracle09 confirmed N1000: prior row0 ID was clicked, but current rows15..39
+omitted that response, so no menu could attach. Preserve production animation.
+The revised viewport recipe adds two explicit CPU frames after last selection: first
+advances simulated input19ticks (19/60s, beyond pinned0.3s maximum), second paints
+the updated offset. Both execute full eager/action/paint validation and remain
+inside whole-owner timing with receipts. No sleep, retry or untallied frame.
+
+Viewport input ticks are9,10,11,12,13,32,33,34,35; query recipes remain contiguous
+from9. Schema2 emits and strictly validates input_tick. Viewport steps now total9,
+popup-open index7/close8. Small380/Full1140 actual frames; intent counts and5warm/20
+retained/zero exclusions are unchanged. The8-frame limit remains per query intent.
+Only three viewport recipe signatures change; independent outputs grow51to57.
+The nine-frame controls are NOT COMPARABLE with historical seven-frame controls,
+and simulated animation time is not wall waiting or native interaction latency.
+V1 collector/bindings/committed measurements remain immutable; companion
+collect_query_v2.py and v2 bindings require independent review/freeze before execution.
+
+Schema2 source, exact collector and independent bindings now reviewed CLEAR.
+protocol_schema2_freeze.json freezes all six source hashes, collector, binding
+hashes and 25 passing synthetic controls before focused oracle10 execution.
+All42 protected helpers and byte-identical Notes confirmed. Schema2 oracle and
+Small/Full acceptance remain pending.
+
+Schema2 oracle10 PASS (four N100 recipes plus1k/10k viewport). Small03 owner PASS
+13.931s, strict collector4records80sequences200intents380frames,180completed/20
+superseded. Whole p50/p95/max ms: typed62.1107/68.5586/70.3971; provider43.2483/
+44.4446/45.0983; filters34.4561/38.7398/43.4390; nine-frame controls151.5174/
+247.8101/248.6301. No historical viewport comparison or improvement claim.
+Independent Small evidence review and exact committed Full remain pending.
+
+Independent schema2 Small review CLEAR: six live source hashes, collector/bindings,
+raw equality and all42 timing triplets reproduced. Reviewed source+Small may commit;
+Full acceptance requires the exact clean new commit.

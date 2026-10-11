@@ -1,5 +1,5 @@
 {
-  "status": "PASS_SCOPED_ORDINARY_LIBRARY_SMALL",
+  "status": "SCHEMA2_ORACLE_SMALL_INDEPENDENT_REVIEW_CLEAR_FULL_PENDING",
   "profile": "fast-dev",
   "test_runner": "cargo nextest",
   "test_threads": 1,
@@ -53,9 +53,13 @@
     "ordinary-01.log",
     "ordinary-02.log",
     "oracle-03.log",
-    "oracle-04.log"
+    "oracle-04.log",
+    "oracle-07.log",
+    "oracle-08.log",
+    "oracle-09.log",
+    "full-01.log"
   ],
-  "benchmarks": "Small02_PASS4records80sequences200intents340frames; Full_NOT_RUN",
+  "benchmarks": "Historical_schema1Small02_preserved; schema2Small03_PASS4records80sequences200intents380frames; schema1Full01FAIL_preserved; schema2Full_NOT_RUN",
   "native": "NOT_RUN",
   "benchmark_evidence": {
     "small": "small.json",
@@ -65,5 +69,27 @@
     "small_test_seconds": 12.991,
     "small_nextest_run": "9ba9814e-3a18-415e-bf4e-eaadc62e8afa"
   },
-  "small_independent_review": "CLEAR_source6hashes_collector_raw4records_40triplets_80sequences200intents340frames_privacy"
+  "small_independent_review": "CLEAR_source6hashes_collector_raw4records_40triplets_80sequences200intents340frames_privacy",
+  "full_attempt": "full_attempt_01_failure.json",
+  "oracle_attempt_07": "oracle_attempt_07_failure.json",
+  "schema2_source_binding": "protocol_schema2_freeze.json",
+  "schema2_controls": "25_SYNTHETIC_PASS_NOT_MEASUREMENT",
+  "schema2_review": "SOURCE_METHOD_BINDINGS_FIXTURE_CLEAR",
+  "schema2_oracle": "oracle_schema2_result.json",
+  "schema2_small": {
+    "artifact": "small_v2.json",
+    "source_binding": "protocol_schema2_freeze.json",
+    "source": "UNCOMMITTED_SOURCE",
+    "owner_seconds": 13.931,
+    "nextest_seconds": 13.964,
+    "nextest_run": "d569c82b-75ac-4794-9fe4-71135e55434c",
+    "records": 4,
+    "sequences": 80,
+    "intents": 200,
+    "frames": 380,
+    "completed": 180,
+    "superseded": 20,
+    "cancelled": 0,
+    "review": "CLEAR_6sourcehashes_raw_equality_42triplets_receipts_privacy"
+  }
 }

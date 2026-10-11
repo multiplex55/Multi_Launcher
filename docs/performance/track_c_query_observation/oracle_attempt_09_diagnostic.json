@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "status": "FAIL_DIAGNOSTIC_CAUSE_CONFIRMED",
+  "source_binding": "diagnostic-source-v8-1.json",
+  "source_parent": "d161e8daa7a2aa3f113fb9ef1f0d0c537af8277b",
+  "render_sha256": "c9b09bd7589c018f597f4bc2191e2021cb2ae9f06492ccce40d1a5e54c3a6cf7",
+  "profile": "fast-dev",
+  "nextest_run": "bdd62320-c21f-429a-8ff0-fa0d21cbc30e",
+  "compile_seconds": 62,
+  "owner_seconds": 1.338,
+  "nextest_seconds": 1.349,
+  "tests": 1,
+  "passed": 0,
+  "failed": 1,
+  "raw_log_sha256": "4e6aa06ea534b4bd7c9ffbbdec1a90082a2648ba458d952837daf40a4a114960",
+  "diagnostic": {
+    "count": 1000,
+    "target_index": 0,
+    "prior_id": "7EC49366B74322A4",
+    "clicked_id": "7EC49366B74322A4",
+    "prior_id_present_current": false,
+    "current_target_index_present": false,
+    "popup_owner": null,
+    "current_index_min": 15,
+    "current_index_max": 39,
+    "prior_and_current_clip": [
+      [
+        0,
+        74.4
+      ],
+      [
+        960,
+        635
+      ]
+    ],
+    "prior_target_rect": [
+      [
+        8,
+        77.4
+      ],
+      [
+        952,
+        95.4
+      ]
+    ],
+    "current_target_rect": null
+  },
+  "diagnosis": "Previous-frame hit ID is correct but absent from current virtualized set after animated scroll; menu cannot attach because corresponding response is not rendered.",
+  "resolution": "Reviewed schema2 protocol preserves production animation and adds two explicitly timed/validated/emitted neutral CPU frames,19simulated input ticks then paint updated offset; no wall sleep or favorable subset acceptance",
+  "native": "NOT_RUN"
+}

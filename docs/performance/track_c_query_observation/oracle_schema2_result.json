@@ -1,0 +1,18 @@
+{
+  "schema": 2,
+  "status": "PASS",
+  "source_binding": "protocol_schema2_freeze.json",
+  "source": "UNCOMMITTED_SOURCE",
+  "profile": "fast-dev",
+  "command": "cargo nextest run --cargo-profile fast-dev --lib --test-threads 1 --no-fail-fast -E test(=gui::render::tests::track_c2g_oracle_query_sequences_match_usable_cpu_frames)",
+  "nextest_run": "bdbeba24-5903-4d27-88d2-676e9e54b728",
+  "tests_executed": 1,
+  "passed": 1,
+  "failed": 0,
+  "owner_seconds": 11.153,
+  "nextest_seconds": 11.166,
+  "compile_seconds": 89,
+  "log_sha256": "faa290e6f42ff62f8f0e0244330d53571834c5216a3ca4574a99822cabe88435",
+  "scope": "four recipes N100 plus viewport controls N1000/N10000; eager geometry/fullAction/actual click owner assertions",
+  "native": false
+}

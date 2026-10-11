@@ -9873,7 +9873,7 @@ mod tests {
             match self {
                 Self::TypedSuffixSequence | Self::AppProviderSupersession => 4,
                 Self::EquivalentFilterSequence => 2,
-                Self::ViewportControls => 7,
+                Self::ViewportControls => 9,
             }
         }
 
@@ -9998,6 +9998,8 @@ mod tests {
                 "select:first",
                 "select:middle",
                 "select:last",
+                "neutral_frame:advance_scroll_animation:19_ticks",
+                "neutral_frame:paint_updated_scroll_offset",
                 "secondary_click:visible_row",
                 "primary_click:outside_scroll_area",
             ],
@@ -10689,6 +10691,7 @@ mod tests {
         assert!(app.last_visible);
         let json = serde_json::json!({
             "frame": after.frame_count,
+            "input_tick": frame,
             "step": step_index,
             "kind": kind,
             "elapsed_ns": elapsed_ns,
@@ -10903,19 +10906,70 @@ mod tests {
                     );
                     steps.push(track_c2g_step_json(index, kind, observation));
                 }
+                assert_eq!(
+                    state.frame_index, 14,
+                    "select_last used raw input tick 13 and the next tick is 14"
+                );
+                state.frame_index = state.frame_index.saturating_add(18);
+                assert_eq!(state.frame_index, 32);
+                for (index, kind) in [
+                    (5, "advance_scroll_animation"),
+                    (6, "paint_updated_scroll_offset"),
+                ] {
+                    let observation = track_c2g_run_frame(
+                        state,
+                        index,
+                        kind,
+                        "app",
+                        false,
+                        Some(state.count - 1),
+                        960.0,
+                        640.0,
+                        Vec::new(),
+                    );
+                    steps.push(track_c2g_step_json(index, kind, observation));
+                }
                 let viewport = state
                     .app
                     .test_root_scroll_viewport_rect
                     .expect("the prior actual frame records its visible viewport");
-                let target = state
-                    .app
-                    .test_root_rendered_row_rects
-                    .iter()
-                    .find_map(|(_, rect)| viewport.intersects(*rect).then_some(rect.center()))
+                let current_rows = &state.app.test_root_rendered_row_rects;
+                let fully_visible_target = current_rows.iter().find_map(|(index, rect)| {
+                    viewport
+                        .contains_rect(*rect)
+                        .then_some((*index, rect.center()))
+                });
+                let (target_index, target) = fully_visible_target
+                    .or_else(|| {
+                        current_rows
+                            .iter()
+                            .filter_map(|(index, rect)| {
+                                let clipped = rect.intersect(viewport);
+                                (clipped.width() > 0.0 && clipped.height() > 0.0).then_some((
+                                    *index,
+                                    clipped.center(),
+                                    clipped.width() * clipped.height(),
+                                ))
+                            })
+                            .max_by(|left, right| left.2.total_cmp(&right.2))
+                            .map(|(index, point, _)| (index, point))
+                    })
                     .expect("the current viewport contains a controlled catalog row");
+                let target_rect = current_rows
+                    .iter()
+                    .find_map(|(index, rect)| (*index == target_index).then_some(*rect))
+                    .expect("the chosen point belongs to a current-frame response row");
+                let prior_target_id = state
+                    .app
+                    .test_root_rendered_row_ids
+                    .iter()
+                    .find_map(|(index, id)| (*index == target_index).then_some(*id))
+                    .expect("the prior-frame target has a response identity");
+                assert!(viewport.contains(target));
+                assert!(target_rect.contains(target));
                 let open = track_c2g_run_frame(
                     state,
-                    5,
+                    7,
                     "open_result_context_menu",
                     "app",
                     false,
@@ -10938,16 +10992,84 @@ mod tests {
                         },
                     ],
                 );
+                let clicked_id = state.ctx.interaction_snapshot(|snapshot| snapshot.clicked);
+                let menu_open = state.ctx.is_context_menu_open();
+                let current_viewport = state.app.test_root_scroll_viewport_rect;
+                let popup_owner = state.app.root_list_geometry.popup_owner();
                 assert!(
-                    state.ctx.is_context_menu_open(),
-                    "the result menu opens through a real secondary click"
+                    menu_open && clicked_id == Some(prior_target_id),
+                    "the real secondary click opens the menu through the prior-frame target response; menu_open={}, count={}, target_index={}, prior_target_id={:?}, clicked_id={:?}, prior_id_present_current={}, current_id_at_target_index={:?}, popup_owner={:?}, current_index_min={:?}, current_index_max={:?}, prior_viewport={:?}, current_viewport={:?}, prior_target_rect={:?}, current_target_rect={:?}",
+                    menu_open,
+                    state.count,
+                    target_index,
+                    prior_target_id,
+                    clicked_id,
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .any(|(_, id)| *id == prior_target_id),
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .find_map(|(index, id)| (*index == target_index).then_some(*id)),
+                    popup_owner,
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .min(),
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .max(),
+                    viewport,
+                    current_viewport,
+                    target_rect,
+                    state
+                        .app
+                        .test_root_rendered_row_rects
+                        .iter()
+                        .find_map(|(index, rect)| (*index == target_index).then_some(*rect)),
                 );
-                steps.push(track_c2g_step_json(5, "open_result_context_menu", open));
+                let current_viewport = current_viewport
+                    .expect("the menu-opening frame records its current clipped viewport");
+                let popup_owner =
+                    popup_owner.expect("the real secondary click records its current popup owner");
+                assert!(current_viewport.contains(target));
+                assert_eq!(popup_owner, target_index);
+                let popup_owner_id = state
+                    .app
+                    .test_root_rendered_row_ids
+                    .iter()
+                    .find_map(|(index, id)| (*index == popup_owner).then_some(*id))
+                    .expect("the actual popup owner has a current-frame widget identity");
+                assert_eq!(popup_owner_id, prior_target_id);
+                let popup_owner_action = state
+                    .app
+                    .test_root_rendered_rows
+                    .iter()
+                    .find_map(|(index, action)| (*index == popup_owner).then_some(action))
+                    .expect("the actual popup owner has a current-frame rendered action");
+                assert_eq!(
+                    state
+                        .app
+                        .results
+                        .get(popup_owner)
+                        .map(|result| &result.action),
+                    Some(popup_owner_action),
+                    "the popup owner still names its actual current result"
+                );
+                steps.push(track_c2g_step_json(7, "open_result_context_menu", open));
 
                 let outside = egui::pos2(1.0, 1.0);
                 let close = track_c2g_run_frame(
                     state,
-                    6,
+                    8,
                     "close_result_context_menu",
                     "app",
                     false,
@@ -10974,7 +11096,7 @@ mod tests {
                     !state.ctx.is_context_menu_open(),
                     "an outside click closes the result menu"
                 );
-                steps.push(track_c2g_step_json(6, "close_result_context_menu", close));
+                steps.push(track_c2g_step_json(8, "close_result_context_menu", close));
             }
         }
 
@@ -11073,6 +11195,34 @@ mod tests {
         use crate::performance::track_c_workloads::TrackCWorkspace;
 
         let workspace = TrackCWorkspace::new();
+        let assert_viewport_recipe = |sample: &serde_json::Value| {
+            let steps = sample["steps"].as_array().unwrap();
+            assert_eq!(steps.len(), 9);
+            assert_eq!(
+                steps
+                    .iter()
+                    .map(|step| step["kind"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "resize_narrow",
+                    "resize_restore",
+                    "select_first",
+                    "select_middle",
+                    "select_last",
+                    "advance_scroll_animation",
+                    "paint_updated_scroll_offset",
+                    "open_result_context_menu",
+                    "close_result_context_menu",
+                ]
+            );
+            assert_eq!(
+                steps
+                    .iter()
+                    .map(|step| step["frame"]["input_tick"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![9, 10, 11, 12, 13, 32, 33, 34, 35]
+            );
+        };
         for case in TrackC2GCase::ALL {
             let sample = track_c2g_run_record(case, 100, workspace.root());
             assert_eq!(sample["steps"].as_array().unwrap().len(), case.step_count());
@@ -11080,6 +11230,15 @@ mod tests {
                 sample["intents"].as_array().unwrap().len(),
                 case.intent_count()
             );
+            if case == TrackC2GCase::ViewportControls {
+                assert_viewport_recipe(&sample);
+            }
+        }
+        for count in [1_000, 10_000] {
+            let sample =
+                track_c2g_run_record(TrackC2GCase::ViewportControls, count, workspace.root());
+            assert_eq!(sample["intents"].as_array().unwrap().len(), 0);
+            assert_viewport_recipe(&sample);
         }
         drop(workspace);
     }
@@ -11117,7 +11276,7 @@ mod tests {
                 }
                 assert_eq!(samples.len(), 20);
                 let output = serde_json::json!({
-                    "schema": 1,
+                    "schema": 2,
                     "stage": "gui_query_to_usable_cpu_viewport",
                     "owner": "egui_Context_run+LauncherApp::render_root_frame",
                     "owner_scope": "accepted_gui_mutation_to_first_usable_cpu_root_frame",

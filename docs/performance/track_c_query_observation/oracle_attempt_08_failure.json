@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "status": "FAIL_REAL_MENU_OPEN_LARGE_VIEWPORT_DIAGNOSIS_PENDING",
+  "source_binding": "protocol_source_correction_v8.json",
+  "profile": "fast-dev",
+  "nextest_run": "c6019285-0c52-41cf-b7ba-d3a94b3f45bf",
+  "compile_seconds": 64,
+  "owner_seconds": 1.383,
+  "nextest_seconds": 1.393,
+  "tests": 1,
+  "passed": 0,
+  "failed": 1,
+  "raw_log_sha256": "cf60e3861a3f686a5c3e3536e4b5177547a31cb2b02129451ff111a872986766",
+  "failure": "Real secondary click menu open assertion; no point/count/IDs emitted so exact failing case is unconfirmed",
+  "hypothesis": "Prior-frame hit-tested row can leave current virtualized rendered range during large animated scroll; source/method investigation pending",
+  "disposition": "No measurement acceptance or rerun until bounded source/method correction",
+  "native": "NOT_RUN"
+}
