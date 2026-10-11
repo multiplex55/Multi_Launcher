@@ -1,6 +1,6 @@
 # Track C C2-E — exact cold grid geometry gate
 
-State IN_PROGRESS. Dependency C2-D closed SKIPPED(measuredgate), closure656b99641026ea3b6238cff7a04e1bbdef6d3e22; render.rs is exact reviewed eager9e986 Gitblob. Accepted C2-C retained. LOCAL ONLY.
+State SKIPPED(measured gate); closure this commit. Dependency C2-D closed SKIPPED(measuredgate), closure656b99641026ea3b6238cff7a04e1bbdef6d3e22; render.rs is exact reviewed eager9e986 Gitblob. Accepted C2-C retained. LOCAL ONLY.
 
 ## One characterization milestone
 
@@ -107,3 +107,16 @@ Candidate Small actualPASS: run69e41583-429b-446f-996f-1f1c68be14d5, build0.87s,
 N100/3cols candidate complete-owner p50/p95/max(ms): fullcold1.3586/1.5484/1.5706; shared5%growth6.7058/8.4580/9.9394; shared20%shrink4.7233/6.3459/6.4010; warm1.3272/1.6635/1.7595; tallspill1.4746/1.6649/2.3006. Small baseline shared5%6.2992/8.3194/9.0100 and20%4.7636/5.2445/5.3633: adverse prefix tails retained, no noise claim or gate relaxation. Fullcold/tall reuse100cells, partial5/20, measured95/80, compared/formatted100; warm all0. Candidate partial geometry+ownedpresentation capacity atN100 peakmax57,896bytes, notallocator/RSS/totalpeak; all tuples retained. SmallN100 percentage exempt as frozen beforehand, not runtime acceptance; Full primary partial-update and regression gates remain required.
 
 Independent candidate Small review CLEAR for source commit then exact clean Full:9records189arrays3780entries162scalars45triplets180statehashes;99unchanged common baseline arrays match, including geometry storage. Actual work, 180projection tuples, source/private-data checks PASS. Contrary shrink p95+21.00% andgrowthp95+1.67% retained. Stable tested sourceB98487A5E9E6B1C944D5A0C01B0DE39FCD33495877FAAB071E4A77B13CD325FB. Candidate source commit is experimental, not runtime KEEP; Full27/540 and frozen gates required. All Cargo terminal, no source writer.15/29closedLOCALONLY.
+
+
+## Final C2-E disposition — SKIPPED (measured gate)
+
+Candidate source1936c89b32545058c8f3ab069b4cf2d59b61b1ff preserved exact semantics. Full run9ddef107-7a80-49c3-85a9-08c523d32943 fast-dev build0.88s, owner728.789s, Nextest728.830s,1PASS/5195skipped;27recipes540retainedsamples,5warmups20samples0exclusions. Independent evidence CLEAR:567arrays11340entries486scalars135nearest-rank triplets540full-state hashes;297unchanged baseline arrays and144Small-overlap arrays/144scalars match. Actual C/R/F/M, all geometry and projection capacities, complete eager/state/widget/extents, source/provenance/privacy PASS. Ordinary13/13 and non-testlibcheckPASS; two compile-only visibility failures retained, zero tests there.
+
+Frozen gate5e0d211:31/32checksPASS, sole failure warmN1000/3cols p95 1.4944→1.6729ms (+11.9446%), above5%limit. Warm median1.3016→1.3090ms (+0.57%), max1.5279→1.8860ms (+23.44%). No waiver, rerun or noise attribution. Source-correct candidate rejected by measured gate, not semantic failure.
+
+Strong favorable partial cases remain visible:20%shrinkN1000 owner p50/p95/max43.6383/46.3230/49.9179→35.7797/39.4707/41.4684ms (-18.01%/-14.79% p50/p95);N10000 481.0998/514.6584/534.1384→355.2499/391.5868/395.5178ms (-26.16%/-23.91%). FullcoldN10000/3cols550.2842/708.8718/929.4093→10.3371/11.0094/21.6542ms and tall539.6941/593.8884/614.2202→10.7470/11.6565/18.2863ms cannot substitute for failed warm gate.5%growthN10000 464.6075/513.4302/557.9451→439.0883/499.2879/569.4444ms has adverse max+2.06%. N100 shrink4.8120/5.3525/5.7481→4.7898/6.1785/8.0042ms (p95+15.43%, max+39.25%);N100warmp95+10.76% retained. All27timing distributions remain in reviewed rejected Full artifact.
+
+Actual simultaneous partial geometry+presentation capacities max57,896/486,640/4,977,280bytes atN100/1k/10k; includes nine f32 vectors, owned String capacities and typed Vec entries, excludes transientgalleys, inlinekeys/Weak, controlblocks, allocator/RSS. One prior snapshot was bounded but adds retention. No total-memory/native/production-frequency/application-wide claim.
+
+Exact pre-candidate render.rs restored from5e0d211/a098, sourceSHA25608AA135652DABF2534807C37BB21E163515D72DA6188E19D9F8572D69127099F, Gitblob32298a95 (fullblob verified in closure checks). AcceptedC2C and earlier behavior remain; active runtime is eager grid, baseline cfgtest characterization retained. Candidate-specific reuse tests are preserved in candidate commit; obsolete active candidate path removed. Already-passing ordinary12/Small9/Full27/non-testlibcheck on this identical eager source provide restored-source verification; no redundant Cargo run after exact restoration, independently approved. Candidate collector/Small/Full/history retained, G0 unchanged. C2-E closes SKIPPED(measuredgate),16/29closed; next C2-F characterization only. LOCAL ONLY.

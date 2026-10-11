@@ -1,6 +1,6 @@
 # C2-E one bounded grid reuse candidate
 
-Status AUTHORIZED for implementation only after this plan commit. Baseline evidence commit6ebf288965a5a9dabd3334e6c75d6096dbf070cb; baseline measured sourcea098d685857cb2c4e7c47e90b20aad4b3c6c838d. Parent owns collector/evidence/Cargo/Git; sole implementer owns src/gui/render.rs runtime, directly relevant tests and candidate test emitter. Not alone in repository; preserve others' changes. LOCAL ONLY.
+Final status REJECTED under the frozen measured gate; eager source restored. Historical authorization: implementation only after this plan commit. Baseline evidence commit6ebf288965a5a9dabd3334e6c75d6096dbf070cb; baseline measured sourcea098d685857cb2c4e7c47e90b20aad4b3c6c838d. Parent owns collector/evidence/Cargo/Git; sole implementer owns src/gui/render.rs runtime, directly relevant tests and candidate test emitter. Not alone in repository; preserve others' changes. LOCAL ONLY.
 
 ## Objective and ownership
 
@@ -45,3 +45,5 @@ Candidate source on plan5e0d21115cf3f964637a33339251c884e93c1e3b is stable; rend
 Candidate46 work counters: original7+18geometry storage, compared/reused/formatted at25/26/27, projection18slots at28..46. Emitter21arrays/18scalars matches separate collector. Fresh per-cell Strings each cold; actual cold comparison count is bounded by available previous indices, fixed benchmark recipes compareN and reuse exactprefix; warm all0. Projection tuples are source-confirmed actual before6/after6/simultaneouspeak6 as frozen plan; Vec<String> capacity bytes use actual Rust entry size24 on x86_64 MSVC. Partialcapacity excludes transientgalleys/inlinekeyWeak/controlblocks/allocator/RSS. Observer/String capacity scans are opt-in cfgtest only; their measured overhead is not subtracted.
 
 Separate collector synthetic controls accepted1positive/rejected18negative; independent synthetic raw/state review189arrays3780entries162scalars45triplets180hashes PASS. These are parser controls, not performance. Exact ordinary13 includes track_c2e_oracle_grid_projection_lifecycle_contract plus previous12. Ordinary candidate run now compiling; no candidate benchmark executed. No source/Git changes while guarded Cargo active. Candidate not accepted; Full evidence and frozen gate pending. LOCAL ONLY.
+
+Final disposition: source-correct Full31/32numericchecksPASS, warm1kp95+11.9446%>5% gate fails. No second candidate/relaxed gate; exact eager runtime restored, candidate history/evidence retained. See grid gate and reviewed rejected candidate_full.json.

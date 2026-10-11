@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "C2_E_REVIEWED_UNCOMMITTED_CANDIDATE_SMOKE_PENDING_FULL_GATE",
+  "status": "C2_E_REVIEWED_REJECTED_CANDIDATE_SMALL",
   "source": "UNCOMMITTED_SOURCE",
   "profile": "fast-dev",
   "mode": "Small",
@@ -4611,5 +4611,7 @@
     "baseline_common_arrays": 99,
     "disposition": "CLEAR for source commit and exact-source Full; no KEEP",
     "native": "NOT MEASURED"
-  }
+  },
+  "accepted_runtime": false,
+  "final_gate_evidence": "track_c_grid_geometry_candidate_full.json"
 }
