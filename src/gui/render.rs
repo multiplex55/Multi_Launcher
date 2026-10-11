@@ -6452,6 +6452,799 @@ mod tests {
         drop(workspace);
     }
 
+    const TRACK_C2C_PROVIDER_NAME: &str = "track_c2c_provider";
+    const TRACK_C2C_PROVIDER_SOURCE: &str = "track_c2c_provider";
+    const TRACK_C2C_QUERY: &str = "app ";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2CRefreshCase {
+        CachedRepeat,
+        EqualProviderNotification,
+        ChangedProviderNotification,
+    }
+
+    impl TrackC2CRefreshCase {
+        const ALL: [Self; 3] = [
+            Self::CachedRepeat,
+            Self::EqualProviderNotification,
+            Self::ChangedProviderNotification,
+        ];
+
+        fn key(self) -> &'static str {
+            match self {
+                Self::CachedRepeat => "cached_repeat",
+                Self::EqualProviderNotification => "equal_provider_notification",
+                Self::ChangedProviderNotification => "changed_provider_notification",
+            }
+        }
+
+        fn notifies_provider(self) -> bool {
+            self != Self::CachedRepeat
+        }
+
+        fn changes_provider_action(self) -> bool {
+            self == Self::ChangedProviderNotification
+        }
+    }
+
+    struct TrackC2CControlledProvider {
+        action: Arc<Mutex<Action>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for TrackC2CControlledProvider {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            vec![self.action.lock().unwrap().clone()]
+        }
+
+        fn name(&self) -> &str {
+            TRACK_C2C_PROVIDER_NAME
+        }
+
+        fn description(&self) -> &str {
+            "Synthetic Track C controlled search provider"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn always_search(&self) -> bool {
+            true
+        }
+    }
+
+    fn track_c2c_provider_action(args: Option<&str>) -> Action {
+        Action {
+            label: "Controlled provider result".into(),
+            desc: "Synthetic forced-refresh provider result".into(),
+            action: "track-c:controlled-provider".into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    fn track_c2c_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        value: &str,
+    ) {
+        signature.number(value.len() as u64);
+        signature.bytes(value.as_bytes());
+    }
+
+    fn track_c2c_fixture_signature(
+        catalog: &[Action],
+        case: TrackC2CRefreshCase,
+        initial_provider_action: &Action,
+        effective_provider_action: &Action,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x4352_4652_4553_4831,
+            "track-c2c-forced-refresh-fixture",
+            catalog.len() + 1,
+        );
+        signature.number(action_fixture_identity(catalog));
+        track_c2c_signature_string(&mut signature, case.key());
+        track_c2c_signature_string(&mut signature, TRACK_C2C_QUERY);
+        signature.number(1); // Exact matching.
+        signature.number(0.0_f32.to_bits() as u64); // Fuzzy weight.
+        signature.number(0.0_f32.to_bits() as u64); // Usage weight.
+        signature.number(0); // Usage entries.
+        signature.number(0); // Folder aliases.
+        signature.number(0); // Bookmark aliases.
+        track_c2c_signature_string(&mut signature, TRACK_C2C_PROVIDER_NAME);
+        signature.number(1); // Provider is enabled.
+        signature.number(1); // Provider always searches.
+        signature.number(action_fixture_identity(std::slice::from_ref(
+            initial_provider_action,
+        )));
+        signature.number(action_fixture_identity(std::slice::from_ref(
+            effective_provider_action,
+        )));
+        signature.finish()
+    }
+
+    fn track_c2c_expected_fixture_signature(count: usize, case: TrackC2CRefreshCase) -> u64 {
+        match (count, case) {
+            (100, TrackC2CRefreshCase::CachedRepeat) => 0x83ac_a547_7013_e236,
+            (100, TrackC2CRefreshCase::EqualProviderNotification) => 0x3f27_cdd7_37d2_9326,
+            (100, TrackC2CRefreshCase::ChangedProviderNotification) => 0xb14c_8ea7_53c6_391a,
+            (1_000, TrackC2CRefreshCase::CachedRepeat) => 0xdd5e_4f19_ca87_1066,
+            (1_000, TrackC2CRefreshCase::EqualProviderNotification) => 0xfd1f_a896_de80_5376,
+            (1_000, TrackC2CRefreshCase::ChangedProviderNotification) => 0x58af_94f6_6ee7_856a,
+            (10_000, TrackC2CRefreshCase::CachedRepeat) => 0x04d1_43fb_bcd5_d7b9,
+            (10_000, TrackC2CRefreshCase::EqualProviderNotification) => 0x44fd_c1e0_fbef_b7a9,
+            (10_000, TrackC2CRefreshCase::ChangedProviderNotification) => 0x9c75_a4f1_bef6_38f5,
+            _ => panic!("unapproved C2-C fixture size or case"),
+        }
+    }
+
+    fn track_c2c_expected_action_identity(count: usize, case: TrackC2CRefreshCase) -> u64 {
+        match (count, case.changes_provider_action()) {
+            (100, false) => 0x91f7_8f1a_0090_9136,
+            (100, true) => 0xe185_5561_4ad4_cc6f,
+            (1_000, false) => 0xacc4_b6c3_9213_538b,
+            (1_000, true) => 0xb7c8_75f3_a5f1_bd48,
+            (10_000, false) => 0xe9e0_8ad2_6311_9091,
+            (10_000, true) => 0xa1e3_4d1a_09cd_8152,
+            _ => panic!("unapproved C2-C fixture size"),
+        }
+    }
+
+    struct TrackC2CRefreshState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        case: TrackC2CRefreshCase,
+        expected_actions: Vec<Action>,
+        expected_suggestions: Vec<String>,
+        provider_action: Arc<Mutex<Action>>,
+        provider_calls: Arc<AtomicUsize>,
+        provider_generation_before: u64,
+        result_generation_before: u64,
+        catalog_versions_before: crate::radial::dynamic::MutableResultCatalogVersions,
+        accepted_catalog_versions_before: crate::radial::dynamic::MutableResultCatalogVersions,
+        geometry_before: RootListGeometryObservation,
+        available_width: f32,
+        eager_outer: egui::Rect,
+        eager: EagerRootListLayout,
+        frame_index: usize,
+    }
+
+    fn track_c2c_expected_suggestions(catalog: &[Action]) -> Vec<String> {
+        let mut suggestions = catalog
+            .iter()
+            .map(|action| format!("app {}", action.label.to_lowercase()))
+            .collect::<Vec<_>>();
+        suggestions.sort();
+        suggestions.dedup();
+        suggestions.retain(|suggestion| suggestion != TRACK_C2C_QUERY);
+        suggestions.truncate(5);
+        suggestions
+    }
+
+    fn track_c2c_prepare_state(
+        root: &std::path::Path,
+        catalog: &[Action],
+        case: TrackC2CRefreshCase,
+    ) -> TrackC2CRefreshState {
+        use crate::performance::track_c_workloads::action_fixture_identity;
+
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, catalog.to_vec(), root);
+        // Launcher construction supplies known-folder aliases when no settings
+        // file exists. This fixture measures only its synthetic catalog.
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+
+        let initial_provider_action = track_c2c_provider_action(Some(""));
+        let effective_provider_action = if case.changes_provider_action() {
+            track_c2c_provider_action(Some("changed"))
+        } else {
+            initial_provider_action.clone()
+        };
+        let provider_action = Arc::new(Mutex::new(initial_provider_action.clone()));
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        app.plugins.register(Box::new(TrackC2CControlledProvider {
+            action: Arc::clone(&provider_action),
+            calls: Arc::clone(&provider_calls),
+        }));
+        app.enabled_plugins = Some(std::collections::HashSet::from([
+            TRACK_C2C_PROVIDER_NAME.to_owned()
+        ]));
+        app.query = TRACK_C2C_QUERY.to_owned();
+        app.query_autocomplete = true;
+        app.match_exact = true;
+        app.fuzzy_weight = 0.0;
+        app.usage_weight = 0.0;
+        app.usage.clear();
+        app.update_action_cache();
+        app.rebuild_completion_index_now();
+        assert!(app.completion_index.is_some());
+        assert!(app.completion_rebuild_after.is_none());
+        assert!(!app.action_completion_dirty);
+        assert!(!app.command_completion_dirty);
+        app.search();
+
+        let mut initially_expected_actions = catalog.to_vec();
+        initially_expected_actions.push(initial_provider_action.clone());
+        assert_eq!(app.results, initially_expected_actions);
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(app.last_search_query, TRACK_C2C_QUERY);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        let accepted_catalog_versions_before = app
+            .last_search_result_catalog_versions
+            .expect("the initial accepted search records mutable catalog versions");
+        let catalog_versions_before =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(accepted_catalog_versions_before, catalog_versions_before);
+        let provider_generation_before = app.plugins.search_generation();
+        assert_eq!(
+            app.last_search_provider_revision,
+            provider_generation_before
+        );
+        assert_eq!(
+            app.last_plugin_search_generation,
+            provider_generation_before
+        );
+
+        // Set up settled fonts, dashboard state, and actual root-list geometry
+        // before any measured owner invocation.
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(app.plugins.search_generation(), provider_generation_before);
+        let expected_suggestions = track_c2c_expected_suggestions(catalog);
+        assert_eq!(app.suggestions, expected_suggestions);
+        assert_eq!(expected_suggestions.len(), 5);
+
+        // The changed-provider fixture mutates only its captured Action payload
+        // after the initial result is accepted; the notification is timed later.
+        if case.changes_provider_action() {
+            *provider_action.lock().unwrap() = effective_provider_action.clone();
+        }
+        let mut expected_actions = catalog.to_vec();
+        expected_actions.push(effective_provider_action.clone());
+        assert_eq!(expected_actions.len(), catalog.len() + 1);
+        assert_eq!(
+            action_fixture_identity(&expected_actions),
+            track_c2c_expected_action_identity(catalog.len(), case),
+            "independently reconstructed complete ordered Action output"
+        );
+        let fixture_signature = track_c2c_fixture_signature(
+            catalog,
+            case,
+            &initial_provider_action,
+            &effective_provider_action,
+        );
+        assert_eq!(
+            fixture_signature,
+            track_c2c_expected_fixture_signature(catalog.len(), case),
+            "fixture identity is bound to the independent C2-C reconstruction"
+        );
+
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the actual root UI records its available row width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_style(style.clone());
+        let (eager_outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            &expected_actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            eager_outer,
+            "C2-C settled pre-refresh geometry against independent eager layout",
+        );
+        let (inner_rect, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("settled real ScrollArea records its content extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        assert!(inner_rect.width() > 0.0 && inner_rect.height() > 0.0);
+
+        // A nonempty selection makes the real same-query fast path's clearing
+        // behavior observable without changing the settled viewport.
+        app.selected = Some(0);
+        provider_calls.store(0, Ordering::SeqCst);
+        let geometry_before = app.root_list_geometry.test_observation();
+        let result_generation_before = app.root_list_geometry.result_generation_for_test();
+        crate::performance::track_c::reset();
+        TrackC2CRefreshState {
+            app,
+            ctx,
+            case,
+            expected_actions,
+            expected_suggestions,
+            provider_action,
+            provider_calls,
+            provider_generation_before,
+            result_generation_before,
+            catalog_versions_before,
+            accepted_catalog_versions_before,
+            geometry_before,
+            available_width,
+            eager_outer,
+            eager,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c2c_run_owner(state: &mut TrackC2CRefreshState) -> egui::FullOutput {
+        match state.case {
+            TrackC2CRefreshCase::CachedRepeat => state.app.search(),
+            TrackC2CRefreshCase::EqualProviderNotification
+            | TrackC2CRefreshCase::ChangedProviderNotification => state
+                .app
+                .plugins
+                .notify_search_update_for_test(TRACK_C2C_PROVIDER_SOURCE),
+        }
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
+    }
+
+    fn track_c2c_validate_owner(
+        state: &TrackC2CRefreshState,
+        _output: &egui::FullOutput,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::{OwnerObservation, StableSignature};
+
+        let app = &state.app;
+        assert_eq!(app.query, TRACK_C2C_QUERY);
+        assert_eq!(app.last_search_query, TRACK_C2C_QUERY);
+        assert_eq!(app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in
+            app.results.iter().zip(&state.expected_actions).enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "result {index} label");
+            assert_eq!(actual.desc, expected.desc, "result {index} description");
+            assert_eq!(actual.action, expected.action, "result {index} action ID");
+            assert_eq!(actual.args, expected.args, "result {index} arguments");
+        }
+        assert_eq!(app.results.first(), state.expected_actions.first());
+        assert_eq!(app.results.last(), state.expected_actions.last());
+        assert_eq!(app.suggestions, state.expected_suggestions);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(app.selected, None);
+        assert_eq!(app.autocomplete_index, 0);
+        assert!(app.last_search_result_catalog_versions_stable);
+
+        let current_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(current_catalog_versions, state.catalog_versions_before);
+        assert_eq!(
+            state.accepted_catalog_versions_before, state.catalog_versions_before,
+            "the accepted catalog receipt is the setup generation"
+        );
+        let accepted_catalog_versions = app
+            .last_search_result_catalog_versions
+            .expect("accepted output carries its catalog revision receipt");
+        assert_eq!(
+            accepted_catalog_versions, state.accepted_catalog_versions_before,
+            "the accepted catalog receipt remains unchanged after the owner"
+        );
+        assert_eq!(accepted_catalog_versions, current_catalog_versions);
+
+        let expected_delta = u64::from(state.case.notifies_provider());
+        let current_provider_generation = app.plugins.search_generation();
+        let expected_provider_generation = state
+            .provider_generation_before
+            .wrapping_add(expected_delta);
+        assert_eq!(current_provider_generation, expected_provider_generation);
+        assert_eq!(
+            app.last_search_provider_revision,
+            expected_provider_generation
+        );
+        assert_eq!(
+            app.last_plugin_search_generation,
+            expected_provider_generation
+        );
+        assert_eq!(
+            state.provider_calls.load(Ordering::SeqCst) as u64,
+            expected_delta,
+            "only a provider notification invokes the controlled provider"
+        );
+        assert_eq!(
+            *state.provider_action.lock().unwrap(),
+            if state.case.changes_provider_action() {
+                track_c2c_provider_action(Some("changed"))
+            } else {
+                track_c2c_provider_action(Some(""))
+            }
+        );
+
+        let result_generation = app.root_list_geometry.result_generation_for_test();
+        let result_generation_delta =
+            result_generation.saturating_sub(state.result_generation_before);
+        assert_eq!(result_generation_delta, expected_delta);
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            "C2-C post-refresh geometry against independent eager layout",
+        );
+        let width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the actual root UI records its available row width");
+        assert!((width - state.available_width).abs() <= 0.01);
+        let after = app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.geometry_before.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.geometry_before.measured_rows);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.geometry_before.measured_cells);
+        assert_eq!(rebuilds, expected_delta);
+        assert_eq!(
+            measured_rows,
+            expected_delta.saturating_mul(state.expected_actions.len() as u64)
+        );
+        assert_eq!(measured_cells, 0, "this is the production list layout");
+
+        let painted_rows = app.test_root_rendered_rows.len();
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert!(painted_rows > 0 && painted_rows <= 64);
+        assert_eq!(ids.len(), painted_rows);
+        assert_eq!(rects.len(), painted_rows);
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the real root ScrollArea records its clipped viewport");
+        let (inner_rect, content_size, offset) = app
+            .test_root_scroll_area_extent
+            .expect("the real root ScrollArea records its content extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        let content_origin = inner_rect.min - offset;
+        let visible_start = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.bottom() - state.eager_outer.top() <= viewport.min.y
+        });
+        let visible_end = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.top() - state.eager_outer.top() < viewport.max.y
+        });
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(state.eager.rows.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            app.test_root_rendered_rows
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            expected_indices,
+            "the actual viewport paints exactly the eager visible and overscan rows"
+        );
+        for ((index, action_id), (rect_index, rect)) in
+            app.test_root_rendered_rows.iter().zip(rects)
+        {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager_row = state.eager.rows[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_row.min - state.eager_outer.min),
+                eager_row.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "actual C2-C row {index} differs from the independent eager viewport"
+            );
+        }
+
+        let action_output_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results);
+        let mut complete_state = StableSignature::new(
+            0x4352_4652_4553_4f55,
+            "track-c2c-complete-output-state",
+            app.results.len(),
+        );
+        complete_state.number(action_output_id);
+        track_c2c_signature_string(&mut complete_state, &app.query);
+        track_c2c_signature_string(&mut complete_state, &app.last_search_query);
+        complete_state.number(app.last_results_valid as u64);
+        complete_state.number(app.last_search_pending as u64);
+        complete_state.number(app.background_query_refresh_pending as u64);
+        complete_state.number(app.pending_query.is_some() as u64);
+        if let Some(query) = app.pending_query.as_deref() {
+            track_c2c_signature_string(&mut complete_state, query);
+        }
+        complete_state.number(match app.last_search_provider_deferral {
+            search::ProviderSearchDeferral::None => 0,
+            search::ProviderSearchDeferral::Capacity => 1,
+        });
+        complete_state.number(app.last_search_result_catalog_versions_stable as u64);
+        complete_state.number(app.selected.map_or(u64::MAX, |index| index as u64));
+        complete_state.number(app.suggestions.len() as u64);
+        for suggestion in &app.suggestions {
+            track_c2c_signature_string(&mut complete_state, suggestion);
+        }
+        complete_state.number(app.autocomplete_index as u64);
+        let complete_output_state_id = complete_state.finish();
+
+        let mut viewport_signature = StableSignature::new(
+            0x4352_4652_4553_5650,
+            "track-c2c-root-viewport-receipt",
+            painted_rows,
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in app.test_root_rendered_rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            track_c2c_signature_string(&mut viewport_signature, action_id);
+            track_c2c_signature_string(&mut viewport_signature, &format!("{id:?}"));
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+
+        let accepted_values = accepted_catalog_versions;
+        let current_values = current_catalog_versions;
+        let catalog_receipts = vec![
+            1,
+            accepted_values.clipboard,
+            accepted_values.todo,
+            accepted_values.notes,
+            current_values.clipboard,
+            current_values.todo,
+            current_values.notes,
+        ];
+        let provider_revision_receipts = vec![
+            state.provider_generation_before,
+            app.last_search_provider_revision,
+            current_provider_generation,
+            app.last_plugin_search_generation,
+        ];
+        let geometry_ns = if rebuilds == 0 {
+            0
+        } else {
+            after.last_rebuild_nanos
+        };
+        let work_counters = vec![
+            app.results.len() as u64,
+            state.provider_calls.load(Ordering::SeqCst) as u64,
+            current_provider_generation.saturating_sub(state.provider_generation_before),
+            result_generation_delta,
+            rebuilds,
+            measured_rows,
+            measured_cells,
+            geometry_ns,
+            painted_rows as u64,
+            app.last_results_valid as u64,
+            app.last_search_pending as u64,
+            match app.last_search_provider_deferral {
+                search::ProviderSearchDeferral::None => 0,
+                search::ProviderSearchDeferral::Capacity => 1,
+            },
+            app.last_search_result_catalog_versions_stable as u64,
+            app.selected.map_or(u64::MAX, |index| index as u64),
+            app.suggestions.len() as u64,
+        ];
+        OwnerObservation {
+            output_identity: complete_output_state_id,
+            structural_signature: action_output_id,
+            revision_receipts: catalog_receipts
+                .into_iter()
+                .chain(provider_revision_receipts)
+                .collect(),
+            viewport_receipt: Some(viewport_receipt),
+            work_units: app.results.len() as u64,
+            work_counters,
+        }
+    }
+
+    fn track_c2c_emit_samples(
+        case: TrackC2CRefreshCase,
+        count: usize,
+        fixture_signature: u64,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(crate::performance::enabled());
+        assert_eq!(
+            crate::performance::track_c_workloads::BenchmarkMode::from_process_env()
+                .expect("valid Track C benchmark mode"),
+            mode
+        );
+        for sample in samples {
+            assert_eq!(sample.work_counters.len(), 15);
+            assert_eq!(sample.revision_receipts.len(), 11);
+            assert!(sample.viewport_receipt.is_some());
+        }
+        let numeric = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| sample.work_counters[index].to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let catalog_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.revision_receipts[..7]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let provider_revision_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.revision_receipts[7..]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let complete_output_state_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.output_identity))
+            .collect::<Vec<_>>()
+            .join(",");
+        let action_output_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.structural_signature))
+            .collect::<Vec<_>>()
+            .join(",");
+        let viewport_receipts = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.viewport_receipt.unwrap()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        eprintln!(
+            "C2C_REFRESH_RESULT schema=1 stage=forced_refresh_invalidation installation=eager_reinstall owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=warm_egui_font_atlas settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=existing_test_observation_no_equality_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
+            samples.len(),
+            case.key(),
+            numeric(0),
+            numeric(1),
+            numeric(2),
+            numeric(3),
+            numeric(4),
+            numeric(5),
+            numeric(6),
+            numeric(7),
+            numeric(8),
+            numeric(9),
+            numeric(10),
+            numeric(11),
+            numeric(12),
+            numeric(13),
+            numeric(14),
+        );
+    }
+
+    #[test]
+    fn track_c2c_oracle_forced_refresh_baseline_contract() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for case in TrackC2CRefreshCase::ALL {
+            let mut state = track_c2c_prepare_state(workspace.root(), &fixture.values, case);
+            let output = track_c2c_run_owner(&mut state);
+            let observation = track_c2c_validate_owner(&state, &output);
+            assert_eq!(observation.work_counters[0], 101);
+            assert_eq!(observation.work_counters[14], 5);
+            drop(output);
+            drop(state);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C forced provider refresh and real root geometry baseline"]
+    fn track_c2c_benchmark_forced_refresh_invalidation() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for case in TrackC2CRefreshCase::ALL {
+                let fixture_signature = track_c2c_fixture_signature(
+                    &fixture.values,
+                    case,
+                    &track_c2c_provider_action(Some("")),
+                    &if case.changes_provider_action() {
+                        track_c2c_provider_action(Some("changed"))
+                    } else {
+                        track_c2c_provider_action(Some(""))
+                    },
+                );
+                assert_eq!(
+                    fixture_signature,
+                    track_c2c_expected_fixture_signature(*count, case)
+                );
+                let samples = measure_owner(
+                    || track_c2c_prepare_state(workspace.root(), &fixture.values, case),
+                    track_c2c_run_owner,
+                    |state, output| track_c2c_validate_owner(state, output),
+                );
+                assert!(samples.iter().all(|sample| {
+                    sample.structural_signature == track_c2c_expected_action_identity(*count, case)
+                }));
+                track_c2c_emit_samples(case, *count, fixture_signature, mode, &samples);
+            }
+        }
+        drop(workspace);
+    }
+
     #[test]
     #[ignore = "opt-in Track C end-to-end query-to-current CPU root frame owner"]
     fn track_c_benchmark_root_query_to_usable_cpu_frame() {
