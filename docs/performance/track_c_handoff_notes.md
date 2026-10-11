@@ -467,3 +467,16 @@ Independent candidate Small review CLEAR for source commit then exact clean Full
 
 
 C2-E SKIPPED(measuredgate). Candidate1936c89b32545058c8f3ab069b4cf2d59b61b1ff:13ordinary/non-testlibcheckPASS; Small9/180 andFull27/540PASS728.789test728.830exe. Independent567arrays11340entries486scalars135triplets540statehashes/297baselinecommon/144Smallarrays144scalars CLEAR.31/32frozengatesPASS; warm1kp951.4944→1.6729ms (+11.9446%) exceeds5% despite20%shrink10kp50/p95481.0998/514.6584→355.2499/391.5868ms. All favorable/contrary tails retained, no waiver/noise claim. Partialold/newgeometry+presentation peakmax4,977,280B, notRSS/allocator. Exact5e/a098eager render restored SHA08AA135652DABF2534807C37BB21E163515D72DA6188E19D9F8572D69127099F; reuse identical-source priorverification, no redundantCargo. AcceptedC2C retained; no grid optimization accepted.16/29closed, nextC2F. Native/productionfrequency NOTMEASURED. See grid gate and reviewed rejected candidate_full.json. LOCALONLY.
+
+
+Current state: C2-H PASS,19/29closed. Exact measured source6fb578169a13f074bede2f3352eafe916acb9e7e;
+closure is this local evidence commit.32ordinary+Small32/3+Full96/9+legacywarm6PASS,
+independent source/method/numerical/publication/privacy/conditional reviewCLEAR.
+All Cargo terminal; no active writer. Report track_c_c2h/results.md retains73/96median,
+57/96p95,55/96max adverse G0ratios and all favorable/contrary samples. No blanket
+speedup/native claim. Next C3-A only, using prospective packet in ignored
+next-packets/c3-a-prospective.md including real-Omni watcher lifecycle qualification.
+Planner/writer preparing read-only; source authorization waits closure. Existing
+binary Omni consumer test needs new safety qualification before execution because
+its temp index root alone does not isolate nested constructor CWD/cache/watchers.
+No public production test bridge. Local only; incident UNKNOWN unchanged.

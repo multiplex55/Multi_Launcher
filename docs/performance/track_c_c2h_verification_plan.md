@@ -1,7 +1,7 @@
 # C2-H focused acceptance plan — LOCAL ONLY
 
 Accepted starting source: `6340c6b50200ab3a89fb8f182c98a10671973409`.
-C2-G is closed; 18 of 29 checkpoints are closed. C2-H is in progress.
+C2-H PASS; 19 of 29 checkpoints are closed. Next C3-A.
 
 One source milestone isolates five legacy Notes tests using the existing owned
 workspace and inert app fixture. It removes the obsolete test constructor and HOME
@@ -59,3 +59,8 @@ Independent premeasurement execution review CLEAR. protocol_freeze.json records
 all source/method/reference/runner hashes and exact inventories before any owner
 measurement. Reviewed fixture+protocol commit is permitted; Small/Full output
 acceptance remains pending.
+
+Execution complete at exact clean source6fb578169a13f074bede2f3352eafe916acb9e7e.
+Small32+3,Full96+9 andlegacywarm6 PASS; numerical/method review CLEAR.
+Final publication integrity CLEAR; C2-H closes in this local evidence commit.
+See track_c_c2h/results.md.

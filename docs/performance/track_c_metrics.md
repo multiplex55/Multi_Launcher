@@ -122,3 +122,16 @@ p50/p95/max551.4688/622.6444/635.6009ms; whole nine-frame viewport8091.1817/8669
 8763.8767ms is not a native or per-query latency. Cold stalls remain; no optimization
 claim. All tails and failed attempts retained. See track_c_query_observation/
 schema2_results.md and full_v2.json.18/29closed; nextC2-H. LOCAL ONLY.
+
+
+C2-H measured source `6fb578169a13f074bede2f3352eafe916acb9e7e`:32ordinary
+checks PASS,23unchanged C2-G checks reused. Exact clean fast-dev Small32+3 and
+Full96+9 raw records plus6legacy warm aggregates PASS; independent source/method/
+numerical/privacy/conditional dispositions CLEAR. Final publication integrity CLEAR. C2-H PASS,19/29closed; nextC3-A.
+Primary G0 comparisons:73/96medians,57/96p95s,55/96maxima adverse; fuzzy10kp95
+405.9538→489.8996ms. Equal10kp95613.9868→7.5071ms is against its own C2-C baseline.
+No blanket speedup; genuine cold stalls remain. Owned dashboard suppression,
+observer/test overhead and historical TrackA debug-test profile limits disclosed.
+All raw arrays and timing tables retained in [C2-H report](track_c_c2h/results.md),
+[search G1](track_c_search_g1.json), [geometry G1](track_c_geometry_g1.json).
+No native/GPU/allocator/prevalence claim. LOCAL ONLY.

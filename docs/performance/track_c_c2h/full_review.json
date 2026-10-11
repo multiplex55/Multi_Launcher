@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "status": "INDEPENDENT_FULL_ACCEPTANCE_CLEAR",
+  "source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+  "original": {
+    "records": 96,
+    "samples": 1920,
+    "arrays": 672,
+    "array_values": 13440,
+    "timing_triplets": 96,
+    "geometry_pairs": 39,
+    "width_receipts": 6,
+    "raw_collection_comparison_parity": true,
+    "notes_actual_revision_rehash": "PASS"
+  },
+  "equal_reuse": {
+    "records": 9,
+    "samples": 180,
+    "arrays": 261,
+    "array_values": 5220,
+    "timing_triplets": 36,
+    "exact_work_source_disposition_timing": "PASS"
+  },
+  "track_a": {
+    "records": 6,
+    "aggregate_only": true,
+    "raw_elapsed_arrays": false,
+    "historical_debug_test_timing_comparison": "NOT_COMPARABLE"
+  },
+  "adverse_primary_counts": {
+    "p50": 73,
+    "p95": 57,
+    "maximum": 55
+  },
+  "privacy": "CLEAR",
+  "source_method_reference_runner_hashes": "ALL_MATCH",
+  "scope": "verification_and_characterization_not_universal_improvement",
+  "publication_integrity": "INDEPENDENT_CLEAR"
+}

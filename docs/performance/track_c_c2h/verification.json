@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "status": "32_ORDINARY_PASS_BENCHMARKS_PENDING",
+  "status": "32_ORDINARY_AND_ALL_MEASUREMENT_ACCEPTANCE_CLEAR",
   "source_parent": "6340c6b50200ab3a89fb8f182c98a10671973409",
-  "source_committed": false,
+  "source_committed": true,
   "profile": "fast-dev",
   "nextest_run": "31e8a7de-2b63-4095-8bc1-ff817d1c4119",
   "compile_seconds": 107,
@@ -49,5 +49,9 @@
   "protected_helpers": "42_IDENTICAL",
   "production_change": false,
   "native": "NOT_RUN",
-  "benchmark_status": "NOT_RUN"
+  "benchmark_status": "SMALL_FULL_AND_WARM_PASS",
+  "accepted_source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+  "ordinary_execution_source": "uncommitted_fixture_bytes_bound_to_accepted_source_hashes",
+  "independent_review": "CLEAR",
+  "publication_integrity": "INDEPENDENT_CLEAR"
 }
