@@ -1,6 +1,6 @@
 # C2-C — forced-refresh result installation gate
 
-Status: IN_PROGRESS. Accepted source base `c08096cd909b68a3bc1ca1f330dc7b9245141e5c`; C2-B is SKIPPED (measured gate), with the eager search source retained. Thirteen of 29 checkpoints are closed. LOCAL ONLY.
+Status: PASS (KEEP conditional equal-result reuse). Accepted source base `c08096cd909b68a3bc1ca1f330dc7b9245141e5c`; C2-B is SKIPPED (measured gate), with the eager search source retained. Fourteen of 29 checkpoints are closed. LOCAL ONLY.
 
 The first milestone adds test-only characterization, with no production search or geometry change. `search()` already skips valid same-query work; equal index completion already preserves search state. Exact-mode cached lowercase fields already exist. A new search index or fuzzy screening rule is not justified by current evidence: the dense fuzzy fixture matches every row, and sparse exact fixtures do not establish unnecessary fuzzy work.
 
@@ -109,3 +109,29 @@ Run cb45b816-2b8b-40c4-b5cd-e904da5e04ee PASS1/1; build.89s/test33.694s/executio
 Equal notify comparisons1/input101/reuse1/discard101 with generation0/rebuild0; changed notify comparisons1/input101/replace1/install101/generation1/rebuild1; cached all0. Complete semantic output identities remain bound. Full baseline N100 owner cached0.8968/1.0457/1.0683, equal5.4254/6.8294/7.8781, changed5.2966/6.2063/6.3695ms. Candidate equal benefit is conditional; changed p95/max and cached-control tails are adverse and retained. Small alone cannot establish acceptance.
 
 Smallreview also confirms unaffected cached/changed viewport IDs match baseline; equal retains cached viewportIDe68b38d1cdff4e1a instead of rebuilt47d1e9ff6b1551bf intentionally. Sourcecommit readinessCLEAR; exact-source Full9/180 and independentgate required, C2Cstillopen13/29closed.
+
+## Exact-source Full candidate and gate
+
+Candidate source `da838c6d59cc5a4172c3a2471398a673dd0188f9`; runfd82a608-b3ae-434c-9cfd-79c5aab580d9 PASS1/1, build.86s/test229.099s/execution229.131s,9records180samples,zeroexclusions, fast-dev. Strict collector accepted. Independent261arrays5220values198scalars36triplets evidence/source/privacy review CLEAR; KEEP recommended and parent accepted.
+
+| Case | N | Baseline owner p50/p95/max ms | Candidate owner p50/p95/max ms | Candidate geometry ms | Comparison ms | Installation ms |
+|---|---:|---:|---:|---:|---:|---:|
+| cached_repeat | 100 | 0.8968/1.0457/1.0683 | 0.8993/1.3244/1.4427 | 0.0000/0.0000/0.0000 | 0.0000/0.0000/0.0000 | 0.0000/0.0000/0.0000 |
+| equal_provider_notification | 100 | 5.4254/6.8294/7.8781 | 1.0624/1.5061/2.0117 | 0.0000/0.0000/0.0000 | 0.0070/0.0116/0.0152 | 0.0225/0.0411/0.0538 |
+| changed_provider_notification | 100 | 5.2966/6.2063/6.3695 | 5.4312/6.1136/6.1443 | 4.1724/4.8042/4.9287 | 0.0073/0.0112/0.0158 | 0.0246/0.0412/0.1723 |
+| cached_repeat | 1000 | 0.9461/1.2278/1.2695 | 0.9179/1.0817/1.2003 | 0.0000/0.0000/0.0000 | 0.0000/0.0000/0.0000 | 0.0000/0.0000/0.0000 |
+| equal_provider_notification | 1000 | 54.1812/59.1624/64.0101 | 1.4970/1.7662/1.9410 | 0.0000/0.0000/0.0000 | 0.0559/0.0813/0.0834 | 0.1888/0.2198/0.2642 |
+| changed_provider_notification | 1000 | 55.7053/110.3065/121.4695 | 53.4526/54.8293/56.7278 | 51.7845/53.2793/54.6230 | 0.0536/0.0959/0.1058 | 0.1920/0.2648/0.2896 |
+| cached_repeat | 10000 | 0.9593/1.2887/1.5005 | 0.9674/1.1438/1.2367 | 0.0000/0.0000/0.0000 | 0.0000/0.0000/0.0000 | 0.0000/0.0000/0.0000 |
+| equal_provider_notification | 10000 | 548.5311/613.9868/629.3620 | 6.8325/8.4798/10.8200 | 0.0000/0.0000/0.0000 | 0.6625/0.9261/1.1008 | 2.3079/2.7082/3.8020 |
+| changed_provider_notification | 10000 | 547.8612/576.5696/615.9344 | 542.4872/596.9982/606.7477 | 535.4350/589.4474/599.0594 | 0.6184/0.8587/1.1495 | 2.3680/2.7176/3.0065 |
+
+Equal notifications invoke provider1 and compare N+1 complete Actions, discard incoming N+1 and reuse installed vector; result generation/rebuild/galley rows0. Changed notifications compare N+1, install N+1, result generation/rebuild1 and measure N+1rows. Cached all observer/work0. Full semantic/Action state remains independently bound; equal viewport generation retention is intentional. Changed10k p95 rises576.5696→596.9982ms, while median/max fall; cachedN100p95/max rise1.0457/1.0683→1.3244/1.4427ms. These remain adverse observations with no invented cause.
+
+## Acceptance decision
+
+C2-C PASS, KEEP the candidate source `da838c6d59cc5a4172c3a2471398a673dd0188f9`. Independent reviewer and parent accept the bounded per-refresh tradeoff: equal owner median savings80.42%/97.24%/98.75% at100/1k/10k, with real generation/rebuild/galley-row work0. Complete Action/state/provider/catalog/eagergeometry semantics, queued offscreen popup cleanup, deferred provider resume and independent display invalidation pass. No added runtime cache, normalized-string index or fuzzy screening; C2-B measured SKIP remains intact.
+
+The decision explicitly retains changed10k p95+3.54%(+20.4286ms), changed100median+2.54%, and cached100p95/max+26.65%/+35.05%(+.2787/.3744ms). Changed10kmedian/max fall0.98%/1.49%. This is an engineering acceptance of conditional savings with recorded downsides, not proof of universal nonregression or a causal noise explanation. Do not subtract phase quantiles or fabricate baseline observer timings as zero. Native/display/allocator/RSS/real equal-refresh frequency remain unmeasured.
+
+Verification completed: candidate9ordinary/Small1/1/Full1/1 allPASS; baseline2distinctordinary/Small1/1/Full1/1 retained. Source/method/fixture/collector/privacy and numerical reviews CLEAR; final cumulative diff inspected, baseline artifacts/frozen oracles preserved, no further tests requested. All Cargo terminal and source writers idle. Fourteen of29closed; next checkpoint C2-D list geometry (prospective read-only packet only so far), then C2-Egrid in order. LOCAL ONLY.
