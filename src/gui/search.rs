@@ -3,6 +3,273 @@ use super::*;
 pub(crate) const NOTE_SEARCH_DEBOUNCE: Duration = Duration::from_secs(1);
 pub(crate) const COMPLETION_REBUILD_DEBOUNCE: Duration = Duration::from_millis(120);
 
+#[cfg(test)]
+mod c2a_search_observer {
+    use std::{cell::Cell, cell::RefCell, rc::Rc};
+
+    use crate::actions::Action;
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct Receipt {
+        pub local_catalog_visits: u64,
+        pub local_filter_passes: u64,
+        pub local_score_attempts: u64,
+        pub local_hits: u64,
+        pub local_action_clones: u64,
+        pub local_clone_logical_bytes: u64,
+        pub local_clone_strings: u64,
+        pub provider_input_actions: u64,
+        pub provider_filter_rejections: u64,
+        pub provider_actions_retained_moved: u64,
+        pub provider_projection_strings: u64,
+        pub provider_projection_bytes: u64,
+        pub command_fallback_actions_visited: u64,
+        pub command_fallback_hits_cloned: u64,
+        pub command_fallback_clone_logical_bytes: u64,
+        pub command_fallback_clone_strings: u64,
+        pub sort_input_len: u64,
+        pub sort_ns: u64,
+        pub final_scored_entries_moved: u64,
+        pub empty_browse_command_cache_cloned: u64,
+        pub empty_browse_catalog_materialized: u64,
+        pub empty_browse_logical_bytes: u64,
+        pub empty_browse_strings: u64,
+        pub final_output_count: u64,
+        pub outcome_state: u64,
+    }
+
+    impl Receipt {
+        pub(super) fn arrays(self) -> [u64; 26] {
+            [
+                self.local_catalog_visits,
+                self.local_filter_passes,
+                self.local_score_attempts,
+                self.local_hits,
+                self.local_action_clones,
+                self.local_clone_logical_bytes,
+                self.local_clone_strings,
+                self.provider_input_actions,
+                self.provider_filter_rejections,
+                self.provider_actions_retained_moved,
+                self.provider_projection_strings,
+                self.provider_projection_bytes,
+                self.command_fallback_actions_visited,
+                self.command_fallback_hits_cloned,
+                self.command_fallback_clone_logical_bytes,
+                self.command_fallback_clone_strings,
+                self.sort_input_len,
+                self.sort_ns,
+                self.final_scored_entries_moved,
+                0, // Final materialization maps and moves the Action values.
+                self.empty_browse_command_cache_cloned,
+                self.empty_browse_catalog_materialized,
+                self.empty_browse_logical_bytes,
+                self.empty_browse_strings,
+                self.final_output_count,
+                self.outcome_state,
+            ]
+        }
+    }
+
+    #[derive(Default)]
+    struct Counters {
+        values: [Cell<u64>; 25],
+        empty_cache_payload_bytes: u64,
+        empty_cache_payload_strings: u64,
+    }
+
+    #[derive(Clone, Copy)]
+    #[repr(usize)]
+    pub(super) enum Counter {
+        LocalCatalogVisits,
+        LocalFilterPasses,
+        LocalScoreAttempts,
+        LocalHits,
+        LocalActionClones,
+        LocalCloneLogicalBytes,
+        LocalCloneStrings,
+        ProviderInputActions,
+        ProviderFilterRejections,
+        ProviderActionsRetainedMoved,
+        ProviderProjectionStrings,
+        ProviderProjectionBytes,
+        CommandFallbackActionsVisited,
+        CommandFallbackHitsCloned,
+        CommandFallbackCloneLogicalBytes,
+        CommandFallbackCloneStrings,
+        SortInputLen,
+        SortNanoseconds,
+        FinalScoredEntriesMoved,
+        EmptyBrowseCommandCacheCloned,
+        EmptyBrowseCatalogMaterialized,
+        EmptyBrowseLogicalBytes,
+        EmptyBrowseStrings,
+        FinalOutputCount,
+        OutcomeState,
+    }
+
+    impl Counters {
+        fn add(&self, counter: Counter, amount: u64) {
+            let value = &self.values[counter as usize];
+            value.set(value.get().saturating_add(amount));
+        }
+
+        fn set(&self, counter: Counter, value: u64) {
+            self.values[counter as usize].set(value);
+        }
+
+        fn receipt(&self) -> Receipt {
+            let v = &self.values;
+            Receipt {
+                local_catalog_visits: v[Counter::LocalCatalogVisits as usize].get(),
+                local_filter_passes: v[Counter::LocalFilterPasses as usize].get(),
+                local_score_attempts: v[Counter::LocalScoreAttempts as usize].get(),
+                local_hits: v[Counter::LocalHits as usize].get(),
+                local_action_clones: v[Counter::LocalActionClones as usize].get(),
+                local_clone_logical_bytes: v[Counter::LocalCloneLogicalBytes as usize].get(),
+                local_clone_strings: v[Counter::LocalCloneStrings as usize].get(),
+                provider_input_actions: v[Counter::ProviderInputActions as usize].get(),
+                provider_filter_rejections: v[Counter::ProviderFilterRejections as usize].get(),
+                provider_actions_retained_moved: v[Counter::ProviderActionsRetainedMoved as usize]
+                    .get(),
+                provider_projection_strings: v[Counter::ProviderProjectionStrings as usize].get(),
+                provider_projection_bytes: v[Counter::ProviderProjectionBytes as usize].get(),
+                command_fallback_actions_visited: v
+                    [Counter::CommandFallbackActionsVisited as usize]
+                    .get(),
+                command_fallback_hits_cloned: v[Counter::CommandFallbackHitsCloned as usize].get(),
+                command_fallback_clone_logical_bytes: v
+                    [Counter::CommandFallbackCloneLogicalBytes as usize]
+                    .get(),
+                command_fallback_clone_strings: v[Counter::CommandFallbackCloneStrings as usize]
+                    .get(),
+                sort_input_len: v[Counter::SortInputLen as usize].get(),
+                sort_ns: v[Counter::SortNanoseconds as usize].get(),
+                final_scored_entries_moved: v[Counter::FinalScoredEntriesMoved as usize].get(),
+                empty_browse_command_cache_cloned: v
+                    [Counter::EmptyBrowseCommandCacheCloned as usize]
+                    .get(),
+                empty_browse_catalog_materialized: v
+                    [Counter::EmptyBrowseCatalogMaterialized as usize]
+                    .get(),
+                empty_browse_logical_bytes: v[Counter::EmptyBrowseLogicalBytes as usize].get(),
+                empty_browse_strings: v[Counter::EmptyBrowseStrings as usize].get(),
+                final_output_count: v[Counter::FinalOutputCount as usize].get(),
+                outcome_state: v[Counter::OutcomeState as usize].get(),
+            }
+        }
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Rc<Counters>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Scope {
+        counters: Rc<Counters>,
+        previous: Option<Rc<Counters>>,
+        active: bool,
+    }
+
+    impl Scope {
+        pub(super) fn new(command_cache: &[Action]) -> Self {
+            let empty_cache_payload_bytes = command_cache.iter().fold(0_u64, |sum, action| {
+                sum.saturating_add(action_payload_bytes(action))
+            });
+            let empty_cache_payload_strings = command_cache.iter().fold(0_u64, |sum, action| {
+                sum.saturating_add(action_payload_strings(action))
+            });
+            Self {
+                counters: Rc::new(Counters {
+                    empty_cache_payload_bytes,
+                    empty_cache_payload_strings,
+                    ..Counters::default()
+                }),
+                previous: None,
+                active: false,
+            }
+        }
+
+        pub(super) fn activate(&mut self) -> Activation<'_> {
+            assert!(
+                !self.active,
+                "C2-A search observer cannot be nested on itself"
+            );
+            self.previous =
+                ACTIVE.with(|active| active.borrow_mut().replace(Rc::clone(&self.counters)));
+            self.active = true;
+            Activation { scope: self }
+        }
+
+        pub(super) fn receipt(&self) -> Receipt {
+            self.counters.receipt()
+        }
+    }
+
+    #[derive(Clone)]
+    pub(super) struct Handle(Rc<Counters>);
+
+    impl Handle {
+        pub(super) fn add(&self, counter: Metric, amount: u64) {
+            self.0.add(counter, amount);
+        }
+
+        pub(super) fn set(&self, counter: Metric, value: u64) {
+            self.0.set(counter, value);
+        }
+
+        pub(super) fn empty_cache_bytes(&self) -> u64 {
+            self.0.empty_cache_payload_bytes
+        }
+
+        pub(super) fn empty_cache_strings(&self) -> u64 {
+            self.0.empty_cache_payload_strings
+        }
+    }
+
+    pub(super) struct Activation<'a> {
+        scope: &'a mut Scope,
+    }
+
+    impl Drop for Activation<'_> {
+        fn drop(&mut self) {
+            if !self.scope.active {
+                return;
+            }
+            ACTIVE.with(|active| {
+                let mut active = active.borrow_mut();
+                let current = active.take();
+                debug_assert!(
+                    current.is_some_and(|value| Rc::ptr_eq(&value, &self.scope.counters))
+                );
+                *active = self.scope.previous.take();
+            });
+            self.scope.active = false;
+        }
+    }
+
+    pub(super) fn current() -> Option<Handle> {
+        ACTIVE.with(|active| {
+            active
+                .borrow()
+                .as_ref()
+                .map(|counters| Handle(Rc::clone(counters)))
+        })
+    }
+
+    pub(super) fn action_payload_bytes(action: &Action) -> u64 {
+        (action.label.len() as u64)
+            .saturating_add(action.desc.len() as u64)
+            .saturating_add(action.action.len() as u64)
+            .saturating_add(action.args.as_ref().map_or(0, |args| args.len() as u64))
+    }
+
+    pub(super) fn action_payload_strings(action: &Action) -> u64 {
+        3 + u64::from(action.args.is_some())
+    }
+
+    pub(super) use Counter as Metric;
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum LauncherSearchState {
     Results,
@@ -433,6 +700,10 @@ impl LauncherApp {
 
     fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
         let telemetry_enabled = crate::performance::enabled();
+        #[cfg(test)]
+        let c2a_observer = c2a_search_observer::current();
+        #[cfg(test)]
+        let c2a_observer_active = c2a_observer.is_some();
         let mut timer = crate::performance::track_c::Timer::start_if(
             crate::performance::track_c::Phase::SearchScoreAndCloneHits,
             telemetry_enabled,
@@ -445,16 +716,46 @@ impl LauncherApp {
 
         let mut res = Vec::new();
         let mut candidates_scored = 0_usize;
+        #[cfg(test)]
+        let (mut c2a_catalog_visits, mut c2a_filter_passes, mut c2a_score_attempts) =
+            (0_u64, 0_u64, 0_u64);
+        #[cfg(test)]
+        let (mut c2a_clone_count, mut c2a_clone_bytes, mut c2a_clone_strings) =
+            (0_u64, 0_u64, 0_u64);
         if query.is_empty() {
             for (i, a) in self.actions.iter().enumerate() {
+                #[cfg(test)]
+                if c2a_observer_active {
+                    c2a_catalog_visits = c2a_catalog_visits.saturating_add(1);
+                }
                 if action_matches_filters(&self.action_filter_metadata[i], &filters) {
-                    res.push((a.clone(), 0.0));
+                    #[cfg(test)]
+                    if c2a_observer_active {
+                        c2a_filter_passes = c2a_filter_passes.saturating_add(1);
+                        c2a_clone_count = c2a_clone_count.saturating_add(1);
+                        c2a_clone_bytes = c2a_clone_bytes
+                            .saturating_add(c2a_search_observer::action_payload_bytes(a));
+                        c2a_clone_strings = c2a_clone_strings
+                            .saturating_add(c2a_search_observer::action_payload_strings(a));
+                    }
+                    let cloned = a.clone();
+                    res.push((cloned, 0.0));
                 }
             }
         } else {
             for (i, a) in self.actions.iter().enumerate() {
+                #[cfg(test)]
+                if c2a_observer_active {
+                    c2a_catalog_visits = c2a_catalog_visits.saturating_add(1);
+                }
                 if !action_matches_filters(&self.action_filter_metadata[i], &filters) {
                     continue;
+                }
+
+                #[cfg(test)]
+                if c2a_observer_active {
+                    c2a_filter_passes = c2a_filter_passes.saturating_add(1);
+                    c2a_score_attempts = c2a_score_attempts.saturating_add(1);
                 }
 
                 if telemetry_enabled {
@@ -470,16 +771,62 @@ impl LauncherApp {
                     let action_match = cached.action_lc.contains(query_lc);
                     if label_match || desc_match || action_match || alias_match {
                         let score = if alias_match { 1.0 } else { 0.0 };
-                        res.push((a.clone(), score));
+                        #[cfg(test)]
+                        if c2a_observer_active {
+                            c2a_clone_count = c2a_clone_count.saturating_add(1);
+                            c2a_clone_bytes = c2a_clone_bytes
+                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
+                            c2a_clone_strings = c2a_clone_strings
+                                .saturating_add(c2a_search_observer::action_payload_strings(a));
+                        }
+                        let cloned = a.clone();
+                        res.push((cloned, score));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, query);
                     let s2 = self.matcher.fuzzy_match(&a.desc, query);
                     if let Some(score) = s1.max(s2) {
-                        res.push((a.clone(), score as f32 * self.fuzzy_weight));
+                        #[cfg(test)]
+                        if c2a_observer_active {
+                            c2a_clone_count = c2a_clone_count.saturating_add(1);
+                            c2a_clone_bytes = c2a_clone_bytes
+                                .saturating_add(c2a_search_observer::action_payload_bytes(a));
+                            c2a_clone_strings = c2a_clone_strings
+                                .saturating_add(c2a_search_observer::action_payload_strings(a));
+                        }
+                        let cloned = a.clone();
+                        res.push((cloned, score as f32 * self.fuzzy_weight));
                     }
                 }
             }
+        }
+        #[cfg(test)]
+        if let Some(observer) = c2a_observer {
+            observer.add(
+                c2a_search_observer::Metric::LocalCatalogVisits,
+                c2a_catalog_visits,
+            );
+            observer.add(
+                c2a_search_observer::Metric::LocalFilterPasses,
+                c2a_filter_passes,
+            );
+            observer.add(
+                c2a_search_observer::Metric::LocalScoreAttempts,
+                c2a_score_attempts,
+            );
+            observer.add(c2a_search_observer::Metric::LocalHits, res.len() as u64);
+            observer.add(
+                c2a_search_observer::Metric::LocalActionClones,
+                c2a_clone_count,
+            );
+            observer.add(
+                c2a_search_observer::Metric::LocalCloneLogicalBytes,
+                c2a_clone_bytes,
+            );
+            observer.add(
+                c2a_search_observer::Metric::LocalCloneStrings,
+                c2a_clone_strings,
+            );
         }
         timer.set_work_units(self.actions.len());
         timer.set_search_counts(candidates_scored, res.len());
@@ -521,11 +868,36 @@ impl LauncherApp {
         plugin_results: Vec<Action>,
         pending: bool,
     ) -> (Vec<(Action, f32)>, bool) {
+        #[cfg(test)]
+        let c2a_observer = c2a_search_observer::current();
+        #[cfg(test)]
+        let c2a_provider_input_actions = plugin_results.len() as u64;
+        #[cfg(test)]
+        let mut c2a_provider_projection_strings = 0_u64;
+        #[cfg(test)]
+        let mut c2a_provider_projection_bytes = 0_u64;
+        #[cfg(test)]
+        let mut c2a_command_fallback_actions_visited = 0_u64;
+        #[cfg(test)]
+        let mut c2a_command_fallback_hits_cloned = 0_u64;
+        #[cfg(test)]
+        let mut c2a_command_fallback_clone_logical_bytes = 0_u64;
+        #[cfg(test)]
+        let mut c2a_command_fallback_clone_strings = 0_u64;
         let mut res = Vec::new();
         if trimmed_lc.starts_with("g ") {
             let query_term = trimmed_lc.split_once(' ').map(|x| x.1).unwrap_or("");
             for a in plugin_results {
                 let cached = CachedSearchEntry::from_action(&a);
+                #[cfg(test)]
+                if c2a_observer.is_some() {
+                    c2a_provider_projection_strings =
+                        c2a_provider_projection_strings.saturating_add(3);
+                    c2a_provider_projection_bytes = c2a_provider_projection_bytes
+                        .saturating_add(cached.label_lc.len() as u64)
+                        .saturating_add(cached.desc_lc.len() as u64)
+                        .saturating_add(cached.action_lc.len() as u64);
+                }
                 if self.is_exact_match_mode() {
                     if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
                         // Plugin commands like `note today`/`note search <term>` already
@@ -560,6 +932,25 @@ impl LauncherApp {
                     res.push((a, score));
                 }
             }
+            #[cfg(test)]
+            if let Some(observer) = c2a_observer {
+                observer.add(
+                    c2a_search_observer::Metric::ProviderInputActions,
+                    c2a_provider_input_actions,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::ProviderFilterRejections,
+                    c2a_provider_input_actions.saturating_sub(res.len() as u64),
+                );
+                observer.add(
+                    c2a_search_observer::Metric::ProviderProjectionStrings,
+                    c2a_provider_projection_strings,
+                );
+                observer.add(
+                    c2a_search_observer::Metric::ProviderProjectionBytes,
+                    c2a_provider_projection_bytes,
+                );
+            }
             return (res, pending);
         }
 
@@ -569,6 +960,11 @@ impl LauncherApp {
                 .iter()
                 .zip(self.command_search_cache.iter())
             {
+                #[cfg(test)]
+                if c2a_observer.is_some() {
+                    c2a_command_fallback_actions_visited =
+                        c2a_command_fallback_actions_visited.saturating_add(1);
+                }
                 if self.is_exact_match_mode() {
                     let alias_match = self.alias_matches_lc(&a.action, trimmed_lc);
                     let label_match = Self::matches_exact_display_text(cached, trimmed_lc);
@@ -576,12 +972,32 @@ impl LauncherApp {
                     let action_match = cached.action_lc.contains(trimmed_lc);
                     if label_match || desc_match || action_match || alias_match {
                         let score = if alias_match { 1.0 } else { 0.0 };
+                        #[cfg(test)]
+                        if c2a_observer.is_some() {
+                            c2a_command_fallback_hits_cloned =
+                                c2a_command_fallback_hits_cloned.saturating_add(1);
+                            c2a_command_fallback_clone_logical_bytes =
+                                c2a_command_fallback_clone_logical_bytes
+                                    .saturating_add(c2a_search_observer::action_payload_bytes(a));
+                            c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
+                                .saturating_add(c2a_search_observer::action_payload_strings(a));
+                        }
                         res.push((a.clone(), score));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
                     let s2 = self.matcher.fuzzy_match(&a.desc, trimmed);
                     if let Some(score) = s1.max(s2) {
+                        #[cfg(test)]
+                        if c2a_observer.is_some() {
+                            c2a_command_fallback_hits_cloned =
+                                c2a_command_fallback_hits_cloned.saturating_add(1);
+                            c2a_command_fallback_clone_logical_bytes =
+                                c2a_command_fallback_clone_logical_bytes
+                                    .saturating_add(c2a_search_observer::action_payload_bytes(a));
+                            c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
+                                .saturating_add(c2a_search_observer::action_payload_strings(a));
+                        }
                         res.push((a.clone(), score as f32 * self.fuzzy_weight));
                     }
                 }
@@ -600,6 +1016,15 @@ impl LauncherApp {
             let query_term_lc = query_term.to_lowercase();
             for a in plugin_results {
                 let cached = CachedSearchEntry::from_action(&a);
+                #[cfg(test)]
+                if c2a_observer.is_some() {
+                    c2a_provider_projection_strings =
+                        c2a_provider_projection_strings.saturating_add(3);
+                    c2a_provider_projection_bytes = c2a_provider_projection_bytes
+                        .saturating_add(cached.label_lc.len() as u64)
+                        .saturating_add(cached.desc_lc.len() as u64)
+                        .saturating_add(cached.action_lc.len() as u64);
+                }
                 if self.is_exact_match_mode() {
                     if Self::should_bypass_exact_post_filter(trimmed, &a.action) {
                         // Explicit plugin commands can resolve into result lists/artifacts.
@@ -633,6 +1058,47 @@ impl LauncherApp {
                     res.push((a, score));
                 }
             }
+        }
+
+        #[cfg(test)]
+        if let Some(observer) = c2a_observer {
+            observer.add(
+                c2a_search_observer::Metric::ProviderInputActions,
+                c2a_provider_input_actions,
+            );
+            let accepted_provider_actions = if c2a_provider_input_actions == 0 {
+                0
+            } else {
+                res.len() as u64
+            };
+            observer.add(
+                c2a_search_observer::Metric::ProviderFilterRejections,
+                c2a_provider_input_actions.saturating_sub(accepted_provider_actions),
+            );
+            observer.add(
+                c2a_search_observer::Metric::ProviderProjectionStrings,
+                c2a_provider_projection_strings,
+            );
+            observer.add(
+                c2a_search_observer::Metric::ProviderProjectionBytes,
+                c2a_provider_projection_bytes,
+            );
+            observer.add(
+                c2a_search_observer::Metric::CommandFallbackActionsVisited,
+                c2a_command_fallback_actions_visited,
+            );
+            observer.add(
+                c2a_search_observer::Metric::CommandFallbackHitsCloned,
+                c2a_command_fallback_hits_cloned,
+            );
+            observer.add(
+                c2a_search_observer::Metric::CommandFallbackCloneLogicalBytes,
+                c2a_command_fallback_clone_logical_bytes,
+            );
+            observer.add(
+                c2a_search_observer::Metric::CommandFallbackCloneStrings,
+                c2a_command_fallback_clone_strings,
+            );
         }
 
         (res, pending)
@@ -753,16 +1219,63 @@ impl LauncherApp {
         result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
         catalog_versions_stable: bool,
     ) -> LauncherSearchOutcome {
+        #[cfg(test)]
+        let c2a_observer = c2a_search_observer::current();
         let trimmed = raw_query.trim();
         let trimmed_lc = trimmed.to_lowercase();
         if trimmed.is_empty() {
             let mut results = self.command_cache.clone();
-            results.extend(self.actions.iter().map(|action| Action {
-                label: format!("app {}", action.label),
-                desc: action.desc.clone(),
-                action: action.action.clone(),
-                args: action.args.clone(),
+            #[cfg(test)]
+            let mut c2a_catalog_bytes = 0_u64;
+            #[cfg(test)]
+            let mut c2a_catalog_strings = 0_u64;
+            results.extend(self.actions.iter().map(|action| {
+                #[cfg(test)]
+                if c2a_observer.is_some() {
+                    c2a_catalog_bytes = c2a_catalog_bytes
+                        .saturating_add(c2a_search_observer::action_payload_bytes(action))
+                        .saturating_add(4); // `app ` prefix in the materialized label.
+                    c2a_catalog_strings = c2a_catalog_strings
+                        .saturating_add(c2a_search_observer::action_payload_strings(action));
+                }
+                Action {
+                    label: format!("app {}", action.label),
+                    desc: action.desc.clone(),
+                    action: action.action.clone(),
+                    args: action.args.clone(),
+                }
             }));
+            #[cfg(test)]
+            if let Some(observer) = c2a_observer {
+                observer.set(c2a_search_observer::Metric::ProviderActionsRetainedMoved, 0);
+                observer.set(c2a_search_observer::Metric::SortInputLen, 0);
+                observer.set(c2a_search_observer::Metric::FinalScoredEntriesMoved, 0);
+                observer.set(
+                    c2a_search_observer::Metric::EmptyBrowseCommandCacheCloned,
+                    self.command_cache.len() as u64,
+                );
+                observer.set(
+                    c2a_search_observer::Metric::EmptyBrowseCatalogMaterialized,
+                    self.actions.len() as u64,
+                );
+                observer.set(
+                    c2a_search_observer::Metric::EmptyBrowseLogicalBytes,
+                    observer
+                        .empty_cache_bytes()
+                        .saturating_add(c2a_catalog_bytes),
+                );
+                observer.set(
+                    c2a_search_observer::Metric::EmptyBrowseStrings,
+                    observer
+                        .empty_cache_strings()
+                        .saturating_add(c2a_catalog_strings),
+                );
+                observer.set(
+                    c2a_search_observer::Metric::FinalOutputCount,
+                    results.len() as u64,
+                );
+                observer.set(c2a_search_observer::Metric::OutcomeState, 1);
+            }
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
                 actions: results,
@@ -781,9 +1294,22 @@ impl LauncherApp {
         if !trimmed_lc.starts_with("g ") && search_actions {
             scored.extend(self.search_actions(action_query, &action_query.to_lowercase()));
         }
+        #[cfg(test)]
+        let c2a_provider_actions_retained_moved = plugin_results.len() as u64;
         scored.extend(plugin_results);
+        #[cfg(test)]
+        let c2a_sort_input_len = scored.len() as u64;
         self.apply_usage_weight(&mut scored);
+        #[cfg(test)]
+        let c2a_sort_started = c2a_observer.as_ref().map(|_| std::time::Instant::now());
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        #[cfg(test)]
+        if let (Some(observer), Some(started)) = (c2a_observer.as_ref(), c2a_sort_started) {
+            observer.add(
+                c2a_search_observer::Metric::SortNanoseconds,
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+            );
+        }
         let mut materialize_timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::SearchMoveResults,
         );
@@ -794,17 +1320,45 @@ impl LauncherApp {
             .collect::<Vec<_>>();
         materialize_timer.set_work_units(materialized);
         materialize_timer.finish(crate::performance::track_c::Outcome::Completed);
+        let state = if provider_pending
+            || start_revision != provider_revision
+            || !catalog_versions_stable
+        {
+            LauncherSearchState::Pending
+        } else if actions.is_empty() {
+            LauncherSearchState::NoResults
+        } else {
+            LauncherSearchState::Results
+        };
+        #[cfg(test)]
+        if let Some(observer) = c2a_observer {
+            observer.set(
+                c2a_search_observer::Metric::ProviderActionsRetainedMoved,
+                c2a_provider_actions_retained_moved,
+            );
+            observer.set(
+                c2a_search_observer::Metric::SortInputLen,
+                c2a_sort_input_len,
+            );
+            observer.set(
+                c2a_search_observer::Metric::FinalScoredEntriesMoved,
+                materialized as u64,
+            );
+            observer.set(
+                c2a_search_observer::Metric::FinalOutputCount,
+                actions.len() as u64,
+            );
+            observer.set(
+                c2a_search_observer::Metric::OutcomeState,
+                match &state {
+                    LauncherSearchState::NoResults => 0,
+                    LauncherSearchState::Results => 1,
+                    LauncherSearchState::Pending => 2,
+                },
+            );
+        }
         LauncherSearchOutcome {
-            state: if provider_pending
-                || start_revision != provider_revision
-                || !catalog_versions_stable
-            {
-                LauncherSearchState::Pending
-            } else if actions.is_empty() {
-                LauncherSearchState::NoResults
-            } else {
-                LauncherSearchState::Results
-            },
+            state,
             actions,
             provider_revision,
             result_catalog_versions,
@@ -858,27 +1412,68 @@ mod tests {
         )
     }
 
-    fn new_app_with_clipboard_modify(ctx: &egui::Context) -> LauncherApp {
-        let mut plugin_manager = PluginManager::new();
-        let catalog = plugin_manager.clipboard_modifier_catalog();
-        plugin_manager.register(Box::new(ClipboardModifyPlugin::new(catalog)));
-
+    fn new_inert_app(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
             0,
-            plugin_manager,
-            "actions.json".into(),
-            "settings.json".into(),
-            Settings::default(),
+            PluginManager::new_inert_for_test(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
             None,
             None,
+            // The inert manager has no default plugins; allow only the
+            // explicitly registered fixture plugins in each test.
             None,
-            None,
+            Some(HashMap::new()),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn c2a_snapshot(
+        actions: Vec<Action>,
+        pending: bool,
+        start_revision: u64,
+        provider_revision: u64,
+        catalog_versions_at_start: crate::radial::dynamic::MutableResultCatalogVersions,
+        catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
+    ) -> crate::plugin::PluginSearchSnapshotResult {
+        crate::plugin::PluginSearchSnapshotResult {
+            actions,
+            pending,
+            start_revision,
+            provider_revision,
+            catalog_versions_at_start,
+            catalog_versions,
+        }
+    }
+
+    fn c2a_assert_reference_parity(
+        app: &LauncherApp,
+        query: &str,
+        snapshot: crate::plugin::PluginSearchSnapshotResult,
+    ) -> LauncherSearchOutcome {
+        let expected = track_c2a_eager_search_outcome(app, query, &snapshot);
+        let actual = app.search_read_only_outcome_with_plugin_snapshot(query, snapshot);
+        assert_eq!(actual, expected, "C2-A semantic fixture: {query:?}");
+        actual
+    }
+
+    fn new_app_with_clipboard_modify(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
+        let mut app = new_inert_app(ctx, root);
+        let catalog = app.plugins.clipboard_modifier_catalog();
+        app.plugins
+            .register(Box::new(ClipboardModifyPlugin::new(catalog)));
+        app
     }
 
     struct StaticSearchPlugin {
@@ -975,6 +1570,521 @@ mod tests {
         expected: LauncherSearchOutcome,
         expected_local_hits: u64,
         fixture_signature: u64,
+    }
+
+    struct TrackC2ASearchState {
+        frozen: TrackCSearchState,
+        observer: c2a_search_observer::Scope,
+        provider_input_actions: u64,
+        provider_projection_strings: u64,
+        provider_projection_bytes: u64,
+    }
+
+    // Companion eager reference for C2-A. It deliberately performs fresh
+    // string matching and score assembly from source Actions; only the stable
+    // query-filter parser/predicate and fuzzy scorer are shared pure helpers.
+    // The original C0 frozen oracle above remains unchanged.
+    fn track_c2a_eager_search_outcome(
+        app: &LauncherApp,
+        raw_query: &str,
+        provider: &crate::plugin::PluginSearchSnapshotResult,
+    ) -> LauncherSearchOutcome {
+        let trimmed = raw_query.trim();
+        let trimmed_lc = trimmed.to_lowercase();
+        let exact_mode = app.match_exact || app.fuzzy_weight <= 0.0;
+        let catalog_versions_stable =
+            provider.catalog_versions_at_start == provider.catalog_versions;
+        if trimmed.is_empty() {
+            let mut actions = app.command_cache.clone();
+            actions.extend(app.actions.iter().map(|action| Action {
+                label: format!("app {}", action.label),
+                desc: action.desc.clone(),
+                action: action.action.clone(),
+                args: action.args.clone(),
+            }));
+            return LauncherSearchOutcome {
+                state: LauncherSearchState::Results,
+                actions,
+                provider_revision: provider.provider_revision,
+                result_catalog_versions: Some(provider.catalog_versions),
+                result_catalog_versions_stable: catalog_versions_stable,
+                provider_deferral: ProviderSearchDeferral::None,
+            };
+        }
+
+        let searches_app =
+            trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{APP_PREFIX} "));
+        let action_query = searches_app
+            .then(|| trimmed.split_once(' ').map(|value| value.1).unwrap_or(""))
+            .unwrap_or("");
+        let (local_text, filters) = split_action_filters(action_query);
+        let local_text = local_text.trim();
+        let local_text_lc = local_text.to_lowercase();
+        let alias_for = |action_id: &str, term: &str| {
+            app.folder_aliases_lc
+                .get(action_id)
+                .or_else(|| app.bookmark_aliases_lc.get(action_id))
+                .and_then(Option::as_ref)
+                .is_some_and(|alias| alias.contains(term))
+        };
+
+        let mut scored = Vec::<(Action, f32)>::new();
+        if !trimmed_lc.starts_with("g ") && searches_app {
+            for (action, metadata) in app.actions.iter().zip(app.action_filter_metadata.iter()) {
+                if !action_matches_filters(metadata, &filters) {
+                    continue;
+                }
+                if local_text_lc.is_empty() {
+                    scored.push((action.clone(), 0.0));
+                } else if exact_mode {
+                    let alias = alias_for(&action.action, &local_text_lc);
+                    let label = action.label.to_lowercase().contains(&local_text_lc);
+                    let desc = action.desc.to_lowercase().contains(&local_text_lc);
+                    let id = action.action.to_lowercase().contains(&local_text_lc);
+                    if label || desc || id || alias {
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                    }
+                } else if let Some(score) = app
+                    .matcher
+                    .fuzzy_match(&action.label, local_text)
+                    .max(app.matcher.fuzzy_match(&action.desc, local_text))
+                {
+                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
+                }
+            }
+        }
+
+        if trimmed_lc.starts_with("g ") {
+            let query_term = trimmed_lc
+                .split_once(' ')
+                .map(|value| value.1)
+                .unwrap_or("");
+            for action in &provider.actions {
+                if exact_mode {
+                    if LauncherApp::should_bypass_exact_post_filter(trimmed, &action.action) {
+                        scored.push((action.clone(), 0.0));
+                    } else if query_term.is_empty() {
+                        // Empty terms match every provider row at neutral
+                        // score; an empty alias must not promote them.
+                        scored.push((action.clone(), 0.0));
+                    } else if action.label.to_lowercase().contains(query_term.trim())
+                        || action.desc.to_lowercase().contains(query_term)
+                        || action.action.to_lowercase().contains(query_term)
+                        || alias_for(&action.action, query_term)
+                    {
+                        let alias = alias_for(&action.action, query_term);
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                    }
+                } else {
+                    let score = if raw_query.is_empty() {
+                        0.0
+                    } else {
+                        app.matcher
+                            .fuzzy_match(&action.label, raw_query)
+                            .max(app.matcher.fuzzy_match(&action.desc, raw_query))
+                            .unwrap_or(0) as f32
+                            * app.fuzzy_weight
+                    };
+                    scored.push((action.clone(), score));
+                }
+            }
+        } else if provider.actions.is_empty() {
+            for action in &app.command_cache {
+                if exact_mode {
+                    let alias = alias_for(&action.action, &trimmed_lc);
+                    let label = action.label.to_lowercase().contains(&trimmed_lc);
+                    let desc = action.desc.to_lowercase().contains(&trimmed_lc);
+                    let id = action.action.to_lowercase().contains(&trimmed_lc);
+                    if label || desc || id || alias {
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                    }
+                } else if let Some(score) = app
+                    .matcher
+                    .fuzzy_match(&action.label, trimmed)
+                    .max(app.matcher.fuzzy_match(&action.desc, trimmed))
+                {
+                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
+                }
+            }
+        } else {
+            let tail = trimmed_lc
+                .split_once(' ')
+                .map(|value| value.1)
+                .unwrap_or("");
+            let mut provider_term = tail.split(' ').nth(1).unwrap_or("").to_string();
+            if provider_term.is_empty() {
+                let parts = tail.split_whitespace().collect::<Vec<_>>();
+                if parts.len() == 1 && !SUBCOMMANDS.contains(&parts[0]) {
+                    provider_term = parts[0].to_string();
+                } else if parts.len() > 1 {
+                    provider_term = parts[1..].join(" ");
+                }
+            }
+            let provider_term = provider_term.to_lowercase();
+            for action in &provider.actions {
+                if exact_mode {
+                    if LauncherApp::should_bypass_exact_post_filter(trimmed, &action.action) {
+                        scored.push((action.clone(), 0.0));
+                    } else if provider_term.is_empty() {
+                        scored.push((action.clone(), 0.0));
+                    } else if action.label.to_lowercase().contains(provider_term.trim())
+                        || action.desc.to_lowercase().contains(&provider_term)
+                        || action.action.to_lowercase().contains(&provider_term)
+                        || alias_for(&action.action, &provider_term)
+                    {
+                        let alias = alias_for(&action.action, &provider_term);
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                    }
+                } else {
+                    let score = app
+                        .matcher
+                        .fuzzy_match(&action.label, raw_query)
+                        .max(app.matcher.fuzzy_match(&action.desc, raw_query))
+                        .unwrap_or(0) as f32
+                        * app.fuzzy_weight;
+                    scored.push((action.clone(), score));
+                }
+            }
+        }
+
+        for (action, score) in &mut scored {
+            *score += app.usage.get(&action.action).copied().unwrap_or(0) as f32 * app.usage_weight;
+        }
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let actions = scored
+            .into_iter()
+            .map(|(action, _)| action)
+            .collect::<Vec<_>>();
+        let state = if provider.pending
+            || provider.start_revision != provider.provider_revision
+            || !catalog_versions_stable
+        {
+            LauncherSearchState::Pending
+        } else if actions.is_empty() {
+            LauncherSearchState::NoResults
+        } else {
+            LauncherSearchState::Results
+        };
+        LauncherSearchOutcome {
+            state,
+            actions,
+            provider_revision: provider.provider_revision,
+            result_catalog_versions: Some(provider.catalog_versions),
+            result_catalog_versions_stable: catalog_versions_stable,
+            provider_deferral: ProviderSearchDeferral::None,
+        }
+    }
+
+    fn track_c2a_prepare_search_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        scenario: TrackCSearchCase,
+    ) -> TrackC2ASearchState {
+        let frozen = track_c_prepare_search_state(root, actions, scenario);
+        let captured_provider = frozen
+            .plugin_snapshot
+            .as_ref()
+            .expect("fixed provider snapshot is captured during setup");
+        let companion_expected =
+            track_c2a_eager_search_outcome(&frozen.app, &frozen.query, captured_provider);
+        assert_eq!(
+            companion_expected, frozen.expected,
+            "C2-A companion eager oracle agrees with the frozen C0 reference"
+        );
+        let provider_actions = &captured_provider.actions;
+        let provider_input_actions = provider_actions.len() as u64;
+        let (provider_projection_strings, provider_projection_bytes) = provider_actions
+            .iter()
+            .fold((0_u64, 0_u64), |(strings, bytes), action| {
+                let projected = CachedSearchEntry::from_action(action);
+                (
+                    strings.saturating_add(3),
+                    bytes
+                        .saturating_add(projected.label_lc.len() as u64)
+                        .saturating_add(projected.desc_lc.len() as u64)
+                        .saturating_add(projected.action_lc.len() as u64),
+                )
+            });
+        let observer = c2a_search_observer::Scope::new(&frozen.app.command_cache);
+        TrackC2ASearchState {
+            frozen,
+            observer,
+            provider_input_actions,
+            provider_projection_strings,
+            provider_projection_bytes,
+        }
+    }
+
+    fn track_c2a_run_search_owner(state: &mut TrackC2ASearchState) -> LauncherSearchOutcome {
+        let activation = state.observer.activate();
+        let outcome = state
+            .frozen
+            .app
+            .search_read_only_outcome_with_plugin_snapshot(
+                &state.frozen.query,
+                state
+                    .frozen
+                    .plugin_snapshot
+                    .take()
+                    .expect("captured provider snapshot is consumed once"),
+            );
+        drop(activation);
+        outcome
+    }
+
+    fn track_c2a_validate_receipt(
+        state: &TrackC2ASearchState,
+        actual: &LauncherSearchOutcome,
+        receipt: c2a_search_observer::Receipt,
+    ) {
+        let frozen = &state.frozen;
+        let is_empty_browse = matches!(frozen.scenario, TrackCSearchCase::EmptyBrowse);
+        let expected_local_actions = if is_empty_browse {
+            Vec::new()
+        } else {
+            frozen
+                .expected
+                .actions
+                .iter()
+                .filter(|action| action.action != "track_c_provider:marker")
+                .collect::<Vec<_>>()
+        };
+        let expected_local_bytes = expected_local_actions.iter().fold(0_u64, |sum, action| {
+            sum.saturating_add(c2a_search_observer::action_payload_bytes(action))
+        });
+        let expected_local_strings = expected_local_actions.iter().fold(0_u64, |sum, action| {
+            sum.saturating_add(c2a_search_observer::action_payload_strings(action))
+        });
+        let expected_provider_retained = frozen
+            .expected
+            .actions
+            .iter()
+            .filter(|action| action.action == "track_c_provider:marker")
+            .count() as u64;
+        let expected_empty_bytes = frozen.expected.actions.iter().fold(0_u64, |sum, action| {
+            sum.saturating_add(c2a_search_observer::action_payload_bytes(action))
+        });
+        let expected_empty_strings = frozen.expected.actions.iter().fold(0_u64, |sum, action| {
+            sum.saturating_add(c2a_search_observer::action_payload_strings(action))
+        });
+        let expected_outcome_state = match frozen.expected.state {
+            LauncherSearchState::NoResults => 0,
+            LauncherSearchState::Results => 1,
+            LauncherSearchState::Pending => 2,
+        };
+
+        assert_eq!(
+            receipt.local_catalog_visits,
+            if is_empty_browse {
+                0
+            } else {
+                frozen.app.actions.len() as u64
+            }
+        );
+        assert_eq!(
+            receipt.local_filter_passes,
+            if is_empty_browse {
+                0
+            } else {
+                frozen.app.actions.len() as u64
+            }
+        );
+        assert_eq!(
+            receipt.local_score_attempts,
+            if matches!(
+                frozen.scenario,
+                TrackCSearchCase::DenseExact | TrackCSearchCase::EmptyBrowse
+            ) {
+                0
+            } else {
+                frozen.app.actions.len() as u64
+            }
+        );
+        assert_eq!(receipt.local_hits, expected_local_actions.len() as u64);
+        assert_eq!(
+            receipt.local_action_clones,
+            expected_local_actions.len() as u64
+        );
+        assert_eq!(receipt.local_clone_logical_bytes, expected_local_bytes);
+        assert_eq!(receipt.local_clone_strings, expected_local_strings);
+        assert_eq!(receipt.provider_input_actions, state.provider_input_actions);
+        assert_eq!(receipt.provider_filter_rejections, 0);
+        assert_eq!(
+            receipt.provider_actions_retained_moved,
+            expected_provider_retained
+        );
+        assert_eq!(
+            receipt.provider_projection_strings,
+            state.provider_projection_strings
+        );
+        assert_eq!(
+            receipt.provider_projection_bytes,
+            state.provider_projection_bytes
+        );
+        assert_eq!(receipt.command_fallback_actions_visited, 0);
+        assert_eq!(receipt.command_fallback_hits_cloned, 0);
+        assert_eq!(receipt.command_fallback_clone_logical_bytes, 0);
+        assert_eq!(receipt.command_fallback_clone_strings, 0);
+        assert_eq!(
+            receipt.sort_input_len,
+            if is_empty_browse {
+                0
+            } else {
+                frozen.expected.actions.len() as u64
+            }
+        );
+        assert_eq!(
+            receipt.final_scored_entries_moved,
+            if is_empty_browse {
+                0
+            } else {
+                frozen.expected.actions.len() as u64
+            }
+        );
+        assert_eq!(
+            receipt.empty_browse_command_cache_cloned,
+            if is_empty_browse {
+                frozen.app.command_cache.len() as u64
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            receipt.empty_browse_catalog_materialized,
+            if is_empty_browse {
+                frozen.app.actions.len() as u64
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            receipt.empty_browse_logical_bytes,
+            if is_empty_browse {
+                expected_empty_bytes
+            } else {
+                0
+            }
+        );
+        assert_eq!(
+            receipt.empty_browse_strings,
+            if is_empty_browse {
+                expected_empty_strings
+            } else {
+                0
+            }
+        );
+        assert_eq!(receipt.final_output_count, actual.actions.len() as u64);
+        assert_eq!(receipt.outcome_state, expected_outcome_state);
+    }
+
+    fn track_c2a_validate_search_state(
+        state: &mut TrackC2ASearchState,
+        actual: &LauncherSearchOutcome,
+        require_metrics: bool,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        let observation = track_c_validate_search_state(&state.frozen, actual, require_metrics);
+        let receipt = state.observer.receipt();
+        track_c2a_validate_receipt(state, actual, receipt);
+        crate::performance::track_c_workloads::OwnerObservation {
+            work_counters: receipt.arrays().to_vec(),
+            ..observation
+        }
+    }
+
+    fn emit_track_c2a_samples(
+        scenario: TrackCSearchCase,
+        count: usize,
+        fixture_signature: u64,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.work_counters.len() == 26)
+        );
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_string());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_string());
+        for value in [&source, &profile] {
+            assert!(!value.bytes().any(|byte| byte.is_ascii_whitespace()));
+        }
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        let array = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| sample.work_counters[index].to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let complete_output_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.output_identity))
+            .collect::<Vec<_>>()
+            .join(",");
+        let structural_output_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.structural_signature))
+            .collect::<Vec<_>>()
+            .join(",");
+
+        eprintln!(
+            "C2A_SEARCH_RESULT schema=1 stage=eager_rank_attribution owner=search_read_only_outcome_with_plugin_snapshot fixture=synthetic_action_catalog_captured_provider source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 provider_scope=captured_snapshot_no_provider_invocation materialization_scope=local_hit_cloned_once_then_scored_entries_moved empty_browse_scope=command_cache_and_catalog_actions_materialized_provider_input_discarded payload_scope=logical_utf8_and_string_values_not_allocator_or_rss outcome_scope=noresults_0_results_1_pending_2 case={} count={} fixture_signature={:016x} elapsed_ns=[{}] local_catalog_visits=[{}] local_filter_passes=[{}] local_score_attempts=[{}] local_hits=[{}] local_action_clones=[{}] local_clone_logical_bytes=[{}] local_clone_strings=[{}] provider_input_actions=[{}] provider_filter_rejections=[{}] provider_actions_retained_moved=[{}] provider_projection_strings=[{}] provider_projection_bytes=[{}] command_fallback_actions_visited=[{}] command_fallback_hits_cloned=[{}] command_fallback_clone_logical_bytes=[{}] command_fallback_clone_strings=[{}] sort_input_len=[{}] sort_ns=[{}] final_scored_entries_moved=[{}] final_local_action_clones=[{}] empty_browse_command_cache_cloned=[{}] empty_browse_catalog_materialized=[{}] empty_browse_logical_bytes=[{}] empty_browse_strings=[{}] final_output_count=[{}] outcome_state=[{}] complete_output_ids=[{}] structural_output_ids=[{}]",
+            source,
+            profile,
+            mode,
+            WARMUPS,
+            samples.len(),
+            scenario.name(),
+            count,
+            fixture_signature,
+            elapsed,
+            array(0),
+            array(1),
+            array(2),
+            array(3),
+            array(4),
+            array(5),
+            array(6),
+            array(7),
+            array(8),
+            array(9),
+            array(10),
+            array(11),
+            array(12),
+            array(13),
+            array(14),
+            array(15),
+            array(16),
+            array(17),
+            array(18),
+            array(19),
+            array(20),
+            array(21),
+            array(22),
+            array(23),
+            array(24),
+            array(25),
+            complete_output_ids,
+            structural_output_ids,
+        );
     }
 
     fn track_c_search_app(
@@ -1487,6 +2597,372 @@ mod tests {
     }
 
     #[test]
+    fn track_c2a_oracle_search_shared_owner_matches_work_receipts() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for scenario in [
+            TrackCSearchCase::SparseExact,
+            TrackCSearchCase::DenseExact,
+            TrackCSearchCase::DenseFuzzy,
+            TrackCSearchCase::EmptyBrowse,
+            TrackCSearchCase::PendingExact,
+        ] {
+            let mut state =
+                track_c2a_prepare_search_state(workspace.root(), &fixture.values, scenario);
+            let signature = state.frozen.fixture_signature;
+            let actual = track_c2a_run_search_owner(&mut state);
+            let observation = track_c2a_validate_search_state(&mut state, &actual, false);
+            assert_eq!(state.frozen.fixture_signature, signature);
+            assert_eq!(observation.work_counters.len(), 26);
+            assert_eq!(
+                observation.structural_signature,
+                crate::performance::track_c_workloads::action_fixture_identity(&actual.actions)
+            );
+            drop(state);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2a_oracle_covers_local_filter_identity_usage_and_mode_edges() {
+        use crate::{
+            performance::track_c_workloads::TrackCWorkspace,
+            radial::dynamic::MutableResultCatalogVersions,
+        };
+
+        let workspace = TrackCWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_inert_app(&ctx, workspace.root());
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+
+        let folder_keep = Action {
+            label: "Needle keep".into(),
+            desc: "Folder".into(),
+            action: "folder:keep".into(),
+            args: Some("kept".into()),
+        };
+        let duplicate_none = Action {
+            label: "Needle".into(),
+            desc: "Folder".into(),
+            action: "duplicate:item".into(),
+            args: None,
+        };
+        let duplicate_empty = Action {
+            label: "NEEDLE".into(),
+            desc: "Folder".into(),
+            action: "duplicate:item".into(),
+            args: Some(String::new()),
+        };
+        let duplicate_value = Action {
+            label: "needle".into(),
+            desc: "Folder".into(),
+            action: "duplicate:item".into(),
+            args: Some("--mode full".into()),
+        };
+        let folder_skip = Action {
+            label: "Needle skip".into(),
+            desc: "Folder".into(),
+            action: "folder:skip".into(),
+            args: None,
+        };
+        let file_keep = Action {
+            label: "Needle file".into(),
+            desc: "File".into(),
+            action: "file:keep".into(),
+            args: None,
+        };
+        app.actions = Arc::new(vec![
+            folder_keep.clone(),
+            duplicate_none.clone(),
+            duplicate_empty.clone(),
+            duplicate_value.clone(),
+            folder_skip.clone(),
+            file_keep.clone(),
+        ]);
+        app.update_action_cache();
+        app.match_exact = true;
+        app.usage_weight = 0.5;
+        app.usage.insert("duplicate:item".into(), 8);
+        let versions = MutableResultCatalogVersions::default();
+        let empty_provider = || c2a_snapshot(Vec::new(), false, 7, 7, versions, versions);
+
+        let tied_and_weighted = c2a_assert_reference_parity(&app, "app needle", empty_provider());
+        assert_eq!(
+            tied_and_weighted.actions,
+            vec![
+                duplicate_none.clone(),
+                duplicate_empty.clone(),
+                duplicate_value.clone(),
+                folder_keep.clone(),
+                folder_skip.clone(),
+                file_keep.clone(),
+            ],
+            "usage moves the duplicate-ID group ahead while equal case-folded matches retain source order and all args variants"
+        );
+
+        let positive_filters = c2a_assert_reference_parity(
+            &app,
+            "app needle kind:folder id:folder:keep",
+            empty_provider(),
+        );
+        assert_eq!(positive_filters.actions, vec![folder_keep.clone()]);
+
+        let negative_filters = c2a_assert_reference_parity(
+            &app,
+            "app needle kind:folder !id:duplicate:item !id:folder:skip",
+            empty_provider(),
+        );
+        assert_eq!(negative_filters.actions, vec![folder_keep]);
+
+        let no_hits = c2a_assert_reference_parity(&app, "app absent", empty_provider());
+        assert!(no_hits.actions.is_empty());
+
+        let fuzzy_candidate = Action {
+            label: "Needle".into(),
+            desc: "A fuzzy-only subsequence candidate".into(),
+            action: "candidate:one".into(),
+            args: None,
+        };
+        app.actions = Arc::new(vec![fuzzy_candidate.clone()]);
+        app.update_action_cache();
+        app.usage.clear();
+        app.match_exact = false;
+        app.fuzzy_weight = 0.0;
+        assert!(
+            app.matcher
+                .fuzzy_match(&fuzzy_candidate.label, "ndl")
+                .is_some()
+        );
+        let exact_override = c2a_assert_reference_parity(&app, "app ndl", empty_provider());
+        assert!(
+            exact_override.actions.is_empty(),
+            "nonpositive fuzzy weight forces literal exact matching even when the fuzzy matcher accepts"
+        );
+        app.fuzzy_weight = 0.25;
+        let fuzzy_enabled = c2a_assert_reference_parity(&app, "app ndl", empty_provider());
+        assert_eq!(fuzzy_enabled.actions, vec![fuzzy_candidate]);
+
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2a_oracle_covers_provider_precedence_and_snapshot_outcomes() {
+        use crate::{
+            performance::track_c_workloads::TrackCWorkspace,
+            radial::dynamic::MutableResultCatalogVersions,
+        };
+
+        let workspace = TrackCWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_inert_app(&ctx, workspace.root());
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        let local = Action {
+            label: "Local marker".into(),
+            desc: "Owned app result".into(),
+            action: "local:marker".into(),
+            args: Some("local".into()),
+        };
+        let command = Action {
+            label: "Needle command".into(),
+            desc: "Owned command fallback".into(),
+            action: "command:needle".into(),
+            args: Some("command".into()),
+        };
+        app.actions = Arc::new(vec![local.clone()]);
+        app.update_action_cache();
+        app.command_cache = vec![command.clone()];
+        app.command_search_cache = vec![CachedSearchEntry::from_action(&command)];
+        app.match_exact = false;
+        app.fuzzy_weight = 0.25;
+        let versions = MutableResultCatalogVersions::default();
+        let unrelated_provider = Action {
+            label: "Unrelated provider result".into(),
+            desc: "No matching terms".into(),
+            action: "provider:zero-score".into(),
+            args: Some("provider".into()),
+        };
+
+        let provider_wins = c2a_assert_reference_parity(
+            &app,
+            "needle",
+            c2a_snapshot(
+                vec![unrelated_provider.clone()],
+                false,
+                10,
+                10,
+                versions,
+                versions,
+            ),
+        );
+        assert_eq!(provider_wins.actions, vec![unrelated_provider.clone()]);
+        assert_ne!(provider_wins.actions, vec![command.clone()]);
+
+        let command_fallback = c2a_assert_reference_parity(
+            &app,
+            "needle",
+            c2a_snapshot(Vec::new(), false, 10, 10, versions, versions),
+        );
+        assert_eq!(command_fallback.actions, vec![command.clone()]);
+
+        let empty_browse = c2a_assert_reference_parity(
+            &app,
+            "",
+            c2a_snapshot(
+                vec![unrelated_provider.clone()],
+                false,
+                10,
+                10,
+                versions,
+                versions,
+            ),
+        );
+        assert_eq!(empty_browse.actions[0], command);
+        assert_eq!(
+            empty_browse.actions[1],
+            Action {
+                label: "app Local marker".into(),
+                ..local.clone()
+            }
+        );
+        assert_eq!(empty_browse.actions.len(), 2);
+
+        // The production provider filter gives empty exact terms score zero;
+        // a present alias must not turn those empty terms into score-one hits.
+        app.match_exact = true;
+        app.folder_aliases_lc
+            .insert("provider:empty-alias".into(), Some("fixture alias".into()));
+        let empty_term_provider = Action {
+            label: "Provider empty-term row".into(),
+            desc: "No matching local query".into(),
+            action: "provider:empty-alias".into(),
+            args: None,
+        };
+        let empty_term = c2a_assert_reference_parity(
+            &app,
+            "app",
+            c2a_snapshot(
+                vec![empty_term_provider.clone()],
+                false,
+                10,
+                10,
+                versions,
+                versions,
+            ),
+        );
+        assert_eq!(empty_term.actions, vec![local.clone(), empty_term_provider]);
+
+        // Exact display matching trims only its label query; desc, ID, and
+        // alias predicates retain the provider term they were given.
+        app.folder_aliases_lc.clear();
+        let spaced_provider = Action {
+            label: "Needle".into(),
+            desc: "No matching description".into(),
+            action: "provider:spaced".into(),
+            args: None,
+        };
+        let spaced_g_prefix = c2a_assert_reference_parity(
+            &app,
+            "g  needle",
+            c2a_snapshot(
+                vec![spaced_provider.clone()],
+                false,
+                10,
+                10,
+                versions,
+                versions,
+            ),
+        );
+        assert_eq!(spaced_g_prefix.actions, vec![spaced_provider]);
+
+        app.actions = Arc::new(vec![local.clone()]);
+        app.update_action_cache();
+        app.command_cache.clear();
+        app.command_search_cache.clear();
+        app.update_command_cache();
+        for (snapshot, expected_state) in [
+            (
+                c2a_snapshot(Vec::new(), false, 20, 20, versions, versions),
+                LauncherSearchState::Results,
+            ),
+            (
+                c2a_snapshot(Vec::new(), true, 20, 20, versions, versions),
+                LauncherSearchState::Pending,
+            ),
+            (
+                c2a_snapshot(Vec::new(), false, 20, 21, versions, versions),
+                LauncherSearchState::Pending,
+            ),
+            (
+                c2a_snapshot(
+                    Vec::new(),
+                    false,
+                    20,
+                    20,
+                    versions,
+                    MutableResultCatalogVersions {
+                        notes: versions.notes + 1,
+                        ..versions
+                    },
+                ),
+                LauncherSearchState::Pending,
+            ),
+        ] {
+            let outcome = c2a_assert_reference_parity(&app, "app marker", snapshot);
+            assert_eq!(outcome.state, expected_state);
+            assert_eq!(outcome.actions, vec![local.clone()]);
+        }
+
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in C2-A search work attribution; uses only isolated synthetic catalog/provider state"]
+    fn track_c2a_benchmark_search_shared_owner_attribution() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for scenario in [
+                TrackCSearchCase::SparseExact,
+                TrackCSearchCase::DenseExact,
+                TrackCSearchCase::DenseFuzzy,
+                TrackCSearchCase::EmptyBrowse,
+                TrackCSearchCase::PendingExact,
+            ] {
+                let fixture_state =
+                    track_c2a_prepare_search_state(workspace.root(), &fixture.values, scenario);
+                let fixture_signature = fixture_state.frozen.fixture_signature;
+                drop(fixture_state);
+                let samples = measure_owner(
+                    || track_c2a_prepare_search_state(workspace.root(), &fixture.values, scenario),
+                    track_c2a_run_search_owner,
+                    |state, actual| {
+                        assert_eq!(state.frozen.fixture_signature, fixture_signature);
+                        track_c2a_validate_search_state(state, actual, true)
+                    },
+                );
+                emit_track_c2a_samples(scenario, *count, fixture_signature, mode, &samples);
+            }
+        }
+        drop(workspace);
+    }
+
+    #[test]
     fn track_c_fixture_search_ordinary_path_calls_controlled_provider() {
         use crate::performance::track_c_workloads::TrackCWorkspace;
 
@@ -1597,6 +3073,7 @@ mod tests {
 
     #[test]
     fn deferred_snapshot_matches_ordinary_g_prefix_provider_selection() {
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
         for enabled in [
             Some(HashSet::from([
                 "web_search".to_string(),
@@ -1605,7 +3082,7 @@ mod tests {
             Some(HashSet::new()),
         ] {
             let ctx = egui::Context::default();
-            let mut app = new_app(&ctx);
+            let mut app = new_inert_app(&ctx, workspace.root());
             app.plugins
                 .register(Box::new(g_search_plugin("web_search", "Web needle")));
             app.plugins.register(Box::new(g_search_plugin(
@@ -1635,13 +3112,16 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["web_search:needle"]
             );
+            drop(app);
         }
+        drop(workspace);
     }
 
     #[test]
     fn manual_query_fallback_does_not_reenter_a_blocked_provider() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_inert_app(&ctx, workspace.root());
         let searched = Arc::new(AtomicBool::new(false));
         app.plugins.register(Box::new(StaticSearchPlugin {
             name: "blocked_provider",
@@ -1664,12 +3144,15 @@ mod tests {
         assert_eq!(outcome.state, LauncherSearchState::Pending);
         assert!(outcome.actions.is_empty());
         assert!(!searched.load(std::sync::atomic::Ordering::SeqCst));
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
     fn deferred_fallback_suppression_survives_provider_slot_becoming_free() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_inert_app(&ctx, workspace.root());
         let searched = Arc::new(AtomicBool::new(false));
         app.plugins.register(Box::new(StaticSearchPlugin {
             name: "fallback_provider",
@@ -1697,6 +3180,8 @@ mod tests {
         app.query = "needle again".into();
         app.search();
         assert!(searched.load(std::sync::atomic::Ordering::SeqCst));
+        drop(app);
+        drop(workspace);
     }
 
     fn assert_first_result_is_clipboard_modify_open_modify(app: &LauncherApp) {
@@ -1724,7 +3209,8 @@ mod tests {
     #[test]
     fn search_replacement_clears_selected_index() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_inert_app(&ctx, workspace.root());
         app.actions = Arc::new(vec![Action {
             label: "Calculator".into(),
             desc: "App".into(),
@@ -1739,12 +3225,15 @@ mod tests {
 
         assert_eq!(app.results.len(), 1);
         assert_eq!(app.selected, None);
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
     fn read_only_search_uses_launcher_boundary_without_mutating_root_state() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_inert_app(&ctx, workspace.root());
         app.actions = Arc::new(vec![Action {
             label: "Calculator".into(),
             desc: "App".into(),
@@ -1760,7 +3249,14 @@ mod tests {
             args: None,
         }];
         app.selected = Some(0);
-        let before = (app.query.clone(), app.results.clone(), app.selected);
+        let before = (
+            app.query.clone(),
+            app.results.clone(),
+            app.selected,
+            app.root_list_geometry.result_generation_for_test(),
+            app.last_search_query.clone(),
+            app.last_results_valid,
+        );
         let results = app.search_read_only("app calc");
         assert!(
             results
@@ -1768,9 +3264,18 @@ mod tests {
                 .any(|action| action.action == "calc" && action.args.as_deref() == Some("--safe"))
         );
         assert_eq!(
-            (app.query.clone(), app.results.clone(), app.selected),
+            (
+                app.query.clone(),
+                app.results.clone(),
+                app.selected,
+                app.root_list_geometry.result_generation_for_test(),
+                app.last_search_query.clone(),
+                app.last_results_valid,
+            ),
             before
         );
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
@@ -1889,7 +3394,8 @@ mod tests {
     #[test]
     fn clipboard_modify_root_query_returns_direct_open_modify_first_in_fuzzy_mode() {
         let ctx = egui::Context::default();
-        let mut app = new_app_with_clipboard_modify(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_app_with_clipboard_modify(&ctx, workspace.root());
         app.query = "cm".into();
         app.match_exact = false;
         app.fuzzy_weight = 1.0;
@@ -1897,12 +3403,15 @@ mod tests {
         app.search();
 
         assert_first_result_is_clipboard_modify_open_modify(&app);
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
     fn clipboard_modify_root_query_returns_direct_open_modify_first_in_exact_mode() {
         let ctx = egui::Context::default();
-        let mut app = new_app_with_clipboard_modify(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_app_with_clipboard_modify(&ctx, workspace.root());
         app.query = "cm".into();
         app.match_exact = true;
         app.fuzzy_weight = 1.0;
@@ -1910,6 +3419,8 @@ mod tests {
         app.search();
 
         assert_first_result_is_clipboard_modify_open_modify(&app);
+        drop(app);
+        drop(workspace);
     }
 
     #[test]

@@ -6117,7 +6117,41 @@ mod tests {
     #[test]
     fn exact_mode_keeps_plugin_resolved_results_but_filters_query_suggestions() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            workspace
+                .root()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            workspace
+                .root()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::from([
+                "exact-filter-plugin".into()
+            ])),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
         app.match_exact = true;
         app.plugins.register(Box::new(ExactFilterPlugin));
 
@@ -6138,6 +6172,8 @@ mod tests {
         app.last_results_valid = false;
         app.search();
         assert!(app.results.is_empty());
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
