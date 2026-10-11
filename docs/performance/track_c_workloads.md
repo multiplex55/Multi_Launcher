@@ -93,3 +93,16 @@ final-step consistency alone are not semantic parity evidence. The strict collec
 validates source/acceptance/paint/work/timing/disposition accounting. Reproduction and
 exact recipes are in track_c_query_observation_plan.md. Whole sequence elapsed includes
 interstep validation and is not production typing latency.
+
+
+C2-G closes PASS with bounded query/acceptance/paint observation. Exact schema2
+source c6c0f64a5f10f290e95c43bdf2a7104a2a209e67 Full12recipes/240sequences/600intents/
+1140CPUframes PASS,540completed60superseded, independent126triplets/57stepbindings
+CLEAR. Schema2 viewport now has nine actual measured frames, including two explicit
+neutral frames at simulated ticks32/33 before real click34/close35; per-query bound8
+is unchanged. V1seven-frame viewport controls are historical and NOT COMPARABLE.
+Whole elapsed includes interstep validation. At10k first typed usable CPU completion
+p50/p95/max551.4688/622.6444/635.6009ms; whole nine-frame viewport8091.1817/8669.6674/
+8763.8767ms is not a native or per-query latency. Cold stalls remain; no optimization
+claim. All tails and failed attempts retained. See track_c_query_observation/
+schema2_results.md and full_v2.json.18/29closed; nextC2-H. LOCAL ONLY.

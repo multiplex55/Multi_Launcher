@@ -1,5 +1,5 @@
 {
-  "status": "SCHEMA2_ORACLE_SMALL_INDEPENDENT_REVIEW_CLEAR_FULL_PENDING",
+  "status": "PASS_C2G_SCHEMA2_CLOSED",
   "profile": "fast-dev",
   "test_runner": "cargo nextest",
   "test_threads": 1,
@@ -28,14 +28,14 @@
     "gui::track_c_query_observer::tests::lifecycle_rejects_stale_paint_and_direct_source_drift_and_keeps_disabled_path_inert",
     "gui::render::tests::track_c2g_command_pending_query_handoff_is_one_shot_and_query_bound"
   ],
-  "source_review": "CLEAR_v6_handoff_ordering_and_contract",
+  "source_review": "CLEAR_v6_production_handoff_and_schema2_cfgtest_protocol",
   "fixture_safety": "CLEAR_owned_inert_exact_selection",
   "notes_sha256": "0434242a6894f558902a0189c2273d108cab63c3336186f6b5ed7de5923a171b",
   "protected_helpers": 42,
   "protected_status": "PASS",
   "native_execution": false,
   "prior_attempt": "ordinary-01-result.json:compile_failed_before_any_tests",
-  "source_binding": "protocol_source_correction_v6.json",
+  "source_binding": "protocol_schema2_freeze.json",
   "distinct_tests": 23,
   "evidence": [
     "ordinary-02-result.json:21PASS",
@@ -59,7 +59,7 @@
     "oracle-09.log",
     "full-01.log"
   ],
-  "benchmarks": "Historical_schema1Small02_preserved; schema2Small03_PASS4records80sequences200intents380frames; schema1Full01FAIL_preserved; schema2Full_NOT_RUN",
+  "benchmarks": "Schema2Small03_and_exactsourceFull02_PASS_review_CLEAR; historicalv1Small_and_failedattempts_preserved",
   "native": "NOT_RUN",
   "benchmark_evidence": {
     "small": "small.json",
@@ -91,5 +91,6 @@
     "superseded": 20,
     "cancelled": 0,
     "review": "CLEAR_6sourcehashes_raw_equality_42triplets_receipts_privacy"
-  }
+  },
+  "schema2_full": "full_schema2_result.json"
 }

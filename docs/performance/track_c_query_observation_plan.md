@@ -218,3 +218,9 @@ Independent Small evidence review and exact committed Full remain pending.
 Independent schema2 Small review CLEAR: six live source hashes, collector/bindings,
 raw equality and all42 timing triplets reproduced. Reviewed source+Small may commit;
 Full acceptance requires the exact clean new commit.
+
+C2-G CLOSED PASS: exact clean c6c0f64a Full02 owner481.069s/Nextest481.131s,
+strict12records240sequences600intents1140frames;540completed60superseded0cancelled.
+Independent acceptance CLEAR126triplets57bindings/raw equality/source/paint/work/
+privacy. Native/GPU remain unmeasured. Full timing table and distinctions are in
+query_observation/schema2_results.md.18/29checkpoints closed, nextC2-H. LOCAL ONLY.

@@ -1,6 +1,6 @@
 {
   "schema": 2,
-  "status": "CLEAR_FOR_SOURCE_SMALL_COMMIT_THEN_EXACT_CLEAN_FULL",
+  "status": "CLEAR_SOURCE_SMALL_AND_EXACT_SOURCE_FULL",
   "source_binding": "protocol_schema2_freeze.json",
   "reviewer": "independent_repository_reviewer",
   "independent_method_reviewer": "repository_planner",
@@ -22,7 +22,22 @@
     "source_paint_geometry_output_tick_selection_popup_accounting": "PASS",
     "privacy": "CLEAR"
   },
-  "full_acceptance": "PENDING",
+  "full_acceptance": {
+    "status": "CLEAR",
+    "source": "c6c0f64a5f10f290e95c43bdf2a7104a2a209e67",
+    "records": 12,
+    "sequences": 240,
+    "intents": 600,
+    "frames": 1140,
+    "completed": 540,
+    "superseded": 60,
+    "cancelled": 0,
+    "independent_timing_triplets": 126,
+    "independent_step_bindings": 57,
+    "raw_summary_equality": true,
+    "source_paint_tick_selection_popup_provider_geometry_accounting": "PASS",
+    "privacy": "CLEAR"
+  },
   "limitations": [
     "nine-frameviewport_not_comparable_to_schema1seven-frame",
     "adverse_tails_retained",
