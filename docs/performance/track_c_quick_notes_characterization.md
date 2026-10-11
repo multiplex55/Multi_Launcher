@@ -1,6 +1,7 @@
 # C2-F Quick Notes characterization contract
 
-State: IN_PROGRESS; characterization only. No production reuse candidate authorized.
+State: characterization complete and independently reviewed; C2-F remains IN_PROGRESS.
+GO for one separately contracted geometry-only experiment, not optimization acceptance.
 Accepted starting HEAD: `e0564d601141240ba1a06b56f3967acb0897f9e2`.
 Quick Notes source blob: `5ea37d521afbe4280ae0e445de85c89511cef084`.
 LOCAL ONLY. C2-E is closed as a measured skip; accepted C2-C remains intact.
@@ -215,3 +216,39 @@ Small N100 owner p50/p95/max (ms), diagnostic uncommitted source only:
 These are characterization values, not gains. No input prevalence, native display
 or whole-owner peak memory conclusion follows. Full must run on this exact clean
 committed source before a candidate or measured-skip decision.
+
+## Reviewed Full and decision
+
+Full executed on clean local characterization commit
+`804d221cdb4c6f0145213ac52f2ef7b2cb4b77c6`, fast-dev: one owner PASS,
+1185.984s test /1186.014s Nextest, thirty records, 600 retained samples,
+five warmups/twenty retained per record, zero exclusions. Full test elapsed
+includes untimed fresh fixtures and eager references; it is not owner latency.
+`track_c_quick_notes_characterization_baseline.json` preserves all observations.
+Independent review CLEAR: 1,470 arrays/29,400 entries, 570 scalars and 300 timing
+triplets; 380 common Small nontiming arrays match, excluding raw monotonic revision
+receipts. Complete source/profile/fixture/work/state/storage/privacy checks pass.
+
+Final-revision complete owner p50/p95/max (ms): N1000
+144.7888/155.7158/162.4558; N5000 740.4442/781.9052/816.4360.
+Ensure-geometry p50 is 102.8832/528.7564ms respectively. P50 of individual
+sample ensure/owner ratios is about71%; these are not ratios of separate quantiles.
+Snapshot, full lowercase index and full metadata preparation remain real costs.
+Retain contrary Full tails: early-wide N5000 p95/max895.9271/904.3118ms;
+geometry-cold height180 max176.2120ms at1k and724.0973ms at5k.
+No input prevalence, native display or whole-owner peak inference is justified.
+
+Independent decision: GO for ONE bounded geometry-only prefix experiment, preserving
+full snapshot/index/metadata work. Its complete owner must include metadata comparison,
+prefix cloning, whole map/extent construction, proof validation, anchor work and
+retired geometry disposal. Exact source/generation/projection/identity/atlas/environment/
+f32 recurrence checks and no chaining across unrendered installs are mandatory.
+A separate frozen candidate contract and review must precede implementation.
+
+Parser evidence correction: initial negative scripts launched Windows PowerShell5.1,
+while successful positive/actual collection used bundled PowerShell7.6.5. Generic
+runtime rejection made the original negative claims untrusted; those artifacts are
+preserved and superseded. After Full, the corrected harness launched the SAME bundled
+7.6.5 engine, first accepted a ten-record positive control, then rejected all26
+malformed cases with their exact intended errors. Independent review CLEAR. No owner
+rerun, sample exclusion or numeric modification was needed.
