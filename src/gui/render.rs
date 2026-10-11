@@ -119,11 +119,88 @@ mod c2e_grid_cell_loop_observer {
     }
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct PresentationStorage {
+        pub(super) count: u64,
+        pub(super) logical_utf8_bytes: u64,
+        pub(super) string_capacity_bytes: u64,
+        pub(super) vector_capacity_bytes: u64,
+    }
+
+    impl PresentationStorage {
+        pub(super) fn from_strings(strings: &[String], vector_capacity: usize) -> Self {
+            Self {
+                count: strings.len().try_into().unwrap_or(u64::MAX),
+                logical_utf8_bytes: strings.iter().fold(0_u64, |total, text| {
+                    total.saturating_add(text.len().try_into().unwrap_or(u64::MAX))
+                }),
+                string_capacity_bytes: strings.iter().fold(0_u64, |total, text| {
+                    total.saturating_add(text.capacity().try_into().unwrap_or(u64::MAX))
+                }),
+                vector_capacity_bytes: vector_capacity
+                    .saturating_mul(std::mem::size_of::<String>())
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+            }
+        }
+
+        pub(super) fn overlap(self, other: Self) -> Self {
+            Self {
+                count: self.count.saturating_add(other.count),
+                logical_utf8_bytes: self
+                    .logical_utf8_bytes
+                    .saturating_add(other.logical_utf8_bytes),
+                string_capacity_bytes: self
+                    .string_capacity_bytes
+                    .saturating_add(other.string_capacity_bytes),
+                vector_capacity_bytes: self
+                    .vector_capacity_bytes
+                    .saturating_add(other.vector_capacity_bytes),
+            }
+        }
+
+        fn receipt_block(self, geometry: StorageGroups) -> [u64; 6] {
+            let strings_and_vector = self
+                .string_capacity_bytes
+                .saturating_add(self.vector_capacity_bytes);
+            [
+                self.count,
+                self.logical_utf8_bytes,
+                self.string_capacity_bytes,
+                self.vector_capacity_bytes,
+                strings_and_vector,
+                strings_and_vector.saturating_add(geometry.total()),
+            ]
+        }
+
+        pub(super) fn receipt(
+            self,
+            after: Self,
+            peak: Self,
+            geometry_before: StorageGroups,
+            geometry_after: StorageGroups,
+            geometry_peak: StorageGroups,
+        ) -> [u64; 18] {
+            let before = self.receipt_block(geometry_before);
+            let after = after.receipt_block(geometry_after);
+            let peak = peak.receipt_block(geometry_peak);
+            [
+                before[0], before[1], before[2], before[3], before[4], before[5], after[0],
+                after[1], after[2], after[3], after[4], after[5], peak[0], peak[1], peak[2],
+                peak[3], peak[4], peak[5],
+            ]
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub(super) struct Receipt {
         pub(super) calls: u64,
         pub(super) cells: u64,
         pub(super) elapsed_nanos: u64,
+        pub(super) compared_cells: u64,
+        pub(super) reused_cells: u64,
+        pub(super) formatted_presentations: u64,
         pub(super) replacement_peak: Option<StorageGroups>,
+        pub(super) projection_storage: Option<[u64; 18]>,
     }
 
     thread_local! {
@@ -170,7 +247,13 @@ mod c2e_grid_cell_loop_observer {
         ACTIVE.with(|active| active.borrow().is_some().then(Instant::now))
     }
 
-    pub(super) fn record_loop(started: Option<Instant>, cells: usize) {
+    pub(super) fn record_loop(
+        started: Option<Instant>,
+        cells: usize,
+        compared_cells: u64,
+        reused_cells: u64,
+        formatted_presentations: u64,
+    ) {
         let Some(started) = started else {
             return;
         };
@@ -185,16 +268,48 @@ mod c2e_grid_cell_loop_observer {
                 .cells
                 .saturating_add(cells.try_into().unwrap_or(u64::MAX));
             receipt.elapsed_nanos = receipt.elapsed_nanos.saturating_add(elapsed_nanos);
+            receipt.compared_cells = receipt.compared_cells.saturating_add(compared_cells);
+            receipt.reused_cells = receipt.reused_cells.saturating_add(reused_cells);
+            receipt.formatted_presentations = receipt
+                .formatted_presentations
+                .saturating_add(formatted_presentations);
         });
     }
 
-    pub(super) fn record_replacement(old_cache: &super::RootListGeometryCache, new: StorageGroups) {
+    pub(super) fn record_replacement(
+        old_cache: &super::RootListGeometryCache,
+        new_geometry: StorageGroups,
+        new_presentations: &[String],
+        new_presentation_capacity: usize,
+    ) {
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             let Some(receipt) = active.as_mut() else {
                 return;
             };
-            receipt.replacement_peak = Some(StorageGroups::from_cache(old_cache).overlap(new));
+            let old_geometry = StorageGroups::from_cache(old_cache);
+            let new_projection =
+                PresentationStorage::from_strings(new_presentations, new_presentation_capacity);
+            let old_projection = old_cache
+                .grid_presentation
+                .as_ref()
+                .map(|projection| {
+                    PresentationStorage::from_strings(
+                        &projection.texts,
+                        projection.texts.capacity(),
+                    )
+                })
+                .unwrap_or_default();
+            let peak_geometry = old_geometry.overlap(new_geometry);
+            let peak_projection = old_projection.overlap(new_projection);
+            receipt.replacement_peak = Some(peak_geometry);
+            receipt.projection_storage = Some(old_projection.receipt(
+                new_projection,
+                peak_projection,
+                old_geometry,
+                new_geometry,
+                peak_geometry,
+            ));
         });
     }
 }
@@ -220,11 +335,37 @@ struct RootListGeometryKey {
     grid_spacing_y_bits: u32,
 }
 
+impl RootListGeometryKey {
+    fn same_grid_environment(&self, other: &Self) -> bool {
+        self.width_bits == other.width_bits
+            && self.pixels_per_point_bits == other.pixels_per_point_bits
+            && self.button_font == other.button_font
+            && self.wrap == other.wrap
+            && self.button_padding_x_bits == other.button_padding_x_bits
+            && self.button_padding_y_bits == other.button_padding_y_bits
+            && self.interaction_height_bits == other.interaction_height_bits
+            && self.interaction_width_bits == other.interaction_width_bits
+            && self.item_spacing_y_bits == other.item_spacing_y_bits
+            && self.show_full_paths == other.show_full_paths
+            && self.is_grid == other.is_grid
+            && self.grid_columns == other.grid_columns
+            && self.grid_nominal_width_bits == other.grid_nominal_width_bits
+            && self.grid_spacing_x_bits == other.grid_spacing_x_bits
+            && self.grid_spacing_y_bits == other.grid_spacing_y_bits
+    }
+}
+
+struct GridPresentationProjection {
+    key: RootListGeometryKey,
+    font_atlas: std::sync::Weak<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>,
+    texts: Vec<String>,
+}
+
 /// Cached actual SelectableLabel row geometry for the root list.
 ///
-/// Result contents are intentionally not retained here: a generation bump is
-/// the invalidation contract for action replacement, and display-setting
-/// changes invalidate the geometry key separately.
+/// Active geometry is invalidated for every new result generation. A single
+/// last-measured grid presentation may survive those invalidations so exact
+/// same-index cells can reuse measured dimensions on the next frame.
 pub(super) struct RootListGeometryCache {
     key: Option<RootListGeometryKey>,
     row_tops: Vec<f32>,
@@ -240,6 +381,7 @@ pub(super) struct RootListGeometryCache {
     grid_full_width: f32,
     grid_cell_widths: Vec<f32>,
     grid_cell_heights: Vec<f32>,
+    grid_presentation: Option<GridPresentationProjection>,
     grid_visual_row_tops: Vec<f32>,
     grid_visual_row_bottoms: Vec<f32>,
     grid_visual_max_end_tree: Vec<f32>,
@@ -288,6 +430,7 @@ impl Default for RootListGeometryCache {
             grid_full_width: 0.0,
             grid_cell_widths: Vec::new(),
             grid_cell_heights: Vec::new(),
+            grid_presentation: None,
             grid_visual_row_tops: Vec::new(),
             grid_visual_row_bottoms: Vec::new(),
             grid_visual_max_end_tree: Vec::new(),
@@ -313,7 +456,7 @@ impl Default for RootListGeometryCache {
 }
 
 impl RootListGeometryCache {
-    fn invalidate_geometry(&mut self) {
+    fn clear_active_geometry(&mut self) {
         self.key = None;
         self.row_tops.clear();
         self.row_heights.clear();
@@ -326,8 +469,6 @@ impl RootListGeometryCache {
         self.grid_column_x_offsets.clear();
         self.grid_column_widths.clear();
         self.grid_full_width = 0.0;
-        self.grid_cell_widths.clear();
-        self.grid_cell_heights.clear();
         self.grid_visual_row_tops.clear();
         self.grid_visual_row_bottoms.clear();
         self.grid_visual_max_end_tree.clear();
@@ -336,10 +477,30 @@ impl RootListGeometryCache {
         self.content_width = 0.0;
     }
 
+    fn clear_grid_presentation(&mut self) {
+        self.grid_presentation = None;
+        self.grid_cell_widths = Vec::new();
+        self.grid_cell_heights = Vec::new();
+    }
+
+    fn invalidate_geometry(&mut self) {
+        self.clear_active_geometry();
+        self.clear_grid_presentation();
+    }
+
     fn invalidate_results(&mut self) {
         self.result_generation = self.result_generation.wrapping_add(1);
         self.queue_popup_cleanup();
-        self.invalidate_geometry();
+        self.clear_active_geometry();
+        let aligned_projection = self.grid_presentation.as_ref().is_some_and(|projection| {
+            projection.key.is_grid
+                && projection.texts.len() == projection.key.result_count
+                && self.grid_cell_widths.len() == projection.key.result_count
+                && self.grid_cell_heights.len() == projection.key.result_count
+        });
+        if !aligned_projection {
+            self.clear_grid_presentation();
+        }
     }
 
     #[cfg(test)]
@@ -499,8 +660,7 @@ impl RootListGeometryCache {
         self.grid_column_x_offsets.clear();
         self.grid_column_widths.clear();
         self.grid_full_width = 0.0;
-        self.grid_cell_widths.clear();
-        self.grid_cell_heights.clear();
+        self.clear_grid_presentation();
         self.grid_visual_row_tops.clear();
         self.grid_visual_row_bottoms.clear();
         self.grid_visual_max_end_tree.clear();
@@ -569,6 +729,33 @@ impl RootListGeometryCache {
 
         #[cfg(test)]
         let started = std::time::Instant::now();
+        let presentation_compatible = self.grid_presentation.as_ref().is_some_and(|previous| {
+            let aligned = previous.key.is_grid
+                && previous.key.same_grid_environment(&key)
+                && previous.texts.len() == previous.key.result_count
+                && self.grid_cell_widths.len() == previous.key.result_count
+                && self.grid_cell_heights.len() == previous.key.result_count;
+            if !aligned {
+                return false;
+            }
+            let Some(previous_atlas) = previous.font_atlas.upgrade() else {
+                return false;
+            };
+            let same_atlas = Arc::ptr_eq(&previous_atlas, &font_atlas);
+            drop(previous_atlas);
+            same_atlas
+        });
+        let comparable_cells = if presentation_compatible {
+            self.grid_presentation
+                .as_ref()
+                .map_or(0, |previous| previous.texts.len().min(results.len()))
+        } else {
+            0
+        };
+        let previous_presentations = self
+            .grid_presentation
+            .as_ref()
+            .map(|previous| previous.texts.as_slice());
         let padding = spacing.button_padding;
         let interaction_width = spacing.interact_size.x;
         let interaction_height = spacing.interact_size.y;
@@ -576,35 +763,65 @@ impl RootListGeometryCache {
         let mut column_widths = vec![interaction_width; actual_columns];
         let mut cell_widths = Vec::with_capacity(results.len());
         let mut cell_heights = Vec::with_capacity(results.len());
+        let mut presentations = Vec::with_capacity(results.len());
         let mut row_heights = vec![interaction_height.max(44.0); results.len().div_ceil(columns)];
 
         #[cfg(test)]
         let cell_loop_started = c2e_grid_cell_loop_observer::loop_started();
         #[cfg(test)]
         let observe_cell_loop = cell_loop_started.is_some();
+        #[cfg(test)]
+        let mut observed_reused_cells = 0_u64;
+        #[cfg(test)]
+        let mut measured_cell_count = 0_u64;
         for (index, action) in results.iter().enumerate() {
             let text = format!("{}\n{}", action.label, action.desc);
-            let galley = egui::WidgetText::from(text).into_galley_impl(
-                ui.ctx(),
-                ui.style(),
-                wrap,
-                (nominal_width - 2.0 * padding.x).max(0.0),
-                egui::FontSelection::Style(egui::TextStyle::Button),
-                egui::Align::Center,
-            );
-            let cell_width = nominal_width.max(galley.size().x + 2.0 * padding.x);
-            let cell_height = 44.0_f32
-                .max(interaction_height)
-                .max(galley.size().y + 2.0 * padding.y);
+            let reused = index < comparable_cells
+                && previous_presentations
+                    .and_then(|previous| previous.get(index))
+                    .is_some_and(|previous| previous == &text);
+            let (cell_width, cell_height) = if reused {
+                #[cfg(test)]
+                if observe_cell_loop {
+                    observed_reused_cells = observed_reused_cells.saturating_add(1);
+                }
+                (self.grid_cell_widths[index], self.grid_cell_heights[index])
+            } else {
+                #[cfg(test)]
+                {
+                    measured_cell_count = measured_cell_count.saturating_add(1);
+                }
+                let galley = egui::WidgetText::from(text.clone()).into_galley_impl(
+                    ui.ctx(),
+                    ui.style(),
+                    wrap,
+                    (nominal_width - 2.0 * padding.x).max(0.0),
+                    egui::FontSelection::Style(egui::TextStyle::Button),
+                    egui::Align::Center,
+                );
+                (
+                    nominal_width.max(galley.size().x + 2.0 * padding.x),
+                    44.0_f32
+                        .max(interaction_height)
+                        .max(galley.size().y + 2.0 * padding.y),
+                )
+            };
             let column = index % columns;
             let row = index / columns;
             column_widths[column] = column_widths[column].max(cell_width);
             row_heights[row] = row_heights[row].max(cell_height);
             cell_widths.push(cell_width);
             cell_heights.push(cell_height);
+            presentations.push(text);
         }
         #[cfg(test)]
-        c2e_grid_cell_loop_observer::record_loop(cell_loop_started, results.len());
+        c2e_grid_cell_loop_observer::record_loop(
+            cell_loop_started,
+            results.len(),
+            comparable_cells.try_into().unwrap_or(u64::MAX),
+            observed_reused_cells,
+            results.len().try_into().unwrap_or(u64::MAX),
+        );
 
         let mut column_x_offsets = Vec::with_capacity(actual_columns);
         let mut grid_full_width = 0.0_f32;
@@ -674,8 +891,16 @@ impl RootListGeometryCache {
                     grid_visual_row_bottoms.capacity(),
                     grid_visual_max_end_tree.capacity(),
                 ),
+                &presentations,
+                presentations.capacity(),
             );
         }
+
+        let grid_presentation = GridPresentationProjection {
+            key: key.clone(),
+            font_atlas: Arc::downgrade(&font_atlas),
+            texts: presentations,
+        };
 
         self.row_tops = row_tops;
         self.row_heights = row_heights;
@@ -692,6 +917,7 @@ impl RootListGeometryCache {
         self.grid_full_width = grid_full_width;
         self.grid_cell_widths = cell_widths;
         self.grid_cell_heights = cell_heights;
+        self.grid_presentation = Some(grid_presentation);
         self.grid_visual_row_tops = grid_visual_row_tops;
         self.grid_visual_row_bottoms = grid_visual_row_bottoms;
         self.grid_visual_max_end_tree = grid_visual_max_end_tree;
@@ -707,9 +933,7 @@ impl RootListGeometryCache {
         #[cfg(test)]
         {
             self.rebuild_count = self.rebuild_count.saturating_add(1);
-            self.measured_cells = self
-                .measured_cells
-                .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
+            self.measured_cells = self.measured_cells.saturating_add(measured_cell_count);
             self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         }
     }
@@ -7720,6 +7944,7 @@ mod tests {
         old_late_cell_width: Option<f32>,
         late_column_zero: Option<usize>,
         geometry_before: RootListGeometryObservation,
+        projection_storage_before: c2e_grid_cell_loop_observer::PresentationStorage,
         available_width: f32,
         outer: egui::Rect,
         eager: EagerRootGridLayout,
@@ -7848,6 +8073,17 @@ mod tests {
         let geometry_before = app.root_list_geometry.test_observation();
         assert!(geometry_before.rebuild_count > 0);
         assert_eq!(geometry_before.measured_cells, count as u64);
+        let projection_storage_before = app
+            .root_list_geometry
+            .grid_presentation
+            .as_ref()
+            .map(|projection| {
+                c2e_grid_cell_loop_observer::PresentationStorage::from_strings(
+                    &projection.texts,
+                    projection.texts.capacity(),
+                )
+            })
+            .expect("settled grid has one measured presentation projection");
         let available_width = ctx
             .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
             .expect("the real root UI records its available width");
@@ -7932,6 +8168,7 @@ mod tests {
             old_late_cell_width,
             late_column_zero,
             geometry_before,
+            projection_storage_before,
             available_width,
             outer,
             eager,
@@ -8259,6 +8496,16 @@ mod tests {
         let measured_cells = after
             .measured_cells
             .saturating_sub(state.geometry_before.measured_cells);
+        let expected_reused_cells = if state.recipe.is_warm() {
+            0
+        } else {
+            state.prefix_len as u64
+        };
+        let expected_measured_cells = if state.recipe.is_warm() {
+            0
+        } else {
+            (state.count as u64).saturating_sub(expected_reused_cells)
+        };
         if state.recipe.is_warm() {
             assert_eq!(
                 rebuilds, 0,
@@ -8268,11 +8515,25 @@ mod tests {
             assert_eq!(frame.observation.calls, 0);
             assert_eq!(frame.observation.cells, 0);
             assert_eq!(frame.observation.elapsed_nanos, 0);
+            assert_eq!(frame.observation.compared_cells, 0);
+            assert_eq!(frame.observation.reused_cells, 0);
+            assert_eq!(frame.observation.formatted_presentations, 0);
+            assert!(frame.observation.projection_storage.is_none());
         } else {
             assert_eq!(rebuilds, 1, "result-generation invalidation rebuilds once");
-            assert_eq!(measured_cells, state.count as u64);
+            assert_eq!(measured_cells, expected_measured_cells);
             assert_eq!(frame.observation.calls, 1);
             assert_eq!(frame.observation.cells, state.count as u64);
+            assert_eq!(
+                frame.observation.compared_cells, state.count as u64,
+                "all same-index presentations are compared for compatible recipes"
+            );
+            assert_eq!(frame.observation.reused_cells, expected_reused_cells);
+            assert_eq!(
+                frame.observation.formatted_presentations,
+                state.count as u64
+            );
+            assert!(frame.observation.projection_storage.is_some());
             assert!(frame.observation.elapsed_nanos > 0);
         }
         let geometry_ns = if rebuilds == 0 {
@@ -8426,9 +8687,48 @@ mod tests {
 
         let storage_after = c2e_grid_cell_loop_observer::StorageGroups::from_cache(cache);
         let storage_peak = frame.observation.replacement_peak.unwrap_or(storage_after);
+        let projection_storage_after = cache
+            .grid_presentation
+            .as_ref()
+            .map(|projection| {
+                c2e_grid_cell_loop_observer::PresentationStorage::from_strings(
+                    &projection.texts,
+                    projection.texts.capacity(),
+                )
+            })
+            .expect("grid cache retains its exact current presentations");
+        let projection_storage_peak = if state.recipe.is_warm() {
+            projection_storage_after
+        } else {
+            state
+                .projection_storage_before
+                .overlap(projection_storage_after)
+        };
+        let projection_storage_receipt =
+            frame.observation.projection_storage.unwrap_or_else(|| {
+                state.projection_storage_before.receipt(
+                    projection_storage_after,
+                    projection_storage_peak,
+                    state.storage_before,
+                    storage_after,
+                    storage_peak,
+                )
+            });
+        assert_eq!(
+            projection_storage_receipt,
+            state.projection_storage_before.receipt(
+                projection_storage_after,
+                projection_storage_peak,
+                state.storage_before,
+                storage_after,
+                storage_peak,
+            ),
+            "presentation checkpoint receipts account for retained old and new allocations"
+        );
         if state.recipe.is_warm() {
             assert_eq!(storage_after, state.storage_before);
             assert_eq!(storage_peak, storage_after);
+            assert_eq!(projection_storage_after, state.projection_storage_before);
         } else {
             assert_eq!(
                 storage_peak,
@@ -8499,6 +8799,12 @@ mod tests {
             state.prefix_len as u64,
         ];
         work_counters.extend(state.storage_before.receipt(storage_after, storage_peak));
+        work_counters.extend([
+            frame.observation.compared_cells,
+            frame.observation.reused_cells,
+            frame.observation.formatted_presentations,
+        ]);
+        work_counters.extend(projection_storage_receipt);
         OwnerObservation {
             output_identity: state_id,
             structural_signature: action_id,
@@ -8541,7 +8847,7 @@ mod tests {
             samples
                 .iter()
                 .map(|sample| {
-                    assert_eq!(sample.work_counters.len(), 25);
+                    assert_eq!(sample.work_counters.len(), 46);
                     sample.work_counters[index].to_string()
                 })
                 .collect::<Vec<_>>()
@@ -8604,6 +8910,18 @@ mod tests {
             .map(|sample| {
                 sample.work_counters[7..]
                     .iter()
+                    .take(18)
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let projection_storage_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.work_counters[28..46]
+                    .iter()
                     .map(u64::to_string)
                     .collect::<Vec<_>>()
                     .join(":")
@@ -8615,7 +8933,7 @@ mod tests {
             crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
         };
         eprintln!(
-            "C2E_GRID_RESULT schema=1 stage=cold_grid_geometry_characterization installation=eager_grid_geometry fixture=synthetic_root_grid_geometry owner=RootListGeometryCache::ensure_grid measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 case={} count={} columns={} fixture_signature={:016x} elapsed_ns=[{}] geometry_ns=[{}] cell_loop_ns=[{}] geometry_residual_ns=[{}] owner_residual_ns=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] painted_cells=[{}] presentation_prefix_len=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{}] transition_receipts=[{}] storage_receipts=[{}]",
+            "C2E_GRID_REUSE_RESULT schema=1 stage=cold_grid_geometry_reuse installation=same_index_cell_projection fixture=synthetic_root_grid_geometry owner=RootListGeometryCache::ensure_grid measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 case={} count={} columns={} fixture_signature={:016x} elapsed_ns=[{}] geometry_ns=[{}] cell_loop_ns=[{}] geometry_residual_ns=[{}] owner_residual_ns=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] painted_cells=[{}] presentation_prefix_len=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{}] transition_receipts=[{}] storage_receipts=[{}] compared_cells=[{}] reused_cells=[{}] formatted_presentations=[{}] projection_storage_receipts=[{}]",
             source,
             profile,
             mode,
@@ -8642,6 +8960,10 @@ mod tests {
             ids(|sample| sample.viewport_receipt.unwrap()),
             transition_receipts,
             storage_receipts,
+            arrays(25),
+            arrays(26),
+            arrays(27),
+            projection_storage_receipts,
         );
     }
 
@@ -8746,6 +9068,7 @@ mod tests {
             old_grid_column_widths,
             old_grid_column_x_offsets,
             geometry_before,
+            projection_storage_before,
             expected_visible_ids,
             expected_search_state,
         ) = {
@@ -8758,6 +9081,16 @@ mod tests {
                 app.root_list_geometry.grid_column_widths.clone(),
                 app.root_list_geometry.grid_column_x_offsets.clone(),
                 app.root_list_geometry.test_observation(),
+                app.root_list_geometry
+                    .grid_presentation
+                    .as_ref()
+                    .map(|projection| {
+                        c2e_grid_cell_loop_observer::PresentationStorage::from_strings(
+                            &projection.texts,
+                            projection.texts.capacity(),
+                        )
+                    })
+                    .expect("settled grid retains its presentation projection"),
                 app.test_root_rendered_row_ids.clone(),
                 track_c2e_search_state(app),
             )
@@ -8769,6 +9102,7 @@ mod tests {
         state.old_grid_column_widths = old_grid_column_widths;
         state.old_grid_column_x_offsets = old_grid_column_x_offsets;
         state.geometry_before = geometry_before;
+        state.projection_storage_before = projection_storage_before;
         state.expected_visible_ids = expected_visible_ids;
         state.expected_search_state = expected_search_state;
         state.old_late_cell_width = None;
@@ -8886,6 +9220,37 @@ mod tests {
         );
         assert_eq!(atlas_frame.observation.calls, 1);
         assert_eq!(atlas_frame.observation.cells, state.count as u64);
+        assert_eq!(atlas_frame.observation.compared_cells, 0);
+        assert_eq!(atlas_frame.observation.reused_cells, 0);
+        assert_eq!(
+            atlas_frame.observation.formatted_presentations,
+            state.count as u64
+        );
+        let atlas_storage_after = c2e_grid_cell_loop_observer::StorageGroups::from_cache(cache);
+        let atlas_storage_peak = state.storage_before.overlap(atlas_storage_after);
+        let atlas_projection_after = cache
+            .grid_presentation
+            .as_ref()
+            .map(|projection| {
+                c2e_grid_cell_loop_observer::PresentationStorage::from_strings(
+                    &projection.texts,
+                    projection.texts.capacity(),
+                )
+            })
+            .expect("atlas replacement installs the current presentation projection");
+        let atlas_projection_peak = state
+            .projection_storage_before
+            .overlap(atlas_projection_after);
+        assert_eq!(
+            atlas_frame.observation.projection_storage,
+            Some(state.projection_storage_before.receipt(
+                atlas_projection_after,
+                atlas_projection_peak,
+                state.storage_before,
+                atlas_storage_after,
+                atlas_storage_peak,
+            ))
+        );
         let current_atlas = cache
             .font_atlas
             .as_ref()
@@ -8916,6 +9281,174 @@ mod tests {
             state.app.test_root_rendered_row_ids, state.expected_visible_ids,
             "same generation and presentation retain absolute widget IDs"
         );
+    }
+
+    fn track_c2e_cache_grid_frame(
+        ctx: &egui::Context,
+        cache: &mut RootListGeometryCache,
+        actions: &[Action],
+        columns: usize,
+        frame: usize,
+    ) -> c2e_grid_cell_loop_observer::Receipt {
+        let scope = c2e_grid_cell_loop_observer::Scope::start();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                time: Some(frame as f64 + 1.0),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        cache.ensure_grid(ui, actions, columns);
+                    });
+                });
+            },
+        );
+        drop(output);
+        scope.finish()
+    }
+
+    fn track_c2e_cache_list_frame(
+        ctx: &egui::Context,
+        cache: &mut RootListGeometryCache,
+        actions: &[Action],
+        frame: usize,
+    ) -> c2e_grid_cell_loop_observer::Receipt {
+        let scope = c2e_grid_cell_loop_observer::Scope::start();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                time: Some(frame as f64 + 1.0),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        cache.ensure(ui, actions, &HashMap::new(), false, false);
+                    });
+                });
+            },
+        );
+        drop(output);
+        scope.finish()
+    }
+
+    fn track_c2e_contract_action(label: &str, id: &str) -> Action {
+        Action {
+            label: label.into(),
+            desc: "same exact description".into(),
+            action: format!("track-c2e-contract:{id}"),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn track_c2e_oracle_grid_projection_lifecycle_contract() {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let mut style = ctx.style().as_ref().clone();
+        style.wrap = Some(false);
+        ctx.set_style(style);
+        let mut cache = RootListGeometryCache::default();
+        cache.observe_grid_mode(true);
+        let original = vec![
+            track_c2e_contract_action("duplicate", "zero"),
+            track_c2e_contract_action("left", "one"),
+            track_c2e_contract_action("duplicate", "two"),
+            track_c2e_contract_action("right", "three"),
+        ];
+
+        let first = track_c2e_cache_grid_frame(&ctx, &mut cache, &original, 3, 0);
+        assert_eq!(first.calls, 1);
+        assert_eq!(first.compared_cells, 0);
+        assert_eq!(first.reused_cells, 0);
+        assert_eq!(first.formatted_presentations, 4);
+        assert_eq!(cache.measured_cells, 4);
+
+        let mut changed = original.clone();
+        changed[1].label = "duplicate".into();
+        cache.invalidate_results();
+        cache.invalidate_results();
+        assert!(cache.key.is_none());
+        assert!(cache.grid_presentation.is_some());
+        assert_eq!(cache.grid_cell_widths.len(), original.len());
+        let partial = track_c2e_cache_grid_frame(&ctx, &mut cache, &changed, 3, 1);
+        assert_eq!(partial.compared_cells, 4);
+        assert_eq!(partial.reused_cells, 3);
+        assert_eq!(cache.measured_cells, 5);
+
+        let mut reordered_duplicates = changed.clone();
+        reordered_duplicates.swap(0, 2);
+        assert_ne!(
+            crate::performance::track_c_workloads::action_fixture_identity(&changed),
+            crate::performance::track_c_workloads::action_fixture_identity(&reordered_duplicates),
+            "the duplicate displays represent different ordered Actions"
+        );
+        cache.invalidate_results();
+        let duplicate_texts =
+            track_c2e_cache_grid_frame(&ctx, &mut cache, &reordered_duplicates, 3, 2);
+        assert_eq!(duplicate_texts.compared_cells, 4);
+        assert_eq!(duplicate_texts.reused_cells, 4);
+        assert_eq!(cache.measured_cells, 5);
+
+        let mut grown = reordered_duplicates.clone();
+        grown.push(track_c2e_contract_action("new row", "four"));
+        cache.invalidate_results();
+        let growth = track_c2e_cache_grid_frame(&ctx, &mut cache, &grown, 3, 3);
+        assert_eq!(growth.compared_cells, 4);
+        assert_eq!(growth.reused_cells, 4);
+        assert_eq!(growth.formatted_presentations, 5);
+        assert_eq!(cache.grid_cell_widths.len(), 5);
+        assert_eq!(cache.measured_cells, 6);
+
+        let mut shrunk = grown.clone();
+        shrunk.pop();
+        cache.invalidate_results();
+        let shrink = track_c2e_cache_grid_frame(&ctx, &mut cache, &shrunk, 3, 4);
+        assert_eq!(shrink.compared_cells, 4);
+        assert_eq!(shrink.reused_cells, 4);
+        assert_eq!(shrink.formatted_presentations, 4);
+        assert_eq!(cache.grid_cell_widths.len(), 4);
+        assert_eq!(cache.measured_cells, 6);
+
+        cache.invalidate_geometry();
+        assert!(cache.grid_presentation.is_none());
+        let display_rejection = track_c2e_cache_grid_frame(&ctx, &mut cache, &shrunk, 3, 5);
+        assert_eq!(display_rejection.compared_cells, 0);
+        assert_eq!(display_rejection.reused_cells, 0);
+        assert_eq!(display_rejection.formatted_presentations, 4);
+        assert_eq!(cache.measured_cells, 10);
+
+        cache.invalidate_results();
+        let environment_rejection = track_c2e_cache_grid_frame(&ctx, &mut cache, &shrunk, 2, 6);
+        assert_eq!(environment_rejection.compared_cells, 0);
+        assert_eq!(environment_rejection.reused_cells, 0);
+        assert_eq!(environment_rejection.formatted_presentations, 4);
+        assert_eq!(cache.measured_cells, 14);
+
+        cache.observe_grid_mode(false);
+        cache.observe_grid_mode(true);
+        let mode_rejection = track_c2e_cache_grid_frame(&ctx, &mut cache, &shrunk, 2, 7);
+        assert_eq!(mode_rejection.compared_cells, 0);
+        assert_eq!(mode_rejection.reused_cells, 0);
+        assert_eq!(mode_rejection.formatted_presentations, 4);
+        assert_eq!(cache.measured_cells, 18);
+
+        let _ = track_c2e_cache_list_frame(&ctx, &mut cache, &shrunk, 8);
+        assert!(cache.grid_presentation.is_none());
+        assert!(cache.grid_cell_widths.is_empty());
+        let list_rejection = track_c2e_cache_grid_frame(&ctx, &mut cache, &shrunk, 2, 9);
+        assert_eq!(list_rejection.compared_cells, 0);
+        assert_eq!(list_rejection.reused_cells, 0);
+        assert_eq!(list_rejection.formatted_presentations, 4);
+        assert_eq!(cache.measured_cells, 22);
     }
 
     #[test]
