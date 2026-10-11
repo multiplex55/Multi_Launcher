@@ -66,3 +66,22 @@ AtN100/3columns, full-cold owner p50/p95/max4.5482/5.2745/5.8383ms; full geometr
 Scoped ordinary completion: eleven unchanged grid/list tests passed in ordinary1; the corrected new contract passed retry2 de31e335-65dc-4445-9599-ebb271c0febf (build35.83s,test4.926s,Nextest4.938s,1PASS/5194skipped). No need to repeat the unchanged eleven tests. Non-test lib check currently running; source must remain fixed until terminal.
 
 Independent Small evidence review CLEAR for a local harness commit and exact clean Full. Reviewer used a separate FNV implementation and confirmed all9records/153arrays3060entries162scalars45triplets180complete-state hashes, all53transitions and18endpoint capacity slots,944ptwidth, paired timing residuals, warm zero geometry and all source/privacy bindings. Partial geometry capacities atN100 span1376–3432B; cold actual old/new overlap2752–6864B; warm endpoint1880B. These are nine grid f32 vector capacities only, not allocator or total memory. All timing tails retained. Non-test `cargo check --lib --profile fast-dev` PASS12.97s. Harness commit is preparation for Full; C2-E remains IN_PROGRESS and no reuse runtime candidate is authorized.
+
+
+## C2-E reviewed Full baseline
+
+Runtime eager unchanged; source a098d685857cb2c4e7c47e90b20aad4b3c6c838d, renderSHA25608AA135652DABF2534807C37BB21E163515D72DA6188E19D9F8572D69127099F. Exact fast-dev Full run bdeb9dfc-3fc0-4ec4-94e7-61625291997f: build0.88s, owner841.096s, Nextest841.133s,1PASS/5194skipped. All27recipes/540retainedsamples executed,5warmups20samples0exclusions. Independent review CLEAR:459arrays9180entries486scalars135timingtriplets540complete-state hashes;108Small-overlap nontiming arrays/144scalars match. Ordinary12unique tests and non-test libcheck12.97s PASS; two fixture setup/binding failures retained in prior evidence.
+
+Complete-owner p50/p95/max(ms), three columns:
+
+| Recipe | N100 | N1000 | N10000 |
+| --- | --- | --- | --- |
+| Full cold | 4.5634/5.2796/6.8275 | 48.9670/66.5741/80.6139 | 550.2842/708.8718/929.4093 |
+| Shared5% growth | 6.1232/7.4017/7.8773 | 42.9384/50.1649/58.0102 | 464.6075/513.4302/557.9451 |
+| Shared20% shrink | 4.8120/5.3525/5.7481 | 43.6383/46.3230/49.9179 | 481.0998/514.6584/534.1384 |
+| Warm repeat | 1.2894/1.5574/1.5591 | 1.3016/1.4944/1.5279 | 1.3691/1.6541/1.6915 |
+| Tall spill cold | 4.3798/6.1214/6.7795 | 48.6874/50.0190/56.3321 | 539.6941/593.8884/614.2202 |
+
+N10k/3cols fullcold cell-loop543.4424/700.7973/918.6308ms; paired geometry residual0.5287/0.6052/0.7771ms. Paired cell fraction about95-97% at1k and98.7-98.9% at10k includes formatting/galley/per-cell maxima, not pure font time. All global aggregates remain mandatory. All other column profiling and adverse tails retained in Full JSON, including N100/cols1 maximum11.5706ms and cols5 maximum9.9372ms. No exclusions, speedup or production-frequency claim.
+
+Independent GO for ONE separately gated candidate experiment, not KEEP: same-index exact dimensions, all global aggregates rebuilt, comparison/retention/disposal and actual storage overlap included in complete owner. Existing cell vectors remain sole dimension storage; one prior presentation projection only. Baseline contains no optimization. C2-E IN_PROGRESS;15/29closed. Native display, allocator/RSS, production frequency and application-wide gain NOT MEASURED. LOCAL ONLY.
