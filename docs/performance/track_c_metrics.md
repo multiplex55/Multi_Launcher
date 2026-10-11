@@ -62,3 +62,7 @@ error and early-continue paths. Public raw sender registration retains its
 existing `std::sync::mpsc::Sender<WatchEvent>` signature; the app-owned receiver
 facade returns the original plain `WatchEvent` values and keeps envelope
 metadata private. Native presentation remains outside these measurements.
+
+## C1-A attribution supplement
+
+C1-A adds a distinct observer-enabled actual NotePanel UI series; it does not redefine frozen C0 or Track A metrics. See `track_c_notes_contract.md` for selected construction-point String estimates, overlapping timer boundaries, legacy NoteSnapshot completion semantics and test-constructor isolation correction. `track_c_c1a_evidence.json` retains all exact-source Full observations and the original-owner continuity rerun. Native display and allocator traffic remain unmeasured.

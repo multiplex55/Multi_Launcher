@@ -1,6 +1,6 @@
 # Track C C1-A note relationship contract
 
-Status: IN_PROGRESS. Parent-owned contract; source implementation and measurement review are pending. Initial C1-A source is `bf105215c918656a5cdd18e64eef677f10cd9186`. Frozen G0 remains `071243db068835617a054a74fb5734a6dd9f128d`; its numeric values and eager oracle are immutable. LOCAL ONLY.
+Status: PASS. Parent-owned contract; source, Full attribution and original-owner continuity independently reviewed CLEAR. Accepted source is `b47c1646d99c653b53e96bafa6b242259eabef17`. Frozen G0 remains `071243db068835617a054a74fb5734a6dd9f128d`; its numeric values and eager oracle are immutable. LOCAL ONLY.
 
 ## Ownership and refresh routes
 
@@ -72,7 +72,7 @@ Use five warmups, twenty retained measurements, nearest-rank quantiles and zero 
 C1-A does not fuse passes, build an index, replace snapshot ownership, optimize alias lookup, change saved data or fix unrelated defects. The next smallest hypothesis is C1-B pass fusion, gated on accepted work attribution and full output parity.
 ### C1-A first ordinary execution (pending correction)
 
-On the reviewed uncommitted C1-A source based on `bf105215c918656a5cdd18e64eef677f10cd9186`, the exact 14-test fast-dev selection genuinely ran: 13 PASS, the new caller harness FAIL at its initial complete row comparison (actual Mentioned tab empty while the independent eager reference expected six note rows). Nextest run `069003db-1bca-4609-b631-b1b1fd318d43`; build 2m02s, test execution 0.899s. Preserved raw log: ignored `target/performance/track-c/c1-a/nextest-ordinary.log`. This is not an accepted measurement or a reason to weaken the oracle. Sole source writer is correcting the setup boundary; only the failed new test will be rerun initially. The thirteen existing behavioral/publication tests need no redundant rerun unless the correction affects their behavior. C1-A remains IN_PROGRESS; frozen G0 unchanged; LOCAL ONLY.
+On the reviewed uncommitted C1-A source based on `bf105215c918656a5cdd18e64eef677f10cd9186`, the exact 14-test fast-dev selection genuinely ran: 13 PASS, the new caller harness FAIL at its initial complete row comparison (actual RelatedNotes tab empty while the independent eager reference expected six note rows). Nextest run `069003db-1bca-4609-b631-b1b1fd318d43`; build 2m02s, test execution 0.899s. Preserved raw log: ignored `target/performance/track-c/c1-a/nextest-ordinary.log`. This is not an accepted measurement or a reason to weaken the oracle. Sole source writer is correcting the setup boundary; only the failed new test will be rerun initially. The thirteen existing behavioral/publication tests need no redundant rerun unless the correction affects their behavior. C1-A remains IN_PROGRESS; frozen G0 unchanged; LOCAL ONLY.
 
 ### C1-A constructor isolation finding (before retry)
 
@@ -103,3 +103,55 @@ Nextest run `79ab7c2d-8a2f-40da-bc2a-5dff0d02d8da` PASS1/1, build0.88s, executio
 Collector accepted all three actual records and preserved twenty numeric/identity receipts per record. Four copied-log negative cases rejected: altered frame quantile, missing refresh array, incorrect work counter and snapshot wait/hold exceeding wrapper. Original raw data was never rewritten. This is supplemental characterization smoke, not an optimization, committed-source Full evidence or a native display measurement. Independent numerical review is pending; C1-A remains IN_PROGRESS.
 
 Independent Small evidence review CLEAR: all150 raw arrays across three records match collected JSON exactly, twenty entries each; every timing distribution was independently recomputed, work/containment/revision joins passed, and privacy scan found no personal paths/contact data. Each scenario has one structural identity and twenty distinct complete-state IDs explained by monotonic revision receipts. Reviewed smoke saved as `track_c_c1a_small.json`, retaining honest UNCOMMITTED_SOURCE. Collector saved as `track_c_collect_note_attribution.ps1`. Source/contract commit may proceed with C1-A explicitly IN_PROGRESS; exact committed-source Full and original owner evidence remain required before closure.
+
+### Exact-source Full collection
+
+Reviewed source committed locally as `b47c1646d99c653b53e96bafa6b242259eabef17` (`test(notes): [C1-A] characterize relationship-refresh contract`); tree clean immediately after commit. Parent Full runner verified source HEAD, clean source and no active Cargo before launch, saves/restores telemetry/source/profile/mode variables in finally, refuses existing raw logs, and rechecks HEAD/clean source afterward. Full attribution run `a8b4eaed-5132-4d5e-8c3d-b4eba7ec53f3` is active in session51023, raw ignored `nextest-full-attribution.log`; source writers paused. Five required scenarios,100 retained samples, no exclusions. Original note-owner rerun follows serially on the same source. Results and independent review remain pending; C1-A is not closed.
+
+Full supplemental terminal PASS1/1 (build0.84s, execution282.635s,5166skipped); all five scenarios collected by the committed strict collector. Source `b47c1646d99c653b53e96bafa6b242259eabef17`, fast-dev,Full,PERF1,observer enabled,5warmups/20samples each,0exclusions. Candidate/raw remain ignored until review.
+
+| Transition / notes | Frame p50 / p95 / max (ms) | Snapshot wrapper p50 / p95 (ms) | Heavy refresh p50 / p95 (ms) | Actual note+todo visits / fence transforms |
+| --- | --- | --- | --- | --- |
+| Draft /100 |24.9107 /26.4808 /26.6228 |0.2531 /0.2834 |22.2972 /23.2908 |336 /300 |
+| Draft /1000 |233.9967 /243.0205 /243.2449 |2.1270 /2.6344 |231.1644 /240.3031 |3036 /3000 |
+| Draft /5000 |1148.3915 /1215.0013 /1246.0377 |11.5232 /13.7048 |1145.7011 /1210.8903 |15036 /15000 |
+| External note /1000 |234.3999 /245.5493 /264.6342 |2.3465 /2.7735 |231.7930 /242.6472 |3036 /3000 |
+| Persisted todo /1000 |231.1382 /248.4943 /264.0510 |2.2306 /2.5697 |228.3185 /245.5075 |3036 /3000 |
+
+Snapshot clone-byte estimates for local100/1000/5000 are559340/5709977/28606683 bytes. Selected fenced-string construction lengths total1487457/15215796/76249743 bytes per local refresh; these are observed helper construction lengths, not allocator traffic or retained memory. Full per-pass distributions remain in the appendix; do not subtract overlapping timers. At5000 notes each of the three row passes has a median in the366–395ms range, versus11.5232ms for the snapshot wrapper. This supports bounded C1-B fusion before indexed state; it does not prove future speedup. Original owner rerun is in progress on the same source, parent session52960; independent Full numeric review pending.
+
+Independent Full attribution review CLEAR: all250 raw arrays exactly match five collected records, twenty entries each; independent nearest-rank timing quantiles, provenance, counter joins, timer containment and privacy passed. Across100 samples snapshot-wrapper/refresh ratios span approximately0.83–1.68%, and per-sample sum-of-three-pass/refresh spans95.80–98.67%. Quantiles of the actual per-sample pass sums (not sums of quantiles) have local100/1000/5000 p50 values21.6067/227.4301/1128.3059ms. Nested/observer overhead limits remain applicable.
+
+Preserve contrary/variable receipts: the external1000 scenario has two structural hashes across twenty samples; the other four scenarios have one each. Filesystem minute-formatted updated strings are retained exactly and can change while fixtures are written. Every individual sample passed full frozen row equality, so do not normalize away this variation or require false across-sample identity. Complete state IDs retain monotonic revision variation. Original-owner run/review and final closure remain pending.
+
+### Original owner continuity rerun
+
+Original note owner PASS1/1, Nextest run `9210b828-3287-4144-9fd3-c2520d7e3bee`, build0.84s, execution120.677s,5166skipped; raw `nextest-full-original-owner.log` and strict three-record collection retained. Exact same committed source/profile as Full supplemental; observer is not armed for this original owner, although disabled test hooks remain compiled in. Fixture sizes100/1000/5000,5warmups/20retained samples each,0exclusions. Frozen G0 remains unchanged.
+
+| Notes | Frozen G0 p50 / p95 / max (ms) | C1-A original owner p50 / p95 / max (ms) |
+| --- | --- | --- |
+|100 |22.3415 /23.4536 /26.5596 |23.0671 /33.1873 /35.7915 |
+|1000 |229.0207 /254.2780 /385.6323 |232.4852 /254.9681 /286.6619 |
+|5000 |1153.8690 /1182.8377 /1255.7501 |1163.7188 /1186.3802 /1216.1710 |
+
+Retain the higher median/p95 observations and differing maxima; no improvement, statistical equivalence or whole-application claim follows. This original owner differs from the actual UI/observer-enabled supplemental series, so do not mix their quantiles. Inert constructor correction is a separate disclosed test-setup change; production behavior is unchanged. Independent original-owner raw/identity/work review is pending. Native display/input and allocator traffic remain NOT MEASURED; no cleanup operation was executed by these owner tests.
+
+### Reproduction
+
+Use the exact source above and `fast-dev`; do not overwrite frozen G0 or existing raw logs. Serialize Cargo, save/restore these process variables in `finally`, and use fresh owned raw-log names. The original Full invocations were:
+
+```powershell
+$env:MULTI_LAUNCHER_PERF='1'
+$env:ML_SKIP_CLIPBOARD_SYNC='1'
+$env:ML_TRACK_C_PROFILE='fast-dev'
+$env:ML_TRACK_C_BENCH_MODE='full'
+$env:ML_TRACK_C_SOURCE_SHA='b47c1646d99c653b53e96bafa6b242259eabef17'
+cargo nextest run --lib --cargo-profile fast-dev --test-threads 1 --no-fail-fast --success-output immediate --run-ignored only -E 'test(track_c_c1a_benchmark_open_note_panel_refresh_attribution)'
+cargo nextest run --lib --cargo-profile fast-dev --test-threads 1 --no-fail-fast --success-output immediate --run-ignored only -E 'test(track_c_benchmark_note_panel_heavy_refresh_owner)'
+```
+
+Capture each run separately; parse supplemental output using `track_c_collect_note_attribution.ps1` with `-ExpectedSource` the exact SHA, `-ExpectedMode Full`, `-LogPath` its raw log and a fresh `-OutputPath`. Parse original-owner output using `track_c_collect_owner_results.ps1` and its `-LogPaths` argument. Source SHA, profile and protocols must match actual execution; never relabel an uncommitted run as committed evidence. Original guarded runners additionally required clean source before/after, no competing Cargo, no log overwrite and restored every variable.
+
+### C1-A closure
+
+Independent original-owner review CLEAR: all21 raw arrays across three records match JSON; every fixture/protocol/full output-state ID/structural ID/revision receipt/viewport/work-unit/work-counter array exactly matches frozen G0, apart from source and elapsed values. The100-note p95 was41.50% higher in this rerun; retain that unfavorable observation without inferring a causal production regression or equivalence from one observer-inactive test rerun. The complete supplemental/continuity evidence is saved in `track_c_c1a_evidence.json`. Source, method, full semantics, counts, quantiles and privacy reviews are CLEAR; C1-A PASS. No optimization was implemented. Next checkpoint C1-B should fuse the triplicate passes against the immutable eager oracle and this matched supplemental series, with failed-snapshot/debounce/revision/unsaved-order behavior preserved. Indexing remains gated until fusion has been measured.
