@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "scope": "original_two_Full_queue_control_comparator_only",
+  "status": "INDEPENDENT_METHOD_CORRECTIONS_CLEAR",
+  "reviewer": "c0_boundary_review",
+  "method": "track_c_compare_queue_controls.py",
+  "sha256": "f18e0882dd49a3bb7a9c6cf191ab7af86b349e243f29935fb6a8d4e1ceba692b",
+  "production_or_benchmark_runs": 0,
+  "synthetic_controls_executed_total": 22,
+  "original_guards_reviewed": [
+    "Exact frozen G0/source/profile/Full recipe inventory",
+    "Structural/revision/viewport/work parity",
+    "Exact FIFO class-origin and age inventory",
+    "Nearest ranks and nested timing"
+  ],
+  "findings_resolved": [
+    "Impossible drain count: finite requires1; concurrent1or2",
+    "Handler max<=total<=calls*max"
+  ],
+  "small_mode": "Explicitly rejected: Full20k is not a Small200 comparator",
+  "c3c_acceptance": "PENDING source/protocol/actual execution/numerical/privacy review"
+}

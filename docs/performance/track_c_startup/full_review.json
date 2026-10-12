@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "status": "INDEPENDENT_FULL_CHARACTERIZATION_CLEAR",
+  "source": "0fbd2f0327badf899e2bdd662616ac6d9d1228d5",
+  "profile": "fast-dev",
+  "original_records": 3,
+  "supplement_records": 3,
+  "component_records": 3,
+  "retained_unique_owner_samples": 120,
+  "timing_triplets_recomputed": 57,
+  "duplicate_original_supplement_elapsed_summaries": 3,
+  "original_raw_array_domains_per_record": 7,
+  "raw_json_payload_links": "LOSSLESS",
+  "original_elapsed_supplement_join_samples": 60,
+  "complete_catalog_ack_generation": 1,
+  "component_receipts": 60,
+  "geometry": "One Query-only N+3-row rebuild per accepted+painted current PendingQuery/Search frame",
+  "handler_inventory": "Exact10 attempted/created/released per60samples=600 each; zerooverflow",
+  "full_identity": "All3 frozen fixture/structural/revision/work domains match; raw Action ID and UTF8 payload fixed per owned root; geometry/viewport per real root",
+  "source_file_hashes_checked": 9,
+  "method_hashes_checked": 2,
+  "privacy": "CLEAR",
+  "adverse_catalog_comparisons": {
+    "p50": 3,
+    "p95": 2,
+    "max": 1,
+    "total": 3
+  },
+  "notable_adverse": "10k p95+3.9162998%; max+15.4207012%",
+  "phase_fraction_review": "Independent nearest-rank same-sample ratios match; scan overlaps wait; no additive quantile arithmetic",
+  "limits": "CPU characterization only; no process/hotkey/native/display/cold-disk/allocator/RSS/prevalence or application-wide benefit claim",
+  "conditional_c3b": "No concrete material removable operation identified; separate measured-skip decision pending"
+}

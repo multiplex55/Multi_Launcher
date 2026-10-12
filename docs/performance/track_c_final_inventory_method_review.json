@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "status": "METHOD_CLEAR_PUBLIC_BYTES_IDENTICAL_FINAL_EXECUTION_PENDING",
+  "reviewer": "c0_boundary_review",
+  "method": "docs/performance/track_c_verify_final_inventory.py",
+  "method_sha256": "2f66a84caf75a39f8c66b92c0be1ee628aa081bb3318a2185480dc1d459c4587",
+  "controls": 10,
+  "control_basis": "Frozen G0 inventory method only; not finalsource execution",
+  "counts": {
+    "records": 105,
+    "samples": 2100,
+    "width_arrays": 6,
+    "width_values": 120,
+    "event_age_rows": 40,
+    "individual_ages": 440
+  },
+  "semantic_acceptance_requires_family_subsets": [
+    96,
+    2,
+    3,
+    4
+  ],
+  "pending": [
+    "Final protocol, baseline hash and clean accepted source freeze",
+    "Actual finalFull owner execution",
+    "Four family comparators and independent numerical/privacy/publication acceptance"
+  ],
+  "local_only": true
+}

@@ -1,11 +1,12 @@
+use super::event_channel::EventSender;
 use super::{LauncherApp, ViewportWake, WatchEvent};
 use crate::actions::Action;
 use crate::indexer::coordinator::{
     CoordinatorError, IndexCompletion, IndexConfig, IndexCoordinator, NotifierToken, ShutdownError,
     WorkerTermination,
 };
+use crate::performance::track_c::EventOrigin;
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 
 /// App-owned lifecycle for replaceable indexed-action requests.
 ///
@@ -45,10 +46,10 @@ impl IndexingOwner {
     fn attach(
         &mut self,
         coordinator: IndexCoordinator,
-        event_tx: &Sender<WatchEvent>,
+        event_tx: &EventSender,
         wake: ViewportWake,
     ) -> Result<(), CoordinatorError> {
-        let tx = event_tx.clone();
+        let tx = event_tx.with_origin(EventOrigin::IndexCoordinator);
         let token = coordinator.attach_notifier(move || {
             if tx.send(WatchEvent::IndexReady).is_ok() {
                 wake.wake();
@@ -64,7 +65,7 @@ impl IndexingOwner {
         coordinator: IndexCoordinator,
         config: IndexConfig,
         generation: u64,
-        event_tx: &Sender<WatchEvent>,
+        event_tx: &EventSender,
         wake: ViewportWake,
     ) -> Result<(), CoordinatorError> {
         if self.closed {
@@ -86,7 +87,7 @@ impl IndexingOwner {
 
     fn ensure_coordinator(
         &mut self,
-        event_tx: &Sender<WatchEvent>,
+        event_tx: &EventSender,
         wake: ViewportWake,
     ) -> Result<(), CoordinatorError> {
         if self.coordinator.is_none() {
@@ -193,6 +194,10 @@ impl LauncherApp {
     }
 
     pub(super) fn process_index_ready(&mut self) {
+        #[cfg(test)]
+        let _track_c_index_ready = crate::gui::track_c_action_observer::scope(
+            crate::gui::track_c_action_observer::Phase::IndexReadyOwner,
+        );
         // Taking first acknowledges even stale or post-close notifications.
         let completion = self.indexing.take_completion();
         if self.indexing.closed {
@@ -205,11 +210,21 @@ impl LauncherApp {
             if is_current {
                 match completion.outcome() {
                     Ok(actions) => {
+                        #[cfg(test)]
+                        crate::gui::track_c_action_observer::add(
+                            crate::gui::track_c_action_observer::Counter::IndexAccepted,
+                            1,
+                        );
                         self.publish_indexed_tail_if_changed(actions);
                         self.indexing.diagnostic = None;
                         self.indexing.terminal_reported = false;
                     }
                     Err(error) => {
+                        #[cfg(test)]
+                        crate::gui::track_c_action_observer::add(
+                            crate::gui::track_c_action_observer::Counter::IndexRejected,
+                            1,
+                        );
                         // A later committed save with this same config may
                         // retry a failed scan on the still-live worker.
                         self.indexing.expected_generation = None;
@@ -240,10 +255,40 @@ impl LauncherApp {
     fn publish_indexed_tail_if_changed(&mut self, indexed: &[Action]) {
         let custom_len = self.custom_len.min(self.actions.len());
         if self.actions[custom_len..] == *indexed {
+            #[cfg(test)]
+            crate::gui::track_c_action_observer::add(
+                crate::gui::track_c_action_observer::Counter::IndexTailEqual,
+                1,
+            );
             return;
         }
-        let custom = self.actions[..custom_len].to_vec();
-        self.publish_actions(custom, indexed.iter().cloned());
+        #[cfg(test)]
+        crate::gui::track_c_action_observer::add(
+            crate::gui::track_c_action_observer::Counter::IndexTailChanged,
+            1,
+        );
+        let custom = {
+            #[cfg(test)]
+            let _track_c_index_custom_copy = crate::gui::track_c_action_observer::scope(
+                crate::gui::track_c_action_observer::Phase::IndexCustomPrefixCopy,
+            );
+            self.actions[..custom_len].to_vec()
+        };
+        #[cfg(test)]
+        crate::gui::track_c_action_observer::add(
+            crate::gui::track_c_action_observer::Counter::IndexCustomActionsCloned,
+            custom.len(),
+        );
+
+        #[cfg(test)]
+        let mut clone_observer = crate::gui::track_c_action_observer::indexed_clone_observer();
+        #[cfg(test)]
+        let indexed_clones = indexed
+            .iter()
+            .map(move |action| clone_observer.clone_action(action));
+        #[cfg(not(test))]
+        let indexed_clones = indexed.iter().cloned();
+        self.publish_actions(custom, indexed_clones);
         crate::actions::bump_actions_version();
     }
 

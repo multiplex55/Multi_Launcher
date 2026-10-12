@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "checkpoint": "C3-C",
+  "status": "CLEAR",
+  "reviewer": "c0_boundary_review",
+  "source": "c6c9d7edf16a8c6b77a44656ffee46275a08abfe",
+  "profile": "fast-dev",
+  "mode": "Full",
+  "retained_owner_samples": 100,
+  "companion_retained_samples": 60,
+  "companion_actual_frames": 60,
+  "companion_event_ages": 560,
+  "original_event_ages": 440,
+  "checks": [
+    "Lossless raw marker/collected records and independent full collector regeneration",
+    "All18 companion summary distributions and per-sample/event-weighted pooled nearest-rank ages",
+    "Original frozen G0 full identity/work/revision/FIFO parity and comparison regeneration",
+    "All7 source hashes, protocol/collector hashes and immutable G0 identity",
+    "Exact four handler registration/creation/final-release inventories for all60 companion sequences",
+    "Zero overflow, abandoned, send failures and final backlog",
+    "Twenty separate untimed coordinator B finalizations retained",
+    "Source-derived independent Action/projection/recipe bindings",
+    "Static/hex/numeric privacy vocabulary"
+  ],
+  "observed_replenishing": {
+    "samples": 20,
+    "drain_windows_with_ack_advancement": 0,
+    "whole_frame_windows_with_ack_advancement": 10,
+    "all_drain_ack_before_after": [
+      16,
+      16
+    ],
+    "sustained_starvation": "NOT_ESTABLISHED"
+  },
+  "quiet_completion": {
+    "pending": 17,
+    "rebuilt": 3,
+    "distinct_projection_full_state_viewport_identities": 2
+  },
+  "adverse_original_concurrent_max": {
+    "g0_ns": 611470800,
+    "current_ns": 655969900,
+    "percent": 7.27738757108272
+  },
+  "native": "NOT_RUN_NOT_MEASURED",
+  "local_only": true
+}

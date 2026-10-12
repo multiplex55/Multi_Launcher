@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "status": "17_SYNTHETIC_CONTROLS_PASS_NOT_MEASUREMENTS",
+  "method_sha256": "603fd5730f7bc91829f097d8a9b134bfb618f108fcf45cffd1ef48d178864d1d",
+  "controls": [
+    {
+      "control": "valid_Full_three",
+      "passed": true
+    },
+    {
+      "control": "valid_Small_one_context",
+      "passed": true
+    },
+    {
+      "control": "missing_recipe",
+      "passed": true
+    },
+    {
+      "control": "duplicate_recipe",
+      "passed": true
+    },
+    {
+      "control": "wrong_source",
+      "passed": true
+    },
+    {
+      "control": "bool_schema",
+      "passed": true
+    },
+    {
+      "control": "float_count",
+      "passed": true
+    },
+    {
+      "control": "bool_elapsed",
+      "passed": true
+    },
+    {
+      "control": "wrong_stat",
+      "passed": true
+    },
+    {
+      "control": "float_stat",
+      "passed": true
+    },
+    {
+      "control": "wrong_structural",
+      "passed": true
+    },
+    {
+      "control": "wrong_ack",
+      "passed": true
+    },
+    {
+      "control": "bool_work",
+      "passed": true
+    },
+    {
+      "control": "bad_complete",
+      "passed": true
+    },
+    {
+      "control": "changed_complete_within_root",
+      "passed": true
+    },
+    {
+      "control": "wrong_G0_source",
+      "passed": true
+    },
+    {
+      "control": "unfrozen_reference",
+      "passed": true
+    }
+  ]
+}

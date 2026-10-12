@@ -72,9 +72,16 @@ where
     let callbacks_clone = callbacks.clone();
     let target = path_buf.clone();
 
+    #[cfg(test)]
+    let release = track_c_json_handler_release(&path_buf);
+    #[cfg(test)]
+    let release_registration = release.as_ref().map(|sentinel| sentinel.registration());
+
     let mut watcher = RecommendedWatcher::new(
         move |res: notify::Result<notify::Event>| match res {
             Ok(event) => {
+                #[cfg(test)]
+                let _keep_handler_release = &release;
                 if matches!(
                     event.kind,
                     EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
@@ -95,7 +102,28 @@ where
 
     map.insert(path_buf.clone(), WatchEntry { watcher, callbacks });
 
+    #[cfg(test)]
+    if let Some(registration) = release_registration {
+        registration.registered();
+    }
+
     Ok(JsonWatcher { path: path_buf, id })
+}
+
+#[cfg(test)]
+fn track_c_json_handler_release(
+    path: &Path,
+) -> Option<crate::performance::track_c_watcher_lifecycle::HandlerReleaseSentinel> {
+    use crate::performance::track_c_watcher_lifecycle::HandlerKind;
+
+    let kind = match path.file_name().and_then(|name| name.to_str())? {
+        crate::plugins::folders::FOLDERS_FILE => HandlerKind::JsonFolders,
+        crate::plugins::bookmarks::BOOKMARKS_FILE => HandlerKind::JsonBookmarks,
+        crate::plugins::todo::TODO_FILE => HandlerKind::JsonTodos,
+        "dashboard.json" => HandlerKind::JsonDashboard,
+        _ => return None,
+    };
+    crate::performance::track_c_watcher_lifecycle::capture(kind, path)
 }
 
 fn invoke_callbacks(callbacks: &Arc<Mutex<HashMap<usize, Callback>>>) {

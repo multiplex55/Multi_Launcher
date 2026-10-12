@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "status": "INDEPENDENT_ACCEPTANCE_CLEAR",
+  "profile": "fast-dev",
+  "source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+  "runs": [
+    {
+      "stage": "original",
+      "mode": "Small",
+      "source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+      "nextest_run": "1f1c935b-e46f-4388-be8e-561822411620",
+      "tests_executed": 5,
+      "passed": 5,
+      "nextest_seconds": 55.52,
+      "raw_log_sha256": "16024b2ceb6b1edb1ae1e532a3e496621694772949ef0059d5eebbd22de5a895",
+      "exact_clean_source_unchanged": true,
+      "status": "TERMINAL_PASS"
+    },
+    {
+      "stage": "equal",
+      "mode": "Small",
+      "source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+      "nextest_run": "59d927f0-adb7-4f5e-bd16-1013e2c62464",
+      "tests_executed": 1,
+      "passed": 1,
+      "nextest_seconds": 4.388,
+      "raw_log_sha256": "ac13fbd967d0c8629b2bc764c31d3b9dad545e9d01ada0a902022b1085aea755",
+      "exact_clean_source_unchanged": true,
+      "status": "TERMINAL_PASS"
+    },
+    {
+      "stage": "original",
+      "mode": "Full",
+      "source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+      "nextest_run": "4c489617-d979-417c-b816-5bed443b2d54",
+      "tests_executed": 5,
+      "passed": 5,
+      "nextest_seconds": 1723.615,
+      "raw_log_sha256": "96ea93e8c85250abf04ac299618dade53e3eaeedb0adbefd37adc2dece97c7a8",
+      "exact_clean_source_unchanged": true,
+      "status": "TERMINAL_PASS"
+    },
+    {
+      "stage": "equal",
+      "mode": "Full",
+      "source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+      "nextest_run": "155bf1bf-40f9-4958-9afe-19d6f75630ce",
+      "tests_executed": 1,
+      "passed": 1,
+      "nextest_seconds": 148.092,
+      "raw_log_sha256": "a4397e07a86f34750a46131a2ae533925fb3fe3c6b61eaf6b8ae53dd117b40e4",
+      "exact_clean_source_unchanged": true,
+      "status": "TERMINAL_PASS"
+    },
+    {
+      "stage": "track_a_warm",
+      "mode": "Full",
+      "source": "6fb578169a13f074bede2f3352eafe916acb9e7e",
+      "nextest_run": "cccdcc3b-e516-4930-91aa-8e32ccc27de1",
+      "tests_executed": 1,
+      "passed": 1,
+      "nextest_seconds": 3.387,
+      "raw_log_sha256": "994e0c38d13c99075db9e1c1de0a96769f00aaaf26ef50a01b15f451902711fa",
+      "exact_clean_source_unchanged": true,
+      "status": "TERMINAL_PASS"
+    }
+  ],
+  "local_only": true
+}

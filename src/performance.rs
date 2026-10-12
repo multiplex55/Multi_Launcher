@@ -10,9 +10,16 @@ static FRAME_STATE: OnceLock<Mutex<FrameState>> = OnceLock::new();
 static METRICS: MetricCollector = MetricCollector::new();
 
 pub mod coordinate_profile;
+pub mod track_c;
 
 #[cfg(test)]
 pub(crate) mod workloads;
+
+#[cfg(test)]
+pub(crate) mod track_c_watcher_lifecycle;
+
+#[cfg(test)]
+pub(crate) mod track_c_workloads;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]

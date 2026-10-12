@@ -1,0 +1,20 @@
+{
+  "status": "PASS_INDEPENDENT_REVIEW_CLEAR",
+  "method": "docs/performance/track_c_events/reconstruct_watch_identities.py",
+  "method_sha256": "64e37642ba4f8799fafef85711976108ff73cba5579c73b5ee7ea0d1b268fd0d",
+  "expression": "aid(actions(1000),'track-c-action-state',0x435f574f524b4c44)",
+  "result": "9a958b83b7e7345f",
+  "exact_final_record_key": {
+    "owner": "egui_Context_run+LauncherApp::render_root_frame",
+    "fixture": "root-list-default-layout",
+    "fixture_signature": "9a958b83b7e7345f",
+    "item_count": 1000,
+    "viewport": "960x640",
+    "scale_milli": 1000,
+    "fonts": "warm-egui-font-atlas",
+    "settings": "list-wrap-default",
+    "cold_type": "geometry-cold-warm-fonts"
+  },
+  "matches": 1,
+  "scope": "Independent pure fixture signature reconstruction only; no owner timing/font/display replay"
+}

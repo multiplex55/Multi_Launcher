@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "status": "INDEPENDENT_SOURCE_FIXTURE_PROTOCOL_LIFECYCLE_CLEAR_FOR_SCOPED_EXECUTION",
+  "source_parent": "d23e57384da453b3e3281e8c09d19630b1d39347",
+  "source_sha256": {
+    "src/main.rs": "8477265e47f9c53fa1f160800abd6eb5594b1103cfb74574d2f8fb167bca47a7",
+    "src/gui/render.rs": "bdf593eb1261e6ed8606227fc43af280f712172718a3bc25dd677755bd7886c1",
+    "src/plugins/omni_search.rs": "efe0b73e32503f69fb448852837e1f3065d04f93cab5b1bb6b1ea482de545298",
+    "src/common/json_watch.rs": "8eda498cefe2ca74518c4f032278f280c10f3edf04593971a5f6423f67d17ea0",
+    "src/plugins/note.rs": "846d6cc68bc19a646727ba75cbfa46630cc5cf33cf7839d21889c842c2f7a59b",
+    "src/gui/watch.rs": "f65e6d1c1c5f2af9728b40c7ab8a7de82a76b4354bc7f94599ec95c451765347",
+    "src/clipboard_modify/watch.rs": "6cb7ffd2235cb8c75e84785a2504df4f6c2304de8617c6466272d94160137172",
+    "src/performance.rs": "c5adcc3b710dd7c743af56f1bb729068978191b0aa6e07992e3b0d5b262ab425",
+    "src/performance/track_c_watcher_lifecycle.rs": "8d2a30651d6563c48d46a186e73584c002eaa2d31bcd482ac532e110b641d553"
+  },
+  "tests_executed": 0,
+  "measurements_executed": 0,
+  "reviewer": "c0_boundary_review",
+  "scope": "9 library +3 binary exact ordinary tests; no generic reload/native/desktop execution",
+  "findings_resolved": [
+    "typed Query-only geometry and fixed-root payload collector checks",
+    "paint hook Action.action instead of label",
+    "actual context eager oracle borrow and measured viewport capture before posttimer ctx.run",
+    "explicit exact matching/autocomplete disabled/zero usage weight and empty aliases/usage/no local matches"
+  ],
+  "production_behavior": "Unchanged; new source observations and fixture seams cfg(test) only",
+  "pending": [
+    "clean source commit",
+    "Small/Full evidence",
+    "independent numerical/privacy review"
+  ],
+  "compiler_followup_review": "CLEAR: clone independent oracle label insertion; remove only unused fixture_signature binding and unneeded closure mut; seven other hashes unchanged",
+  "ordinary_failure_followup": "Independent CLEAR: empty provider results legitimately expose exact Omni command fallback; assert full query:o list Action and zero catalog-ID overlap, preserve real frame full Actions equality. Comment clarifies o does not enter app catalog route."
+}

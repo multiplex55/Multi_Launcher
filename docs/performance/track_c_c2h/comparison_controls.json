@@ -1,0 +1,122 @@
+{
+  "status": "SYNTHETIC_ONLY_NOT_MEASUREMENT",
+  "controls": [
+    {
+      "control": "Small_synthetic_positive",
+      "status": "PASS"
+    },
+    {
+      "control": "Full_synthetic_positive",
+      "status": "PASS"
+    },
+    {
+      "control": "Notes_actual_revision_rehash_positive",
+      "status": "PASS"
+    },
+    {
+      "control": "missing",
+      "status": "PASS",
+      "rejection": "exact subset inventory"
+    },
+    {
+      "control": "duplicate",
+      "status": "PASS",
+      "rejection": "duplicate scenario"
+    },
+    {
+      "control": "unexpected_fixture",
+      "status": "PASS",
+      "rejection": "exact subset inventory"
+    },
+    {
+      "control": "wrong_source",
+      "status": "PASS",
+      "rejection": "collection provenance"
+    },
+    {
+      "control": "wrong_profile",
+      "status": "PASS",
+      "rejection": "collection provenance"
+    },
+    {
+      "control": "work_mismatch",
+      "status": "PASS",
+      "rejection": "output/work parity: work_counters"
+    },
+    {
+      "control": "structural_mismatch",
+      "status": "PASS",
+      "rejection": "output/work parity: structural_output_ids"
+    },
+    {
+      "control": "complete_mismatch",
+      "status": "PASS",
+      "rejection": "Notes complete identity with actual revisions"
+    },
+    {
+      "control": "Notes_wrong_complete",
+      "status": "PASS",
+      "rejection": "Notes complete identity with actual revisions"
+    },
+    {
+      "control": "Notes_wrong_generation",
+      "status": "PASS",
+      "rejection": "Notes generation suffix"
+    },
+    {
+      "control": "Notes_wrong_progression",
+      "status": "PASS",
+      "rejection": "Notes retained publication progression"
+    },
+    {
+      "control": "missing_width",
+      "status": "PASS",
+      "rejection": "exact horizontal width receipt"
+    },
+    {
+      "control": "wrong_width",
+      "status": "PASS",
+      "rejection": "exact horizontal width receipt"
+    },
+    {
+      "control": "wrong_quantile",
+      "status": "PASS",
+      "rejection": "nearest-rank quantiles"
+    },
+    {
+      "control": "sample_count",
+      "status": "PASS",
+      "rejection": "sample protocol"
+    },
+    {
+      "control": "bool_elapsed",
+      "status": "PASS",
+      "rejection": "numeric array type: elapsed_ns"
+    },
+    {
+      "control": "float_item_count",
+      "status": "PASS",
+      "rejection": "numeric field type: item_count"
+    },
+    {
+      "control": "bool_zero_work",
+      "status": "PASS",
+      "rejection": "numeric array type: work_units"
+    },
+    {
+      "control": "float_quantile",
+      "status": "PASS",
+      "rejection": "numeric field type: p50_ns"
+    },
+    {
+      "control": "bool_schema",
+      "status": "PASS",
+      "rejection": "collection provenance"
+    },
+    {
+      "control": "float_width",
+      "status": "PASS",
+      "rejection": "width uint type"
+    }
+  ]
+}

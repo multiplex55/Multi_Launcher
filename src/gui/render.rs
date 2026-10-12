@@ -6,6 +6,199 @@ use crate::radial::acceptance_trace::{
 
 const ROOT_LIST_OVERSCAN_ROWS: usize = 2;
 
+#[cfg(test)]
+mod c2e_grid_cell_loop_observer {
+    use std::{cell::RefCell, time::Instant};
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct StorageGroups {
+        pub(super) cell_vectors: u64,
+        pub(super) column_vectors: u64,
+        pub(super) shared_row_vectors: u64,
+        pub(super) visual_bounds: u64,
+        pub(super) spill_tree: u64,
+    }
+
+    impl StorageGroups {
+        fn vector_bytes<T>(capacity: usize) -> u64 {
+            capacity
+                .saturating_mul(std::mem::size_of::<T>())
+                .try_into()
+                .unwrap_or(u64::MAX)
+        }
+
+        pub(super) fn from_cache(cache: &super::RootListGeometryCache) -> Self {
+            Self {
+                cell_vectors: Self::vector_bytes::<f32>(cache.grid_cell_widths.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(
+                        cache.grid_cell_heights.capacity(),
+                    )),
+                column_vectors: Self::vector_bytes::<f32>(cache.grid_column_x_offsets.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(
+                        cache.grid_column_widths.capacity(),
+                    )),
+                shared_row_vectors: Self::vector_bytes::<f32>(cache.row_tops.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(cache.row_heights.capacity())),
+                visual_bounds: Self::vector_bytes::<f32>(cache.grid_visual_row_tops.capacity())
+                    .saturating_add(Self::vector_bytes::<f32>(
+                        cache.grid_visual_row_bottoms.capacity(),
+                    )),
+                spill_tree: Self::vector_bytes::<f32>(cache.grid_visual_max_end_tree.capacity()),
+            }
+        }
+
+        pub(super) fn from_capacities(
+            cell_widths: usize,
+            cell_heights: usize,
+            column_offsets: usize,
+            column_widths: usize,
+            row_tops: usize,
+            row_heights: usize,
+            visual_tops: usize,
+            visual_bottoms: usize,
+            spill_tree: usize,
+        ) -> Self {
+            Self {
+                cell_vectors: Self::vector_bytes::<f32>(cell_widths)
+                    .saturating_add(Self::vector_bytes::<f32>(cell_heights)),
+                column_vectors: Self::vector_bytes::<f32>(column_offsets)
+                    .saturating_add(Self::vector_bytes::<f32>(column_widths)),
+                shared_row_vectors: Self::vector_bytes::<f32>(row_tops)
+                    .saturating_add(Self::vector_bytes::<f32>(row_heights)),
+                visual_bounds: Self::vector_bytes::<f32>(visual_tops)
+                    .saturating_add(Self::vector_bytes::<f32>(visual_bottoms)),
+                spill_tree: Self::vector_bytes::<f32>(spill_tree),
+            }
+        }
+
+        pub(super) fn total(self) -> u64 {
+            self.cell_vectors
+                .saturating_add(self.column_vectors)
+                .saturating_add(self.shared_row_vectors)
+                .saturating_add(self.visual_bounds)
+                .saturating_add(self.spill_tree)
+        }
+
+        pub(super) fn overlap(self, other: Self) -> Self {
+            Self {
+                cell_vectors: self.cell_vectors.saturating_add(other.cell_vectors),
+                column_vectors: self.column_vectors.saturating_add(other.column_vectors),
+                shared_row_vectors: self
+                    .shared_row_vectors
+                    .saturating_add(other.shared_row_vectors),
+                visual_bounds: self.visual_bounds.saturating_add(other.visual_bounds),
+                spill_tree: self.spill_tree.saturating_add(other.spill_tree),
+            }
+        }
+
+        pub(super) fn receipt(self, after: Self, peak: Self) -> [u64; 18] {
+            let before_total = self.total();
+            let after_total = after.total();
+            let peak_total = peak.total();
+            [
+                self.cell_vectors,
+                self.column_vectors,
+                self.shared_row_vectors,
+                self.visual_bounds,
+                self.spill_tree,
+                before_total,
+                after.cell_vectors,
+                after.column_vectors,
+                after.shared_row_vectors,
+                after.visual_bounds,
+                after.spill_tree,
+                after_total,
+                peak.cell_vectors,
+                peak.column_vectors,
+                peak.shared_row_vectors,
+                peak.visual_bounds,
+                peak.spill_tree,
+                peak_total,
+            ]
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(super) struct Receipt {
+        pub(super) calls: u64,
+        pub(super) cells: u64,
+        pub(super) elapsed_nanos: u64,
+        pub(super) replacement_peak: Option<StorageGroups>,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Receipt>> = const { RefCell::new(None) };
+    }
+
+    pub(super) struct Scope {
+        active: bool,
+    }
+
+    impl Scope {
+        pub(super) fn start() -> Self {
+            ACTIVE.with(|active| {
+                assert!(
+                    active.borrow_mut().replace(Receipt::default()).is_none(),
+                    "C2-E grid cell-loop observations cannot be nested"
+                );
+            });
+            Self { active: true }
+        }
+
+        pub(super) fn finish(mut self) -> Receipt {
+            self.active = false;
+            ACTIVE.with(|active| {
+                active
+                    .borrow_mut()
+                    .take()
+                    .expect("C2-E grid cell-loop scope remains installed")
+            })
+        }
+    }
+
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            if self.active {
+                ACTIVE.with(|active| {
+                    active.borrow_mut().take();
+                });
+            }
+        }
+    }
+
+    pub(super) fn loop_started() -> Option<Instant> {
+        ACTIVE.with(|active| active.borrow().is_some().then(Instant::now))
+    }
+
+    pub(super) fn record_loop(started: Option<Instant>, cells: usize) {
+        let Some(started) = started else {
+            return;
+        };
+        let elapsed_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            let receipt = active
+                .as_mut()
+                .expect("a timed C2-E cell loop has an active observation scope");
+            receipt.calls = receipt.calls.saturating_add(1);
+            receipt.cells = receipt
+                .cells
+                .saturating_add(cells.try_into().unwrap_or(u64::MAX));
+            receipt.elapsed_nanos = receipt.elapsed_nanos.saturating_add(elapsed_nanos);
+        });
+    }
+
+    pub(super) fn record_replacement(old_cache: &super::RootListGeometryCache, new: StorageGroups) {
+        ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            let Some(receipt) = active.as_mut() else {
+                return;
+            };
+            receipt.replacement_peak = Some(StorageGroups::from_cache(old_cache).overlap(new));
+        });
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct RootListGeometryKey {
     result_generation: u64,
@@ -149,6 +342,15 @@ impl RootListGeometryCache {
         self.invalidate_geometry();
     }
 
+    pub(super) fn result_generation(&self) -> u64 {
+        self.result_generation
+    }
+
+    #[cfg(test)]
+    pub(super) fn result_generation_for_test(&self) -> u64 {
+        self.result_generation
+    }
+
     fn observe_grid_mode(&mut self, is_grid: bool) {
         if self
             .last_grid_mode
@@ -201,7 +403,7 @@ impl RootListGeometryCache {
         folder_aliases: &HashMap<String, Option<String>>,
         show_full_paths: bool,
         is_grid: bool,
-    ) {
+    ) -> bool {
         let spacing = ui.spacing();
         let effective_text_style = ui
             .style()
@@ -235,8 +437,13 @@ impl RootListGeometryCache {
                 .as_ref()
                 .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
         {
-            return;
+            return false;
         }
+
+        let mut track_c_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::RootGeometryCold,
+        );
+        track_c_timer.set_work_units(results.len());
 
         #[cfg(test)]
         let started = std::time::Instant::now();
@@ -303,6 +510,7 @@ impl RootListGeometryCache {
         self.grid_visual_max_end_tree.clear();
         self.key = Some(key);
         self.font_atlas = Some(font_atlas);
+        track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
             self.rebuild_count = self.rebuild_count.saturating_add(1);
@@ -311,9 +519,10 @@ impl RootListGeometryCache {
                 .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
             self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         }
+        true
     }
 
-    fn ensure_grid(&mut self, ui: &egui::Ui, results: &[Action], columns: usize) {
+    fn ensure_grid(&mut self, ui: &egui::Ui, results: &[Action], columns: usize) -> bool {
         let spacing = ui.spacing();
         let columns = columns.max(1);
         let grid_spacing_x = 8.0_f32;
@@ -355,8 +564,13 @@ impl RootListGeometryCache {
                 .as_ref()
                 .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
         {
-            return;
+            return false;
         }
+
+        let mut track_c_timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::RootGeometryCold,
+        );
+        track_c_timer.set_work_units(results.len());
 
         #[cfg(test)]
         let started = std::time::Instant::now();
@@ -369,6 +583,10 @@ impl RootListGeometryCache {
         let mut cell_heights = Vec::with_capacity(results.len());
         let mut row_heights = vec![interaction_height.max(44.0); results.len().div_ceil(columns)];
 
+        #[cfg(test)]
+        let cell_loop_started = c2e_grid_cell_loop_observer::loop_started();
+        #[cfg(test)]
+        let observe_cell_loop = cell_loop_started.is_some();
         for (index, action) in results.iter().enumerate() {
             let text = format!("{}\n{}", action.label, action.desc);
             let galley = egui::WidgetText::from(text).into_galley_impl(
@@ -390,6 +608,8 @@ impl RootListGeometryCache {
             cell_widths.push(cell_width);
             cell_heights.push(cell_height);
         }
+        #[cfg(test)]
+        c2e_grid_cell_loop_observer::record_loop(cell_loop_started, results.len());
 
         let mut column_x_offsets = Vec::with_capacity(actual_columns);
         let mut grid_full_width = 0.0_f32;
@@ -444,6 +664,24 @@ impl RootListGeometryCache {
             .fold(cursor_y, f32::max);
         let empty_grid = row_heights.is_empty();
 
+        #[cfg(test)]
+        if observe_cell_loop {
+            c2e_grid_cell_loop_observer::record_replacement(
+                self,
+                c2e_grid_cell_loop_observer::StorageGroups::from_capacities(
+                    cell_widths.capacity(),
+                    cell_heights.capacity(),
+                    column_x_offsets.capacity(),
+                    column_widths.capacity(),
+                    row_tops.capacity(),
+                    row_heights.capacity(),
+                    grid_visual_row_tops.capacity(),
+                    grid_visual_row_bottoms.capacity(),
+                    grid_visual_max_end_tree.capacity(),
+                ),
+            );
+        }
+
         self.row_tops = row_tops;
         self.row_heights = row_heights;
         self.row_x_offsets.clear();
@@ -470,6 +708,7 @@ impl RootListGeometryCache {
         };
         self.key = Some(key);
         self.font_atlas = Some(font_atlas);
+        track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
             self.rebuild_count = self.rebuild_count.saturating_add(1);
@@ -478,6 +717,7 @@ impl RootListGeometryCache {
                 .saturating_add(results.len().try_into().unwrap_or(u64::MAX));
             self.last_rebuild_nanos = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         }
+        true
     }
 
     fn visible_range(&self, viewport: egui::Rect) -> std::ops::Range<usize> {
@@ -1207,7 +1447,24 @@ impl LauncherApp {
         Some(direction)
     }
 
+    fn begin_track_c_query_intent(
+        &mut self,
+        started: Option<Instant>,
+        origin: super::track_c_query_observer::Origin,
+    ) {
+        self.track_c_query_observer
+            .begin_from(started, origin, &self.query);
+    }
+
     fn handle_query_text_changed(&mut self) {
+        self.begin_track_c_query_intent(
+            self.track_c_query_observer.tentative_start(),
+            super::track_c_query_observer::Origin::TextEdit,
+        );
+        self.handle_query_text_changed_after_intent();
+    }
+
+    fn handle_query_text_changed_after_intent(&mut self) {
         self.autocomplete_index = 0;
         if Self::is_note_search_query(&self.query) {
             self.last_note_search_change = Some(Instant::now());
@@ -1218,10 +1475,15 @@ impl LauncherApp {
     }
 
     fn apply_history_query(&mut self, query: String) {
+        self.track_c_query_observer.begin_from(
+            self.track_c_query_observer.tentative_start(),
+            super::track_c_query_observer::Origin::History,
+            &query,
+        );
         self.query = query;
         self.selected = None;
         self.suggestions.clear();
-        self.handle_query_text_changed();
+        self.handle_query_text_changed_after_intent();
         self.move_cursor_end = true;
         self.focus_input();
     }
@@ -1616,6 +1878,7 @@ impl LauncherApp {
             return LauncherCommandResponse::Activated;
         };
 
+        self.track_c_query_observer.supersede_external();
         self.query = query.clone();
         self.last_timer_query =
             self.query.starts_with("timer list") || self.query.starts_with("alarm list");
@@ -1681,6 +1944,7 @@ impl LauncherApp {
         let Some(pending) = broker.take_pending() else {
             return;
         };
+        self.track_c_query_observer.supersede_external();
         self.query = pending.query.clone();
         self.last_results_valid = false;
         self.search();
@@ -1770,7 +2034,48 @@ impl LauncherApp {
 
 impl LauncherApp {
     pub(super) fn invalidate_root_list_results(&mut self) {
+        self.track_c_query_observer.results_invalidated();
         self.root_list_geometry.invalidate_results();
+    }
+
+    fn record_query_geometry_rebuild(
+        &mut self,
+        source_state_before_frame: Option<(
+            u64,
+            crate::radial::dynamic::MutableResultCatalogVersions,
+            Option<usize>,
+        )>,
+        mut cause: super::track_c_query_observer::GeometryCause,
+    ) {
+        if !self.track_c_query_observer.is_enabled() {
+            return;
+        }
+        if cause == super::track_c_query_observer::GeometryCause::Other
+            && let Some(hint) = self.track_c_query_observer.geometry_cause_hint()
+        {
+            cause = hint;
+        }
+        let provider_revision = self.plugins.search_generation();
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        if let Some((provider_before, catalog_before, selected_before)) = source_state_before_frame
+        {
+            if provider_before != provider_revision || catalog_before != catalog_versions {
+                cause = super::track_c_query_observer::GeometryCause::ProviderOrCatalog;
+            } else if cause == super::track_c_query_observer::GeometryCause::Other
+                && selected_before != self.selected
+            {
+                cause = super::track_c_query_observer::GeometryCause::Navigation;
+            }
+        }
+        if cause == super::track_c_query_observer::GeometryCause::Other {
+            cause = super::track_c_query_observer::GeometryCause::DisplayOrResize;
+        }
+        self.track_c_query_observer
+            .note_geometry_rebuild(cause, self.results.len());
+    }
+
+    pub(super) fn queue_popup_cleanup_after_preserved_results(&mut self) {
+        self.root_list_geometry.queue_popup_cleanup();
     }
 
     pub(super) fn invalidate_root_list_display_geometry(&mut self) {
@@ -1779,6 +2084,21 @@ impl LauncherApp {
 
     pub(super) fn render_root_frame(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use egui::*;
+
+        self.track_c_query_observer.begin_frame();
+        let track_c_enabled = crate::performance::enabled();
+        #[cfg(test)]
+        let track_c_enabled = track_c_enabled || self.track_c_test_force_enabled;
+        let mut painted_root_generation = None;
+        let mut painted_query_results = false;
+        let mut query_geometry_cause = super::track_c_query_observer::GeometryCause::Other;
+        let source_state_before_frame = self.track_c_query_observer.is_enabled().then(|| {
+            (
+                self.plugins.search_generation(),
+                crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                self.selected,
+            )
+        });
 
         #[cfg(test)]
         self.test_root_rendered_rows.clear();
@@ -1853,6 +2173,7 @@ impl LauncherApp {
         if plugin_search_generation != self.last_plugin_search_generation
             && !self.ocr_defers_launcher_query_refresh()
         {
+            query_geometry_cause = super::track_c_query_observer::GeometryCause::ProviderOrCatalog;
             self.last_plugin_search_generation = plugin_search_generation;
             self.last_results_valid = false;
             self.search();
@@ -1928,12 +2249,14 @@ impl LauncherApp {
         let frame_time = Duration::from_secs_f32(ctx.input(|i| i.unstable_dt).max(0.0));
         self.dashboard.update_frame_timing(frame_time);
         if let Some(pending) = self.pending_query.take() {
+            self.track_c_query_observer.begin_pending_query(&pending);
             self.query = pending;
+            query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
             self.search();
             self.focus_input();
         }
-        if !self.ocr_defers_launcher_query_refresh() {
-            self.maybe_run_note_search_debounce();
+        if !self.ocr_defers_launcher_query_refresh() && self.maybe_run_note_search_debounce() {
+            query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
         }
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref())
             && t.elapsed().as_secs_f32() >= 3.0
@@ -2350,6 +2673,7 @@ impl LauncherApp {
                     )
                 });
 
+                let text_edit_started = self.track_c_query_observer.tentative_start();
                 let mut query_output = egui::TextEdit::singleline(&mut self.query)
                     .id(input_id)
                     .interactive(!action_sheet_blocks_launcher_input)
@@ -2383,7 +2707,12 @@ impl LauncherApp {
 
                 self.query_history.synchronize(&self.query);
                 if query_response.changed() {
-                    self.handle_query_text_changed();
+                    self.begin_track_c_query_intent(
+                        text_edit_started,
+                        super::track_c_query_observer::Origin::TextEdit,
+                    );
+                    query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
+                    self.handle_query_text_changed_after_intent();
                 }
 
                 let history_direction = if action_sheet_blocks_launcher_input {
@@ -2552,18 +2881,22 @@ impl LauncherApp {
                     crate::performance::record_dashboard_repaint_request();
                     ctx.request_repaint_after(interval);
                 }
-                if crate::dashboard::dashboard_should_render(dashboard_visible, true)
-                    && let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click)
-                {
-                    self.activate_action(
-                        action.action,
-                        action.query_override,
-                        ActivationSource::Dashboard,
-                    );
+                if crate::dashboard::dashboard_should_render(dashboard_visible, true) {
+                    if track_c_enabled {
+                        painted_root_generation = Some(self.root_list_geometry.result_generation);
+                    }
+                    if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click)
+                    {
+                        self.activate_action(
+                            action.action,
+                            action.query_override,
+                            ActivationSource::Dashboard,
+                        );
+                    }
                 }
             } else {
                 let area_height = ui.available_height();
-                let root_scroll_output = ScrollArea::vertical()
+                let _root_scroll_output = ScrollArea::vertical()
                     .max_height(area_height)
                     .show_viewport(ui, |ui, viewport| {
                         #[cfg(test)]
@@ -2571,6 +2904,21 @@ impl LauncherApp {
                             self.test_root_scroll_viewport_rect = Some(ui.clip_rect());
                         }
                         scale_ui(ui, self.list_scale, |ui| {
+                            #[cfg(test)]
+                            {
+                                let available_width = ui.available_width();
+                                let content_origin = ui.max_rect().min;
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(
+                                        egui::Id::new("track-c-root-list-available-width"),
+                                        available_width,
+                                    );
+                                    data.insert_temp(
+                                        egui::Id::new("track-c2g-root-content-viewport"),
+                                        (viewport, content_origin),
+                                    );
+                                });
+                            }
                             let mut refresh = false;
                             let mut set_focus = false;
                             let show_full = self
@@ -2586,7 +2934,18 @@ impl LauncherApp {
                             let mut rows_built = 0_u64;
                             if self.resolved_grid_layout {
                                 let cols = self.query_results_layout.cols.max(1);
-                                self.root_list_geometry.ensure_grid(ui, &self.results, cols);
+                                let geometry_rebuilt =
+                                    self.root_list_geometry.ensure_grid(ui, &self.results, cols);
+                                if track_c_enabled || self.track_c_query_observer.is_enabled() {
+                                    painted_root_generation =
+                                        Some(self.root_list_geometry.result_generation);
+                                }
+                                if geometry_rebuilt && self.track_c_query_observer.is_enabled() {
+                                    self.record_query_geometry_rebuild(
+                                        source_state_before_frame,
+                                        query_geometry_cause,
+                                    );
+                                }
                                 let content_origin = ui.max_rect().min;
                                 let total_height = self.root_list_geometry.total_height;
                                 let content_width = self.root_list_geometry.content_width;
@@ -2699,13 +3058,23 @@ impl LauncherApp {
                                     egui::vec2(content_width, total_height),
                                 ));
                             } else {
-                                self.root_list_geometry.ensure(
+                                let geometry_rebuilt = self.root_list_geometry.ensure(
                                     ui,
                                     &self.results,
                                     &self.folder_aliases,
                                     show_full,
                                     false,
                                 );
+                                if track_c_enabled || self.track_c_query_observer.is_enabled() {
+                                    painted_root_generation =
+                                        Some(self.root_list_geometry.result_generation);
+                                }
+                                if geometry_rebuilt && self.track_c_query_observer.is_enabled() {
+                                    self.record_query_geometry_rebuild(
+                                        source_state_before_frame,
+                                        query_geometry_cause,
+                                    );
+                                }
                                 let total_height = self.root_list_geometry.total_height;
                                 let content_width = self.root_list_geometry.content_width;
                                 let content_origin = ui.max_rect().min;
@@ -2736,7 +3105,16 @@ impl LauncherApp {
                                     .root_list_geometry
                                     .visible_range(viewport)
                                     .collect::<Vec<_>>();
-                                if let Some(owner) = self.root_list_geometry.popup_owner() {
+                                let popup_owner_for_paint =
+                                    self.root_list_geometry.popup_owner();
+                                #[cfg(test)]
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(
+                                        egui::Id::new("track-c2g-root-popup-owner-for-paint"),
+                                        popup_owner_for_paint,
+                                    );
+                                });
+                                if let Some(owner) = popup_owner_for_paint {
                                     visible_rows.push(owner);
                                     visible_rows.sort_unstable();
                                     visible_rows.dedup();
@@ -2757,10 +3135,12 @@ impl LauncherApp {
                                             self.root_list_geometry.row_heights[idx],
                                         ),
                                     );
+                                    let row_widget_id =
+                                        self.root_list_geometry.row_widget_id(ui.id(), idx);
                                     let mut row_ui = egui::Ui::new(
                                         ui.ctx().clone(),
                                         ui.layer_id(),
-                                        self.root_list_geometry.row_widget_id(ui.id(), idx),
+                                        row_widget_id,
                                         row_rect,
                                         ui.clip_rect(),
                                     );
@@ -2779,6 +3159,22 @@ impl LauncherApp {
                                             },
                                         )
                                         .inner;
+                                    #[cfg(test)]
+                                    {
+                                        // Ui::new scopes the row by generation and absolute
+                                        // index; with_layout creates one child UI before the
+                                        // SelectableLabel allocates its response ID.
+                                        let row_auto_id_source =
+                                            row_widget_id.with("auto").value();
+                                        let label_auto_id_source = egui::Id::new(row_auto_id_source)
+                                            .with("child")
+                                            .value();
+                                        assert_eq!(
+                                            resp.id,
+                                            egui::Id::new(label_auto_id_source),
+                                            "painted response ID retains its absolute generation/row scope"
+                                        );
+                                    }
                                     #[cfg(test)]
                                     self.test_root_rendered_rows.push((idx, a.action.clone()));
                                     #[cfg(test)]
@@ -2841,6 +3237,12 @@ impl LauncherApp {
                                     egui::vec2(content_width, total_height),
                                 ));
                             }
+                            if self.track_c_query_observer.is_enabled() {
+                                let generation = self.root_list_geometry.result_generation;
+                                painted_root_generation = Some(generation);
+                                painted_query_results =
+                                    self.track_c_query_observer.note_painted_root(generation);
+                            }
                             rows_timer.set_work_units(rows_built);
                             drop(rows_timer);
                             if refresh {
@@ -2859,14 +3261,14 @@ impl LauncherApp {
                 #[cfg(test)]
                 {
                     self.test_root_scroll_area_extent = Some((
-                        root_scroll_output.inner_rect,
-                        root_scroll_output.content_size,
-                        root_scroll_output.state.offset,
+                        _root_scroll_output.inner_rect,
+                        _root_scroll_output.content_size,
+                        _root_scroll_output.state.offset,
                     ));
                 }
                 #[cfg(test)]
                 {
-                    self.test_root_scroll_area_id = Some(root_scroll_output.id);
+                    self.test_root_scroll_area_id = Some(_root_scroll_output.id);
                 }
             }
             if let Some(deferred) = deferred_activation_unless_radial_add(
@@ -2901,6 +3303,18 @@ impl LauncherApp {
             self.enforce_pinned();
             self.update_panel_stack();
             self.show_ocr_surface(ctx);
+            if self.track_c_query_observer.is_enabled() {
+                self.track_c_query_observer.finish_frame(
+                    &self.query,
+                    self.visible_flag.load(Ordering::Relaxed),
+                    should_be_visible,
+                    false,
+                    self.plugins.search_generation(),
+                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                    painted_root_generation,
+                );
+            }
+            self.track_c_query_observer.end_frame_boundary();
             return;
         }
         let show_editor = self.show_editor;
@@ -3244,6 +3658,92 @@ impl LauncherApp {
         let note_close_snapshot = note_close_frame.map(|frame| frame.snapshot(&self.note_panels));
         self.poll_radial_query_observation(ctx, note_close_snapshot);
         self.show_ocr_surface(ctx);
+
+        #[cfg(test)]
+        if std::mem::take(&mut self.track_c_test_provider_change_at_frame_end) {
+            self.plugins
+                .notify_search_update_for_test("track_c_frame_end");
+        }
+        #[cfg(test)]
+        if std::mem::take(&mut self.track_c_test_catalog_version_change_at_frame_end) {
+            // Publish through the real mutable-catalog owner and restore its
+            // process-global cache when this isolated render fixture exits.
+            let _catalog_guard = crate::plugins::note::publish_note_cache_for_test(vec![
+                crate::plugins::note::Note {
+                    title: "Track C frame catalog mutation".into(),
+                    path: std::path::PathBuf::from("track-c-frame-catalog-mutation.md"),
+                    content: "synthetic mid-frame catalog change".into(),
+                    tags: Vec::new(),
+                    links: Vec::new(),
+                    slug: "track-c-frame-catalog-mutation".into(),
+                    alias: None,
+                    aliases: Vec::new(),
+                    entity_refs: Vec::new(),
+                },
+            ]);
+        }
+
+        if track_c_enabled {
+            let frame_eligible = painted_root_generation.is_some()
+                && self.pending_query.is_none()
+                && !self.background_query_refresh_pending
+                && !self.last_search_pending
+                && self.last_search_provider_revision == self.plugins.search_generation()
+                && self.last_search_result_catalog_versions_stable
+                && self.last_search_result_catalog_versions
+                    == Some(crate::radial::dynamic::MutableResultCatalogVersions::current())
+                && self.last_search_provider_deferral == search::ProviderSearchDeferral::None
+                && !self.radial_provider_search_capacity.is_occupied()
+                && self.coordinate_capture_parking.is_none()
+                && self.screen_draw_launcher_parking.is_none()
+                && !self.color_pick_owns_root()
+                && !self.ocr_owns_root()
+                && !self.ocr_surface_visible()
+                && !self.ocr_defers_launcher_query_refresh();
+            let current_generation = self.root_list_geometry.result_generation;
+            self.visibility_revision.complete_first_usable_frame(
+                visibility_request,
+                visibility_invocation_id,
+                &self.visible_flag,
+                should_be_visible,
+                frame_eligible,
+                painted_root_generation,
+                current_generation,
+                track_c_enabled,
+            );
+        }
+
+        if self.track_c_query_observer.is_enabled() {
+            let root_visible = self.visible_flag.load(Ordering::Relaxed);
+            let root_owned = should_be_visible;
+            let query_root_gates_clear = painted_query_results
+                && self.pending_query.is_none()
+                && !self.background_query_refresh_pending
+                && self.last_note_search_change.is_none()
+                && !self.radial_provider_search_capacity.is_occupied()
+                && !self.ocr_defers_launcher_query_refresh()
+                && !self.ocr_owns_root()
+                && !self.ocr_surface_visible()
+                && !self.color_pick_owns_root()
+                && self.coordinate_capture_parking.is_none()
+                && self.screen_draw_launcher_parking.is_none()
+                && !self.action_sheet.is_open()
+                && !self.snippet_prompt_dialog.is_open()
+                && !self.confirm_modal.is_open()
+                && !self.file_search_dialog.open
+                && !self.any_panel_open()
+                && !self.should_show_dashboard(self.query.as_str());
+            self.track_c_query_observer.finish_frame(
+                &self.query,
+                root_visible,
+                root_owned,
+                query_root_gates_clear,
+                self.plugins.search_generation(),
+                crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                painted_root_generation,
+            );
+        }
+        self.track_c_query_observer.end_frame_boundary();
     }
 }
 
@@ -4173,6 +4673,143 @@ mod tests {
         )
     }
 
+    #[derive(Clone, Debug)]
+    struct EagerRootListLayout {
+        rows: Vec<egui::Rect>,
+        available_widths: Vec<f32>,
+        bounds: egui::Rect,
+    }
+
+    fn eager_root_list_selectable_labels(
+        ui: &mut egui::Ui,
+        actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+        outer: egui::Rect,
+    ) -> EagerRootListLayout {
+        let mut layout = EagerRootListLayout {
+            rows: Vec::with_capacity(actions.len()),
+            available_widths: Vec::with_capacity(actions.len()),
+            bounds: outer,
+        };
+        for action in actions {
+            let text = root_list_display_text(action, aliases, show_full_paths).into_owned();
+            let available_width = ui.available_width();
+            layout.available_widths.push(available_width);
+            let response = ui.add_sized(
+                [available_width, 0.0],
+                egui::SelectableLabel::new(false, text),
+            );
+            layout.bounds = layout.bounds.union(response.rect);
+            layout.rows.push(response.rect);
+        }
+        layout
+    }
+
+    fn track_c_eager_root_list_layout(
+        ctx: &egui::Context,
+        actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+        width: f32,
+        style: &egui::Style,
+        scale: f32,
+    ) -> (egui::Rect, EagerRootListLayout) {
+        let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1_000_000.0));
+        let layer = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("track-c-root-list-eager-oracle"),
+        );
+        let mut layout = None;
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(outer),
+                ..Default::default()
+            },
+            |ctx| {
+                let mut ui = egui::Ui::new(
+                    ctx.clone(),
+                    layer,
+                    egui::Id::new("track-c-root-list-eager-ui"),
+                    outer,
+                    outer,
+                );
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_style(style.clone());
+                    scale_ui(ui, scale, |ui| {
+                        layout = Some(eager_root_list_selectable_labels(
+                            ui,
+                            actions,
+                            aliases,
+                            show_full_paths,
+                            outer,
+                        ));
+                    });
+                });
+            },
+        );
+        (outer, layout.expect("Track C eager list composition ran"))
+    }
+
+    fn assert_root_list_cache_matches_eager(
+        cache: &RootListGeometryCache,
+        eager: &EagerRootListLayout,
+        outer: egui::Rect,
+        label: &str,
+    ) {
+        assert_eq!(cache.row_tops.len(), eager.rows.len());
+        for (index, response) in eager.rows.iter().enumerate() {
+            let expected_top = response.top() - outer.top();
+            assert!(
+                (cache.row_tops[index] - expected_top).abs() <= 1.0,
+                "{label} row {index} top: cache={} eager={expected_top}",
+                cache.row_tops[index]
+            );
+            assert!(
+                (cache.row_heights[index] - response.height()).abs() <= 1.0,
+                "{label} row {index} height: cache={} eager={}",
+                cache.row_heights[index],
+                response.height()
+            );
+            assert!(
+                (cache.row_widths[index] - eager.available_widths[index]).abs() <= 1.0,
+                "{label} row {index} available width: cache={} eager={}",
+                cache.row_widths[index],
+                eager.available_widths[index]
+            );
+            let expected_left = response.left() - outer.left();
+            assert!(
+                (cache.row_response_x_offsets[index] - expected_left).abs() <= 1.0,
+                "{label} row {index} response left: cache={} eager={expected_left}",
+                cache.row_response_x_offsets[index]
+            );
+            assert!(
+                (cache.row_response_widths[index] - response.width()).abs() <= 1.0,
+                "{label} row {index} response width: cache={} eager={}",
+                cache.row_response_widths[index],
+                response.width()
+            );
+        }
+        assert!(
+            (cache.content_x_offset - (eager.bounds.left() - outer.left())).abs() <= 1.0,
+            "{label} content left: cache={} eager={}",
+            cache.content_x_offset,
+            eager.bounds.left() - outer.left()
+        );
+        assert!(
+            (cache.content_width - eager.bounds.width()).abs() <= 1.0,
+            "{label} content width: cache={} eager={}",
+            cache.content_width,
+            eager.bounds.width()
+        );
+        assert!(
+            (cache.total_height - (eager.rows.last().unwrap().bottom() - outer.top())).abs() <= 1.0,
+            "{label} total height: cache={} eager={}",
+            cache.total_height,
+            eager.rows.last().unwrap().bottom() - outer.top()
+        );
+    }
+
     #[test]
     fn root_list_geometry_matches_eager_selectable_label_layout() {
         let cases = [
@@ -4230,10 +4867,8 @@ mod tests {
                 ..Default::default()
             };
             let mut cache = RootListGeometryCache::default();
-            let mut eager_rows = Vec::new();
             let mut virtual_rows = Vec::new();
-            let mut eager_available_widths = Vec::new();
-            let mut eager_bounds = outer;
+            let mut eager_layout = None;
 
             let _ = ctx.run(input, |ctx| {
                 let mut eager = egui::Ui::new(
@@ -4248,17 +4883,9 @@ mod tests {
                     style.wrap = Some(wrap);
                     ui.set_style(style);
                     scale_ui(ui, scale, |ui| {
-                        for action in &actions {
-                            let text = root_list_display_text(action, &aliases, false).into_owned();
-                            let available_width = ui.available_width();
-                            eager_available_widths.push(available_width);
-                            let response = ui.add_sized(
-                                [available_width, 0.0],
-                                egui::SelectableLabel::new(false, text),
-                            );
-                            eager_bounds = eager_bounds.union(response.rect);
-                            eager_rows.push(response.rect);
-                        }
+                        eager_layout = Some(eager_root_list_selectable_labels(
+                            ui, &actions, &aliases, false, outer,
+                        ));
                     });
                 });
 
@@ -4302,6 +4929,10 @@ mod tests {
                 });
             });
 
+            let eager_layout = eager_layout.expect("the eager selectable-label oracle ran");
+            let eager_rows = &eager_layout.rows;
+            let eager_available_widths = &eager_layout.available_widths;
+            let eager_bounds = eager_layout.bounds;
             assert_eq!(cache.row_tops.len(), eager_rows.len());
             for (index, response) in eager_rows.iter().enumerate() {
                 let expected_top = response.top() - outer.top();
@@ -4361,6 +4992,244 @@ mod tests {
                 eager_rows.last().unwrap().bottom() - outer.top()
             );
         }
+    }
+
+    #[derive(Clone, Debug)]
+    struct EagerRootGridLayout {
+        cells: Vec<egui::Rect>,
+        cell_cursors: Vec<egui::Pos2>,
+        grid_bounds: egui::Rect,
+        content_bounds: egui::Rect,
+        nominal_width: f32,
+    }
+
+    fn eager_root_grid_layout(
+        ui: &mut egui::Ui,
+        actions: &[Action],
+        columns: usize,
+        identity: usize,
+    ) -> EagerRootGridLayout {
+        let nominal_width = ((ui.available_width() - columns.saturating_sub(1) as f32 * 8.0)
+            / columns as f32)
+            .max(160.0);
+        let mut cells = Vec::with_capacity(actions.len());
+        let mut cell_cursors = Vec::with_capacity(actions.len());
+        let grid = egui::Grid::new(("root-grid-real", identity))
+            .num_columns(columns)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                for (index, action) in actions.iter().enumerate() {
+                    cell_cursors.push(ui.cursor().min);
+                    let response = ui.add_sized(
+                        [nominal_width, 44.0],
+                        egui::SelectableLabel::new(
+                            false,
+                            format!("{}\n{}", action.label, action.desc),
+                        ),
+                    );
+                    cells.push(response.rect);
+                    if (index + 1) % columns == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+        EagerRootGridLayout {
+            cells,
+            cell_cursors,
+            grid_bounds: grid.response.rect,
+            content_bounds: ui.min_rect(),
+            nominal_width,
+        }
+    }
+
+    fn track_c_eager_root_grid_layout(
+        ctx: &egui::Context,
+        actions: &[Action],
+        columns: usize,
+        width: f32,
+        style: &egui::Style,
+        scale: f32,
+    ) -> (egui::Rect, EagerRootGridLayout) {
+        let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1_000_000.0));
+        ctx.set_style(style.clone());
+        let layer = egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("track-c-root-grid-eager-oracle"),
+        );
+        let mut layout = None;
+        for frame in 0..4 {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1_800.0, 1_500.0),
+                    )),
+                    time: Some(1.0 + frame as f64 / 60.0),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let mut ui = egui::Ui::new(
+                        ctx.clone(),
+                        layer,
+                        egui::Id::new("track-c-root-grid-eager-ui"),
+                        outer,
+                        outer,
+                    );
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_style(style.clone());
+                        scale_ui(ui, scale, |ui| {
+                            layout = Some(eager_root_grid_layout(ui, actions, columns, 0));
+                        });
+                    });
+                },
+            );
+        }
+        (outer, layout.expect("Track C eager grid composition ran"))
+    }
+
+    fn eager_grid_row_geometry(
+        eager: &EagerRootGridLayout,
+        columns: usize,
+        outer: egui::Rect,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let row_count = eager.cells.len().div_ceil(columns);
+        (0..row_count)
+            .map(|row| {
+                let first = row * columns;
+                let last = (first + columns).min(eager.cells.len());
+                let top = eager.cell_cursors[first].y - outer.top();
+                let height = if row + 1 < row_count {
+                    eager.cell_cursors[(row + 1) * columns].y - eager.cell_cursors[first].y - 6.0
+                } else {
+                    eager.content_bounds.bottom() - outer.top() - top
+                };
+                let visual_top = eager.cells[first..last]
+                    .iter()
+                    .map(|cell| cell.top() - outer.top())
+                    .fold(f32::INFINITY, f32::min);
+                let visual_bottom = eager.cells[first..last]
+                    .iter()
+                    .map(|cell| cell.bottom() - outer.top())
+                    .fold(f32::NEG_INFINITY, f32::max);
+                (top, height, visual_top, visual_bottom)
+            })
+            .collect()
+    }
+
+    fn assert_track_c_root_grid_matches_eager(
+        cache: &RootListGeometryCache,
+        eager: &EagerRootGridLayout,
+        outer: egui::Rect,
+        actions: &[Action],
+        columns: usize,
+        style: &egui::Style,
+        label: &str,
+    ) -> Vec<(f32, f32, f32, f32)> {
+        let expected_columns = columns.min(actions.len());
+        let row_geometry = eager_grid_row_geometry(eager, columns, outer);
+        assert_eq!(eager.cells.len(), actions.len());
+        assert_eq!(eager.cell_cursors.len(), actions.len());
+        assert_eq!(cache.grid_columns, columns);
+        assert_eq!(
+            cache.grid_nominal_width.to_bits(),
+            eager.nominal_width.to_bits()
+        );
+        assert_eq!(cache.grid_cell_widths.len(), actions.len());
+        assert_eq!(cache.grid_cell_heights.len(), actions.len());
+        assert_eq!(cache.grid_column_x_offsets.len(), expected_columns);
+        assert_eq!(cache.grid_column_widths.len(), expected_columns);
+        assert_eq!(cache.row_tops.len(), row_geometry.len());
+        assert_eq!(cache.row_heights.len(), row_geometry.len());
+        assert_eq!(cache.grid_visual_row_tops.len(), row_geometry.len());
+        assert_eq!(cache.grid_visual_row_bottoms.len(), row_geometry.len());
+        for row in 0..row_geometry.len() {
+            let (top, height, visual_top, visual_bottom) = row_geometry[row];
+            assert!(
+                (cache.row_tops[row] - top).abs() <= 1.0,
+                "{label} logical row {row} top: cache={} eager={top}",
+                cache.row_tops[row]
+            );
+            assert!(
+                (cache.row_heights[row] - height).abs() <= 1.0,
+                "{label} logical row {row} height: cache={} eager={height}",
+                cache.row_heights[row]
+            );
+            assert!(
+                (cache.grid_visual_row_tops[row] - visual_top).abs() <= 1.0,
+                "{label} visual row {row} top: cache={} eager={visual_top}",
+                cache.grid_visual_row_tops[row]
+            );
+            assert!(
+                (cache.grid_visual_row_bottoms[row] - visual_bottom).abs() <= 1.0,
+                "{label} visual row {row} bottom: cache={} eager={visual_bottom}",
+                cache.grid_visual_row_bottoms[row]
+            );
+        }
+
+        let interaction_width = style.spacing.interact_size.x;
+        let mut expected_column_widths = vec![interaction_width; expected_columns];
+        for (index, cell) in eager.cells.iter().enumerate() {
+            let column = index % columns;
+            let expected_left = cell.left() - outer.left();
+            let cell_width = cell.width().max(interaction_width);
+            expected_column_widths[column] = expected_column_widths[column].max(cell_width);
+            assert!(
+                (cache.grid_cell_widths[index] - cell.width()).abs() <= 1.0,
+                "{label} cell {index} width: cache={} eager={}",
+                cache.grid_cell_widths[index],
+                cell.width()
+            );
+            assert!(
+                (cache.grid_cell_heights[index] - cell.height()).abs() <= 1.0,
+                "{label} cell {index} height: cache={} eager={}",
+                cache.grid_cell_heights[index],
+                cell.height()
+            );
+            assert!(
+                (cache.grid_column_x_offsets[column] - expected_left).abs() <= 1.0,
+                "{label} cell {index} column offset: cache={} eager={expected_left}",
+                cache.grid_column_x_offsets[column]
+            );
+        }
+        assert!(
+            cache.row_x_offsets.is_empty()
+                && cache.row_response_x_offsets.is_empty()
+                && cache.row_widths.is_empty()
+                && cache.row_response_widths.is_empty(),
+            "{label} grid cache has no stale list-row geometry"
+        );
+        assert_eq!(cache.content_x_offset, 0.0);
+        for (column, (actual, expected)) in cache
+            .grid_column_widths
+            .iter()
+            .zip(&expected_column_widths)
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() <= 1.0,
+                "{label} column {column} width: cache={actual} eager={expected}"
+            );
+        }
+        let expected_grid_width = expected_column_widths.iter().sum::<f32>()
+            + expected_columns.saturating_sub(1) as f32 * 8.0;
+        let expected_content_width = eager.content_bounds.right() - outer.left();
+        let expected_total_height = eager.content_bounds.bottom() - outer.top();
+        assert!(
+            (cache.grid_full_width - expected_grid_width).abs() <= 1.0,
+            "{label} full grid width: cache={} eager={expected_grid_width}",
+            cache.grid_full_width
+        );
+        assert!(
+            (cache.content_width - expected_content_width).abs() <= 1.0,
+            "{label} content width: cache={} eager={expected_content_width}",
+            cache.content_width
+        );
+        assert!(
+            (cache.total_height - expected_total_height).abs() <= 1.0,
+            "{label} total height: cache={} eager={expected_total_height}",
+            cache.total_height
+        );
+        row_geometry
     }
 
     #[test]
@@ -4462,34 +5331,11 @@ mod tests {
                             ui.set_style(style);
                         }
                         scale_ui(ui, scale, |ui| {
-                            let nominal_width = ((ui.available_width()
-                                - columns.saturating_sub(1) as f32 * 8.0)
-                                / columns as f32)
-                                .max(160.0);
-                            let mut actual = Vec::new();
-                            eager_grid_cursors.clear();
-                            let grid = egui::Grid::new(("root-grid-real", case_index))
-                                .num_columns(columns)
-                                .spacing([8.0, 6.0])
-                                .show(ui, |ui| {
-                                    for (index, action) in actions.iter().enumerate() {
-                                        eager_grid_cursors.push(ui.cursor().min);
-                                        let response = ui.add_sized(
-                                            [nominal_width, 44.0],
-                                            egui::SelectableLabel::new(
-                                                false,
-                                                format!("{}\n{}", action.label, action.desc),
-                                            ),
-                                        );
-                                        actual.push(response.rect);
-                                        if (index + 1) % columns == 0 {
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                            eager_grid_bounds = grid.response.rect;
-                            eager_content_bounds = ui.min_rect();
-                            eager_cells = actual;
+                            let layout = eager_root_grid_layout(ui, &actions, columns, case_index);
+                            eager_grid_cursors = layout.cell_cursors;
+                            eager_grid_bounds = layout.grid_bounds;
+                            eager_content_bounds = layout.content_bounds;
+                            eager_cells = layout.cells;
                         });
                     });
 
@@ -4701,6 +5547,15 @@ mod tests {
         LauncherApp,
     ) {
         let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let app = root_list_app_at(ctx, results, workspace.root());
+        (workspace, app)
+    }
+
+    fn root_list_app_at(
+        ctx: &egui::Context,
+        results: Vec<Action>,
+        root: &std::path::Path,
+    ) -> LauncherApp {
         let mut settings = Settings::default();
         settings.hotkey = None;
         settings.quit_hotkey = None;
@@ -4715,16 +5570,8 @@ mod tests {
             Arc::new(Vec::new()),
             0,
             PluginManager::new_inert_for_test(),
-            workspace
-                .root()
-                .join("actions.json")
-                .to_string_lossy()
-                .into_owned(),
-            workspace
-                .root()
-                .join("settings.json")
-                .to_string_lossy()
-                .into_owned(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
             settings,
             None,
             None,
@@ -4734,6 +5581,10 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        // The first root frame otherwise starts the production dashboard's
+        // all-sources refresh even though the dashboard is disabled. This
+        // isolated observer fixture intentionally keeps that worker dormant.
+        app.dashboard_initial_refresh_queued = true;
         app.actions = Arc::new(results.clone());
         app.results = results;
         app.invalidate_root_list_results();
@@ -4747,7 +5598,7 @@ mod tests {
         app.recompute_query_results_layout();
         app.list_scale = 1.0;
         app.selected = None;
-        (workspace, app)
+        app
     }
 
     fn root_list_action(index: usize) -> Action {
@@ -4781,6 +5632,7011 @@ mod tests {
             ..Default::default()
         };
         ctx.run(input, |ctx| app.render_root_frame(ctx, None))
+    }
+
+    fn arm_track_c_frame_sample(app: &mut LauncherApp, invocation_id: u64) -> u64 {
+        use crate::visibility::VisibilityToggleBatch;
+
+        let mut batch = VisibilityToggleBatch::default();
+        let (was_visible, revision) = batch.record_toggle_ordered_with_invocation(
+            &app.visibility_revision,
+            &app.visible_flag,
+            Some(invocation_id),
+        );
+        assert!(!was_visible, "the fixture begins hidden");
+        app.track_c_test_force_enabled = true;
+        // The test uses the production render/completion path while explicitly
+        // seeding its revision-owned timer independent of the process switch.
+        app.visibility_revision
+            .arm_first_usable_frame_for_test(revision, Some(invocation_id));
+        revision
+    }
+
+    struct TrackCRootListState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        expected_actions: Vec<Action>,
+        expected_visible_ids: Vec<(usize, egui::Id)>,
+        available_width: f32,
+        eager_outer: egui::Rect,
+        eager: EagerRootListLayout,
+        before: RootListGeometryObservation,
+        cold: bool,
+        frame_index: usize,
+    }
+
+    fn track_c_prepare_root_list_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        cold: bool,
+    ) -> TrackCRootListState {
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        let before = app.root_list_geometry.test_observation();
+        assert!(before.rebuild_count > 0, "setup warms real root geometry");
+        assert_eq!(before.measured_rows, actions.len() as u64);
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real scaled root UI records its available width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let expected_visible_ids = app.test_root_rendered_row_ids.clone();
+        assert!(!expected_visible_ids.is_empty());
+        let oracle_ctx = egui::Context::default();
+        let oracle_style = ctx.style().as_ref().clone();
+        oracle_ctx.set_style(oracle_style.clone());
+        let (eager_outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &oracle_style,
+            app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            eager_outer,
+            "Track C independent root list oracle",
+        );
+        if cold {
+            app.invalidate_root_list_display_geometry();
+        }
+        let before = app.root_list_geometry.test_observation();
+        crate::performance::track_c::reset();
+        TrackCRootListState {
+            app,
+            ctx,
+            expected_actions: actions.to_vec(),
+            expected_visible_ids,
+            available_width,
+            eager_outer,
+            eager,
+            before,
+            cold,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c_root_list_signature(app: &LauncherApp, viewport_receipt: u64) -> (u64, u64) {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let cache = &app.root_list_geometry;
+        let mut structure = StableSignature::new(
+            0x435F_524F_4F54_4C53,
+            "track-c-root-list-complete-geometry",
+            app.results.len(),
+        );
+        structure.number(action_fixture_identity(&app.results));
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.row_x_offsets,
+            &cache.row_response_x_offsets,
+            &cache.row_widths,
+            &cache.row_response_widths,
+        ] {
+            structure.number(values.len() as u64);
+            for value in values {
+                structure.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            structure.number(u64::from(value.to_bits()));
+        }
+        let structural_signature = structure.finish();
+        let mut complete = StableSignature::new(
+            0x435F_524F_4F54_4C53,
+            "track-c-root-list-frame-output",
+            app.test_root_rendered_rows.len(),
+        );
+        complete.number(structural_signature);
+        complete.number(viewport_receipt);
+        complete.number(app.root_list_geometry.result_generation);
+        complete.number(app.selected.map_or(u64::MAX, |selected| selected as u64));
+        (complete.finish(), structural_signature)
+    }
+
+    fn track_c_validate_root_list_state(
+        state: &TrackCRootListState,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        assert_eq!(state.app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in state
+            .app
+            .results
+            .iter()
+            .zip(&state.expected_actions)
+            .enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "result {index} label");
+            assert_eq!(actual.desc, expected.desc, "result {index} description");
+            assert_eq!(actual.action, expected.action, "result {index} action id");
+            assert_eq!(actual.args, expected.args, "result {index} arguments");
+        }
+        assert_root_list_cache_matches_eager(
+            &state.app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            "actual root frame",
+        );
+        let actual_available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real root UI records its available width");
+        assert!(
+            (actual_available_width - state.available_width).abs() <= 0.01,
+            "the measured root frame keeps the independent oracle width: actual={actual_available_width} expected={}",
+            state.available_width
+        );
+        let after = state.app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.before.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.before.measured_rows);
+        if state.cold {
+            assert_eq!(rebuilds, 1, "cold geometry rebuilds exactly once");
+            assert_eq!(measured_rows, state.expected_actions.len() as u64);
+        } else {
+            assert_eq!(rebuilds, 0, "warm geometry is reused");
+            assert_eq!(measured_rows, 0, "warm geometry measures no full rows");
+        }
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        assert!(
+            !rows.is_empty(),
+            "the real frame paints visible result rows"
+        );
+        assert!(
+            rows.len() <= 64,
+            "painted row count is bounded: {}",
+            rows.len()
+        );
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(
+            ids, &state.expected_visible_ids,
+            "geometry-only invalidation preserves surviving root widget IDs"
+        );
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("real root ScrollArea records its viewport and extent");
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("real root viewport is captured");
+        let content_origin = inner_rect.min - offset;
+        let visible_start = state.eager.rows.partition_point(|row| {
+            let screen_bottom = content_origin.y + row.bottom() - state.eager_outer.top();
+            screen_bottom <= viewport.min.y
+        });
+        let visible_end = state.eager.rows.partition_point(|row| {
+            let screen_top = content_origin.y + row.top() - state.eager_outer.top();
+            screen_top < viewport.max.y
+        });
+        let expected_start = visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS);
+        let expected_end = visible_end
+            .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+            .min(state.eager.rows.len());
+        let expected_built_indices = (expected_start..expected_end).collect::<Vec<_>>();
+        let actual_built_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(
+            actual_built_indices, expected_built_indices,
+            "root frame builds exactly visible rows plus the documented overscan"
+        );
+        for ((index, action_id), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(
+                action_id, &state.expected_actions[*index].action,
+                "rendered absolute index keeps its catalog action"
+            );
+            let expected_relative = state.eager.rows[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (expected_relative.min - state.eager_outer.min),
+                expected_relative.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "rendered row {index} differs from independent eager layout: actual={rect:?}, eager={expected_rect:?}"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(
+                    viewport.intersects(*rect),
+                    "visible row {index} intersects the current scroll viewport"
+                );
+            }
+        }
+        let mut viewport_signature = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_524F_4F54_4C53,
+            "track-c-root-list-visible-viewport",
+            rows.len(),
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            viewport_signature.bytes(action_id.as_bytes());
+            viewport_signature.bytes(format!("{id:?}").as_bytes());
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+        let (output_identity, structural_signature) =
+            track_c_root_list_signature(&state.app, viewport_receipt);
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: vec![
+                state.app.root_list_geometry.result_generation,
+                rebuilds,
+                measured_rows,
+            ],
+            viewport_receipt: Some(viewport_receipt),
+            work_units: measured_rows,
+            work_counters: vec![rebuilds, measured_rows, rows.len() as u64],
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2DRecipe {
+        FreshContextFirstOpen,
+        SharedPrefixFivePercent,
+        SharedPrefixTwentyPercent,
+        IdenticalPresentationNewGeneration,
+        LastRowTextEdit,
+        FirstRowWidthExpansionNoWrap,
+        FullPathsToggle,
+        WrapChange,
+        FontAtlasReplacement,
+        PixelsPerPointChange,
+        ViewportWidthChange,
+        WarmRepeat,
+    }
+
+    impl TrackC2DRecipe {
+        const ALL: [Self; 12] = [
+            Self::FreshContextFirstOpen,
+            Self::SharedPrefixFivePercent,
+            Self::SharedPrefixTwentyPercent,
+            Self::IdenticalPresentationNewGeneration,
+            Self::LastRowTextEdit,
+            Self::FirstRowWidthExpansionNoWrap,
+            Self::FullPathsToggle,
+            Self::WrapChange,
+            Self::FontAtlasReplacement,
+            Self::PixelsPerPointChange,
+            Self::ViewportWidthChange,
+            Self::WarmRepeat,
+        ];
+
+        fn token(self) -> &'static str {
+            match self {
+                Self::FreshContextFirstOpen => "fresh_context_first_open",
+                Self::SharedPrefixFivePercent => "shared_prefix_5_percent",
+                Self::SharedPrefixTwentyPercent => "shared_prefix_20_percent",
+                Self::IdenticalPresentationNewGeneration => "identical_presentation_new_generation",
+                Self::LastRowTextEdit => "last_row_text_edit",
+                Self::FirstRowWidthExpansionNoWrap => "first_row_width_expansion_no_wrap",
+                Self::FullPathsToggle => "full_paths_toggle",
+                Self::WrapChange => "wrap_change",
+                Self::FontAtlasReplacement => "font_atlas_replacement",
+                Self::PixelsPerPointChange => "pixels_per_point_change",
+                Self::ViewportWidthChange => "viewport_width_change",
+                Self::WarmRepeat => "warm_repeat",
+            }
+        }
+
+        fn installs_new_results(self) -> bool {
+            matches!(
+                self,
+                Self::SharedPrefixFivePercent
+                    | Self::SharedPrefixTwentyPercent
+                    | Self::IdenticalPresentationNewGeneration
+                    | Self::LastRowTextEdit
+                    | Self::FirstRowWidthExpansionNoWrap
+            )
+        }
+
+        fn first_open(self) -> bool {
+            self == Self::FreshContextFirstOpen
+        }
+
+        fn old_screen_width(self) -> f32 {
+            960.0
+        }
+
+        fn new_screen_width(self) -> f32 {
+            if self == Self::ViewportWidthChange {
+                720.0
+            } else {
+                960.0
+            }
+        }
+
+        fn old_wrap(self, default: bool) -> bool {
+            match self {
+                Self::FirstRowWidthExpansionNoWrap => false,
+                Self::WrapChange => true,
+                _ => default,
+            }
+        }
+
+        fn new_wrap(self, old: bool) -> bool {
+            if self == Self::WrapChange { !old } else { old }
+        }
+
+        fn old_pixels_per_point(self) -> f32 {
+            1.0
+        }
+
+        fn new_pixels_per_point(self) -> f32 {
+            if self == Self::PixelsPerPointChange {
+                1.25
+            } else {
+                1.0
+            }
+        }
+
+        fn new_full_paths(self) -> bool {
+            self == Self::FullPathsToggle
+        }
+
+        fn expects_cold_geometry(self) -> bool {
+            self != Self::WarmRepeat
+        }
+    }
+
+    fn track_c2d_frame_texts(
+        actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        show_full_paths: bool,
+    ) -> Vec<String> {
+        actions
+            .iter()
+            .map(|action| root_list_display_text(action, aliases, show_full_paths).into_owned())
+            .collect()
+    }
+
+    fn track_c2d_frame_signature(domain: &'static str, values: &[String]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(0x4332_445F_4C49_5354, domain, values.len());
+        for value in values {
+            signature.number(value.len() as u64);
+            signature.bytes(value.as_bytes());
+        }
+        signature.finish()
+    }
+
+    fn track_c2d_fixture_signature(
+        recipe: TrackC2DRecipe,
+        source_actions: &[Action],
+        old_actions: &[Action],
+        new_actions: &[Action],
+        aliases: &HashMap<String, Option<String>>,
+        old_screen: (f32, f32),
+        new_screen: (f32, f32),
+        old_ppp: f32,
+        new_ppp: f32,
+        old_wrap: bool,
+        new_wrap: bool,
+        old_full_paths: bool,
+        new_full_paths: bool,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-root-list-recipe",
+            source_actions.len(),
+        );
+        for text in [recipe.token()] {
+            signature.number(text.len() as u64);
+            signature.bytes(text.as_bytes());
+        }
+        signature.number(action_fixture_identity(source_actions));
+        signature.number(action_fixture_identity(old_actions));
+        signature.number(action_fixture_identity(new_actions));
+        let old_presentation = track_c2d_frame_texts(old_actions, aliases, old_full_paths);
+        let new_presentation = track_c2d_frame_texts(new_actions, aliases, new_full_paths);
+        let prefix = if recipe.first_open() {
+            0
+        } else {
+            old_presentation
+                .iter()
+                .zip(&new_presentation)
+                .take_while(|(old, new)| old == new)
+                .count()
+        };
+        signature.number(prefix as u64);
+        for value in [old_screen.0, old_screen.1, new_screen.0, new_screen.1] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for value in [old_ppp, new_ppp] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for value in [old_wrap, new_wrap, old_full_paths, new_full_paths] {
+            signature.number(value as u64);
+        }
+        let mut ordered_aliases = aliases.iter().collect::<Vec<_>>();
+        ordered_aliases.sort_by(|left, right| left.0.cmp(right.0));
+        signature.number(ordered_aliases.len() as u64);
+        for (action_id, alias) in ordered_aliases {
+            signature.number(action_id.len() as u64);
+            signature.bytes(action_id.as_bytes());
+            match alias {
+                Some(alias) => {
+                    signature.number(1);
+                    signature.number(alias.len() as u64);
+                    signature.bytes(alias.as_bytes());
+                }
+                None => signature.number(0),
+            }
+        }
+        signature.finish()
+    }
+
+    fn track_c2d_geometry_capacity_bytes(cache: &RootListGeometryCache) -> u64 {
+        [
+            cache.row_tops.capacity(),
+            cache.row_heights.capacity(),
+            cache.row_x_offsets.capacity(),
+            cache.row_response_x_offsets.capacity(),
+            cache.row_widths.capacity(),
+            cache.row_response_widths.capacity(),
+        ]
+        .into_iter()
+        .map(|capacity| (capacity * std::mem::size_of::<f32>()) as u64)
+        .sum()
+    }
+
+    fn track_c2d_font_signature(key: Option<&RootListGeometryKey>) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-button-font",
+            if key.is_some() { 1 } else { 0 },
+        );
+        if let Some(key) = key {
+            let value = format!("{:?}", key.button_font);
+            signature.number(value.len() as u64);
+            signature.bytes(value.as_bytes());
+        }
+        signature.finish()
+    }
+
+    struct TrackC2DListState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        recipe: TrackC2DRecipe,
+        old_actions: Vec<Action>,
+        expected_actions: Vec<Action>,
+        prepared_catalog: Option<Arc<Vec<Action>>>,
+        prepared_results: Option<Vec<Action>>,
+        aliases: HashMap<String, Option<String>>,
+        old_action_id: u64,
+        new_action_id: u64,
+        fixture_signature: u64,
+        prefix_len: usize,
+        old_screen_width: f32,
+        new_screen_width: f32,
+        screen_height: f32,
+        old_key: Option<RootListGeometryKey>,
+        // A non-owning receipt keeps the old atlas eligible for destruction
+        // inside the measured transition instead of extending its lifetime.
+        old_atlas: Option<std::sync::Weak<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
+        old_geometry: RootListGeometryObservation,
+        old_result_generation: u64,
+        old_capacity_bytes: u64,
+        old_first_response_width: f32,
+        old_next_row_width: f32,
+        old_next_row_x_offset: f32,
+        old_second_downstream_x_offset: f32,
+        old_visible_row_ids: Vec<(usize, egui::Id)>,
+        old_wrap: bool,
+        old_full_paths: bool,
+        new_wrap: bool,
+        new_full_paths: bool,
+        new_style: Option<egui::Style>,
+        new_capabilities: Option<HashMap<String, Vec<String>>>,
+        new_font_definitions: Option<egui::FontDefinitions>,
+        expected_font_definitions: egui::FontDefinitions,
+        frame_index: usize,
+    }
+
+    fn track_c2d_expected_actions(
+        source_actions: &[Action],
+        recipe: TrackC2DRecipe,
+    ) -> Vec<Action> {
+        let mut actions = source_actions.to_vec();
+        match recipe {
+            TrackC2DRecipe::SharedPrefixFivePercent | TrackC2DRecipe::SharedPrefixTwentyPercent => {
+                let percent = if recipe == TrackC2DRecipe::SharedPrefixFivePercent {
+                    5
+                } else {
+                    20
+                };
+                let changed = source_actions.len() * percent / 100;
+                for action in actions.iter_mut().skip(changed) {
+                    action.label.push_str(" [C2-D display edit]");
+                }
+            }
+            TrackC2DRecipe::IdenticalPresentationNewGeneration => {
+                for (index, action) in actions.iter_mut().enumerate() {
+                    action.args = Some(format!("c2d-args-{index:05}"));
+                }
+            }
+            TrackC2DRecipe::LastRowTextEdit => {
+                actions
+                    .last_mut()
+                    .expect("the Track C2-D fixtures are nonempty")
+                    .desc
+                    .push_str(" [C2-D last-row edit]");
+            }
+            TrackC2DRecipe::FirstRowWidthExpansionNoWrap => {
+                actions[0].desc.push_str(&" early-wide-segment/".repeat(24));
+            }
+            _ => {}
+        }
+        actions
+    }
+
+    fn track_c2d_aliases(
+        source_actions: &[Action],
+        recipe: TrackC2DRecipe,
+    ) -> HashMap<String, Option<String>> {
+        let mut aliases = HashMap::new();
+        if recipe == TrackC2DRecipe::FullPathsToggle {
+            for (index, action) in source_actions
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index % 17 == 0)
+            {
+                aliases.insert(
+                    action.action.clone(),
+                    Some(format!("C2D folder alias {index:05}")),
+                );
+            }
+        }
+        aliases
+    }
+
+    fn track_c2d_prepare_list_state(
+        root: &std::path::Path,
+        source_actions: &[Action],
+        recipe: TrackC2DRecipe,
+    ) -> TrackC2DListState {
+        use crate::performance::track_c_workloads::action_fixture_identity;
+
+        let old_actions = source_actions.to_vec();
+        let new_actions = track_c2d_expected_actions(source_actions, recipe);
+        let aliases = track_c2d_aliases(source_actions, recipe);
+
+        let default_font_definitions = egui::FontDefinitions::default();
+        let ctx = egui::Context::default();
+        ctx.set_fonts(default_font_definitions.clone());
+        let mut app = root_list_app_at(&ctx, old_actions.clone(), root);
+        // Keep the synthetic fixture independent from constructor-time host
+        // aliases and bookmarks. The selected recipe installs only its own
+        // deterministic aliases below.
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.folder_aliases.clone_from(&aliases);
+        app.enabled_capabilities = Some(HashMap::new());
+        app.enabled_plugins = Some(std::collections::HashSet::new());
+
+        let mut old_style = ctx.style().as_ref().clone();
+        let default_wrap = old_style.wrap.unwrap_or(true);
+        assert!(default_wrap, "C2-D default root list wrapping is enabled");
+        let old_wrap = recipe.old_wrap(default_wrap);
+        old_style.wrap = Some(old_wrap);
+        if recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap
+            || recipe == TrackC2DRecipe::WrapChange
+        {
+            ctx.set_style(old_style);
+        }
+        ctx.set_pixels_per_point(recipe.old_pixels_per_point());
+
+        if !recipe.first_open() {
+            for frame in 0..9 {
+                let _ = run_root_list_frame(
+                    &ctx,
+                    &mut app,
+                    frame,
+                    recipe.old_screen_width(),
+                    640.0,
+                    Vec::new(),
+                );
+            }
+            app.dashboard_data_cache.wait_for_refresh();
+        }
+        app.rebuild_completion_index_now();
+        app.dashboard_data_cache.wait_for_refresh();
+
+        let old_geometry = app.root_list_geometry.test_observation();
+        let old_result_generation = app.root_list_geometry.result_generation;
+        if recipe.first_open() {
+            assert!(app.root_list_geometry.key.is_none());
+            assert_eq!(old_geometry.rebuild_count, 0);
+            assert_eq!(old_geometry.measured_rows, 0);
+        } else {
+            assert!(app.root_list_geometry.key.is_some());
+            assert_eq!(old_geometry.measured_rows, source_actions.len() as u64);
+        }
+        let old_key = app.root_list_geometry.key.clone();
+        // Keep only an identity receipt: a strong Arc here would move old-atlas
+        // destruction out of the timed environment transition.
+        let old_atlas = app
+            .root_list_geometry
+            .font_atlas
+            .as_ref()
+            .map(Arc::downgrade);
+        let old_capacity_bytes = track_c2d_geometry_capacity_bytes(&app.root_list_geometry);
+        let (
+            old_first_response_width,
+            old_next_row_width,
+            old_next_row_x_offset,
+            old_second_downstream_x_offset,
+        ) = if recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap {
+            (
+                app.root_list_geometry.row_response_widths[0],
+                app.root_list_geometry.row_widths[1],
+                app.root_list_geometry.row_x_offsets[1],
+                app.root_list_geometry.row_x_offsets[2],
+            )
+        } else {
+            (0.0, 0.0, 0.0, 0.0)
+        };
+        let old_visible_row_ids = if recipe.first_open() {
+            Vec::new()
+        } else {
+            app.test_root_rendered_row_ids.clone()
+        };
+
+        let new_wrap = recipe.new_wrap(old_wrap);
+        let new_full_paths = recipe.new_full_paths();
+        let new_style = if recipe == TrackC2DRecipe::WrapChange {
+            let mut style = ctx.style().as_ref().clone();
+            style.wrap = Some(new_wrap);
+            Some(style)
+        } else {
+            None
+        };
+        let new_capabilities: Option<HashMap<String, Vec<String>>> = (recipe
+            == TrackC2DRecipe::FullPathsToggle)
+            .then(|| HashMap::from([("folders".into(), vec!["show_full_path".into()])]));
+        let new_font_definitions = if recipe == TrackC2DRecipe::FontAtlasReplacement {
+            let mut definitions = default_font_definitions.clone();
+            let duplicate = definitions
+                .font_data
+                .get("Ubuntu-Light")
+                .expect("egui default definitions include Ubuntu-Light")
+                .clone();
+            definitions
+                .font_data
+                .insert("TrackC2D-unused-atlas-reset".into(), duplicate);
+            Some(definitions)
+        } else {
+            None
+        };
+        let expected_font_definitions = new_font_definitions
+            .as_ref()
+            .unwrap_or(&default_font_definitions)
+            .clone();
+
+        let prepared_catalog = recipe
+            .installs_new_results()
+            .then(|| Arc::new(new_actions.clone()));
+        let prepared_results = recipe.installs_new_results().then_some(new_actions.clone());
+        let old_action_id = action_fixture_identity(&old_actions);
+        let new_action_id = action_fixture_identity(&new_actions);
+        let old_full_paths = false;
+        let old_screen_width = recipe.old_screen_width();
+        let new_screen_width = recipe.new_screen_width();
+        let screen_height = 640.0;
+        let fixture_signature = track_c2d_fixture_signature(
+            recipe,
+            source_actions,
+            &old_actions,
+            &new_actions,
+            &aliases,
+            (old_screen_width, screen_height),
+            (new_screen_width, screen_height),
+            recipe.old_pixels_per_point(),
+            recipe.new_pixels_per_point(),
+            old_wrap,
+            new_wrap,
+            old_full_paths,
+            new_full_paths,
+        );
+        let old_texts = track_c2d_frame_texts(&old_actions, &aliases, old_full_paths);
+        let new_texts = track_c2d_frame_texts(&new_actions, &aliases, new_full_paths);
+        let prefix_len = if recipe.first_open() {
+            0
+        } else {
+            old_texts
+                .iter()
+                .zip(&new_texts)
+                .take_while(|(old, new)| old == new)
+                .count()
+        };
+
+        TrackC2DListState {
+            app,
+            ctx,
+            recipe,
+            old_actions,
+            expected_actions: new_actions,
+            prepared_catalog,
+            prepared_results,
+            aliases,
+            old_action_id,
+            new_action_id,
+            fixture_signature,
+            prefix_len,
+            old_screen_width,
+            new_screen_width,
+            screen_height,
+            old_key,
+            old_atlas,
+            old_geometry,
+            old_result_generation,
+            old_capacity_bytes,
+            old_first_response_width,
+            old_next_row_width,
+            old_next_row_x_offset,
+            old_second_downstream_x_offset,
+            old_visible_row_ids,
+            old_wrap,
+            old_full_paths,
+            new_wrap,
+            new_full_paths,
+            new_style,
+            new_capabilities,
+            new_font_definitions,
+            expected_font_definitions,
+            frame_index: if recipe.first_open() { 0 } else { 9 },
+        }
+    }
+
+    fn track_c2d_run_list_owner(state: &mut TrackC2DListState) -> egui::FullOutput {
+        if state.recipe.installs_new_results() {
+            state.app.actions = state
+                .prepared_catalog
+                .take()
+                .expect("changed presentation fixture has a prepared catalog");
+            state.app.results = state
+                .prepared_results
+                .take()
+                .expect("changed presentation fixture has prepared results");
+            state.app.invalidate_root_list_results();
+        }
+        if state.recipe == TrackC2DRecipe::FullPathsToggle {
+            state.app.enabled_capabilities = Some(
+                state
+                    .new_capabilities
+                    .take()
+                    .expect("full-path recipe has prepared capabilities"),
+            );
+        }
+        if let Some(style) = state.new_style.take() {
+            state.ctx.set_style(style);
+        }
+        if let Some(definitions) = state.new_font_definitions.take() {
+            state.ctx.set_fonts(definitions);
+        }
+        if state.recipe == TrackC2DRecipe::PixelsPerPointChange {
+            state
+                .ctx
+                .set_pixels_per_point(TrackC2DRecipe::PixelsPerPointChange.new_pixels_per_point());
+        }
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        run_root_list_frame(
+            &state.ctx,
+            &mut state.app,
+            frame,
+            state.new_screen_width,
+            state.screen_height,
+            Vec::new(),
+        )
+    }
+
+    fn track_c2d_geometry_signature(cache: &RootListGeometryCache) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-list-geometry-projection",
+            cache.row_tops.len(),
+        );
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.row_x_offsets,
+            &cache.row_response_x_offsets,
+            &cache.row_widths,
+            &cache.row_response_widths,
+        ] {
+            signature.number(values.len() as u64);
+            for value in values {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.content_x_offset,
+            cache.content_width,
+            cache.total_height,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        signature.finish()
+    }
+
+    fn track_c2d_viewport_signature(app: &LauncherApp) -> (u64, usize) {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let rows = &app.test_root_rendered_rows;
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert_eq!(rows.len(), ids.len());
+        assert_eq!(rows.len(), rects.len());
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("actual root-list frame records its viewport");
+        let (inner, extent, offset) = app
+            .test_root_scroll_area_extent
+            .expect("actual root-list frame records its scroll extent");
+        let mut signature =
+            StableSignature::new(0x4332_445F_4C49_5354, "track-c2d-list-viewport", rows.len());
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner.min.x,
+            inner.min.y,
+            inner.max.x,
+            inner.max.y,
+            extent.x,
+            extent.y,
+            offset.x,
+            offset.y,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            signature.number(*index as u64);
+            signature.number(action_id.len() as u64);
+            signature.bytes(action_id.as_bytes());
+            let id = format!("{id:?}");
+            signature.number(id.len() as u64);
+            signature.bytes(id.as_bytes());
+        }
+        for ((index, _), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        (signature.finish(), rows.len())
+    }
+
+    fn track_c2d_assert_eager_geometry(
+        state: &TrackC2DListState,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        assert_eq!(state.app.results, state.expected_actions);
+        assert_eq!(
+            state.app.actions.as_slice(),
+            state.expected_actions.as_slice()
+        );
+        assert_eq!(state.app.folder_aliases, state.aliases);
+        assert!(state.app.selected.is_none());
+        assert_eq!(state.app.query, "root list fixture");
+        assert_eq!(state.app.last_search_query, "root list fixture");
+        assert!(state.app.last_results_valid);
+        assert!(state.app.pending_query.is_none());
+        assert!(!state.app.background_query_refresh_pending);
+        let rendered_row_ids = &state.app.test_root_rendered_row_ids;
+        let unique_row_ids = rendered_row_ids
+            .iter()
+            .map(|(_, id)| id)
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique_row_ids.len(), rendered_row_ids.len());
+        for (new_index, new_id) in rendered_row_ids {
+            if let Some((_, old_id)) = state
+                .old_visible_row_ids
+                .iter()
+                .find(|(old_index, _)| old_index == new_index)
+            {
+                if state.old_result_generation == state.app.root_list_geometry.result_generation {
+                    assert_eq!(old_id, new_id, "stable generation retains row widget IDs");
+                } else {
+                    assert_ne!(
+                        old_id, new_id,
+                        "new result generation changes row widget IDs"
+                    );
+                }
+            }
+        }
+        let actual_full_paths = state
+            .app
+            .enabled_capabilities
+            .as_ref()
+            .and_then(|capabilities| capabilities.get("folders"))
+            .is_some_and(|capabilities| capabilities.iter().any(|cap| cap == "show_full_path"));
+        assert_eq!(actual_full_paths, state.new_full_paths);
+        assert_eq!(
+            state.ctx.style().wrap.unwrap_or(true),
+            state.new_wrap,
+            "the measured context has the requested effective wrapping policy"
+        );
+        let available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("actual root-list frame records available width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let style = state.ctx.style().as_ref().clone();
+        let ppp = state.ctx.pixels_per_point();
+        assert!((ppp - state.recipe.new_pixels_per_point()).abs() <= f32::EPSILON);
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_fonts(state.expected_font_definitions.clone());
+        oracle_ctx.set_style(style.clone());
+        oracle_ctx.set_pixels_per_point(ppp);
+        let (outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            &state.expected_actions,
+            &state.aliases,
+            actual_full_paths,
+            available_width,
+            &style,
+            state.app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &state.app.root_list_geometry,
+            &eager,
+            outer,
+            "C2-D actual root-list cache against independent eager geometry",
+        );
+        let cache = &state.app.root_list_geometry;
+        assert_eq!(cache.row_x_offsets.len(), eager.rows.len());
+        for (index, response) in eager.rows.iter().enumerate() {
+            let expected_left = response.left() - outer.left()
+                + (response.width() - eager.available_widths[index]) * 0.5;
+            assert!(
+                (cache.row_x_offsets[index] - expected_left).abs() <= 1.0,
+                "C2-D row {index} content x offset differs: actual={} eager={expected_left}",
+                cache.row_x_offsets[index]
+            );
+        }
+        let (inner, content_extent, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("real root ScrollArea records full extent");
+        assert!((content_extent.x - cache.content_width).abs() <= 1.0);
+        assert!((content_extent.y - cache.total_height).abs() <= 1.0);
+        assert!(inner.width() > 0.0 && inner.height() > 0.0);
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("real root ScrollArea records viewport");
+        let content_origin = inner.min - offset;
+        let visible_start = eager
+            .rows
+            .partition_point(|row| content_origin.y + row.bottom() - outer.top() <= viewport.min.y);
+        let visible_end = eager
+            .rows
+            .partition_point(|row| content_origin.y + row.top() - outer.top() < viewport.max.y);
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(eager.rows.len()))
+            .collect::<Vec<_>>();
+        let rows = &state.app.test_root_rendered_rows;
+        let actual_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(actual_indices, expected_indices);
+        for ((index, action_id), (rect_index, rect)) in
+            rows.iter().zip(&state.app.test_root_rendered_row_rects)
+        {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager_rect = eager.rows[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_rect.min - outer.min),
+                eager_rect.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "painted root row {index} differs from the independent eager rectangle"
+            );
+        }
+        let after = state.app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.old_geometry.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.old_geometry.measured_rows);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.old_geometry.measured_cells);
+        if state.recipe.expects_cold_geometry() {
+            assert_eq!(
+                rebuilds, 1,
+                "one changed or first-open recipe rebuilds once"
+            );
+            assert_eq!(measured_rows, state.expected_actions.len() as u64);
+        } else {
+            assert_eq!(rebuilds, 0, "warm repeat reuses the list geometry");
+            assert_eq!(measured_rows, 0);
+        }
+        assert_eq!(measured_cells, 0, "list recipes do not measure grid cells");
+        let actual_action_id = action_fixture_identity(&state.app.results);
+        assert_eq!(actual_action_id, state.new_action_id);
+        let presentation =
+            track_c2d_frame_texts(&state.app.results, &state.aliases, actual_full_paths);
+        let presentation_id = track_c2d_frame_signature("track-c2d-presentation", &presentation);
+        let old_presentation =
+            track_c2d_frame_texts(&state.old_actions, &state.aliases, state.old_full_paths);
+        let prefix_len = if state.recipe.first_open() {
+            0
+        } else {
+            old_presentation
+                .iter()
+                .zip(&presentation)
+                .take_while(|(old, new)| old == new)
+                .count()
+        };
+        assert_eq!(prefix_len, state.prefix_len);
+        if state.recipe == TrackC2DRecipe::FullPathsToggle {
+            assert_ne!(
+                track_c2d_frame_signature("track-c2d-presentation", &old_presentation),
+                presentation_id,
+                "full-path capability changes the actual presentation"
+            );
+        }
+        if state.recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap {
+            assert!(cache.row_response_widths[0] > state.old_first_response_width);
+            assert_ne!(cache.row_widths[1], state.old_next_row_width);
+            assert_ne!(cache.row_x_offsets[1], state.old_next_row_x_offset);
+            assert_ne!(cache.row_x_offsets[2], state.old_second_downstream_x_offset);
+        }
+        let viewport_id = track_c2d_viewport_signature(&state.app).0;
+        let geometry_id = track_c2d_geometry_signature(cache);
+        let mut output = StableSignature::new(
+            0x4332_445F_4C49_5354,
+            "track-c2d-complete-root-list-state",
+            state.app.results.len(),
+        );
+        output.number(actual_action_id);
+        output.number(presentation_id);
+        output.number(cache.result_generation);
+        output.number(
+            state
+                .app
+                .selected
+                .map_or(u64::MAX, |selected| selected as u64),
+        );
+        output.number(state.app.last_results_valid as u64);
+        output.number(state.app.pending_query.is_some() as u64);
+        output.number(state.app.background_query_refresh_pending as u64);
+        output.number(state.app.query.len() as u64);
+        output.bytes(state.app.query.as_bytes());
+        output.number(state.app.last_search_query.len() as u64);
+        output.bytes(state.app.last_search_query.as_bytes());
+        output.number(u64::from(available_width.to_bits()));
+        output.number(u64::from(ppp.to_bits()));
+        output.number(actual_full_paths as u64);
+        output.number(state.new_wrap as u64);
+        output.number(u64::from(state.new_screen_width.to_bits()));
+        output.number(u64::from(state.screen_height.to_bits()));
+        let old_key = state.old_key.as_ref();
+        let new_key = cache.key.as_ref();
+        assert!(new_key.is_some());
+        if let Some(old_key) = old_key {
+            assert_eq!(old_key.wrap, state.old_wrap);
+            assert_eq!(
+                old_key.pixels_per_point_bits,
+                state.recipe.old_pixels_per_point().to_bits()
+            );
+        }
+        let key_changed = old_key != new_key;
+        let atlas_changed = match (state.old_atlas.as_ref(), cache.font_atlas.as_ref()) {
+            (Some(old), Some(new)) => !std::sync::Weak::ptr_eq(old, &Arc::downgrade(new)),
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
+        };
+        let old_generation = state.old_result_generation;
+        let new_generation = cache.result_generation;
+        if state.recipe.installs_new_results() {
+            assert_eq!(new_generation, old_generation.wrapping_add(1));
+        } else {
+            assert_eq!(new_generation, old_generation);
+        }
+        match state.recipe {
+            TrackC2DRecipe::FreshContextFirstOpen => {
+                assert!(key_changed, "first open changes None into an accepted key");
+                assert!(atlas_changed, "first open installs the initial font atlas");
+            }
+            TrackC2DRecipe::WarmRepeat => {
+                assert!(!key_changed && !atlas_changed);
+            }
+            TrackC2DRecipe::FontAtlasReplacement => {
+                assert!(
+                    !key_changed,
+                    "unused font data leaves the geometry key intact"
+                );
+                assert!(
+                    atlas_changed,
+                    "egui actually replaces the retained font atlas"
+                );
+            }
+            TrackC2DRecipe::PixelsPerPointChange => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key
+                        .expect("settled ppp recipe has an old key")
+                        .pixels_per_point_bits,
+                    new_key.expect("new frame has a key").pixels_per_point_bits,
+                    "pixels-per-point transition changes that exact geometry-key field"
+                );
+            }
+            TrackC2DRecipe::ViewportWidthChange => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key
+                        .expect("settled width recipe has an old key")
+                        .width_bits,
+                    new_key.expect("new frame has a key").width_bits,
+                    "viewport transition changes the measured geometry-key width"
+                );
+            }
+            TrackC2DRecipe::WrapChange => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key.expect("settled wrap recipe has an old key").wrap,
+                    new_key.expect("new frame has a key").wrap,
+                    "wrap transition changes that exact geometry-key field"
+                );
+            }
+            TrackC2DRecipe::FullPathsToggle => {
+                assert!(key_changed);
+                assert_ne!(
+                    old_key
+                        .expect("settled full-path recipe has an old key")
+                        .show_full_paths,
+                    new_key.expect("new frame has a key").show_full_paths,
+                    "full-path transition changes that exact geometry-key field"
+                );
+            }
+            _ => assert!(
+                key_changed,
+                "the selected presentation transition changes its key"
+            ),
+        }
+        let transitions = vec![
+            state.old_action_id,
+            state.new_action_id,
+            old_generation,
+            new_generation,
+            old_key.is_some() as u64,
+            new_key.is_some() as u64,
+            key_changed as u64,
+            state.old_atlas.is_some() as u64,
+            cache.font_atlas.is_some() as u64,
+            atlas_changed as u64,
+            old_key.map_or(0, |key| u64::from(key.width_bits)),
+            new_key.map_or(0, |key| u64::from(key.width_bits)),
+            old_key.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
+            new_key.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
+            old_key.map_or(0, |key| track_c2d_font_signature(Some(key))),
+            new_key.map_or(0, |key| track_c2d_font_signature(Some(key))),
+            old_key.map_or(0, |key| key.wrap as u64),
+            new_key.map_or(state.new_wrap as u64, |key| key.wrap as u64),
+            old_key.map_or(0, |key| key.show_full_paths as u64),
+            new_key.map_or(state.new_full_paths as u64, |key| {
+                key.show_full_paths as u64
+            }),
+            u64::from(state.old_screen_width.to_bits()),
+            u64::from(state.new_screen_width.to_bits()),
+            u64::from(state.screen_height.to_bits()),
+            u64::from(state.screen_height.to_bits()),
+        ];
+        // The full state identity binds the actual effective font-key receipt.
+        output.number(track_c2d_font_signature(new_key));
+        let geometry_ns = if rebuilds == 0 {
+            0
+        } else {
+            after.last_rebuild_nanos
+        };
+        let capacity_after = track_c2d_geometry_capacity_bytes(cache);
+        let painted_rows = state.app.test_root_rendered_rows.len();
+        let counters = vec![
+            rebuilds,
+            measured_rows,
+            measured_cells,
+            geometry_ns,
+            painted_rows as u64,
+            prefix_len as u64,
+            state.old_capacity_bytes,
+            capacity_after,
+            presentation_id,
+            actual_action_id,
+        ];
+        assert_eq!(transitions.len(), 24);
+        crate::performance::track_c_workloads::OwnerObservation {
+            output_identity: output.finish(),
+            structural_signature: geometry_id,
+            revision_receipts: transitions,
+            viewport_receipt: Some(viewport_id),
+            work_units: measured_rows,
+            work_counters: counters,
+        }
+    }
+
+    fn track_c2d_emit_samples(
+        recipe: TrackC2DRecipe,
+        count: usize,
+        fixture_signature: u64,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(crate::performance::enabled());
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        for (field, value) in [("source", source.as_str()), ("profile", profile.as_str())] {
+            assert!(
+                !value.bytes().any(|byte| byte.is_ascii_whitespace()),
+                "C2-D {field} metadata must be a single token"
+            );
+        }
+        let counters = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| {
+                    assert_eq!(sample.work_counters.len(), 10);
+                    sample.work_counters[index].to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let counter_ids = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| {
+                    assert_eq!(sample.work_counters.len(), 10);
+                    format!("{:016x}", sample.work_counters[index])
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ids = |value: fn(&crate::performance::track_c_workloads::SampleRecord) -> u64| {
+            samples
+                .iter()
+                .map(|sample| format!("{:016x}", value(sample)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let viewport_receipts = samples
+            .iter()
+            .map(|sample| {
+                format!(
+                    "{:016x}",
+                    sample
+                        .viewport_receipt
+                        .expect("C2-D records actual viewport output")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let transition_receipts = samples
+            .iter()
+            .map(|sample| {
+                assert_eq!(sample.revision_receipts.len(), 24);
+                sample
+                    .revision_receipts
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let case = recipe.token();
+        assert!(!case.bytes().any(|byte| byte.is_ascii_whitespace()));
+        eprintln!(
+            "C2D_LIST_RESULT schema=1 stage=cold_list_geometry_characterization installation=eager_list_geometry owner=RootListGeometryCache::ensure measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_root_list_geometry source={source} profile={profile} mode={mode} telemetry_enabled=true observer_enabled=false warmups={WARMUPS} samples={} exclusions=0 case={case} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] presentation_prefix_len=[{}] geometry_capacity_before_bytes=[{}] geometry_capacity_after_bytes=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{viewport_receipts}] transition_receipts=[{transition_receipts}]",
+            samples.len(),
+            counters(0),
+            counters(1),
+            counters(2),
+            counters(3),
+            counters(4),
+            counters(5),
+            counters(6),
+            counters(7),
+            ids(|sample| sample.output_identity),
+            counter_ids(9),
+            counter_ids(8),
+            ids(|sample| sample.structural_signature),
+        );
+    }
+
+    fn track_c2d_assert_independent_n100_bindings(
+        state: &TrackC2DListState,
+        observation: &crate::performance::track_c_workloads::OwnerObservation,
+    ) {
+        let expected = match state.recipe {
+            TrackC2DRecipe::FreshContextFirstOpen => Some((
+                0xbced_459d_451b_8ce6,
+                0xc374_5052_c657_97f2,
+                0x6b20_5379_e46a_ddc3,
+            )),
+            TrackC2DRecipe::SharedPrefixFivePercent => Some((
+                0x8489_a2c8_3fcf_50e4,
+                0x3948_b637_4a90_077a,
+                0xd10d_4701_5e04_d833,
+            )),
+            TrackC2DRecipe::SharedPrefixTwentyPercent => Some((
+                0xae25_df48_1aa4_82bd,
+                0x5a78_f8dd_bda6_bd22,
+                0x1c91_0b44_35b1_775b,
+            )),
+            _ => None,
+        };
+        if let Some((fixture, actions, presentation)) = expected {
+            assert_eq!(state.fixture_signature, fixture);
+            assert_eq!(observation.work_counters[9], actions);
+            assert_eq!(observation.work_counters[8], presentation);
+        }
+    }
+
+    #[test]
+    fn track_c2d_oracle_root_list_recipes_match_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for recipe in TrackC2DRecipe::ALL {
+            let mut state = track_c2d_prepare_list_state(workspace.root(), &fixture.values, recipe);
+            let output = track_c2d_run_list_owner(&mut state);
+            let observation = track_c2d_assert_eager_geometry(&state);
+            track_c2d_assert_independent_n100_bindings(&state, &observation);
+            drop(output);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "bounded Track C2-D owner characterization; run through the explicit Track C runner"]
+    fn track_c2d_benchmark_root_list_cold_geometry_recipes() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for recipe in TrackC2DRecipe::ALL {
+                let fixture_signature = track_c2d_fixture_signature(
+                    recipe,
+                    &fixture.values,
+                    &fixture.values,
+                    &track_c2d_expected_actions(&fixture.values, recipe),
+                    &track_c2d_aliases(&fixture.values, recipe),
+                    (recipe.old_screen_width(), 640.0),
+                    (recipe.new_screen_width(), 640.0),
+                    recipe.old_pixels_per_point(),
+                    recipe.new_pixels_per_point(),
+                    recipe.old_wrap(true),
+                    recipe.new_wrap(recipe.old_wrap(true)),
+                    false,
+                    recipe.new_full_paths(),
+                );
+                let samples = measure_owner(
+                    || track_c2d_prepare_list_state(workspace.root(), &fixture.values, recipe),
+                    track_c2d_run_list_owner,
+                    |state, _output| track_c2d_assert_eager_geometry(state),
+                );
+                track_c2d_emit_samples(recipe, *count, fixture_signature, mode, &samples);
+            }
+        }
+        drop(workspace);
+    }
+
+    struct TrackCRootGridState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        expected_actions: Vec<Action>,
+        expected_visible_ids: Vec<(usize, egui::Id)>,
+        available_width: f32,
+        columns: usize,
+        eager_outer: egui::Rect,
+        eager: EagerRootGridLayout,
+        style: egui::Style,
+        before: RootListGeometryObservation,
+        cold: bool,
+        frame_index: usize,
+    }
+
+    fn track_c_prepare_root_grid_state(
+        root: &std::path::Path,
+        actions: &[Action],
+        columns: usize,
+        cold: bool,
+    ) -> TrackCRootGridState {
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = columns;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        let warm = app.root_list_geometry.test_observation();
+        assert!(
+            warm.rebuild_count > 0,
+            "setup warms real root grid geometry"
+        );
+        assert_eq!(warm.measured_cells, actions.len() as u64);
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real scaled root UI records its available width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let expected_visible_ids = app.test_root_rendered_row_ids.clone();
+        assert!(!expected_visible_ids.is_empty());
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let (eager_outer, eager) = track_c_eager_root_grid_layout(
+            &oracle_ctx,
+            actions,
+            columns,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        let row_geometry = assert_track_c_root_grid_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            eager_outer,
+            actions,
+            columns,
+            &style,
+            "Track C independent root grid oracle",
+        );
+        assert_eq!(row_geometry.len(), app.root_list_geometry.row_tops.len());
+        if cold {
+            app.invalidate_root_list_display_geometry();
+        }
+        let before = app.root_list_geometry.test_observation();
+        crate::performance::track_c::reset();
+        TrackCRootGridState {
+            app,
+            ctx,
+            expected_actions: actions.to_vec(),
+            expected_visible_ids,
+            available_width,
+            columns,
+            eager_outer,
+            eager,
+            style,
+            before,
+            cold,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c_root_grid_signature(app: &LauncherApp, viewport_receipt: u64) -> (u64, u64) {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let cache = &app.root_list_geometry;
+        let mut structure = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c-root-grid-complete-geometry",
+            cache.grid_cell_widths.len(),
+        );
+        structure.number(action_fixture_identity(&app.results));
+        structure.number(cache.grid_columns as u64);
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.grid_column_x_offsets,
+            &cache.grid_column_widths,
+            &cache.grid_cell_widths,
+            &cache.grid_cell_heights,
+            &cache.grid_visual_row_tops,
+            &cache.grid_visual_row_bottoms,
+            &cache.grid_visual_max_end_tree,
+        ] {
+            structure.number(values.len() as u64);
+            for value in values {
+                structure.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.grid_nominal_width,
+            cache.grid_full_width,
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            structure.number(u64::from(value.to_bits()));
+        }
+        let structural_signature = structure.finish();
+        let mut complete = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c-root-grid-frame-output",
+            app.test_root_rendered_rows.len(),
+        );
+        complete.number(structural_signature);
+        complete.number(viewport_receipt);
+        complete.number(cache.result_generation);
+        complete.number(app.query_results_layout.cols as u64);
+        complete.number(app.selected.map_or(u64::MAX, |selected| selected as u64));
+        (complete.finish(), structural_signature)
+    }
+
+    fn track_c_validate_root_grid_state(
+        state: &TrackCRootGridState,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        assert_eq!(state.app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in state
+            .app
+            .results
+            .iter()
+            .zip(&state.expected_actions)
+            .enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "grid result {index} label");
+            assert_eq!(
+                actual.desc, expected.desc,
+                "grid result {index} description"
+            );
+            assert_eq!(
+                actual.action, expected.action,
+                "grid result {index} action id"
+            );
+            assert_eq!(actual.args, expected.args, "grid result {index} arguments");
+        }
+        assert!(state.app.resolved_grid_layout);
+        assert_eq!(state.app.query_results_layout.cols, state.columns);
+        let actual_available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real root grid UI records its available width");
+        assert!(
+            (actual_available_width - state.available_width).abs() <= 0.01,
+            "the measured root grid keeps the independent oracle width: actual={actual_available_width} expected={}",
+            state.available_width
+        );
+        assert_track_c_root_grid_matches_eager(
+            &state.app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            &state.expected_actions,
+            state.columns,
+            &state.style,
+            "actual root grid frame",
+        );
+        let after = state.app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.before.rebuild_count);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.before.measured_cells);
+        if state.cold {
+            assert_eq!(rebuilds, 1, "cold grid geometry rebuilds exactly once");
+            assert_eq!(measured_cells, state.expected_actions.len() as u64);
+        } else {
+            assert_eq!(rebuilds, 0, "warm grid geometry is reused");
+            assert_eq!(measured_cells, 0, "warm grid measures no full cells");
+        }
+
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        assert!(!rows.is_empty(), "the real frame paints root grid cells");
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        assert!(rows.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert_eq!(
+            ids, &state.expected_visible_ids,
+            "geometry-only invalidation preserves surviving root grid widget IDs"
+        );
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("real root grid ScrollArea records its viewport and extent");
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("real root grid viewport is captured");
+        let content_origin = inner_rect.min - offset;
+        let row_geometry = eager_grid_row_geometry(&state.eager, state.columns, state.eager_outer);
+        let visible_start = row_geometry
+            .iter()
+            .position(|(top, height, _, _)| content_origin.y + *top + *height > viewport.min.y)
+            .unwrap_or(row_geometry.len());
+        let visible_end = row_geometry
+            .iter()
+            .take_while(|(top, _, _, _)| content_origin.y + *top < viewport.max.y)
+            .count();
+        let mut expected_rows = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(row_geometry.len()))
+            .collect::<Vec<_>>();
+        expected_rows.extend(row_geometry.iter().enumerate().filter_map(
+            |(row, (_, _, visual_top, visual_bottom))| {
+                (content_origin.y + *visual_top < viewport.max.y
+                    && content_origin.y + *visual_bottom > viewport.min.y)
+                    .then_some(row)
+            },
+        ));
+        expected_rows.sort_unstable();
+        expected_rows.dedup();
+        let expected_indices = expected_rows
+            .into_iter()
+            .flat_map(|row| {
+                let start = row * state.columns;
+                start..(start + state.columns).min(state.expected_actions.len())
+            })
+            .collect::<Vec<_>>();
+        let actual_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(
+            actual_indices, expected_indices,
+            "root grid builds exactly logical overscan rows plus eager visual spill rows"
+        );
+        assert_eq!(
+            rows.len(),
+            expected_indices.len(),
+            "the independently eager-derived viewport and overscan set bounds grid painting"
+        );
+        for ((index, action_id), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(
+                action_id, &state.expected_actions[*index].action,
+                "rendered grid absolute index keeps its catalog action"
+            );
+            let eager_cell = state.eager.cells[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_cell.min - state.eager_outer.min),
+                eager_cell.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "rendered grid cell {index} differs from independent eager layout: actual={rect:?}, eager={expected_rect:?}"
+            );
+        }
+
+        let mut viewport_signature = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c-root-grid-visible-viewport",
+            rows.len(),
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            viewport_signature.bytes(action_id.as_bytes());
+            viewport_signature.bytes(format!("{id:?}").as_bytes());
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+        let (output_identity, structural_signature) =
+            track_c_root_grid_signature(&state.app, viewport_receipt);
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: vec![
+                state.app.root_list_geometry.result_generation,
+                rebuilds,
+                measured_cells,
+            ],
+            viewport_receipt: Some(viewport_receipt),
+            work_units: measured_cells,
+            work_counters: vec![rebuilds, measured_cells, rows.len() as u64],
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_root_list_frame_matches_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for cold in [true, false] {
+            let mut state =
+                track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold);
+            let frame = state.frame_index;
+            state.frame_index += 1;
+            let _ =
+                run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new());
+            let _ = track_c_validate_root_list_state(&state);
+            drop(state);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C owner benchmark; isolated synthetic action catalog only"]
+    fn track_c_benchmark_root_list_frame_geometry() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, TrackCWorkspace, action_fixture, emit_samples,
+            measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for cold in [true, false] {
+                let cold_type = if cold {
+                    "geometry-cold-warm-fonts"
+                } else {
+                    "geometry-warm-warm-fonts"
+                };
+                let samples = measure_owner(
+                    || track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold),
+                    |state| {
+                        let frame = state.frame_index;
+                        state.frame_index += 1;
+                        run_root_list_frame(
+                            &state.ctx,
+                            &mut state.app,
+                            frame,
+                            960.0,
+                            640.0,
+                            Vec::new(),
+                        )
+                    },
+                    |state, _frame_output| track_c_validate_root_list_state(state),
+                );
+                emit_samples(
+                    ReportMetadata {
+                        owner: "egui_Context_run+LauncherApp::render_root_frame",
+                        fixture_name: "root-list-default-layout",
+                        fixture_signature: fixture.summary.signature,
+                        item_count: *count,
+                        viewport: "960x640",
+                        scale_milli: 1_000,
+                        font_state: "warm-egui-font-atlas",
+                        settings: "list-wrap-default",
+                        cold_type,
+                        mode,
+                    },
+                    &samples,
+                );
+            }
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c_oracle_root_grid_frame_matches_frozen_eager_geometry() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for columns in [1, 2, 3, 5, 6] {
+            for cold in [true, false] {
+                let mut state = track_c_prepare_root_grid_state(
+                    workspace.root(),
+                    &fixture.values,
+                    columns,
+                    cold,
+                );
+                let frame = state.frame_index;
+                state.frame_index += 1;
+                let _ = run_root_list_frame(
+                    &state.ctx,
+                    &mut state.app,
+                    frame,
+                    960.0,
+                    640.0,
+                    Vec::new(),
+                );
+                let _ = track_c_validate_root_grid_state(&state);
+                drop(state);
+            }
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C owner benchmark; isolated synthetic action catalog only"]
+    fn track_c_benchmark_root_grid_frame_geometry() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, StableSignature, TrackCWorkspace, action_fixture,
+            action_fixture_identity, emit_samples, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for columns in [1, 2, 3, 5, 6] {
+                let mut fixture_signature = StableSignature::new(
+                    0x435F_524F_4F54_4752,
+                    "track-c-root-grid-input",
+                    fixture.values.len(),
+                );
+                fixture_signature.number(action_fixture_identity(&fixture.values));
+                fixture_signature.number(columns as u64);
+                let fixture_signature = fixture_signature.finish();
+                for cold in [true, false] {
+                    let cold_type = if cold {
+                        "geometry_cold_warm_fonts"
+                    } else {
+                        "geometry_warm_warm_fonts"
+                    };
+                    let samples = measure_owner(
+                        || {
+                            track_c_prepare_root_grid_state(
+                                workspace.root(),
+                                &fixture.values,
+                                columns,
+                                cold,
+                            )
+                        },
+                        |state| {
+                            let frame = state.frame_index;
+                            state.frame_index += 1;
+                            run_root_list_frame(
+                                &state.ctx,
+                                &mut state.app,
+                                frame,
+                                960.0,
+                                640.0,
+                                Vec::new(),
+                            )
+                        },
+                        |state, _frame_output| track_c_validate_root_grid_state(state),
+                    );
+                    emit_samples(
+                        ReportMetadata {
+                            owner: "egui_Context_run+LauncherApp::render_root_frame",
+                            fixture_name: "root_grid_action_fixture",
+                            fixture_signature,
+                            item_count: *count,
+                            viewport: "960x640",
+                            scale_milli: 1_000,
+                            font_state: "warm_egui_font_atlas",
+                            settings: match columns {
+                                1 => "grid_cols_1_default_style",
+                                2 => "grid_cols_2_default_style",
+                                3 => "grid_cols_3_default_style",
+                                5 => "grid_cols_5_default_style",
+                                6 => "grid_cols_6_default_style",
+                                _ => unreachable!("the owner iterates supported grid columns"),
+                            },
+                            cold_type,
+                            mode,
+                        },
+                        &samples,
+                    );
+                }
+            }
+        }
+        drop(workspace);
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2EGridRecipe {
+        FullGeometryCold,
+        SharedPrefixGrowth,
+        SharedPrefixShrink,
+        WarmRepeat,
+        TallCellSpillCold,
+    }
+
+    impl TrackC2EGridRecipe {
+        const PRIMARY: [Self; 5] = [
+            Self::FullGeometryCold,
+            Self::SharedPrefixGrowth,
+            Self::SharedPrefixShrink,
+            Self::WarmRepeat,
+            Self::TallCellSpillCold,
+        ];
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::FullGeometryCold => "full_geometry_cold",
+                Self::SharedPrefixGrowth => "shared_prefix_5_percent_growth",
+                Self::SharedPrefixShrink => "shared_prefix_20_percent_shrink",
+                Self::WarmRepeat => "warm_repeat",
+                Self::TallCellSpillCold => "tall_cell_spill_cold",
+            }
+        }
+
+        fn is_warm(self) -> bool {
+            self == Self::WarmRepeat
+        }
+
+        fn prefix_percent(self) -> Option<usize> {
+            match self {
+                Self::SharedPrefixGrowth => Some(5),
+                Self::SharedPrefixShrink => Some(20),
+                _ => None,
+            }
+        }
+    }
+
+    struct TrackC2EGridFixture {
+        recipe: TrackC2EGridRecipe,
+        count: usize,
+        columns: usize,
+        base_actions: Vec<Action>,
+        old_actions: Vec<Action>,
+        new_actions: Vec<Action>,
+        prefix_len: usize,
+        fixture_signature: u64,
+        base_action_id: u64,
+        old_action_id: u64,
+        new_action_id: u64,
+        old_presentation_id: u64,
+        presentation_id: u64,
+        old_presentation_utf8_bytes: u64,
+        presentation_utf8_bytes: u64,
+    }
+
+    fn track_c2e_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        text: &str,
+    ) {
+        signature.number(text.len() as u64);
+        signature.bytes(text.as_bytes());
+    }
+
+    fn track_c2e_presentation_texts(actions: &[Action]) -> Vec<String> {
+        actions
+            .iter()
+            .map(|action| format!("{}\n{}", action.label, action.desc))
+            .collect()
+    }
+
+    fn track_c2e_presentation_signature(texts: &[String]) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-grid-presentation",
+            texts.len(),
+        );
+        for text in texts {
+            track_c2e_signature_string(&mut signature, text);
+        }
+        signature.finish()
+    }
+
+    fn track_c2e_grid_fixture(
+        count: usize,
+        columns: usize,
+        recipe: TrackC2EGridRecipe,
+    ) -> TrackC2EGridFixture {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture};
+
+        assert!(count >= 100);
+        let base_actions = action_fixture(count).values;
+        let mut old_actions = base_actions.clone();
+        let mut new_actions = base_actions.clone();
+        let prefix_len = match recipe.prefix_percent() {
+            Some(percent) => count.saturating_mul(percent) / 100,
+            None => count,
+        };
+        match recipe {
+            TrackC2EGridRecipe::FullGeometryCold | TrackC2EGridRecipe::WarmRepeat => {}
+            TrackC2EGridRecipe::SharedPrefixGrowth => {
+                assert_eq!(
+                    columns, 3,
+                    "prefix recipes are characterized at three columns"
+                );
+                let late_column_zero = (count - 1) / columns * columns;
+                assert!(late_column_zero >= prefix_len);
+                for (index, action) in new_actions.iter_mut().enumerate().skip(prefix_len) {
+                    action.label = format!("C2E suffix growth {index:05}");
+                }
+                new_actions[late_column_zero].label = format!(
+                    "C2E global growth {late_column_zero:05} {}",
+                    "W".repeat(2048)
+                );
+            }
+            TrackC2EGridRecipe::SharedPrefixShrink => {
+                assert_eq!(
+                    columns, 3,
+                    "prefix recipes are characterized at three columns"
+                );
+                let late_column_zero = (count - 1) / columns * columns;
+                assert!(late_column_zero >= prefix_len);
+                old_actions[late_column_zero].label = format!(
+                    "C2E old unique width {late_column_zero:05} {}",
+                    "W".repeat(2048)
+                );
+                for (index, action) in new_actions.iter_mut().enumerate().skip(prefix_len) {
+                    action.label = format!("C2E suffix shrink {index:05}");
+                }
+            }
+            TrackC2EGridRecipe::TallCellSpillCold => {
+                assert_eq!(columns, 3, "tall spill is characterized at three columns");
+                old_actions[0].label = "Tall cell spill line\n".repeat(150);
+                new_actions.clone_from(&old_actions);
+            }
+        }
+        let old_texts = track_c2e_presentation_texts(&old_actions);
+        let new_texts = track_c2e_presentation_texts(&new_actions);
+        let actual_prefix = old_texts
+            .iter()
+            .zip(&new_texts)
+            .take_while(|(old, new)| old == new)
+            .count();
+        assert_eq!(
+            actual_prefix, prefix_len,
+            "the recipe's exact full-cell prefix"
+        );
+
+        let base_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&base_actions);
+        let old_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&old_actions);
+        let new_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&new_actions);
+        let old_presentation_id = track_c2e_presentation_signature(&old_texts);
+        let presentation_id = track_c2e_presentation_signature(&new_texts);
+        let mut fixture =
+            StableSignature::new(0x435F_524F_4F54_4752, "track-c2e-grid-fixture", count);
+        track_c2e_signature_string(&mut fixture, recipe.name());
+        for value in [
+            count as u64,
+            columns as u64,
+            u64::from(960.0_f32.to_bits()),
+            u64::from(640.0_f32.to_bits()),
+            u64::from(1.0_f32.to_bits()),
+            0,
+            prefix_len as u64,
+            base_action_id,
+            old_action_id,
+            new_action_id,
+        ] {
+            fixture.number(value);
+        }
+        TrackC2EGridFixture {
+            recipe,
+            count,
+            columns,
+            base_actions,
+            old_actions,
+            new_actions,
+            prefix_len,
+            fixture_signature: fixture.finish(),
+            base_action_id,
+            old_action_id,
+            new_action_id,
+            old_presentation_id,
+            presentation_id,
+            old_presentation_utf8_bytes: old_texts.iter().map(|text| text.len() as u64).sum(),
+            presentation_utf8_bytes: new_texts.iter().map(|text| text.len() as u64).sum(),
+        }
+    }
+
+    fn track_c2e_recipe_specs(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+    ) -> Vec<(usize, usize, TrackC2EGridRecipe)> {
+        let mut specs = Vec::new();
+        for count in mode.action_sizes() {
+            for recipe in TrackC2EGridRecipe::PRIMARY {
+                specs.push((*count, 3, recipe));
+            }
+            for columns in [1, 2, 5, 6] {
+                specs.push((*count, columns, TrackC2EGridRecipe::FullGeometryCold));
+            }
+        }
+        specs
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct TrackC2EGridSearchState {
+        last_results_valid: bool,
+        last_search_pending: bool,
+        provider_revision: u64,
+        last_provider_revision: u64,
+        catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+        catalog_versions_stable: bool,
+        provider_deferral: u64,
+        pending_query_id: u64,
+        background_refresh_pending: bool,
+        selected: u64,
+    }
+
+    fn track_c2e_search_state(app: &LauncherApp) -> TrackC2EGridSearchState {
+        let mut pending_query = crate::performance::track_c_workloads::StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-pending-query",
+            usize::from(app.pending_query.is_some()),
+        );
+        if let Some(query) = app.pending_query.as_deref() {
+            track_c2e_signature_string(&mut pending_query, query);
+        }
+        TrackC2EGridSearchState {
+            last_results_valid: app.last_results_valid,
+            last_search_pending: app.last_search_pending,
+            provider_revision: app.plugins.search_generation(),
+            last_provider_revision: app.last_search_provider_revision,
+            catalog_versions: app.last_search_result_catalog_versions,
+            catalog_versions_stable: app.last_search_result_catalog_versions_stable,
+            provider_deferral: match app.last_search_provider_deferral {
+                search::ProviderSearchDeferral::None => 0,
+                search::ProviderSearchDeferral::Capacity => 1,
+            },
+            pending_query_id: pending_query.finish(),
+            background_refresh_pending: app.background_query_refresh_pending,
+            selected: app.selected.map_or(u64::MAX, |index| index as u64),
+        }
+    }
+
+    struct TrackC2EGridState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        recipe: TrackC2EGridRecipe,
+        count: usize,
+        columns: usize,
+        expected_result_action_id: u64,
+        expected_catalog_action_id: u64,
+        expected_actions: Vec<Action>,
+        incoming_actions: Option<Vec<Action>>,
+        incoming_catalog: Option<Arc<Vec<Action>>>,
+        prefix_len: usize,
+        fixture_signature: u64,
+        presentation_id: u64,
+        expected_visible_ids: Vec<(usize, egui::Id)>,
+        expected_search_state: TrackC2EGridSearchState,
+        generation_before: u64,
+        old_key: Option<RootListGeometryKey>,
+        old_atlas: Option<Arc<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
+        storage_before: c2e_grid_cell_loop_observer::StorageGroups,
+        old_grid_column_widths: Vec<f32>,
+        old_grid_column_x_offsets: Vec<f32>,
+        old_late_cell_width: Option<f32>,
+        late_column_zero: Option<usize>,
+        geometry_before: RootListGeometryObservation,
+        available_width: f32,
+        outer: egui::Rect,
+        eager: EagerRootGridLayout,
+        style: egui::Style,
+        frame_index: usize,
+        expected_presentation_bytes: u64,
+    }
+
+    struct TrackC2EGridFrame {
+        _output: egui::FullOutput,
+        observation: c2e_grid_cell_loop_observer::Receipt,
+    }
+
+    fn track_c2e_prepare_grid_state(
+        root: &std::path::Path,
+        fixture: TrackC2EGridFixture,
+    ) -> TrackC2EGridState {
+        let ctx = egui::Context::default();
+        ctx.set_fonts(egui::FontDefinitions::default());
+        let mut initial_style = ctx.style().as_ref().clone();
+        initial_style.wrap = Some(false);
+        ctx.set_style(initial_style);
+        let TrackC2EGridFixture {
+            recipe,
+            count,
+            columns,
+            base_actions,
+            old_actions,
+            new_actions,
+            prefix_len,
+            fixture_signature,
+            base_action_id,
+            old_action_id,
+            new_action_id,
+            old_presentation_id,
+            presentation_id,
+            old_presentation_utf8_bytes,
+            presentation_utf8_bytes,
+        } = fixture;
+
+        let old_texts = track_c2e_presentation_texts(&old_actions);
+        let new_texts = track_c2e_presentation_texts(&new_actions);
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&old_actions),
+            old_action_id
+        );
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&new_actions),
+            new_action_id
+        );
+        assert_eq!(
+            track_c2e_presentation_signature(&old_texts),
+            old_presentation_id
+        );
+        assert_eq!(
+            track_c2e_presentation_signature(&new_texts),
+            presentation_id
+        );
+        assert_eq!(
+            old_texts.iter().map(|text| text.len() as u64).sum::<u64>(),
+            old_presentation_utf8_bytes
+        );
+        assert_eq!(
+            new_texts.iter().map(|text| text.len() as u64).sum::<u64>(),
+            presentation_utf8_bytes
+        );
+
+        let mut app = root_list_app_at(&ctx, old_actions, root);
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = columns;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        assert!(app.resolved_grid_layout);
+        assert_eq!(app.results.len(), count);
+        assert_eq!(app.actions.len(), count);
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results),
+            old_action_id
+        );
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&app.actions),
+            old_action_id
+        );
+        assert_eq!(
+            crate::performance::track_c_workloads::action_fixture_identity(&base_actions),
+            base_action_id
+        );
+
+        let mut frame_index = 0;
+        for _ in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new());
+            frame_index += 1;
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert_eq!(app.query, "root list fixture");
+        assert_eq!(app.last_search_query, "root list fixture");
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert_eq!(app.plugins.search_generation(), 0);
+        assert_eq!(app.last_search_provider_revision, 0);
+        assert_eq!(app.last_plugin_search_generation, 0);
+        let startup_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            startup_catalog_versions,
+            crate::radial::dynamic::MutableResultCatalogVersions::default(),
+            "the isolated fresh-process fixture has no mutable-catalog publications"
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(startup_catalog_versions),
+            "the constructor's initial empty-query result records its catalog snapshot"
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.selected, None);
+        let geometry_before = app.root_list_geometry.test_observation();
+        assert!(geometry_before.rebuild_count > 0);
+        assert_eq!(geometry_before.measured_cells, count as u64);
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real root UI records its available width");
+        assert_eq!(available_width.to_bits(), 944.0_f32.to_bits());
+
+        if recipe == TrackC2EGridRecipe::TallCellSpillCold {
+            let row_top = app.root_list_geometry.row_tops[0];
+            let row_height = app.root_list_geometry.row_heights[0];
+            let scroll_id = app
+                .test_root_scroll_area_id
+                .expect("grid ScrollArea exists");
+            let mut scroll = egui::scroll_area::State::load(&ctx, scroll_id)
+                .expect("settled grid has ScrollArea state");
+            scroll.offset.y = row_top + row_height + 8.0;
+            scroll.store(&ctx, scroll_id);
+            let _ = run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new());
+            frame_index += 1;
+            app.dashboard_data_cache.wait_for_refresh();
+        }
+
+        let expected_visible_ids = app.test_root_rendered_row_ids.clone();
+        let style = ctx.style().as_ref().clone();
+        assert_eq!(style.wrap, Some(false));
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_fonts(egui::FontDefinitions::default());
+        let (outer, eager) = track_c_eager_root_grid_layout(
+            &oracle_ctx,
+            &new_actions,
+            columns,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        let search_state = track_c2e_search_state(&app);
+        assert_eq!(app.folder_aliases.len(), 0);
+        assert_eq!(app.folder_aliases_lc.len(), 0);
+        assert_eq!(app.bookmark_aliases.len(), 0);
+        assert_eq!(app.bookmark_aliases_lc.len(), 0);
+        let generation_before = app.root_list_geometry.result_generation;
+        let old_key = app.root_list_geometry.key.clone();
+        let old_atlas = app.root_list_geometry.font_atlas.clone();
+        let old_grid_column_widths = app.root_list_geometry.grid_column_widths.clone();
+        let old_grid_column_x_offsets = app.root_list_geometry.grid_column_x_offsets.clone();
+        let late_column_zero = matches!(
+            recipe,
+            TrackC2EGridRecipe::SharedPrefixGrowth | TrackC2EGridRecipe::SharedPrefixShrink
+        )
+        .then_some((count - 1) / columns * columns);
+        let old_late_cell_width =
+            late_column_zero.map(|index| app.root_list_geometry.grid_cell_widths[index]);
+        let storage_before =
+            c2e_grid_cell_loop_observer::StorageGroups::from_cache(&app.root_list_geometry);
+        let mut incoming_actions = None;
+        let mut incoming_catalog = None;
+        if !recipe.is_warm() {
+            incoming_catalog = Some(Arc::new(new_actions.clone()));
+            incoming_actions = Some(new_actions.clone());
+        }
+        crate::performance::track_c::reset();
+        TrackC2EGridState {
+            app,
+            ctx,
+            recipe,
+            count,
+            columns,
+            expected_result_action_id: new_action_id,
+            expected_catalog_action_id: new_action_id,
+            expected_actions: new_actions,
+            incoming_actions,
+            incoming_catalog,
+            prefix_len,
+            fixture_signature,
+            presentation_id,
+            expected_visible_ids,
+            expected_search_state: search_state,
+            generation_before,
+            old_key,
+            old_atlas,
+            storage_before,
+            old_grid_column_widths,
+            old_grid_column_x_offsets,
+            old_late_cell_width,
+            late_column_zero,
+            geometry_before,
+            available_width,
+            outer,
+            eager,
+            style,
+            frame_index,
+            expected_presentation_bytes: presentation_utf8_bytes,
+        }
+    }
+
+    fn track_c2e_run_grid_owner(state: &mut TrackC2EGridState) -> TrackC2EGridFrame {
+        let scope = c2e_grid_cell_loop_observer::Scope::start();
+        if !state.recipe.is_warm() {
+            state.app.actions = state
+                .incoming_catalog
+                .take()
+                .expect("cold recipe has an owned incoming catalog");
+            state.app.results = state
+                .incoming_actions
+                .take()
+                .expect("cold recipe has owned incoming results");
+            state.app.invalidate_root_list_results();
+        }
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        let output =
+            run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new());
+        TrackC2EGridFrame {
+            _output: output,
+            observation: scope.finish(),
+        }
+    }
+
+    fn track_c2e_geometry_signature(cache: &RootListGeometryCache) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-grid-geometry",
+            cache.grid_cell_widths.len(),
+        );
+        signature.number(cache.grid_columns as u64);
+        for values in [
+            &cache.grid_cell_widths,
+            &cache.grid_cell_heights,
+            &cache.grid_column_x_offsets,
+            &cache.grid_column_widths,
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.grid_visual_row_tops,
+            &cache.grid_visual_row_bottoms,
+            &cache.grid_visual_max_end_tree,
+        ] {
+            signature.number(values.len() as u64);
+            for value in values {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.grid_nominal_width,
+            cache.grid_full_width,
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        signature.finish()
+    }
+
+    fn track_c2e_full_state_signature(
+        state: &TrackC2EGridState,
+        result_action_id: u64,
+        catalog_action_id: u64,
+        presentation_id: u64,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let app = &state.app;
+        let mut signature = StableSignature::new(
+            0x435F_524F_4F54_4752,
+            "track-c2e-grid-full-state",
+            app.results.len(),
+        );
+        signature.number(result_action_id);
+        signature.number(catalog_action_id);
+        signature.number(presentation_id);
+        for text in [&app.query, &app.last_search_query] {
+            track_c2e_signature_string(&mut signature, text);
+        }
+        signature.number(app.last_results_valid as u64);
+        signature.number(app.last_search_pending as u64);
+        signature.number(app.plugins.search_generation());
+        signature.number(app.last_search_provider_revision);
+        signature.number(app.last_plugin_search_generation);
+        signature.number(app.last_search_result_catalog_versions_stable as u64);
+        if let Some(versions) = app.last_search_result_catalog_versions {
+            signature.number(1);
+            signature.number(versions.clipboard);
+            signature.number(versions.todo);
+            signature.number(versions.notes);
+        } else {
+            signature.number(0);
+        }
+        signature.number(match app.last_search_provider_deferral {
+            search::ProviderSearchDeferral::None => 0,
+            search::ProviderSearchDeferral::Capacity => 1,
+        });
+        signature.number(track_c2e_search_state(app).pending_query_id);
+        signature.number(app.background_query_refresh_pending as u64);
+        signature.number(app.selected.map_or(u64::MAX, |index| index as u64));
+        signature.number(app.pending_query.is_some() as u64);
+        signature.number(app.query_results_layout.enabled as u64);
+        signature.number(app.query_results_layout.respect_plugin_capability as u64);
+        signature.number(app.query_results_layout.cols as u64);
+        signature.number(app.resolved_grid_layout as u64);
+        signature.number(app.root_list_geometry.result_generation);
+        signature.finish()
+    }
+
+    fn track_c2e_viewport_signature(state: &TrackC2EGridState) -> (u64, Vec<usize>) {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("the rendered grid records its ScrollArea extent");
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("the rendered grid records its actual viewport");
+        let mut signature =
+            StableSignature::new(0x435F_524F_4F54_4752, "track-c2e-grid-viewport", rows.len());
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            signature.number(*index as u64);
+            track_c2e_signature_string(&mut signature, action_id);
+            track_c2e_signature_string(&mut signature, &format!("{id:?}"));
+        }
+        for (index, rect) in rects {
+            signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        (
+            signature.finish(),
+            rows.iter().map(|(index, _)| *index).collect(),
+        )
+    }
+
+    fn track_c2e_transition_receipts(
+        state: &TrackC2EGridState,
+        generation_after: u64,
+        atlas_same: bool,
+    ) -> Vec<u64> {
+        let key = state
+            .app
+            .root_list_geometry
+            .key
+            .as_ref()
+            .expect("real grid frame installs an exact geometry key");
+        let old = state.old_key.as_ref();
+        let viewport = state
+            .app
+            .test_root_scroll_viewport_rect
+            .expect("actual root grid viewport is captured");
+        let (inner_rect, content_size, offset) = state
+            .app
+            .test_root_scroll_area_extent
+            .expect("actual root grid content extent is captured");
+        let font_id_signature = |key: &RootListGeometryKey| {
+            let mut signature = crate::performance::track_c_workloads::StableSignature::new(
+                0x435F_524F_4F54_4752,
+                "track-c2e-font-id",
+                1,
+            );
+            track_c2e_signature_string(&mut signature, &format!("{:?}", key.button_font));
+            signature.finish()
+        };
+        let new_spacing = state.ctx.style();
+        let spacing = &new_spacing.spacing;
+        vec![
+            state.generation_before,
+            generation_after,
+            generation_after.wrapping_sub(state.generation_before),
+            state.count as u64,
+            state.columns as u64,
+            old.is_some() as u64,
+            state.app.root_list_geometry.key.is_some() as u64,
+            old.map_or(0, |key| u64::from(key.width_bits)),
+            u64::from(key.width_bits),
+            old.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
+            u64::from(key.pixels_per_point_bits),
+            old.is_some_and(|key| key.wrap) as u64,
+            key.wrap as u64,
+            old.is_some_and(|key| key.show_full_paths) as u64,
+            key.show_full_paths as u64,
+            old.is_some_and(|key| key.is_grid) as u64,
+            key.is_grid as u64,
+            old.map_or(0, |key| key.grid_columns as u64),
+            key.grid_columns as u64,
+            old.map_or(0, |key| u64::from(key.grid_nominal_width_bits)),
+            u64::from(key.grid_nominal_width_bits),
+            old.map_or(0, font_id_signature),
+            font_id_signature(key),
+            u64::from(spacing.button_padding.x.to_bits()),
+            u64::from(spacing.button_padding.y.to_bits()),
+            u64::from(spacing.interact_size.y.to_bits()),
+            u64::from(spacing.interact_size.x.to_bits()),
+            u64::from(spacing.item_spacing.y.to_bits()),
+            u64::from(key.grid_spacing_x_bits),
+            u64::from(key.grid_spacing_y_bits),
+            atlas_same as u64,
+            u64::from(960.0_f32.to_bits()),
+            u64::from(640.0_f32.to_bits()),
+            u64::from(viewport.min.x.to_bits()),
+            u64::from(viewport.min.y.to_bits()),
+            u64::from(viewport.max.x.to_bits()),
+            u64::from(viewport.max.y.to_bits()),
+            u64::from(inner_rect.min.x.to_bits()),
+            u64::from(inner_rect.min.y.to_bits()),
+            u64::from(inner_rect.max.x.to_bits()),
+            u64::from(inner_rect.max.y.to_bits()),
+            u64::from(content_size.x.to_bits()),
+            u64::from(content_size.y.to_bits()),
+            u64::from(offset.x.to_bits()),
+            u64::from(offset.y.to_bits()),
+            u64::from(state.available_width.to_bits()),
+            u64::from(state.app.root_list_geometry.grid_full_width.to_bits()),
+            u64::from(state.app.root_list_geometry.content_width.to_bits()),
+            u64::from(state.app.root_list_geometry.total_height.to_bits()),
+            state.app.root_list_geometry.row_tops.len() as u64,
+            state.app.root_list_geometry.grid_visual_max_end_tree.len() as u64,
+            state.app.root_list_geometry.font_atlas.is_some() as u64,
+            state.app.test_root_rendered_row_ids.len() as u64,
+        ]
+    }
+
+    fn track_c2e_validate_grid_state(
+        state: &mut TrackC2EGridState,
+        frame: &TrackC2EGridFrame,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::OwnerObservation;
+
+        let app = &state.app;
+        assert_eq!(
+            app.results, state.expected_actions,
+            "complete ordered grid results"
+        );
+        assert_eq!(
+            app.actions.as_ref(),
+            &state.expected_actions,
+            "complete shared action catalog matches measured results"
+        );
+        assert_eq!(app.query, "root list fixture");
+        assert_eq!(app.last_search_query, "root list fixture");
+        assert_eq!(app.selected, None);
+        assert_eq!(
+            track_c2e_search_state(app),
+            state.expected_search_state,
+            "search, provider, catalog, pending, and selection state are unchanged"
+        );
+        assert!(app.resolved_grid_layout);
+        assert!(app.query_results_layout.enabled);
+        assert_eq!(app.query_results_layout.cols, state.columns);
+        assert!(!app.query_results_layout.respect_plugin_capability);
+        assert!(app.folder_aliases.is_empty() && app.folder_aliases_lc.is_empty());
+        assert!(app.bookmark_aliases.is_empty() && app.bookmark_aliases_lc.is_empty());
+        let actual_available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("actual grid UI provides the measured width");
+        assert!((actual_available_width - state.available_width).abs() <= 0.01);
+        let cache = &app.root_list_geometry;
+        let key = cache.key.as_ref().expect("grid cache has current key");
+        let old_key = state
+            .old_key
+            .as_ref()
+            .expect("the prepared owner begins with settled grid geometry");
+        assert_eq!(key.width_bits, actual_available_width.to_bits());
+        assert_eq!(key.pixels_per_point_bits, 1.0_f32.to_bits());
+        assert!(!key.wrap && !key.show_full_paths && key.is_grid);
+        assert_eq!(key.grid_columns, state.columns);
+        assert_eq!(old_key.result_generation, state.generation_before);
+        assert_eq!(old_key.result_count, state.count);
+        assert_eq!(old_key.width_bits, key.width_bits);
+        assert_eq!(old_key.pixels_per_point_bits, key.pixels_per_point_bits);
+        assert_eq!(old_key.button_font, key.button_font);
+        assert_eq!(old_key.wrap, key.wrap);
+        assert_eq!(old_key.show_full_paths, key.show_full_paths);
+        assert_eq!(old_key.is_grid, key.is_grid);
+        assert_eq!(old_key.grid_columns, key.grid_columns);
+        assert_eq!(old_key.grid_nominal_width_bits, key.grid_nominal_width_bits);
+        assert_eq!(old_key.grid_spacing_x_bits, key.grid_spacing_x_bits);
+        assert_eq!(old_key.grid_spacing_y_bits, key.grid_spacing_y_bits);
+        let expected_nominal = ((actual_available_width
+            - (state.columns.saturating_sub(1) as f32 * 8.0))
+            / state.columns as f32)
+            .max(160.0);
+        assert_eq!(key.grid_nominal_width_bits, expected_nominal.to_bits());
+
+        let after = cache.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.geometry_before.rebuild_count);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.geometry_before.measured_cells);
+        if state.recipe.is_warm() {
+            assert_eq!(
+                rebuilds, 0,
+                "warm repeat preserves the exact geometry cache"
+            );
+            assert_eq!(measured_cells, 0);
+            assert_eq!(frame.observation.calls, 0);
+            assert_eq!(frame.observation.cells, 0);
+            assert_eq!(frame.observation.elapsed_nanos, 0);
+        } else {
+            assert_eq!(rebuilds, 1, "result-generation invalidation rebuilds once");
+            assert_eq!(measured_cells, state.count as u64);
+            assert_eq!(frame.observation.calls, 1);
+            assert_eq!(frame.observation.cells, state.count as u64);
+            assert!(frame.observation.elapsed_nanos > 0);
+        }
+        let geometry_ns = if rebuilds == 0 {
+            0
+        } else {
+            after.last_rebuild_nanos
+        };
+        let cell_loop_ns = frame.observation.elapsed_nanos;
+        assert!(cell_loop_ns <= geometry_ns);
+
+        assert_eq!(cache.grid_cell_widths.len(), state.expected_actions.len());
+        assert_eq!(cache.grid_cell_heights.len(), state.expected_actions.len());
+        let row_geometry = assert_track_c_root_grid_matches_eager(
+            cache,
+            &state.eager,
+            state.outer,
+            &state.expected_actions,
+            state.columns,
+            &state.style,
+            "C2-E complete cold grid owner",
+        );
+        let (viewport_id, actual_indices) = track_c2e_viewport_signature(state);
+        let (inner_rect, content_size, offset) = state.app.test_root_scroll_area_extent.unwrap();
+        assert!((content_size.x - cache.content_width).abs() <= 1.0);
+        assert!((content_size.y - cache.total_height).abs() <= 1.0);
+        let viewport = state.app.test_root_scroll_viewport_rect.unwrap();
+        let content_origin = inner_rect.min - offset;
+        let visible_start = row_geometry
+            .iter()
+            .position(|(top, height, _, _)| content_origin.y + *top + *height > viewport.min.y)
+            .unwrap_or(row_geometry.len());
+        let visible_end = row_geometry
+            .iter()
+            .take_while(|(top, _, _, _)| content_origin.y + *top < viewport.max.y)
+            .count();
+        let mut expected_visible_rows = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(row_geometry.len()))
+            .collect::<Vec<_>>();
+        expected_visible_rows.extend(row_geometry.iter().enumerate().filter_map(
+            |(row, (_, _, visual_top, visual_bottom))| {
+                (content_origin.y + *visual_top < viewport.max.y
+                    && content_origin.y + *visual_bottom > viewport.min.y)
+                    .then_some(row)
+            },
+        ));
+        expected_visible_rows.sort_unstable();
+        expected_visible_rows.dedup();
+        let expected_indices = expected_visible_rows
+            .into_iter()
+            .flat_map(|row| {
+                let start = row * state.columns;
+                start..(start + state.columns).min(state.count)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_indices, expected_indices);
+        assert!(
+            actual_indices.windows(2).all(|pair| pair[0] < pair[1]),
+            "painted cell indices are unique and retain absolute order"
+        );
+        let rows = &state.app.test_root_rendered_rows;
+        let ids = &state.app.test_root_rendered_row_ids;
+        let rects = &state.app.test_root_rendered_row_rects;
+        assert_eq!(rows.len(), ids.len());
+        assert_eq!(rows.len(), rects.len());
+        for (((index, action_id), (id_index, _)), (rect_index, rect)) in
+            rows.iter().zip(ids).zip(rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager_cell = state.eager.cells[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_cell.min - state.outer.min),
+                eager_cell.size(),
+            );
+            assert!(rect.min.distance(expected_rect.min) <= 1.0);
+            assert!(rect.max.distance(expected_rect.max) <= 1.0);
+        }
+
+        let old_ids = state
+            .expected_visible_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut current_ids = std::collections::HashSet::with_capacity(ids.len());
+        for (index, id) in ids {
+            assert!(
+                current_ids.insert(*id),
+                "each painted absolute cell has a unique widget ID"
+            );
+            if let Some(old_id) = old_ids.get(index) {
+                if state.recipe.is_warm() {
+                    assert_eq!(id, old_id, "same generation preserves absolute widget IDs");
+                } else {
+                    assert_ne!(id, old_id, "a new results generation gets new widget IDs");
+                }
+            }
+        }
+
+        if state.recipe == TrackC2EGridRecipe::SharedPrefixGrowth {
+            let late = state
+                .late_column_zero
+                .expect("growth fixture identifies its late column-zero stress cell");
+            let old_cell_width = state
+                .old_late_cell_width
+                .expect("settled source layout includes the stress cell");
+            assert!(cache.grid_cell_widths[late] > old_cell_width);
+            assert!(cache.grid_column_widths[0] > state.old_grid_column_widths[0]);
+            assert!(cache.grid_column_x_offsets[1] > state.old_grid_column_x_offsets[1]);
+            assert!(cache.grid_column_x_offsets[2] > state.old_grid_column_x_offsets[2]);
+        }
+        if state.recipe == TrackC2EGridRecipe::SharedPrefixShrink {
+            let late = state
+                .late_column_zero
+                .expect("shrink fixture identifies its old late column-zero stress cell");
+            let old_cell_width = state
+                .old_late_cell_width
+                .expect("settled source layout includes the stress cell");
+            assert!(old_cell_width > cache.grid_cell_widths[late]);
+            assert!(state.old_grid_column_widths[0] > cache.grid_column_widths[0]);
+            assert!(cache.grid_column_x_offsets[1] < state.old_grid_column_x_offsets[1]);
+            assert!(cache.grid_column_x_offsets[2] < state.old_grid_column_x_offsets[2]);
+        }
+        if state.recipe == TrackC2EGridRecipe::TallCellSpillCold {
+            let (logical_top, logical_height, visual_top, visual_bottom) = row_geometry[0];
+            let logical_bottom = content_origin.y + logical_top + logical_height;
+            assert!(logical_bottom <= viewport.min.y);
+            assert!(
+                content_origin.y + visual_top < viewport.max.y
+                    && content_origin.y + visual_bottom > viewport.min.y
+            );
+            assert!(
+                rows.iter().any(|(index, _)| *index < state.columns),
+                "the offscreen logical row's visual spill remains painted"
+            );
+            let logical_row_zero_visible =
+                content_origin.y + logical_top < viewport.max.y && logical_bottom > viewport.min.y;
+            assert!(
+                !logical_row_zero_visible,
+                "row zero's logical interval is outside the viewport despite its tall visual spill"
+            );
+            assert!(
+                actual_indices
+                    .iter()
+                    .any(|index| *index / state.columns == 0),
+                "spill painting keeps row zero's absolute cell indices in the exact viewport set"
+            );
+        }
+
+        let storage_after = c2e_grid_cell_loop_observer::StorageGroups::from_cache(cache);
+        let storage_peak = frame.observation.replacement_peak.unwrap_or(storage_after);
+        if state.recipe.is_warm() {
+            assert_eq!(storage_after, state.storage_before);
+            assert_eq!(storage_peak, storage_after);
+        } else {
+            assert_eq!(
+                storage_peak,
+                state.storage_before.overlap(storage_after),
+                "the actual replacement site briefly owns cleared old cache plus all new vectors"
+            );
+        }
+        assert!(cache.row_x_offsets.capacity() == 0);
+        assert!(cache.row_response_x_offsets.capacity() == 0);
+        assert!(cache.row_widths.capacity() == 0);
+        assert!(cache.row_response_widths.capacity() == 0);
+
+        let atlas_same = matches!(
+            (state.old_atlas.as_ref(), cache.font_atlas.as_ref()),
+            (Some(old), Some(new)) if Arc::ptr_eq(old, new)
+        );
+        assert!(
+            atlas_same,
+            "all measured recipes retain the actual warm font atlas"
+        );
+        let action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&state.expected_actions);
+        let result_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results);
+        let catalog_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(app.actions.as_ref());
+        assert_eq!(result_action_id, action_id);
+        let presentation_texts = track_c2e_presentation_texts(&state.expected_actions);
+        let actual_presentation_bytes = presentation_texts
+            .iter()
+            .map(|text| text.len() as u64)
+            .sum::<u64>();
+        assert_eq!(actual_presentation_bytes, state.expected_presentation_bytes);
+        let presentation_id = track_c2e_presentation_signature(&presentation_texts);
+        assert_eq!(presentation_id, state.presentation_id);
+        assert_eq!(result_action_id, state.expected_result_action_id);
+        assert_eq!(catalog_action_id, state.expected_catalog_action_id);
+        let geometry_id = track_c2e_geometry_signature(cache);
+        let state_id = track_c2e_full_state_signature(
+            state,
+            result_action_id,
+            catalog_action_id,
+            presentation_id,
+        );
+        let generation_after = cache.result_generation;
+        assert_eq!(
+            generation_after,
+            if state.recipe.is_warm() {
+                state.generation_before
+            } else {
+                state.generation_before.wrapping_add(1)
+            }
+        );
+        let mut revisions = vec![presentation_id, geometry_id];
+        revisions.extend(track_c2e_transition_receipts(
+            state,
+            generation_after,
+            atlas_same,
+        ));
+        let painted_cells = rows.len() as u64;
+        let mut work_counters = vec![
+            geometry_ns,
+            cell_loop_ns,
+            rebuilds,
+            0,
+            measured_cells,
+            painted_cells,
+            state.prefix_len as u64,
+        ];
+        work_counters.extend(state.storage_before.receipt(storage_after, storage_peak));
+        OwnerObservation {
+            output_identity: state_id,
+            structural_signature: action_id,
+            revision_receipts: revisions,
+            viewport_receipt: Some(viewport_id),
+            work_units: measured_cells,
+            work_counters,
+        }
+    }
+
+    fn track_c2e_emit_samples(
+        fixture: &TrackC2EGridFixture,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(crate::performance::enabled());
+        assert_eq!(
+            crate::performance::track_c_workloads::BenchmarkMode::from_process_env()
+                .expect("valid Track C benchmark mode"),
+            mode
+        );
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        for (field, value) in [
+            ("source", source.as_str()),
+            ("profile", profile.as_str()),
+            ("case", fixture.recipe.name()),
+        ] {
+            assert!(
+                !value.bytes().any(|byte| byte.is_ascii_whitespace()),
+                "{field} token"
+            );
+        }
+        let arrays = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| {
+                    assert_eq!(sample.work_counters.len(), 25);
+                    sample.work_counters[index].to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let ids = |f: fn(&crate::performance::track_c_workloads::SampleRecord) -> u64| {
+            samples
+                .iter()
+                .map(|sample| format!("{:016x}", f(sample)))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let geometry_residual = samples
+            .iter()
+            .map(|sample| {
+                sample.work_counters[0]
+                    .saturating_sub(sample.work_counters[1])
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let owner_residual = samples
+            .iter()
+            .map(|sample| {
+                sample
+                    .elapsed_nanos
+                    .saturating_sub(sample.work_counters[0])
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let presentation_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.revision_receipts[0]))
+            .collect::<Vec<_>>()
+            .join(",");
+        let geometry_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.revision_receipts[1]))
+            .collect::<Vec<_>>()
+            .join(",");
+        let transition_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.revision_receipts[2..]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let storage_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.work_counters[7..]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        eprintln!(
+            "C2E_GRID_RESULT schema=1 stage=cold_grid_geometry_characterization installation=eager_grid_geometry fixture=synthetic_root_grid_geometry owner=RootListGeometryCache::ensure_grid measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 case={} count={} columns={} fixture_signature={:016x} elapsed_ns=[{}] geometry_ns=[{}] cell_loop_ns=[{}] geometry_residual_ns=[{}] owner_residual_ns=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] painted_cells=[{}] presentation_prefix_len=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{}] transition_receipts=[{}] storage_receipts=[{}]",
+            source,
+            profile,
+            mode,
+            WARMUPS,
+            samples.len(),
+            fixture.recipe.name(),
+            fixture.count,
+            fixture.columns,
+            fixture.fixture_signature,
+            elapsed,
+            arrays(0),
+            arrays(1),
+            geometry_residual,
+            owner_residual,
+            arrays(2),
+            arrays(3),
+            arrays(4),
+            arrays(5),
+            arrays(6),
+            ids(|sample| sample.output_identity),
+            ids(|sample| sample.structural_signature),
+            presentation_ids,
+            geometry_ids,
+            ids(|sample| sample.viewport_receipt.unwrap()),
+            transition_receipts,
+            storage_receipts,
+        );
+    }
+
+    fn track_c2e_n100_expected_binding(
+        fixture: &TrackC2EGridFixture,
+    ) -> Option<(u64, u64, u64, u64, u64, u64, usize)> {
+        if fixture.count != 100 {
+            return None;
+        }
+        match (fixture.recipe, fixture.columns) {
+            (TrackC2EGridRecipe::FullGeometryCold, 3) => Some((
+                0xda10_4120_fad8_3bc1,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::SharedPrefixGrowth, 3) => Some((
+                0x77e6_7587_e20c_1b48,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x5942_fd58_6669_6c37,
+                0x0d50_b2c9_c841_f532,
+                0xc357_8f26_4109_c20f,
+                5,
+            )),
+            (TrackC2EGridRecipe::SharedPrefixShrink, 3) => Some((
+                0x1244_8b89_406e_6296,
+                0xc374_5052_c657_97f2,
+                0x3138_4c47_c48b_cd73,
+                0xcbfd_79be_2552_7b18,
+                0x7f46_a882_d995_ac55,
+                0xfd2a_d140_815d_50b0,
+                20,
+            )),
+            (TrackC2EGridRecipe::WarmRepeat, 3) => Some((
+                0x7a52_b515_7331_c9e4,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::TallCellSpillCold, 3) => Some((
+                0x19cb_892b_bfdc_9a92,
+                0xc374_5052_c657_97f2,
+                0xbffd_2147_ce71_d20c,
+                0xbffd_2147_ce71_d20c,
+                0x01a3_80bc_17d6_755c,
+                0x01a3_80bc_17d6_755c,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 1) => Some((
+                0x4528_5c79_b9bf_706f,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 2) => Some((
+                0xd951_edf2_ef39_91fc,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 5) => Some((
+                0x128b_e8fb_7398_ff5b,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            (TrackC2EGridRecipe::FullGeometryCold, 6) => Some((
+                0x071b_a795_a9b3_3f08,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0xc374_5052_c657_97f2,
+                0x0d50_b2c9_c841_f532,
+                0x0d50_b2c9_c841_f532,
+                100,
+            )),
+            _ => None,
+        }
+    }
+
+    fn track_c2e_rebase_grid_state(state: &mut TrackC2EGridState) {
+        let (
+            generation_before,
+            old_key,
+            old_atlas,
+            storage_before,
+            old_grid_column_widths,
+            old_grid_column_x_offsets,
+            geometry_before,
+            expected_visible_ids,
+            expected_search_state,
+        ) = {
+            let app = &state.app;
+            (
+                app.root_list_geometry.result_generation,
+                app.root_list_geometry.key.clone(),
+                app.root_list_geometry.font_atlas.clone(),
+                c2e_grid_cell_loop_observer::StorageGroups::from_cache(&app.root_list_geometry),
+                app.root_list_geometry.grid_column_widths.clone(),
+                app.root_list_geometry.grid_column_x_offsets.clone(),
+                app.root_list_geometry.test_observation(),
+                app.test_root_rendered_row_ids.clone(),
+                track_c2e_search_state(app),
+            )
+        };
+        state.generation_before = generation_before;
+        state.old_key = old_key;
+        state.old_atlas = old_atlas;
+        state.storage_before = storage_before;
+        state.old_grid_column_widths = old_grid_column_widths;
+        state.old_grid_column_x_offsets = old_grid_column_x_offsets;
+        state.geometry_before = geometry_before;
+        state.expected_visible_ids = expected_visible_ids;
+        state.expected_search_state = expected_search_state;
+        state.old_late_cell_width = None;
+        state.late_column_zero = None;
+    }
+
+    fn track_c2e_args_and_atlas_rejection_contract(root: &std::path::Path) {
+        let fixture = track_c2e_grid_fixture(100, 3, TrackC2EGridRecipe::FullGeometryCold);
+        let mut state = track_c2e_prepare_grid_state(root, fixture);
+        let initial_frame = track_c2e_run_grid_owner(&mut state);
+        track_c2e_validate_grid_state(&mut state, &initial_frame);
+
+        let old_action_id = state.expected_result_action_id;
+        let old_presentation_id = state.presentation_id;
+        let mut args_only_actions = state.expected_actions.clone();
+        let replacement_args = "track-c2e-args-only-contract".to_owned();
+        assert_ne!(
+            args_only_actions[0].args.as_deref(),
+            Some(replacement_args.as_str())
+        );
+        args_only_actions[0].args = Some(replacement_args);
+        let args_only_action_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&args_only_actions);
+        let args_only_presentation_id =
+            track_c2e_presentation_signature(&track_c2e_presentation_texts(&args_only_actions));
+        assert_ne!(args_only_action_id, old_action_id);
+        assert_eq!(args_only_presentation_id, old_presentation_id);
+
+        state.expected_actions = args_only_actions.clone();
+        state.expected_result_action_id = args_only_action_id;
+        state.expected_catalog_action_id = args_only_action_id;
+        state.prefix_len = state.count;
+        state.incoming_actions = Some(args_only_actions.clone());
+        state.incoming_catalog = Some(Arc::new(args_only_actions));
+        track_c2e_rebase_grid_state(&mut state);
+        let args_only_frame = track_c2e_run_grid_owner(&mut state);
+        let args_only_observation = track_c2e_validate_grid_state(&mut state, &args_only_frame);
+        assert_eq!(
+            args_only_observation.revision_receipts[0],
+            old_presentation_id
+        );
+        assert_eq!(
+            args_only_observation.structural_signature,
+            args_only_action_id
+        );
+
+        track_c2e_rebase_grid_state(&mut state);
+        let old_key = state
+            .old_key
+            .clone()
+            .expect("settled args-only grid has an exact key");
+        let old_generation = state.generation_before;
+        let old_atlas = state
+            .old_atlas
+            .as_ref()
+            .expect("settled grid retains its actual font atlas")
+            .clone();
+        let mut definitions = egui::FontDefinitions::default();
+        let duplicate = definitions
+            .font_data
+            .get("Ubuntu-Light")
+            .expect("egui default definitions include Ubuntu-Light")
+            .clone();
+        definitions
+            .font_data
+            .insert("TrackC2E-unused-atlas-rejection".into(), duplicate);
+        state.ctx.set_fonts(definitions.clone());
+
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_fonts(definitions);
+        oracle_ctx.set_style(state.style.clone());
+        let (outer, eager) = track_c_eager_root_grid_layout(
+            &oracle_ctx,
+            &state.expected_actions,
+            state.columns,
+            state.available_width,
+            &state.style,
+            state.app.list_scale,
+        );
+        state.outer = outer;
+        state.eager = eager;
+
+        let frame_index = state.frame_index;
+        state.frame_index += 1;
+        let scope = c2e_grid_cell_loop_observer::Scope::start();
+        let output = run_root_list_frame(
+            &state.ctx,
+            &mut state.app,
+            frame_index,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let atlas_frame = TrackC2EGridFrame {
+            _output: output,
+            observation: scope.finish(),
+        };
+        let app = &state.app;
+        let cache = &app.root_list_geometry;
+        let after = cache.test_observation();
+        assert_eq!(cache.key.as_ref(), Some(&old_key));
+        assert_eq!(cache.result_generation, old_generation);
+        assert_eq!(
+            after
+                .rebuild_count
+                .saturating_sub(state.geometry_before.rebuild_count),
+            1,
+            "an actual atlas change rejects the otherwise unchanged key"
+        );
+        assert_eq!(
+            after
+                .measured_cells
+                .saturating_sub(state.geometry_before.measured_cells),
+            state.count as u64
+        );
+        assert_eq!(atlas_frame.observation.calls, 1);
+        assert_eq!(atlas_frame.observation.cells, state.count as u64);
+        let current_atlas = cache
+            .font_atlas
+            .as_ref()
+            .expect("grid cache records the replacement font atlas");
+        assert!(!Arc::ptr_eq(&old_atlas, current_atlas));
+        assert_eq!(app.results, state.expected_actions);
+        assert_eq!(app.actions.as_ref(), &state.expected_actions);
+        assert_eq!(track_c2e_search_state(app), state.expected_search_state);
+        assert_eq!(app.query, "root list fixture");
+        assert_eq!(app.last_search_query, "root list fixture");
+        assert_eq!(app.selected, None);
+        let (_, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("atlas-replacement frame records its ScrollArea extent");
+        assert!((content_size.x - cache.content_width).abs() <= 1.0);
+        assert!((content_size.y - cache.total_height).abs() <= 1.0);
+        let _ = assert_track_c_root_grid_matches_eager(
+            cache,
+            &state.eager,
+            state.outer,
+            &state.expected_actions,
+            state.columns,
+            &state.style,
+            "C2-E same-key atlas rejection",
+        );
+        let _ = track_c2e_viewport_signature(&state);
+        assert_eq!(
+            state.app.test_root_rendered_row_ids, state.expected_visible_ids,
+            "same generation and presentation retain absolute widget IDs"
+        );
+    }
+
+    #[test]
+    fn track_c2e_oracle_cold_grid_recipe_contract() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        for (count, columns, recipe) in
+            track_c2e_recipe_specs(crate::performance::track_c_workloads::BenchmarkMode::Small)
+        {
+            let fixture = track_c2e_grid_fixture(count, columns, recipe);
+            if let Some((
+                expected_fixture,
+                base,
+                old,
+                new,
+                old_presentation,
+                presentation,
+                prefix,
+            )) = track_c2e_n100_expected_binding(&fixture)
+            {
+                assert_eq!(fixture.fixture_signature, expected_fixture);
+                assert_eq!(fixture.base_action_id, base);
+                assert_eq!(fixture.old_action_id, old);
+                assert_eq!(fixture.new_action_id, new);
+                assert_eq!(fixture.old_presentation_id, old_presentation);
+                assert_eq!(fixture.presentation_id, presentation);
+                assert_eq!(fixture.prefix_len, prefix);
+            }
+            let mut state = track_c2e_prepare_grid_state(workspace.root(), fixture);
+            let frame = track_c2e_run_grid_owner(&mut state);
+            let observation = track_c2e_validate_grid_state(&mut state, &frame);
+            assert_eq!(observation.revision_receipts[0], state.presentation_id);
+            assert_eq!(
+                observation.revision_receipts[1],
+                track_c2e_geometry_signature(&state.app.root_list_geometry)
+            );
+            drop(state);
+        }
+        track_c2e_args_and_atlas_rejection_contract(workspace.root());
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C C2-E owner characterization; isolated synthetic grid only"]
+    fn track_c2e_benchmark_cold_root_grid_geometry() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let workspace = TrackCWorkspace::new();
+        for (count, columns, recipe) in track_c2e_recipe_specs(mode) {
+            let fixture = track_c2e_grid_fixture(count, columns, recipe);
+            let samples = measure_owner(
+                || {
+                    track_c2e_prepare_grid_state(
+                        workspace.root(),
+                        track_c2e_grid_fixture(count, columns, recipe),
+                    )
+                },
+                track_c2e_run_grid_owner,
+                track_c2e_validate_grid_state,
+            );
+            track_c2e_emit_samples(&fixture, mode, &samples);
+        }
+        drop(workspace);
+    }
+
+    struct TrackCRootQueryState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        source_actions: Vec<Action>,
+        expected_actions: Vec<Action>,
+        query_suffix: &'static str,
+        expected_query: String,
+        expected_provider_revision: u64,
+        expected_catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
+        generation_before_search: u64,
+        available_width: f32,
+        eager_outer: egui::Rect,
+        eager: EagerRootListLayout,
+        style: egui::Style,
+        geometry_before: RootListGeometryObservation,
+        frame_index: usize,
+        invocation_id: u64,
+        armed_revision: Option<u64>,
+    }
+
+    fn track_c_expected_root_query_actions(actions: &[Action], term: &str) -> Vec<Action> {
+        let term = term.to_lowercase();
+        actions
+            .iter()
+            .filter(|action| {
+                action.label.to_lowercase().contains(&term)
+                    || action.desc.to_lowercase().contains(&term)
+                    || action.action.to_lowercase().contains(&term)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn track_c_prepare_root_query_state(
+        root: &std::path::Path,
+        actions: &[Action],
+    ) -> TrackCRootQueryState {
+        const QUERY_SUFFIX: &str = "00009";
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        // `default_folders()` supplies path entries when the isolated workspace
+        // has no folders file. Clear those constructor defaults so this owner
+        // exercises only the synthetic action catalog and no host paths.
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.query = "app ".into();
+        app.match_exact = true;
+        app.fuzzy_weight = 0.0;
+        app.usage.clear();
+        app.update_action_cache();
+        app.search();
+        assert_eq!(
+            app.results, actions,
+            "the setup query seeds the full catalog"
+        );
+        app.selected = None;
+        focus_launcher_query(&ctx, &mut app);
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert!(
+            ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))),
+            "the production launcher query TextEdit owns input before measurement"
+        );
+        set_query_cursor(&ctx, app.query.chars().count(), app.query.chars().count());
+
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the real scaled root UI records its available width");
+        let expected_query = format!("app {QUERY_SUFFIX}");
+        let expected_actions = track_c_expected_root_query_actions(actions, QUERY_SUFFIX);
+        assert!(!expected_actions.is_empty());
+        assert!(app.match_exact && app.fuzzy_weight == 0.0);
+        assert!(app.usage.is_empty());
+        assert!(app.folder_aliases_lc.is_empty() && app.bookmark_aliases_lc.is_empty());
+        let expected_provider_revision = app.plugins.search_generation();
+        let expected_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            app.last_search_provider_revision, expected_provider_revision,
+            "the inert provider snapshot is current before the query event"
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(expected_catalog_versions)
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert!(app.last_results_valid);
+
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let (eager_outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            &expected_actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        let generation_before_search = app.root_list_geometry.result_generation;
+        let geometry_before = app.root_list_geometry.test_observation();
+        assert!(
+            geometry_before.rebuild_count > 0,
+            "setup settles real root geometry"
+        );
+        crate::performance::track_c::reset();
+        TrackCRootQueryState {
+            app,
+            ctx,
+            source_actions: actions.to_vec(),
+            expected_actions,
+            query_suffix: QUERY_SUFFIX,
+            expected_query,
+            expected_provider_revision,
+            expected_catalog_versions,
+            generation_before_search,
+            available_width,
+            eager_outer,
+            eager,
+            style,
+            geometry_before,
+            frame_index: 9,
+            invocation_id: 0x4350_435F_5152_0001,
+            armed_revision: None,
+        }
+    }
+
+    fn track_c_run_root_query_owner(state: &mut TrackCRootQueryState) -> egui::FullOutput {
+        state.armed_revision = Some(arm_track_c_frame_sample(
+            &mut state.app,
+            state.invocation_id,
+        ));
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        run_root_list_frame(
+            &state.ctx,
+            &mut state.app,
+            frame,
+            960.0,
+            640.0,
+            vec![egui::Event::Text(state.query_suffix.to_owned())],
+        )
+    }
+
+    fn track_c_validate_root_query_frame(
+        state: &TrackCRootQueryState,
+        _output: &egui::FullOutput,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::{OwnerObservation, StableSignature};
+
+        let app = &state.app;
+        assert_eq!(app.query, state.expected_query);
+        assert_eq!(app.last_search_query, state.expected_query);
+        assert_eq!(app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in
+            app.results.iter().zip(&state.expected_actions).enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "query result {index} label");
+            assert_eq!(
+                actual.desc, expected.desc,
+                "query result {index} description"
+            );
+            assert_eq!(
+                actual.action, expected.action,
+                "query result {index} action id"
+            );
+            assert_eq!(actual.args, expected.args, "query result {index} arguments");
+        }
+        assert_eq!(
+            app.results,
+            track_c_expected_root_query_actions(&state.source_actions, state.query_suffix,)
+        );
+        assert!(
+            app.last_results_valid,
+            "the query result is accepted and current"
+        );
+        assert!(!app.last_search_pending);
+        assert!(app.pending_query.is_none() && !app.background_query_refresh_pending);
+        assert_eq!(
+            app.selected, None,
+            "replacing results clears the old selection"
+        );
+        assert_eq!(
+            app.last_search_provider_revision,
+            state.expected_provider_revision
+        );
+        assert_eq!(
+            app.plugins.search_generation(),
+            state.expected_provider_revision
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(state.expected_catalog_versions)
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            crate::radial::dynamic::MutableResultCatalogVersions::current(),
+            state.expected_catalog_versions,
+            "the controlled owner leaves result-provider catalogs unchanged"
+        );
+        assert_eq!(
+            app.root_list_geometry.result_generation,
+            state.generation_before_search.wrapping_add(1),
+            "the query replacement publishes exactly one new result generation"
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            "actual query-to-root frame",
+        );
+        let available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the actual root UI records its query-frame width");
+        assert!((available_width - state.available_width).abs() <= 0.01);
+        let after = app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.geometry_before.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.geometry_before.measured_rows);
+        assert_eq!(
+            rebuilds, 1,
+            "the accepted query rebuilds its result geometry once"
+        );
+        assert_eq!(measured_rows, state.expected_actions.len() as u64);
+
+        let rows = &app.test_root_rendered_rows;
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert!(!rows.is_empty(), "the current query paints a root viewport");
+        assert!(rows.len() <= 64, "query viewport paint remains bounded");
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        let (inner_rect, content_size, offset) = app
+            .test_root_scroll_area_extent
+            .expect("the real root ScrollArea records its extent");
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the real root ScrollArea records its viewport");
+        let content_origin = inner_rect.min - offset;
+        let visible_start = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.bottom() - state.eager_outer.top() <= viewport.min.y
+        });
+        let visible_end = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.top() - state.eager_outer.top() < viewport.max.y
+        });
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(state.eager.rows.len()))
+            .collect::<Vec<_>>();
+        let actual_indices = rows.iter().map(|(index, _)| *index).collect::<Vec<_>>();
+        assert_eq!(actual_indices, expected_indices);
+        for ((index, action_id), (rect_index, rect)) in rows.iter().zip(rects) {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager = state.eager.rows[*index];
+            let expected = egui::Rect::from_min_size(
+                content_origin + (eager.min - state.eager_outer.min),
+                eager.size(),
+            );
+            assert!(
+                rect.min.distance(expected.min) <= 1.0 && rect.max.distance(expected.max) <= 1.0,
+                "query frame row {index} differs from the independent eager layout"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(viewport.intersects(*rect));
+            }
+        }
+        let armed_revision = state
+            .armed_revision
+            .expect("the production root query owner arms its visibility revision");
+        assert_eq!(app.visibility_revision.current(), armed_revision);
+        assert_eq!(
+            app.visibility_revision.invocation_id(),
+            Some(state.invocation_id)
+        );
+
+        let mut viewport_signature = StableSignature::new(
+            0x435F_5155_4552_5956,
+            "track-c-root-query-visible-viewport",
+            rows.len(),
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            viewport_signature.bytes(action_id.as_bytes());
+            viewport_signature.bytes(format!("{id:?}").as_bytes());
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+        let structural_signature = {
+            let mut structure = StableSignature::new(
+                0x435F_5155_4552_5953,
+                "track-c-root-query-complete-results",
+                app.results.len(),
+            );
+            structure.number(
+                crate::performance::track_c_workloads::action_fixture_identity(&app.results),
+            );
+            structure.bytes(app.query.as_bytes());
+            structure.number(app.selected.map_or(u64::MAX, |value| value as u64));
+            structure.number(app.last_results_valid as u64);
+            structure.number(app.last_search_pending as u64);
+            structure.finish()
+        };
+        let versions = state.expected_catalog_versions;
+        let mut output = StableSignature::new(
+            0x435F_5155_4552_594F,
+            "track-c-root-query-usable-frame-state",
+            rows.len(),
+        );
+        output.number(structural_signature);
+        output.number(viewport_receipt);
+        output.number(app.root_list_geometry.result_generation);
+        output.number(app.last_search_provider_revision);
+        output.number(versions.clipboard);
+        output.number(versions.todo);
+        output.number(versions.notes);
+        let output_identity = output.finish();
+
+        let metrics = crate::performance::track_c::snapshot();
+        let metric = |phase| {
+            metrics
+                .iter()
+                .find(|(candidate, _)| *candidate == phase)
+                .expect("Track C phase has a fixed slot")
+                .1
+        };
+        let (candidates_scored, local_clones, moved_results) = if crate::performance::enabled() {
+            let first_frame = metric(crate::performance::track_c::Phase::HotkeyFirstUsableFrame);
+            assert_eq!(first_frame.calls, 1);
+            assert_eq!(first_frame.completed, 1);
+            let scoring = metric(crate::performance::track_c::Phase::SearchScoreAndCloneHits);
+            assert_eq!(scoring.calls, 1);
+            let move_results = metric(crate::performance::track_c::Phase::SearchMoveResults);
+            assert_eq!(move_results.calls, 1);
+            let geometry = metric(crate::performance::track_c::Phase::RootGeometryCold);
+            assert_eq!(geometry.calls, 1);
+            (
+                scoring.candidates_scored,
+                scoring.action_clones,
+                move_results.work_units,
+            )
+        } else {
+            (
+                state.source_actions.len() as u64,
+                state.expected_actions.len() as u64,
+                state.expected_actions.len() as u64,
+            )
+        };
+        assert_eq!(candidates_scored, state.source_actions.len() as u64);
+        assert_eq!(local_clones, state.expected_actions.len() as u64);
+        assert_eq!(moved_results, state.expected_actions.len() as u64);
+        OwnerObservation {
+            output_identity,
+            structural_signature,
+            revision_receipts: vec![
+                state.generation_before_search,
+                app.root_list_geometry.result_generation,
+                app.last_search_provider_revision,
+                versions.clipboard,
+                versions.todo,
+                versions.notes,
+                app.last_search_result_catalog_versions_stable as u64,
+            ],
+            viewport_receipt: Some(viewport_receipt),
+            work_units: candidates_scored,
+            work_counters: vec![
+                state.source_actions.len() as u64,
+                candidates_scored,
+                local_clones,
+                moved_results,
+                rebuilds,
+                measured_rows,
+                rows.len() as u64,
+            ],
+        }
+    }
+
+    #[test]
+    fn track_c_oracle_root_query_reaches_current_usable_cpu_frame() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let mut state = track_c_prepare_root_query_state(workspace.root(), &fixture.values);
+        let _output = track_c_run_root_query_owner(&mut state);
+        let _ = track_c_validate_root_query_frame(&state, &_output);
+        drop(state);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2g_pending_query_does_not_absorb_later_geometry_causes() {
+        use crate::gui::track_c_query_observer::{GeometryCause, Origin};
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let ctx = egui::Context::default();
+        let actions = (0..100).map(root_list_action).collect::<Vec<_>>();
+        let mut app = root_list_app_at(&ctx, actions, workspace.root());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.track_c_query_observer.enable_for_test();
+        app.track_c_query_observer.begin_from(
+            app.track_c_query_observer.tentative_start(),
+            Origin::TextEdit,
+            &app.query,
+        );
+
+        // The first pending frame owns its cold geometry rebuild as query work.
+        let _ = run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new());
+        assert!(app.track_c_query_observer.has_pending());
+        assert_eq!(
+            app.track_c_query_observer.snapshot().geometry[GeometryCause::Query as usize].rebuilds,
+            1
+        );
+
+        // The same still-pending intent must not relabel later, independent
+        // display and navigation rebuilds as query work.
+        let _ = run_root_list_frame(&ctx, &mut app, 1, 480.0, 640.0, Vec::new());
+        assert!(app.track_c_query_observer.has_pending());
+        let _ = run_root_list_frame(
+            &ctx,
+            &mut app,
+            2,
+            520.0,
+            640.0,
+            vec![key_press(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+        );
+
+        let geometry = app.track_c_query_observer.snapshot().geometry;
+        assert_eq!(geometry[GeometryCause::Query as usize].rebuilds, 1);
+        assert_eq!(
+            geometry[GeometryCause::DisplayOrResize as usize].rebuilds,
+            1
+        );
+        assert_eq!(geometry[GeometryCause::Navigation as usize].rebuilds, 1);
+        assert!(app.track_c_query_observer.has_pending());
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2g_command_pending_query_handoff_is_one_shot_and_query_bound() {
+        use crate::commands::{
+            ActivationSource, Command, CommandInvocation, CommandOutcome, LauncherCommand,
+            PendingQueryPolicy, QueryPolicy,
+        };
+        use crate::gui::track_c_query_observer::{Cause, Origin, Terminal};
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+        use crate::universal_actions::RootLauncherPolicy;
+
+        let workspace = TrackCWorkspace::new();
+        let mut state =
+            track_c2g_prepare_state(workspace.root(), 100, TrackC2GCase::TypedSuffixSequence);
+        let invocation = CommandInvocation {
+            command: Command::Launcher(LauncherCommand::Show { query: None }),
+            original_action: root_list_action(0),
+            query_override: None,
+            source: ActivationSource::Enter,
+        };
+        let paired_query = "app 00009";
+
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                query: QueryPolicy::Set(paired_query.to_owned()),
+                pending_query: PendingQueryPolicy::Set(paired_query.to_owned()),
+                search: true,
+                invalidate_results: true,
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        let first_started = state
+            .app
+            .track_c_query_observer
+            .pending_started_at_for_test()
+            .expect("the normalized command query starts one observed intent");
+        assert_eq!(state.app.track_c_query_observer.snapshot().intent_count, 1);
+        assert_eq!(state.app.pending_query.as_deref(), Some(paired_query));
+
+        let _ = track_c2g_run_frame(
+            &mut state,
+            0,
+            "paired_command_pending_query",
+            paired_query,
+            false,
+            None,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let first_snapshot = state.app.track_c_query_observer.snapshot();
+        assert_eq!(first_snapshot.intent_count, 1);
+        assert_eq!(first_snapshot.completed_count, 1);
+        assert_eq!(first_snapshot.receipt_count, 1);
+        let first_receipt = first_snapshot.receipts[0].unwrap();
+        assert_eq!(first_receipt.origin, Origin::CommandSet);
+        assert_eq!(first_receipt.terminal, Terminal::Completed);
+        assert_eq!(first_receipt.cause, Cause::FirstUsableRootFrame);
+        assert_eq!(first_receipt.started_at, first_started);
+        assert!(first_receipt.completion_latency_ns.is_some());
+
+        // A later QueryKeep/PendingSet outcome publishing the same text is an
+        // independent pending request. It clears the one-shot pair association;
+        // text equality alone must not absorb this new intent.
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                query: QueryPolicy::Set(paired_query.to_owned()),
+                pending_query: PendingQueryPolicy::Set(paired_query.to_owned()),
+                search: true,
+                invalidate_results: true,
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        let second_command_started = state
+            .app
+            .track_c_query_observer
+            .pending_started_at_for_test()
+            .expect("the second normalized command starts a new intent");
+        assert_eq!(state.app.track_c_query_observer.snapshot().intent_count, 2);
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                pending_query: PendingQueryPolicy::Set(paired_query.to_owned()),
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        assert_eq!(state.app.pending_query.as_deref(), Some(paired_query));
+        assert_eq!(state.app.track_c_query_observer.snapshot().intent_count, 2);
+        assert_eq!(
+            state
+                .app
+                .track_c_query_observer
+                .pending_started_at_for_test(),
+            Some(second_command_started),
+            "publishing pending text clears the handoff without changing the active command start"
+        );
+
+        let _ = track_c2g_run_frame(
+            &mut state,
+            1,
+            "independent_same_text_pending_query",
+            paired_query,
+            false,
+            None,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let second_snapshot = state.app.track_c_query_observer.snapshot();
+        assert_eq!(second_snapshot.intent_count, 3);
+        assert_eq!(second_snapshot.completed_count, 2);
+        assert_eq!(second_snapshot.superseded_count, 1);
+        assert_eq!(second_snapshot.receipt_count, 3);
+        let superseded_command = second_snapshot.receipts[1].unwrap();
+        assert_eq!(superseded_command.origin, Origin::CommandSet);
+        assert_eq!(superseded_command.terminal, Terminal::Superseded);
+        assert_eq!(superseded_command.cause, Cause::SupersededByQuery);
+        assert_eq!(superseded_command.started_at, second_command_started);
+        let independent_pending = second_snapshot.receipts[2].unwrap();
+        assert_eq!(independent_pending.origin, Origin::PendingQuery);
+        assert_eq!(independent_pending.terminal, Terminal::Completed);
+
+        // A single normalized outcome with different command/pending text is
+        // also deliberately not paired, even though both policies are Set.
+        let changed_pending = "app 00010";
+        state.app.apply_command_outcome_with_root_policy(
+            CommandOutcome {
+                query: QueryPolicy::Set(paired_query.to_owned()),
+                pending_query: PendingQueryPolicy::Set(changed_pending.to_owned()),
+                search: true,
+                invalidate_results: true,
+                ..CommandOutcome::default()
+            },
+            &invocation,
+            None,
+            RootLauncherPolicy::Legacy,
+        );
+        let _ = track_c2g_run_frame(
+            &mut state,
+            2,
+            "mismatched_command_pending_query",
+            changed_pending,
+            false,
+            None,
+            960.0,
+            640.0,
+            Vec::new(),
+        );
+        let final_snapshot = state.app.track_c_query_observer.snapshot();
+        assert_eq!(final_snapshot.intent_count, 5);
+        assert_eq!(final_snapshot.completed_count, 3);
+        assert_eq!(final_snapshot.superseded_count, 2);
+        assert_eq!(final_snapshot.receipt_count, 5);
+        assert_eq!(
+            final_snapshot.receipts[3].unwrap().origin,
+            Origin::CommandSet
+        );
+        assert_eq!(
+            final_snapshot.receipts[3].unwrap().terminal,
+            Terminal::Superseded
+        );
+        assert_eq!(
+            final_snapshot.receipts[4].unwrap().origin,
+            Origin::PendingQuery
+        );
+        assert_eq!(
+            final_snapshot.receipts[4].unwrap().terminal,
+            Terminal::Completed
+        );
+
+        drop(state);
+        drop(workspace);
+    }
+
+    const TRACK_C2G_PROVIDER_NAME: &str = "track_c2g_provider";
+    const TRACK_C2G_PROVIDER_SOURCE: &str = "track_c2g_provider";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2GCase {
+        TypedSuffixSequence,
+        AppProviderSupersession,
+        EquivalentFilterSequence,
+        ViewportControls,
+    }
+
+    impl TrackC2GCase {
+        const ALL: [Self; 4] = [
+            Self::TypedSuffixSequence,
+            Self::AppProviderSupersession,
+            Self::EquivalentFilterSequence,
+            Self::ViewportControls,
+        ];
+
+        fn token(self) -> &'static str {
+            match self {
+                Self::TypedSuffixSequence => "typed_suffix_sequence",
+                Self::AppProviderSupersession => "app_provider_supersession",
+                Self::EquivalentFilterSequence => "equivalent_filter_sequence",
+                Self::ViewportControls => "viewport_controls",
+            }
+        }
+
+        fn initial_query(self) -> &'static str {
+            match self {
+                Self::TypedSuffixSequence => "app ",
+                Self::AppProviderSupersession
+                | Self::EquivalentFilterSequence
+                | Self::ViewportControls => "app",
+            }
+        }
+
+        fn intent_count(self) -> usize {
+            match self {
+                Self::TypedSuffixSequence | Self::AppProviderSupersession => 4,
+                Self::EquivalentFilterSequence => 2,
+                Self::ViewportControls => 0,
+            }
+        }
+
+        fn step_count(self) -> usize {
+            match self {
+                Self::TypedSuffixSequence | Self::AppProviderSupersession => 4,
+                Self::EquivalentFilterSequence => 2,
+                Self::ViewportControls => 9,
+            }
+        }
+
+        fn uses_provider(self) -> bool {
+            self == Self::AppProviderSupersession
+        }
+    }
+
+    struct TrackC2GControlledProvider {
+        action: Arc<Mutex<Action>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for TrackC2GControlledProvider {
+        fn search(&self, query: &str) -> Vec<Action> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if query.to_lowercase().contains("provider") {
+                vec![self.action.lock().unwrap().clone()]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn name(&self) -> &str {
+            TRACK_C2G_PROVIDER_NAME
+        }
+
+        fn description(&self) -> &str {
+            "Synthetic Track C query-observation provider"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn always_search(&self) -> bool {
+            true
+        }
+    }
+
+    fn track_c2g_provider_action(generation: &'static str) -> Action {
+        Action {
+            label: "C2G controlled provider result".into(),
+            desc: "Synthetic C2G provider result".into(),
+            action: "track-c:controlled-provider-result".into(),
+            args: Some(generation.into()),
+        }
+    }
+
+    fn track_c2g_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        value: &str,
+    ) {
+        signature.number(value.len() as u64);
+        signature.bytes(value.as_bytes());
+    }
+
+    fn track_c2g_signature_action(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        action: &Action,
+    ) {
+        track_c2g_signature_string(signature, &action.label);
+        track_c2g_signature_string(signature, &action.desc);
+        track_c2g_signature_string(signature, &action.action);
+        match action.args.as_deref() {
+            Some(args) => {
+                signature.number(1);
+                track_c2g_signature_string(signature, args);
+            }
+            None => signature.number(0),
+        }
+    }
+
+    fn track_c2g_fixture_signature(case: TrackC2GCase, count: usize, catalog: &[Action]) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-query-sequence-fixture",
+            count,
+        );
+        track_c2g_signature_string(&mut signature, case.token());
+        signature.number(action_fixture_identity(catalog));
+        track_c2g_signature_string(&mut signature, case.initial_query());
+        signature.number(1); // exact matching
+        signature.number(0.0_f32.to_bits() as u64); // fuzzy weight
+        signature.number(0.0_f32.to_bits() as u64); // usage weight
+        signature.number(0); // autocomplete disabled in the controlled fixture
+        signature.number(case.uses_provider() as u64);
+        signature.number(960.0_f32.to_bits() as u64);
+        signature.number(640.0_f32.to_bits() as u64);
+        signature.number(8); // maximum frames allowed for a completed intent
+        // Bind the actual control recipe, not merely its case name. These
+        // private strings are hashed into the fixture identity and never
+        // included in the emitted record.
+        let recipe: &[&str] = match case {
+            TrackC2GCase::TypedSuffixSequence => &["text_suffix", "0", "00", "000", "00009"],
+            TrackC2GCase::AppProviderSupersession => &[
+                "text_append",
+                " ",
+                "provider",
+                "hold_capacity",
+                "text_suffix",
+                "provider",
+                "release_capacity",
+                "mutate_args:generation-0->generation-1",
+                "notify_source:track_c2g_provider",
+                "text_suffix",
+                "beta",
+                "text_suffix",
+                "provider",
+            ],
+            TrackC2GCase::EquivalentFilterSequence => &[
+                "text_replace_all",
+                "app !id:track-c2g-absent-a",
+                "text_replace_all",
+                "app !id:track-c2g-absent-b",
+            ],
+            TrackC2GCase::ViewportControls => &[
+                "resize:480x640",
+                "resize:960x640",
+                "select:first",
+                "select:middle",
+                "select:last",
+                "neutral_frame:advance_scroll_animation:19_ticks",
+                "neutral_frame:paint_updated_scroll_offset",
+                "secondary_click:visible_row",
+                "primary_click:outside_scroll_area",
+            ],
+        };
+        signature.number(recipe.len() as u64);
+        for token in recipe {
+            track_c2g_signature_string(&mut signature, token);
+        }
+        signature.number(0); // viewport controls do not mutate query weights
+        if case == TrackC2GCase::ViewportControls {
+            signature.number(0);
+            signature.number((count / 2) as u64);
+            signature.number(count.saturating_sub(1) as u64);
+        }
+        if case.uses_provider() {
+            track_c2g_signature_action(&mut signature, &track_c2g_provider_action("generation-0"));
+            track_c2g_signature_action(&mut signature, &track_c2g_provider_action("generation-1"));
+        }
+        signature.finish()
+    }
+
+    fn track_c2g_expected_actions(
+        catalog: &[Action],
+        query: &str,
+        provider_action: Option<&Action>,
+        capacity_deferred: bool,
+    ) -> Vec<Action> {
+        let trimmed = query.trim();
+        assert!(trimmed == "app" || trimmed.starts_with("app "));
+        let mut term = trimmed
+            .strip_prefix("app")
+            .expect("the controlled query uses the app prefix")
+            .trim()
+            .split_whitespace()
+            .filter(|token| !token.starts_with("!id:"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        term.make_ascii_lowercase();
+        let mut expected = if term.is_empty() {
+            catalog.to_vec()
+        } else {
+            track_c_expected_root_query_actions(catalog, &term)
+        };
+        if !capacity_deferred
+            && trimmed.to_lowercase().contains("provider")
+            && let Some(action) = provider_action
+        {
+            expected.push(action.clone());
+        }
+        expected
+    }
+
+    fn track_c2g_catalog_versions(
+        versions: crate::radial::dynamic::MutableResultCatalogVersions,
+    ) -> [u64; 3] {
+        [versions.clipboard, versions.todo, versions.notes]
+    }
+
+    fn track_c2g_geometry_pairs(
+        before: crate::gui::track_c_query_observer::Snapshot,
+        after: crate::gui::track_c_query_observer::Snapshot,
+    ) -> [[u64; 2]; 5] {
+        std::array::from_fn(|index| {
+            [
+                after.geometry[index]
+                    .rebuilds
+                    .saturating_sub(before.geometry[index].rebuilds),
+                after.geometry[index]
+                    .rows
+                    .saturating_sub(before.geometry[index].rows),
+            ]
+        })
+    }
+
+    fn track_c2g_geometry_id(app: &LauncherApp) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let cache = &app.root_list_geometry;
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-root-geometry",
+            app.results.len(),
+        );
+        for values in [
+            &cache.row_tops,
+            &cache.row_heights,
+            &cache.row_x_offsets,
+            &cache.row_response_x_offsets,
+            &cache.row_widths,
+            &cache.row_response_widths,
+        ] {
+            signature.number(values.len() as u64);
+            for value in values {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        for value in [
+            cache.total_height,
+            cache.content_x_offset,
+            cache.content_width,
+        ] {
+            signature.number(u64::from(value.to_bits()));
+        }
+        signature.number(cache.result_generation);
+        signature.finish()
+    }
+
+    fn track_c2g_full_state_id(app: &LauncherApp) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-full-output-state",
+            app.results.len(),
+        );
+        signature.number(action_fixture_identity(&app.actions));
+        signature.number(action_fixture_identity(&app.results));
+        track_c2g_signature_string(&mut signature, &app.query);
+        track_c2g_signature_string(&mut signature, &app.last_search_query);
+        signature.number(app.selected.map_or(u64::MAX, |index| index as u64));
+        signature.number(app.last_results_valid as u64);
+        signature.number(app.last_search_pending as u64);
+        signature.number(app.last_search_result_catalog_versions_stable as u64);
+        signature.number(app.pending_query.is_some() as u64);
+        if let Some(pending) = app.pending_query.as_deref() {
+            track_c2g_signature_string(&mut signature, pending);
+        }
+        signature.number(app.background_query_refresh_pending as u64);
+        signature.number(match app.last_search_provider_deferral {
+            search::ProviderSearchDeferral::None => 0,
+            search::ProviderSearchDeferral::Capacity => 1,
+        });
+        signature.number(app.last_search_provider_revision);
+        signature.number(app.plugins.search_generation());
+        if let Some(versions) = app.last_search_result_catalog_versions {
+            signature.number(1);
+            for value in track_c2g_catalog_versions(versions) {
+                signature.number(value);
+            }
+        } else {
+            signature.number(0);
+        }
+        let current_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        for value in track_c2g_catalog_versions(current_versions) {
+            signature.number(value);
+        }
+        signature.number(app.root_list_geometry.result_generation);
+        signature.number(app.query_autocomplete as u64);
+        signature.number(app.autocomplete_index as u64);
+        signature.number(app.suggestions.len() as u64);
+        for suggestion in &app.suggestions {
+            track_c2g_signature_string(&mut signature, suggestion);
+        }
+        signature.number(app.last_note_search_change.is_some() as u64);
+        signature.number(app.radial_provider_search_capacity.is_occupied() as u64);
+        signature.finish()
+    }
+
+    fn track_c2g_viewport_id(app: &LauncherApp) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature = StableSignature::new(
+            0x435F_5147_5545_5259,
+            "track-c2g-root-viewport",
+            app.test_root_rendered_rows.len(),
+        );
+        if let Some((inner_rect, content_size, offset)) = app.test_root_scroll_area_extent {
+            signature.number(1);
+            for value in [
+                inner_rect.min.x,
+                inner_rect.min.y,
+                inner_rect.max.x,
+                inner_rect.max.y,
+                content_size.x,
+                content_size.y,
+                offset.x,
+                offset.y,
+            ] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        } else {
+            signature.number(0);
+        }
+        if let Some(viewport) = app.test_root_scroll_viewport_rect {
+            signature.number(1);
+            for value in [
+                viewport.min.x,
+                viewport.min.y,
+                viewport.max.x,
+                viewport.max.y,
+            ] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        } else {
+            signature.number(0);
+        }
+        if let Some((content_viewport, content_origin)) = app.egui_ctx.data(|data| {
+            data.get_temp::<(egui::Rect, egui::Pos2)>(egui::Id::new(
+                "track-c2g-root-content-viewport",
+            ))
+        }) {
+            signature.number(1);
+            for value in [
+                content_viewport.min.x,
+                content_viewport.min.y,
+                content_viewport.max.x,
+                content_viewport.max.y,
+                content_origin.x,
+                content_origin.y,
+            ] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        } else {
+            signature.number(0);
+        }
+        if let Some(popup_owner) = app.egui_ctx.data(|data| {
+            data.get_temp::<Option<usize>>(egui::Id::new("track-c2g-root-popup-owner-for-paint"))
+        }) {
+            signature.number(1);
+            signature.number(popup_owner.map_or(u64::MAX, |index| index as u64));
+        } else {
+            signature.number(0);
+        }
+        for (((index, action), (id_index, id)), (rect_index, rect)) in app
+            .test_root_rendered_rows
+            .iter()
+            .zip(&app.test_root_rendered_row_ids)
+            .zip(&app.test_root_rendered_row_rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            signature.number(*index as u64);
+            track_c2g_signature_string(&mut signature, action);
+            track_c2g_signature_string(&mut signature, &format!("{id:?}"));
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                signature.number(u64::from(value.to_bits()));
+            }
+        }
+        signature.number(
+            app.root_list_geometry
+                .popup_owner()
+                .map_or(u64::MAX, |index| index as u64),
+        );
+        signature.number(app.egui_ctx.is_context_menu_open() as u64);
+        signature.finish()
+    }
+
+    struct TrackC2GState {
+        app: LauncherApp,
+        ctx: egui::Context,
+        catalog: Vec<Action>,
+        provider_action: Option<Arc<Mutex<Action>>>,
+        provider_calls: Arc<AtomicUsize>,
+        capacity: Option<crate::radial::handoff::DeferredProviderSearchPermit>,
+        case: TrackC2GCase,
+        count: usize,
+        fixture_signature: u64,
+        provider_generation: u64,
+        catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
+        frame_index: usize,
+    }
+
+    fn track_c2g_prepare_state(
+        root: &std::path::Path,
+        count: usize,
+        case: TrackC2GCase,
+    ) -> TrackC2GState {
+        use crate::performance::track_c_workloads::action_fixture;
+
+        let catalog = action_fixture(count).values;
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, catalog.clone(), root);
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+        app.actions = Arc::new(catalog.clone());
+        app.match_exact = true;
+        app.fuzzy_weight = 0.0;
+        app.usage_weight = 0.0;
+        app.usage.clear();
+        app.query_autocomplete = false;
+        app.query = case.initial_query().to_owned();
+
+        let mut provider_action = None;
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        if case.uses_provider() {
+            let initial_action = track_c2g_provider_action("generation-0");
+            let action = Arc::new(Mutex::new(initial_action));
+            app.plugins.register(Box::new(TrackC2GControlledProvider {
+                action: Arc::clone(&action),
+                calls: Arc::clone(&provider_calls),
+            }));
+            app.enabled_plugins = Some(std::collections::HashSet::from([
+                TRACK_C2G_PROVIDER_NAME.to_owned()
+            ]));
+            provider_action = Some(action);
+        } else {
+            app.enabled_plugins = Some(std::collections::HashSet::new());
+        }
+        app.last_plugin_search_generation = app.plugins.search_generation();
+        app.update_action_cache();
+        app.rebuild_completion_index_now();
+        assert!(app.completion_index.is_some());
+        assert!(app.completion_rebuild_after.is_none());
+        assert!(!app.action_completion_dirty && !app.command_completion_dirty);
+        app.search();
+
+        let expected_provider_action = provider_action
+            .as_ref()
+            .map(|action| action.lock().unwrap().clone());
+        let expected_initial = track_c2g_expected_actions(
+            &catalog,
+            case.initial_query(),
+            expected_provider_action.as_ref(),
+            false,
+        );
+        assert_eq!(app.results, expected_initial);
+        assert_eq!(app.query, case.initial_query());
+        assert_eq!(app.last_search_query, case.initial_query());
+        assert!(app.last_results_valid && !app.last_search_pending);
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert!(app.pending_query.is_none() && !app.background_query_refresh_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(
+            provider_calls.load(Ordering::SeqCst),
+            usize::from(case.uses_provider()),
+            "the captured provider is invoked only by the initial setup search"
+        );
+        let provider_generation = app.plugins.search_generation();
+        assert_eq!(app.last_search_provider_revision, provider_generation);
+        assert_eq!(app.last_plugin_search_generation, provider_generation);
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.restore_flag.store(false, Ordering::SeqCst);
+        app.last_visible = true;
+        app.follow_mouse = false;
+        focus_launcher_query(&ctx, &mut app);
+        for frame in 0..9 {
+            drop(run_root_list_frame(
+                &ctx,
+                &mut app,
+                frame,
+                960.0,
+                640.0,
+                Vec::new(),
+            ));
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert_eq!(app.plugins.search_generation(), provider_generation);
+        assert_eq!(app.results, expected_initial);
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+        set_query_cursor(&ctx, app.query.chars().count(), app.query.chars().count());
+        app.track_c_query_observer.enable_for_test();
+        assert_eq!(app.track_c_query_observer.snapshot().frame_count, 0);
+        provider_calls.store(0, Ordering::SeqCst);
+
+        let fixture_signature = track_c2g_fixture_signature(case, count, &catalog);
+        TrackC2GState {
+            app,
+            ctx,
+            catalog,
+            provider_action,
+            provider_calls,
+            capacity: None,
+            case,
+            count,
+            fixture_signature,
+            provider_generation,
+            catalog_versions,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c2g_expected_state_for_query(
+        state: &TrackC2GState,
+        query: &str,
+        capacity_deferred: bool,
+    ) -> Vec<Action> {
+        let provider_action = state.provider_action.as_ref().map(|action| {
+            if state.provider_generation == state.app.plugins.search_generation() {
+                action.lock().unwrap().clone()
+            } else {
+                track_c2g_provider_action("generation-1")
+            }
+        });
+        track_c2g_expected_actions(
+            &state.catalog,
+            query,
+            provider_action.as_ref(),
+            capacity_deferred,
+        )
+    }
+
+    fn track_c2g_validate_frame(
+        state: &TrackC2GState,
+        expected_query: &str,
+        expected_actions: &[Action],
+        capacity_deferred: bool,
+        expected_selected: Option<usize>,
+    ) -> (u64, u64, u64) {
+        let app = &state.app;
+        assert_eq!(app.query, expected_query);
+        assert_eq!(app.last_search_query, expected_query);
+        assert_eq!(app.actions.as_ref(), &state.catalog);
+        assert_eq!(app.results, expected_actions);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(app.last_search_pending, capacity_deferred);
+        assert_eq!(app.last_results_valid, !capacity_deferred);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            if capacity_deferred {
+                search::ProviderSearchDeferral::Capacity
+            } else {
+                search::ProviderSearchDeferral::None
+            }
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(state.catalog_versions)
+        );
+        assert_eq!(
+            app.last_search_result_catalog_versions_stable,
+            !capacity_deferred
+        );
+        assert_eq!(app.plugins.search_generation(), state.provider_generation);
+        assert_eq!(app.last_plugin_search_generation, state.provider_generation);
+        assert_eq!(app.last_search_provider_revision, state.provider_generation);
+        assert_eq!(
+            crate::radial::dynamic::MutableResultCatalogVersions::current(),
+            state.catalog_versions
+        );
+        assert_eq!(app.selected, expected_selected);
+
+        let available_width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the current root frame records its actual row width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let style = state.ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        let (outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            expected_actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        if expected_actions.is_empty() {
+            let cache = &app.root_list_geometry;
+            assert!(eager.rows.is_empty());
+            assert!(eager.available_widths.is_empty());
+            assert!(cache.row_tops.is_empty());
+            assert!(cache.row_heights.is_empty());
+            assert!(cache.row_x_offsets.is_empty());
+            assert!(cache.row_response_x_offsets.is_empty());
+            assert!(cache.row_widths.is_empty());
+            assert!(cache.row_response_widths.is_empty());
+            assert_eq!(cache.total_height, 0.0);
+            assert_eq!(cache.content_x_offset, 0.0);
+            assert!(
+                (cache.content_width - available_width).abs() <= 1.0,
+                "empty list content width matches the actual available width"
+            );
+        } else {
+            assert_root_list_cache_matches_eager(
+                &app.root_list_geometry,
+                &eager,
+                outer,
+                "C2-G actual query frame against the frozen eager list oracle",
+            );
+        }
+
+        let rows = &app.test_root_rendered_rows;
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert_eq!(ids.len(), rows.len());
+        assert_eq!(rects.len(), rows.len());
+        let (_, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("the actual root frame records ScrollArea content extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        let clip_viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the actual root frame records the visible viewport");
+        let popup_owner_for_paint = state
+            .ctx
+            .data(|data| {
+                data.get_temp::<Option<usize>>(egui::Id::new(
+                    "track-c2g-root-popup-owner-for-paint",
+                ))
+            })
+            .expect("the actual root frame records its paint-time popup owner");
+        let (content_viewport, content_origin) = state
+            .ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Pos2)>(egui::Id::new(
+                    "track-c2g-root-content-viewport",
+                ))
+            })
+            .expect("the actual scaled root frame records its content viewport and origin");
+        let visible_start = eager
+            .rows
+            .partition_point(|row| row.bottom() - outer.top() <= content_viewport.min.y);
+        let visible_end = eager
+            .rows
+            .partition_point(|row| row.top() - outer.top() < content_viewport.max.y);
+        let mut expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(expected_actions.len()))
+            .collect::<Vec<_>>();
+        if let Some(owner) = popup_owner_for_paint {
+            assert!(owner < expected_actions.len());
+            assert_eq!(app.results.get(owner), expected_actions.get(owner));
+            expected_indices.push(owner);
+            expected_indices.sort_unstable();
+            expected_indices.dedup();
+        }
+        assert_eq!(
+            rows.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+            expected_indices,
+            "actual rows are the eager visible rows plus the documented overscan"
+        );
+        for (((index, action_id), (id_index, _)), (rect_index, rect)) in
+            rows.iter().zip(ids).zip(rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &expected_actions[*index].action);
+            let expected = egui::Rect::from_min_size(
+                content_origin + (eager.rows[*index].min - outer.min),
+                eager.rows[*index].size(),
+            );
+            assert!(
+                rect.min.distance(expected.min) <= 1.0 && rect.max.distance(expected.max) <= 1.0,
+                "painted row {index} matches eager geometry"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(clip_viewport.intersects(*rect));
+            }
+        }
+        (
+            track_c2g_full_state_id(app),
+            track_c2g_geometry_id(app),
+            track_c2g_viewport_id(app),
+        )
+    }
+
+    struct TrackC2GFrameObservation {
+        json: serde_json::Value,
+        provider_calls_delta: u64,
+    }
+
+    fn track_c2g_action_payload_bytes(actions: &[Action]) -> u64 {
+        actions
+            .iter()
+            .map(|action| {
+                action.label.len() as u64
+                    + action.desc.len() as u64
+                    + action.action.len() as u64
+                    + action.args.as_ref().map_or(0, |args| args.len() as u64)
+            })
+            .sum()
+    }
+
+    fn track_c2g_acceptance_json(
+        acceptance: Option<crate::gui::track_c_query_observer::AcceptanceReceipt>,
+    ) -> serde_json::Value {
+        use crate::gui::track_c_query_observer::AcceptanceKind;
+
+        match acceptance {
+            Some(acceptance) => serde_json::json!({
+                "kind": match acceptance.kind {
+                    AcceptanceKind::Search => "search",
+                    AcceptanceKind::CommandReplacement => "command_replacement",
+                },
+                "frame": acceptance.frame,
+                "result_generation": acceptance.result_generation,
+                "provider_revision": acceptance.provider_revision,
+                "catalog_versions": acceptance.catalog_versions.map(track_c2g_catalog_versions),
+                "catalog_versions_stable": acceptance.catalog_versions_stable,
+                "search_pending": acceptance.search_pending,
+                "capacity_deferred": acceptance.capacity_deferred,
+                "direct_source_before": acceptance.direct_provider_before,
+                "direct_source_after": acceptance.direct_provider_after,
+                "direct_catalog_before": acceptance.direct_catalog_before.map(track_c2g_catalog_versions),
+                "direct_catalog_after": acceptance.direct_catalog_after.map(track_c2g_catalog_versions),
+            }),
+            None => serde_json::Value::Null,
+        }
+    }
+
+    fn track_c2g_receipt_json(
+        receipt: crate::gui::track_c_query_observer::Receipt,
+    ) -> serde_json::Value {
+        use crate::gui::track_c_query_observer::GeometryCause;
+
+        let geometry_by_cause = (0..5)
+            .map(|index| {
+                serde_json::json!([
+                    receipt.geometry_by_cause[index].rebuilds,
+                    receipt.geometry_by_cause[index].rows
+                ])
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "sequence": receipt.sequence,
+            "origin": receipt.origin.token(),
+            "terminal": receipt.terminal.token(),
+            "cause": receipt.cause.token(),
+            "started_frame": receipt.started_frame,
+            "terminal_frame": receipt.terminal_frame,
+            "frame_count": receipt.frames,
+            "terminal_elapsed_ns": receipt.terminal_elapsed_ns,
+            "completion_latency_ns": receipt.completion_latency_ns,
+            "acceptance": track_c2g_acceptance_json(receipt.acceptance),
+            "painted_sequence": receipt.painted_sequence,
+            "painted_acceptance_frame": receipt.painted_acceptance_frame,
+            "painted_frame": receipt.painted_frame,
+            "painted_generation": receipt.painted_generation,
+            "geometry_rebuilds": receipt.geometry_rebuilds,
+            "geometry_rows": receipt.geometry_rows,
+            "geometry_by_cause": geometry_by_cause,
+            "geometry_cause_order": [
+                GeometryCause::Query.token(),
+                GeometryCause::ProviderOrCatalog.token(),
+                GeometryCause::DisplayOrResize.token(),
+                GeometryCause::Navigation.token(),
+                GeometryCause::Other.token(),
+            ],
+        })
+    }
+
+    fn track_c2g_run_frame(
+        state: &mut TrackC2GState,
+        step_index: usize,
+        kind: &'static str,
+        expected_query: &str,
+        capacity_deferred: bool,
+        expected_selected: Option<usize>,
+        width: f32,
+        height: f32,
+        events: Vec<egui::Event>,
+    ) -> TrackC2GFrameObservation {
+        let before = state.app.track_c_query_observer.snapshot();
+        let provider_calls_before = state.provider_calls.load(Ordering::SeqCst) as u64;
+        let provider_generation_before = state.app.plugins.search_generation();
+        let frame = state.frame_index;
+        state.frame_index = state.frame_index.saturating_add(1);
+        let started = Instant::now();
+        let output = run_root_list_frame(&state.ctx, &mut state.app, frame, width, height, events);
+        drop(output);
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let after = state.app.track_c_query_observer.snapshot();
+        let provider_calls_after = state.provider_calls.load(Ordering::SeqCst) as u64;
+        let (full_state_id, geometry_id, viewport_id) = track_c2g_validate_frame(
+            state,
+            expected_query,
+            &track_c2g_expected_state_for_query(state, expected_query, capacity_deferred),
+            capacity_deferred,
+            expected_selected,
+        );
+        let app = &state.app;
+        let geometry_by_cause = track_c2g_geometry_pairs(before, after);
+        let geometry_rebuilds = geometry_by_cause.iter().map(|pair| pair[0]).sum::<u64>();
+        let geometry_rows = geometry_by_cause.iter().map(|pair| pair[1]).sum::<u64>();
+        let (screen_width, screen_height) = app
+            .test_root_scroll_viewport_rect
+            .map(|rect| (rect.width(), rect.height()))
+            .expect("the actual root frame records its clipped viewport");
+        let actions_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results);
+        let payload_bytes = track_c2g_action_payload_bytes(&app.results);
+        let popup_open = state.ctx.is_context_menu_open();
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+        let json = serde_json::json!({
+            "frame": after.frame_count,
+            "input_tick": frame,
+            "step": step_index,
+            "kind": kind,
+            "elapsed_ns": elapsed_ns,
+            "viewport_milli": [
+                (screen_width * 1000.0).round() as u64,
+                (screen_height * 1000.0).round() as u64,
+            ],
+            "visible": app.visible_flag.load(Ordering::SeqCst),
+            "root_owned": app.last_visible,
+            "current_result_generation": app.root_list_geometry.result_generation,
+            "provider_revision": app.plugins.search_generation(),
+            "catalog_versions": track_c2g_catalog_versions(state.catalog_versions),
+            "catalog_versions_stable": app.last_search_result_catalog_versions_stable,
+            "pending_query": app.pending_query.is_some(),
+            "background_refresh_pending": app.background_query_refresh_pending,
+            "search_pending": app.last_search_pending,
+            "capacity_deferred": app.last_search_provider_deferral == search::ProviderSearchDeferral::Capacity,
+            "selected_index": app.selected,
+            "popup_open": popup_open,
+            "painted_generation": Some(app.root_list_geometry.result_generation),
+            "geometry_rebuilds": geometry_rebuilds,
+            "geometry_rows": geometry_rows,
+            "geometry_by_cause": geometry_by_cause,
+            "provider_calls_before": provider_calls_before,
+            "provider_calls_after": provider_calls_after,
+            "provider_calls_delta": provider_calls_after.saturating_sub(provider_calls_before),
+            "provider_generation_before": provider_generation_before,
+            "provider_generation_after": app.plugins.search_generation(),
+            "action_count": app.results.len(),
+            "action_payload_utf8_bytes": payload_bytes,
+            "action_output_id": format!("{actions_id:016x}"),
+            "full_state_id": format!("{full_state_id:016x}"),
+            "geometry_id": format!("{geometry_id:016x}"),
+            "viewport_id": format!("{viewport_id:016x}"),
+        });
+        TrackC2GFrameObservation {
+            json,
+            provider_calls_delta: provider_calls_after.saturating_sub(provider_calls_before),
+        }
+    }
+
+    fn track_c2g_text_frame(
+        state: &mut TrackC2GState,
+        step_index: usize,
+        kind: &'static str,
+        expected_query: &str,
+        capacity_deferred: bool,
+        replace_from: usize,
+        replacement: &str,
+    ) -> TrackC2GFrameObservation {
+        let end = state.app.query.chars().count();
+        set_query_cursor(&state.ctx, replace_from, end);
+        track_c2g_run_frame(
+            state,
+            step_index,
+            kind,
+            expected_query,
+            capacity_deferred,
+            None,
+            960.0,
+            640.0,
+            vec![egui::Event::Text(replacement.to_owned())],
+        )
+    }
+
+    fn track_c2g_step_json(
+        index: usize,
+        kind: &'static str,
+        observation: TrackC2GFrameObservation,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "index": index,
+            "kind": kind,
+            "provider_calls_delta": observation.provider_calls_delta,
+            "frame": observation.json,
+        })
+    }
+
+    fn track_c2g_run_sequence(state: &mut TrackC2GState) -> serde_json::Value {
+        use crate::gui::track_c_query_observer::{Cause, Terminal};
+
+        let started = Instant::now();
+        let mut steps = Vec::with_capacity(state.case.step_count());
+        match state.case {
+            TrackC2GCase::TypedSuffixSequence => {
+                for (index, suffix) in ["0", "00", "000", "00009"].into_iter().enumerate() {
+                    let query = format!("app {suffix}");
+                    let observation = track_c2g_text_frame(
+                        state,
+                        index,
+                        "text_edit_suffix",
+                        &query,
+                        false,
+                        4,
+                        suffix,
+                    );
+                    steps.push(track_c2g_step_json(index, "text_edit_suffix", observation));
+                }
+            }
+            TrackC2GCase::AppProviderSupersession => {
+                let first =
+                    track_c2g_text_frame(state, 0, "append_app_space", "app ", false, 3, " ");
+                steps.push(track_c2g_step_json(0, "append_app_space", first));
+
+                state.capacity = Some(
+                    state
+                        .app
+                        .radial_provider_search_capacity
+                        .try_acquire()
+                        .expect("the controlled fixture owns the free provider slot"),
+                );
+                let pending = track_c2g_text_frame(
+                    state,
+                    1,
+                    "capacity_deferred_provider_query",
+                    "app provider",
+                    true,
+                    4,
+                    "provider",
+                );
+                steps.push(track_c2g_step_json(
+                    1,
+                    "capacity_deferred_provider_query",
+                    pending,
+                ));
+
+                drop(state.capacity.take());
+                *state
+                    .provider_action
+                    .as_ref()
+                    .expect("provider case has one captured action")
+                    .lock()
+                    .unwrap() = track_c2g_provider_action("generation-1");
+                state
+                    .app
+                    .plugins
+                    .notify_search_update_for_test(TRACK_C2G_PROVIDER_SOURCE);
+                state.provider_generation = state.app.plugins.search_generation();
+                let supersede = track_c2g_text_frame(
+                    state,
+                    2,
+                    "provider_refresh_then_superseding_beta_edit",
+                    "app beta",
+                    false,
+                    4,
+                    "beta",
+                );
+                assert!(
+                    state.app.results.is_empty(),
+                    "the accepted app beta query is a valid empty-result search"
+                );
+                steps.push(track_c2g_step_json(
+                    2,
+                    "provider_refresh_then_superseding_beta_edit",
+                    supersede,
+                ));
+
+                let finish = track_c2g_text_frame(
+                    state,
+                    3,
+                    "final_provider_query",
+                    "app provider",
+                    false,
+                    4,
+                    "provider",
+                );
+                steps.push(track_c2g_step_json(3, "final_provider_query", finish));
+            }
+            TrackC2GCase::EquivalentFilterSequence => {
+                for (index, query) in ["app !id:track-c2g-absent-a", "app !id:track-c2g-absent-b"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let observation = track_c2g_text_frame(
+                        state,
+                        index,
+                        "whole_query_filter_replacement",
+                        query,
+                        false,
+                        0,
+                        query,
+                    );
+                    steps.push(track_c2g_step_json(
+                        index,
+                        "whole_query_filter_replacement",
+                        observation,
+                    ));
+                }
+            }
+            TrackC2GCase::ViewportControls => {
+                for (index, (kind, width, height, selected)) in [
+                    ("resize_narrow", 480.0, 640.0, None),
+                    ("resize_restore", 960.0, 640.0, None),
+                    ("select_first", 960.0, 640.0, Some(0)),
+                    ("select_middle", 960.0, 640.0, Some(state.count / 2)),
+                    ("select_last", 960.0, 640.0, Some(state.count - 1)),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    state.app.selected = selected;
+                    let observation = track_c2g_run_frame(
+                        state,
+                        index,
+                        kind,
+                        "app",
+                        false,
+                        selected,
+                        width,
+                        height,
+                        Vec::new(),
+                    );
+                    steps.push(track_c2g_step_json(index, kind, observation));
+                }
+                assert_eq!(
+                    state.frame_index, 14,
+                    "select_last used raw input tick 13 and the next tick is 14"
+                );
+                state.frame_index = state.frame_index.saturating_add(18);
+                assert_eq!(state.frame_index, 32);
+                for (index, kind) in [
+                    (5, "advance_scroll_animation"),
+                    (6, "paint_updated_scroll_offset"),
+                ] {
+                    let observation = track_c2g_run_frame(
+                        state,
+                        index,
+                        kind,
+                        "app",
+                        false,
+                        Some(state.count - 1),
+                        960.0,
+                        640.0,
+                        Vec::new(),
+                    );
+                    steps.push(track_c2g_step_json(index, kind, observation));
+                }
+                let viewport = state
+                    .app
+                    .test_root_scroll_viewport_rect
+                    .expect("the prior actual frame records its visible viewport");
+                let current_rows = &state.app.test_root_rendered_row_rects;
+                let fully_visible_target = current_rows.iter().find_map(|(index, rect)| {
+                    viewport
+                        .contains_rect(*rect)
+                        .then_some((*index, rect.center()))
+                });
+                let (target_index, target) = fully_visible_target
+                    .or_else(|| {
+                        current_rows
+                            .iter()
+                            .filter_map(|(index, rect)| {
+                                let clipped = rect.intersect(viewport);
+                                (clipped.width() > 0.0 && clipped.height() > 0.0).then_some((
+                                    *index,
+                                    clipped.center(),
+                                    clipped.width() * clipped.height(),
+                                ))
+                            })
+                            .max_by(|left, right| left.2.total_cmp(&right.2))
+                            .map(|(index, point, _)| (index, point))
+                    })
+                    .expect("the current viewport contains a controlled catalog row");
+                let target_rect = current_rows
+                    .iter()
+                    .find_map(|(index, rect)| (*index == target_index).then_some(*rect))
+                    .expect("the chosen point belongs to a current-frame response row");
+                let prior_target_id = state
+                    .app
+                    .test_root_rendered_row_ids
+                    .iter()
+                    .find_map(|(index, id)| (*index == target_index).then_some(*id))
+                    .expect("the prior-frame target has a response identity");
+                assert!(viewport.contains(target));
+                assert!(target_rect.contains(target));
+                let open = track_c2g_run_frame(
+                    state,
+                    7,
+                    "open_result_context_menu",
+                    "app",
+                    false,
+                    Some(state.count - 1),
+                    960.0,
+                    640.0,
+                    vec![
+                        egui::Event::PointerMoved(target),
+                        egui::Event::PointerButton {
+                            pos: target,
+                            button: egui::PointerButton::Secondary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: target,
+                            button: egui::PointerButton::Secondary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                let clicked_id = state.ctx.interaction_snapshot(|snapshot| snapshot.clicked);
+                let menu_open = state.ctx.is_context_menu_open();
+                let current_viewport = state.app.test_root_scroll_viewport_rect;
+                let popup_owner = state.app.root_list_geometry.popup_owner();
+                assert!(
+                    menu_open && clicked_id == Some(prior_target_id),
+                    "the real secondary click opens the menu through the prior-frame target response; menu_open={}, count={}, target_index={}, prior_target_id={:?}, clicked_id={:?}, prior_id_present_current={}, current_id_at_target_index={:?}, popup_owner={:?}, current_index_min={:?}, current_index_max={:?}, prior_viewport={:?}, current_viewport={:?}, prior_target_rect={:?}, current_target_rect={:?}",
+                    menu_open,
+                    state.count,
+                    target_index,
+                    prior_target_id,
+                    clicked_id,
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .any(|(_, id)| *id == prior_target_id),
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .find_map(|(index, id)| (*index == target_index).then_some(*id)),
+                    popup_owner,
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .min(),
+                    state
+                        .app
+                        .test_root_rendered_row_ids
+                        .iter()
+                        .map(|(index, _)| *index)
+                        .max(),
+                    viewport,
+                    current_viewport,
+                    target_rect,
+                    state
+                        .app
+                        .test_root_rendered_row_rects
+                        .iter()
+                        .find_map(|(index, rect)| (*index == target_index).then_some(*rect)),
+                );
+                let current_viewport = current_viewport
+                    .expect("the menu-opening frame records its current clipped viewport");
+                let popup_owner =
+                    popup_owner.expect("the real secondary click records its current popup owner");
+                assert!(current_viewport.contains(target));
+                assert_eq!(popup_owner, target_index);
+                let popup_owner_id = state
+                    .app
+                    .test_root_rendered_row_ids
+                    .iter()
+                    .find_map(|(index, id)| (*index == popup_owner).then_some(*id))
+                    .expect("the actual popup owner has a current-frame widget identity");
+                assert_eq!(popup_owner_id, prior_target_id);
+                let popup_owner_action = state
+                    .app
+                    .test_root_rendered_rows
+                    .iter()
+                    .find_map(|(index, action)| (*index == popup_owner).then_some(action))
+                    .expect("the actual popup owner has a current-frame rendered action");
+                assert_eq!(
+                    state
+                        .app
+                        .results
+                        .get(popup_owner)
+                        .map(|result| &result.action),
+                    Some(popup_owner_action),
+                    "the popup owner still names its actual current result"
+                );
+                steps.push(track_c2g_step_json(7, "open_result_context_menu", open));
+
+                let outside = egui::pos2(1.0, 1.0);
+                let close = track_c2g_run_frame(
+                    state,
+                    8,
+                    "close_result_context_menu",
+                    "app",
+                    false,
+                    Some(state.count - 1),
+                    960.0,
+                    640.0,
+                    vec![
+                        egui::Event::PointerMoved(outside),
+                        egui::Event::PointerButton {
+                            pos: outside,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                        egui::Event::PointerButton {
+                            pos: outside,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ],
+                );
+                assert!(
+                    !state.ctx.is_context_menu_open(),
+                    "an outside click closes the result menu"
+                );
+                steps.push(track_c2g_step_json(8, "close_result_context_menu", close));
+            }
+        }
+
+        let sequence_elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let snapshot = state.app.track_c_query_observer.snapshot();
+        let receipts = snapshot
+            .receipts
+            .iter()
+            .flatten()
+            .copied()
+            .map(track_c2g_receipt_json)
+            .collect::<Vec<_>>();
+        assert_eq!(receipts.len(), state.case.intent_count());
+        let terminals = snapshot
+            .receipts
+            .iter()
+            .flatten()
+            .map(|receipt| (receipt.terminal, receipt.cause))
+            .collect::<Vec<_>>();
+        let expected_terminals: Vec<(Terminal, Cause)> = match state.case {
+            TrackC2GCase::AppProviderSupersession => vec![
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Superseded, Cause::SupersededByQuery),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+            ],
+            TrackC2GCase::ViewportControls => Vec::new(),
+            _ => vec![
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+                (Terminal::Completed, Cause::FirstUsableRootFrame),
+            ][..state.case.intent_count()]
+                .to_vec(),
+        };
+        assert_eq!(terminals, expected_terminals);
+        for receipt in snapshot.receipts.iter().flatten() {
+            assert!(receipt.terminal_elapsed_ns <= sequence_elapsed_ns);
+            assert!(receipt.frames <= 8);
+            assert_eq!(receipt.origin.token(), "text_edit");
+            if receipt.terminal == Terminal::Completed {
+                assert_eq!(receipt.painted_sequence, Some(receipt.sequence));
+                assert_eq!(receipt.painted_frame, Some(receipt.terminal_frame));
+                assert!(
+                    receipt
+                        .completion_latency_ns
+                        .is_some_and(|latency| latency > 0)
+                );
+            } else {
+                assert!(receipt.completion_latency_ns.is_none());
+            }
+        }
+        if state.case == TrackC2GCase::AppProviderSupersession {
+            assert_eq!(state.provider_calls.load(Ordering::SeqCst), 4);
+            assert_eq!(
+                state.app.plugins.search_generation(),
+                state.provider_generation
+            );
+        } else {
+            assert_eq!(state.provider_calls.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(steps.len(), state.case.step_count());
+        let last_actions_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&state.app.results);
+        serde_json::json!({
+            "sequence_elapsed_ns": sequence_elapsed_ns,
+            "sequence_frame_count": snapshot.frame_count,
+            "intents": receipts,
+            "steps": steps,
+            "provider_calls_total": state.provider_calls.load(Ordering::SeqCst),
+            "provider_generation": state.app.plugins.search_generation(),
+            "catalog_versions": track_c2g_catalog_versions(state.catalog_versions),
+            "action_count": state.app.results.len(),
+            "action_payload_utf8_bytes": track_c2g_action_payload_bytes(&state.app.results),
+            "action_output_id": format!("{last_actions_id:016x}"),
+            "full_state_id": format!("{:016x}", track_c2g_full_state_id(&state.app)),
+            "geometry_id": format!("{:016x}", track_c2g_geometry_id(&state.app)),
+            "viewport_id": format!("{:016x}", track_c2g_viewport_id(&state.app)),
+        })
+    }
+
+    fn track_c2g_run_record(
+        case: TrackC2GCase,
+        count: usize,
+        root: &std::path::Path,
+    ) -> serde_json::Value {
+        let mut state = track_c2g_prepare_state(root, count, case);
+        let sample = track_c2g_run_sequence(&mut state);
+        drop(state.capacity.take());
+        drop(state);
+        sample
+    }
+
+    #[test]
+    fn track_c2g_oracle_query_sequences_match_usable_cpu_frames() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        let workspace = TrackCWorkspace::new();
+        let assert_viewport_recipe = |sample: &serde_json::Value| {
+            let steps = sample["steps"].as_array().unwrap();
+            assert_eq!(steps.len(), 9);
+            assert_eq!(
+                steps
+                    .iter()
+                    .map(|step| step["kind"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![
+                    "resize_narrow",
+                    "resize_restore",
+                    "select_first",
+                    "select_middle",
+                    "select_last",
+                    "advance_scroll_animation",
+                    "paint_updated_scroll_offset",
+                    "open_result_context_menu",
+                    "close_result_context_menu",
+                ]
+            );
+            assert_eq!(
+                steps
+                    .iter()
+                    .map(|step| step["frame"]["input_tick"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![9, 10, 11, 12, 13, 32, 33, 34, 35]
+            );
+        };
+        for case in TrackC2GCase::ALL {
+            let sample = track_c2g_run_record(case, 100, workspace.root());
+            assert_eq!(sample["steps"].as_array().unwrap().len(), case.step_count());
+            assert_eq!(
+                sample["intents"].as_array().unwrap().len(),
+                case.intent_count()
+            );
+            if case == TrackC2GCase::ViewportControls {
+                assert_viewport_recipe(&sample);
+            }
+        }
+        for count in [1_000, 10_000] {
+            let sample =
+                track_c2g_run_record(TrackC2GCase::ViewportControls, count, workspace.root());
+            assert_eq!(sample["intents"].as_array().unwrap().len(), 0);
+            assert_viewport_recipe(&sample);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C GUI query-to-usable-frame attribution owner"]
+    fn track_c2g_benchmark_gui_query_to_usable_cpu_viewport() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let sizes: &[usize] = match mode {
+            BenchmarkMode::Small => &[100],
+            BenchmarkMode::Full => &[100, 1_000, 10_000],
+        };
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        assert!(source == "UNCOMMITTED_SOURCE" || source.len() == 40);
+        assert_eq!(profile, "fast-dev");
+        let workspace = TrackCWorkspace::new();
+        for count in sizes {
+            let catalog = action_fixture(*count).values;
+            for case in TrackC2GCase::ALL {
+                let fixture_signature = track_c2g_fixture_signature(case, *count, &catalog);
+                let mut samples = Vec::with_capacity(20);
+                for sample_index in 0..25 {
+                    let sample = track_c2g_run_record(case, *count, workspace.root());
+                    if sample_index >= 5 {
+                        samples.push(sample);
+                    }
+                }
+                assert_eq!(samples.len(), 20);
+                let output = serde_json::json!({
+                    "schema": 2,
+                    "stage": "gui_query_to_usable_cpu_viewport",
+                    "owner": "egui_Context_run+LauncherApp::render_root_frame",
+                    "owner_scope": "accepted_gui_mutation_to_first_usable_cpu_root_frame",
+                    "sequence_elapsed_scope": "whole_controlled_sequence_including_interstep_validation",
+                    "provider_scope": "captured_controlled_snapshot_no_other_provider_calls",
+                    "fixture": "synthetic_action_catalog_controlled_provider",
+                    "source": source,
+                    "profile": profile,
+                    "mode": match mode { BenchmarkMode::Small => "small", BenchmarkMode::Full => "full" },
+                    "telemetry_enabled": true,
+                    "observer_enabled": true,
+                    "warmups": 5,
+                    "samples": 20,
+                    "exclusions": 0,
+                    "frame_limit": 8,
+                    "case": case.token(),
+                    "count": count,
+                    "fixture_signature": format!("{fixture_signature:016x}"),
+                    "sample_records": samples,
+                });
+                eprintln!("TRACK_C2G_QUERY_RESULT {}", output);
+            }
+        }
+        drop(workspace);
+    }
+
+    const TRACK_C2C_PROVIDER_NAME: &str = "track_c2c_provider";
+    const TRACK_C2C_PROVIDER_SOURCE: &str = "track_c2c_provider";
+    const TRACK_C2C_QUERY: &str = "app ";
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC2CRefreshCase {
+        CachedRepeat,
+        EqualProviderNotification,
+        ChangedProviderNotification,
+    }
+
+    impl TrackC2CRefreshCase {
+        const ALL: [Self; 3] = [
+            Self::CachedRepeat,
+            Self::EqualProviderNotification,
+            Self::ChangedProviderNotification,
+        ];
+
+        fn key(self) -> &'static str {
+            match self {
+                Self::CachedRepeat => "cached_repeat",
+                Self::EqualProviderNotification => "equal_provider_notification",
+                Self::ChangedProviderNotification => "changed_provider_notification",
+            }
+        }
+
+        fn notifies_provider(self) -> bool {
+            self != Self::CachedRepeat
+        }
+
+        fn changes_provider_action(self) -> bool {
+            self == Self::ChangedProviderNotification
+        }
+    }
+
+    struct TrackC2CControlledProvider {
+        action: Arc<Mutex<Action>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for TrackC2CControlledProvider {
+        fn search(&self, _query: &str) -> Vec<Action> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            vec![self.action.lock().unwrap().clone()]
+        }
+
+        fn name(&self) -> &str {
+            TRACK_C2C_PROVIDER_NAME
+        }
+
+        fn description(&self) -> &str {
+            "Synthetic Track C controlled search provider"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &[]
+        }
+
+        fn always_search(&self) -> bool {
+            true
+        }
+    }
+
+    fn track_c2c_provider_action(args: Option<&str>) -> Action {
+        Action {
+            label: "Controlled provider result".into(),
+            desc: "Synthetic forced-refresh provider result".into(),
+            action: "track-c:controlled-provider".into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    fn track_c2c_signature_string(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        value: &str,
+    ) {
+        signature.number(value.len() as u64);
+        signature.bytes(value.as_bytes());
+    }
+
+    fn track_c2c_fixture_signature(
+        catalog: &[Action],
+        case: TrackC2CRefreshCase,
+        initial_provider_action: &Action,
+        effective_provider_action: &Action,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::{StableSignature, action_fixture_identity};
+
+        let mut signature = StableSignature::new(
+            0x4352_4652_4553_4831,
+            "track-c2c-forced-refresh-fixture",
+            catalog.len() + 1,
+        );
+        signature.number(action_fixture_identity(catalog));
+        track_c2c_signature_string(&mut signature, case.key());
+        track_c2c_signature_string(&mut signature, TRACK_C2C_QUERY);
+        signature.number(1); // Exact matching.
+        signature.number(0.0_f32.to_bits() as u64); // Fuzzy weight.
+        signature.number(0.0_f32.to_bits() as u64); // Usage weight.
+        signature.number(0); // Usage entries.
+        signature.number(0); // Folder aliases.
+        signature.number(0); // Bookmark aliases.
+        track_c2c_signature_string(&mut signature, TRACK_C2C_PROVIDER_NAME);
+        signature.number(1); // Provider is enabled.
+        signature.number(1); // Provider always searches.
+        signature.number(action_fixture_identity(std::slice::from_ref(
+            initial_provider_action,
+        )));
+        signature.number(action_fixture_identity(std::slice::from_ref(
+            effective_provider_action,
+        )));
+        signature.finish()
+    }
+
+    fn track_c2c_expected_fixture_signature(count: usize, case: TrackC2CRefreshCase) -> u64 {
+        match (count, case) {
+            (100, TrackC2CRefreshCase::CachedRepeat) => 0x83ac_a547_7013_e236,
+            (100, TrackC2CRefreshCase::EqualProviderNotification) => 0x3f27_cdd7_37d2_9326,
+            (100, TrackC2CRefreshCase::ChangedProviderNotification) => 0xb14c_8ea7_53c6_391a,
+            (1_000, TrackC2CRefreshCase::CachedRepeat) => 0xdd5e_4f19_ca87_1066,
+            (1_000, TrackC2CRefreshCase::EqualProviderNotification) => 0xfd1f_a896_de80_5376,
+            (1_000, TrackC2CRefreshCase::ChangedProviderNotification) => 0x58af_94f6_6ee7_856a,
+            (10_000, TrackC2CRefreshCase::CachedRepeat) => 0x04d1_43fb_bcd5_d7b9,
+            (10_000, TrackC2CRefreshCase::EqualProviderNotification) => 0x44fd_c1e0_fbef_b7a9,
+            (10_000, TrackC2CRefreshCase::ChangedProviderNotification) => 0x9c75_a4f1_bef6_38f5,
+            _ => panic!("unapproved C2-C fixture size or case"),
+        }
+    }
+
+    fn track_c2c_expected_action_identity(count: usize, case: TrackC2CRefreshCase) -> u64 {
+        match (count, case.changes_provider_action()) {
+            (100, false) => 0x91f7_8f1a_0090_9136,
+            (100, true) => 0xe185_5561_4ad4_cc6f,
+            (1_000, false) => 0xacc4_b6c3_9213_538b,
+            (1_000, true) => 0xb7c8_75f3_a5f1_bd48,
+            (10_000, false) => 0xe9e0_8ad2_6311_9091,
+            (10_000, true) => 0xa1e3_4d1a_09cd_8152,
+            _ => panic!("unapproved C2-C fixture size"),
+        }
+    }
+
+    struct TrackC2CRefreshState {
+        app: LauncherApp,
+        installation_observer: search::c2c_install_observer::Scope,
+        ctx: egui::Context,
+        case: TrackC2CRefreshCase,
+        expected_actions: Vec<Action>,
+        expected_suggestions: Vec<String>,
+        provider_action: Arc<Mutex<Action>>,
+        provider_calls: Arc<AtomicUsize>,
+        provider_generation_before: u64,
+        result_generation_before: u64,
+        catalog_versions_before: crate::radial::dynamic::MutableResultCatalogVersions,
+        accepted_catalog_versions_before: crate::radial::dynamic::MutableResultCatalogVersions,
+        geometry_before: RootListGeometryObservation,
+        available_width: f32,
+        eager_outer: egui::Rect,
+        eager: EagerRootListLayout,
+        frame_index: usize,
+    }
+
+    fn track_c2c_expected_suggestions(catalog: &[Action]) -> Vec<String> {
+        let mut suggestions = catalog
+            .iter()
+            .map(|action| format!("app {}", action.label.to_lowercase()))
+            .collect::<Vec<_>>();
+        suggestions.sort();
+        suggestions.dedup();
+        suggestions.retain(|suggestion| suggestion != TRACK_C2C_QUERY);
+        suggestions.truncate(5);
+        suggestions
+    }
+
+    fn track_c2c_prepare_state(
+        root: &std::path::Path,
+        catalog: &[Action],
+        case: TrackC2CRefreshCase,
+    ) -> TrackC2CRefreshState {
+        use crate::performance::track_c_workloads::action_fixture_identity;
+
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, catalog.to_vec(), root);
+        // Launcher construction supplies known-folder aliases when no settings
+        // file exists. This fixture measures only its synthetic catalog.
+        app.folder_aliases.clear();
+        app.folder_aliases_lc.clear();
+        app.bookmark_aliases.clear();
+        app.bookmark_aliases_lc.clear();
+
+        let initial_provider_action = track_c2c_provider_action(Some(""));
+        let effective_provider_action = if case.changes_provider_action() {
+            track_c2c_provider_action(Some("changed"))
+        } else {
+            initial_provider_action.clone()
+        };
+        let provider_action = Arc::new(Mutex::new(initial_provider_action.clone()));
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        app.plugins.register(Box::new(TrackC2CControlledProvider {
+            action: Arc::clone(&provider_action),
+            calls: Arc::clone(&provider_calls),
+        }));
+        app.enabled_plugins = Some(std::collections::HashSet::from([
+            TRACK_C2C_PROVIDER_NAME.to_owned()
+        ]));
+        app.query = TRACK_C2C_QUERY.to_owned();
+        app.query_autocomplete = true;
+        app.match_exact = true;
+        app.fuzzy_weight = 0.0;
+        app.usage_weight = 0.0;
+        app.usage.clear();
+        app.update_action_cache();
+        app.rebuild_completion_index_now();
+        assert!(app.completion_index.is_some());
+        assert!(app.completion_rebuild_after.is_none());
+        assert!(!app.action_completion_dirty);
+        assert!(!app.command_completion_dirty);
+        app.search();
+
+        let mut initially_expected_actions = catalog.to_vec();
+        initially_expected_actions.push(initial_provider_action.clone());
+        assert_eq!(app.results, initially_expected_actions);
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(app.last_search_query, TRACK_C2C_QUERY);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        let accepted_catalog_versions_before = app
+            .last_search_result_catalog_versions
+            .expect("the initial accepted search records mutable catalog versions");
+        let catalog_versions_before =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(accepted_catalog_versions_before, catalog_versions_before);
+        let provider_generation_before = app.plugins.search_generation();
+        assert_eq!(
+            app.last_search_provider_revision,
+            provider_generation_before
+        );
+        assert_eq!(
+            app.last_plugin_search_generation,
+            provider_generation_before
+        );
+
+        // Set up settled fonts, dashboard state, and actual root-list geometry
+        // before any measured owner invocation.
+        for frame in 0..9 {
+            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        }
+        app.dashboard_data_cache.wait_for_refresh();
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(app.plugins.search_generation(), provider_generation_before);
+        let expected_suggestions = track_c2c_expected_suggestions(catalog);
+        assert_eq!(app.suggestions, expected_suggestions);
+        assert_eq!(expected_suggestions.len(), 5);
+
+        // The changed-provider fixture mutates only its captured Action payload
+        // after the initial result is accepted; the notification is timed later.
+        if case.changes_provider_action() {
+            *provider_action.lock().unwrap() = effective_provider_action.clone();
+        }
+        let mut expected_actions = catalog.to_vec();
+        expected_actions.push(effective_provider_action.clone());
+        assert_eq!(expected_actions.len(), catalog.len() + 1);
+        assert_eq!(
+            action_fixture_identity(&expected_actions),
+            track_c2c_expected_action_identity(catalog.len(), case),
+            "independently reconstructed complete ordered Action output"
+        );
+        let fixture_signature = track_c2c_fixture_signature(
+            catalog,
+            case,
+            &initial_provider_action,
+            &effective_provider_action,
+        );
+        assert_eq!(
+            fixture_signature,
+            track_c2c_expected_fixture_signature(catalog.len(), case),
+            "fixture identity is bound to the independent C2-C reconstruction"
+        );
+
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the actual root UI records its available row width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let style = ctx.style().as_ref().clone();
+        let oracle_ctx = egui::Context::default();
+        oracle_ctx.set_style(style.clone());
+        let (eager_outer, eager) = track_c_eager_root_list_layout(
+            &oracle_ctx,
+            &expected_actions,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            eager_outer,
+            "C2-C settled pre-refresh geometry against independent eager layout",
+        );
+        let (inner_rect, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("settled real ScrollArea records its content extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        assert!(inner_rect.width() > 0.0 && inner_rect.height() > 0.0);
+
+        // A nonempty selection makes the real same-query fast path's clearing
+        // behavior observable without changing the settled viewport.
+        app.selected = Some(0);
+        provider_calls.store(0, Ordering::SeqCst);
+        let geometry_before = app.root_list_geometry.test_observation();
+        let result_generation_before = app.root_list_geometry.result_generation_for_test();
+        crate::performance::track_c::reset();
+        let installation_observer = search::c2c_install_observer::Scope::install();
+        TrackC2CRefreshState {
+            app,
+            installation_observer,
+            ctx,
+            case,
+            expected_actions,
+            expected_suggestions,
+            provider_action,
+            provider_calls,
+            provider_generation_before,
+            result_generation_before,
+            catalog_versions_before,
+            accepted_catalog_versions_before,
+            geometry_before,
+            available_width,
+            eager_outer,
+            eager,
+            frame_index: 9,
+        }
+    }
+
+    fn track_c2c_run_owner(state: &mut TrackC2CRefreshState) -> egui::FullOutput {
+        match state.case {
+            TrackC2CRefreshCase::CachedRepeat => state.app.search(),
+            TrackC2CRefreshCase::EqualProviderNotification
+            | TrackC2CRefreshCase::ChangedProviderNotification => state
+                .app
+                .plugins
+                .notify_search_update_for_test(TRACK_C2C_PROVIDER_SOURCE),
+        }
+        let frame = state.frame_index;
+        state.frame_index += 1;
+        run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
+    }
+
+    fn track_c2c_validate_owner(
+        state: &TrackC2CRefreshState,
+        _output: &egui::FullOutput,
+    ) -> crate::performance::track_c_workloads::OwnerObservation {
+        use crate::performance::track_c_workloads::{OwnerObservation, StableSignature};
+
+        let app = &state.app;
+        assert_eq!(app.query, TRACK_C2C_QUERY);
+        assert_eq!(app.last_search_query, TRACK_C2C_QUERY);
+        assert_eq!(app.results.len(), state.expected_actions.len());
+        for (index, (actual, expected)) in
+            app.results.iter().zip(&state.expected_actions).enumerate()
+        {
+            assert_eq!(actual.label, expected.label, "result {index} label");
+            assert_eq!(actual.desc, expected.desc, "result {index} description");
+            assert_eq!(actual.action, expected.action, "result {index} action ID");
+            assert_eq!(actual.args, expected.args, "result {index} arguments");
+        }
+        assert_eq!(app.results.first(), state.expected_actions.first());
+        assert_eq!(app.results.last(), state.expected_actions.last());
+        assert_eq!(app.suggestions, state.expected_suggestions);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(app.selected, None);
+        assert_eq!(app.autocomplete_index, 0);
+        assert!(app.last_search_result_catalog_versions_stable);
+
+        let current_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(current_catalog_versions, state.catalog_versions_before);
+        assert_eq!(
+            state.accepted_catalog_versions_before, state.catalog_versions_before,
+            "the accepted catalog receipt is the setup generation"
+        );
+        let accepted_catalog_versions = app
+            .last_search_result_catalog_versions
+            .expect("accepted output carries its catalog revision receipt");
+        assert_eq!(
+            accepted_catalog_versions, state.accepted_catalog_versions_before,
+            "the accepted catalog receipt remains unchanged after the owner"
+        );
+        assert_eq!(accepted_catalog_versions, current_catalog_versions);
+
+        let expected_delta = u64::from(state.case.notifies_provider());
+        let current_provider_generation = app.plugins.search_generation();
+        let expected_provider_generation = state
+            .provider_generation_before
+            .wrapping_add(expected_delta);
+        assert_eq!(current_provider_generation, expected_provider_generation);
+        assert_eq!(
+            app.last_search_provider_revision,
+            expected_provider_generation
+        );
+        assert_eq!(
+            app.last_plugin_search_generation,
+            expected_provider_generation
+        );
+        assert_eq!(
+            state.provider_calls.load(Ordering::SeqCst) as u64,
+            expected_delta,
+            "only a provider notification invokes the controlled provider"
+        );
+        assert_eq!(
+            *state.provider_action.lock().unwrap(),
+            if state.case.changes_provider_action() {
+                track_c2c_provider_action(Some("changed"))
+            } else {
+                track_c2c_provider_action(Some(""))
+            }
+        );
+
+        let result_generation = app.root_list_geometry.result_generation_for_test();
+        let result_generation_delta =
+            result_generation.saturating_sub(state.result_generation_before);
+        let expected_result_delta =
+            u64::from(state.case == TrackC2CRefreshCase::ChangedProviderNotification);
+        assert_eq!(result_generation_delta, expected_result_delta);
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &state.eager,
+            state.eager_outer,
+            "C2-C post-refresh geometry against independent eager layout",
+        );
+        let width = state
+            .ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the actual root UI records its available row width");
+        assert!((width - state.available_width).abs() <= 0.01);
+        let after = app.root_list_geometry.test_observation();
+        let rebuilds = after
+            .rebuild_count
+            .saturating_sub(state.geometry_before.rebuild_count);
+        let measured_rows = after
+            .measured_rows
+            .saturating_sub(state.geometry_before.measured_rows);
+        let measured_cells = after
+            .measured_cells
+            .saturating_sub(state.geometry_before.measured_cells);
+        assert_eq!(rebuilds, expected_result_delta);
+        assert_eq!(
+            measured_rows,
+            expected_result_delta.saturating_mul(state.expected_actions.len() as u64)
+        );
+        assert_eq!(measured_cells, 0, "this is the production list layout");
+
+        let installation = state.installation_observer.receipt();
+        match state.case {
+            TrackC2CRefreshCase::CachedRepeat => {
+                assert_eq!(installation.comparison_calls, 0);
+                assert_eq!(installation.comparison_ns, 0);
+                assert_eq!(installation.comparison_input_results, 0);
+                assert_eq!(installation.equal_reuses, 0);
+                assert_eq!(installation.discarded_incoming_actions, 0);
+                assert_eq!(installation.replacements, 0);
+                assert_eq!(installation.installed_actions, 0);
+                assert_eq!(installation.installation_ns, 0);
+            }
+            TrackC2CRefreshCase::EqualProviderNotification => {
+                assert_eq!(installation.comparison_calls, 1);
+                assert_eq!(
+                    installation.comparison_input_results,
+                    state.expected_actions.len() as u64
+                );
+                assert_eq!(installation.equal_reuses, 1);
+                assert_eq!(
+                    installation.discarded_incoming_actions,
+                    state.expected_actions.len() as u64
+                );
+                assert_eq!(installation.replacements, 0);
+                assert_eq!(installation.installed_actions, 0);
+            }
+            TrackC2CRefreshCase::ChangedProviderNotification => {
+                assert_eq!(installation.comparison_calls, 1);
+                assert_eq!(
+                    installation.comparison_input_results,
+                    state.expected_actions.len() as u64
+                );
+                assert_eq!(installation.equal_reuses, 0);
+                assert_eq!(installation.discarded_incoming_actions, 0);
+                assert_eq!(installation.replacements, 1);
+                assert_eq!(
+                    installation.installed_actions,
+                    state.expected_actions.len() as u64
+                );
+            }
+        }
+        assert!(installation.comparison_ns <= installation.installation_ns);
+
+        let painted_rows = app.test_root_rendered_rows.len();
+        let ids = &app.test_root_rendered_row_ids;
+        let rects = &app.test_root_rendered_row_rects;
+        assert!(painted_rows > 0 && painted_rows <= 64);
+        assert_eq!(ids.len(), painted_rows);
+        assert_eq!(rects.len(), painted_rows);
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the real root ScrollArea records its clipped viewport");
+        let (inner_rect, content_size, offset) = app
+            .test_root_scroll_area_extent
+            .expect("the real root ScrollArea records its content extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        let content_origin = inner_rect.min - offset;
+        let visible_start = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.bottom() - state.eager_outer.top() <= viewport.min.y
+        });
+        let visible_end = state.eager.rows.partition_point(|row| {
+            content_origin.y + row.top() - state.eager_outer.top() < viewport.max.y
+        });
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(state.eager.rows.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            app.test_root_rendered_rows
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            expected_indices,
+            "the actual viewport paints exactly the eager visible and overscan rows"
+        );
+        for ((index, action_id), (rect_index, rect)) in
+            app.test_root_rendered_rows.iter().zip(rects)
+        {
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &state.expected_actions[*index].action);
+            let eager_row = state.eager.rows[*index];
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager_row.min - state.eager_outer.min),
+                eager_row.size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "actual C2-C row {index} differs from the independent eager viewport"
+            );
+        }
+
+        let action_output_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&app.results);
+        let mut complete_state = StableSignature::new(
+            0x4352_4652_4553_4f55,
+            "track-c2c-complete-output-state",
+            app.results.len(),
+        );
+        complete_state.number(action_output_id);
+        track_c2c_signature_string(&mut complete_state, &app.query);
+        track_c2c_signature_string(&mut complete_state, &app.last_search_query);
+        complete_state.number(app.last_results_valid as u64);
+        complete_state.number(app.last_search_pending as u64);
+        complete_state.number(app.background_query_refresh_pending as u64);
+        complete_state.number(app.pending_query.is_some() as u64);
+        if let Some(query) = app.pending_query.as_deref() {
+            track_c2c_signature_string(&mut complete_state, query);
+        }
+        complete_state.number(match app.last_search_provider_deferral {
+            search::ProviderSearchDeferral::None => 0,
+            search::ProviderSearchDeferral::Capacity => 1,
+        });
+        complete_state.number(app.last_search_result_catalog_versions_stable as u64);
+        complete_state.number(app.selected.map_or(u64::MAX, |index| index as u64));
+        complete_state.number(app.suggestions.len() as u64);
+        for suggestion in &app.suggestions {
+            track_c2c_signature_string(&mut complete_state, suggestion);
+        }
+        complete_state.number(app.autocomplete_index as u64);
+        let complete_output_state_id = complete_state.finish();
+
+        let mut viewport_signature = StableSignature::new(
+            0x4352_4652_4553_5650,
+            "track-c2c-root-viewport-receipt",
+            painted_rows,
+        );
+        for value in [
+            viewport.min.x,
+            viewport.min.y,
+            viewport.max.x,
+            viewport.max.y,
+            inner_rect.min.x,
+            inner_rect.min.y,
+            inner_rect.max.x,
+            inner_rect.max.y,
+            content_size.x,
+            content_size.y,
+            offset.x,
+            offset.y,
+        ] {
+            viewport_signature.number(u64::from(value.to_bits()));
+        }
+        for ((index, action_id), (id_index, id)) in app.test_root_rendered_rows.iter().zip(ids) {
+            assert_eq!(*index, *id_index);
+            viewport_signature.number(*index as u64);
+            track_c2c_signature_string(&mut viewport_signature, action_id);
+            track_c2c_signature_string(&mut viewport_signature, &format!("{id:?}"));
+        }
+        for (index, rect) in rects {
+            viewport_signature.number(*index as u64);
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport_signature.number(u64::from(value.to_bits()));
+            }
+        }
+        let viewport_receipt = viewport_signature.finish();
+
+        let accepted_values = accepted_catalog_versions;
+        let current_values = current_catalog_versions;
+        let catalog_receipts = vec![
+            1,
+            accepted_values.clipboard,
+            accepted_values.todo,
+            accepted_values.notes,
+            current_values.clipboard,
+            current_values.todo,
+            current_values.notes,
+        ];
+        let provider_revision_receipts = vec![
+            state.provider_generation_before,
+            app.last_search_provider_revision,
+            current_provider_generation,
+            app.last_plugin_search_generation,
+        ];
+        let geometry_ns = if rebuilds == 0 {
+            0
+        } else {
+            after.last_rebuild_nanos
+        };
+        let mut work_counters = vec![
+            app.results.len() as u64,
+            state.provider_calls.load(Ordering::SeqCst) as u64,
+            current_provider_generation.saturating_sub(state.provider_generation_before),
+            result_generation_delta,
+            rebuilds,
+            measured_rows,
+            measured_cells,
+            geometry_ns,
+            painted_rows as u64,
+            app.last_results_valid as u64,
+            app.last_search_pending as u64,
+            match app.last_search_provider_deferral {
+                search::ProviderSearchDeferral::None => 0,
+                search::ProviderSearchDeferral::Capacity => 1,
+            },
+            app.last_search_result_catalog_versions_stable as u64,
+            app.selected.map_or(u64::MAX, |index| index as u64),
+            app.suggestions.len() as u64,
+        ];
+        work_counters.extend(installation.arrays());
+        OwnerObservation {
+            output_identity: complete_output_state_id,
+            structural_signature: action_output_id,
+            revision_receipts: catalog_receipts
+                .into_iter()
+                .chain(provider_revision_receipts)
+                .collect(),
+            viewport_receipt: Some(viewport_receipt),
+            work_units: app.results.len() as u64,
+            work_counters,
+        }
+    }
+
+    fn track_c2c_emit_samples(
+        case: TrackC2CRefreshCase,
+        count: usize,
+        fixture_signature: u64,
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        samples: &[crate::performance::track_c_workloads::SampleRecord],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        assert!(crate::performance::enabled());
+        assert_eq!(
+            crate::performance::track_c_workloads::BenchmarkMode::from_process_env()
+                .expect("valid Track C benchmark mode"),
+            mode
+        );
+        for sample in samples {
+            assert_eq!(sample.work_counters.len(), 23);
+            assert_eq!(sample.revision_receipts.len(), 11);
+            assert!(sample.viewport_receipt.is_some());
+        }
+        let numeric = |index: usize| {
+            samples
+                .iter()
+                .map(|sample| sample.work_counters[index].to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let elapsed = samples
+            .iter()
+            .map(|sample| sample.elapsed_nanos.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let catalog_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.revision_receipts[..7]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let provider_revision_receipts = samples
+            .iter()
+            .map(|sample| {
+                sample.revision_receipts[7..]
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(":")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let complete_output_state_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.output_identity))
+            .collect::<Vec<_>>()
+            .join(",");
+        let action_output_ids = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.structural_signature))
+            .collect::<Vec<_>>()
+            .join(",");
+        let viewport_receipts = samples
+            .iter()
+            .map(|sample| format!("{:016x}", sample.viewport_receipt.unwrap()))
+            .collect::<Vec<_>>()
+            .join(",");
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
+        };
+        eprintln!(
+            "C2C_REUSE_RESULT schema=1 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=warm_egui_font_atlas settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=scoped_installation_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
+            samples.len(),
+            case.key(),
+            numeric(0),
+            numeric(1),
+            numeric(2),
+            numeric(3),
+            numeric(4),
+            numeric(5),
+            numeric(6),
+            numeric(7),
+            numeric(8),
+            numeric(9),
+            numeric(10),
+            numeric(11),
+            numeric(12),
+            numeric(13),
+            numeric(14),
+            numeric(15),
+            numeric(16),
+            numeric(17),
+            numeric(18),
+            numeric(19),
+            numeric(20),
+            numeric(21),
+            numeric(22),
+        );
+    }
+
+    #[test]
+    fn track_c2c_oracle_forced_refresh_reuse_contract() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        for case in TrackC2CRefreshCase::ALL {
+            let mut state = track_c2c_prepare_state(workspace.root(), &fixture.values, case);
+            let output = track_c2c_run_owner(&mut state);
+            let observation = track_c2c_validate_owner(&state, &output);
+            assert_eq!(observation.work_counters[0], 101);
+            assert_eq!(observation.work_counters[14], 5);
+            drop(output);
+            drop(state);
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2c_equal_refresh_installation_semantics() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let mut state = track_c2c_prepare_state(
+            workspace.root(),
+            &fixture.values,
+            TrackC2CRefreshCase::EqualProviderNotification,
+        );
+
+        state.app.selected = Some(0);
+        state.app.suggestions = vec!["stale setup suggestion".into()];
+        let generation_before = state.app.root_list_geometry.result_generation_for_test();
+        let geometry_before = state.app.root_list_geometry.test_observation();
+        let _ = track_c2c_run_owner(&mut state);
+        assert_eq!(state.app.results, state.expected_actions);
+        assert_eq!(state.app.selected, None);
+        assert_eq!(state.app.suggestions, state.expected_suggestions);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            generation_before,
+            "equal current-query output retains the installed results generation"
+        );
+        assert_eq!(
+            state
+                .app
+                .root_list_geometry
+                .test_observation()
+                .rebuild_count,
+            geometry_before.rebuild_count,
+            "equal current-query output preserves settled geometry"
+        );
+
+        let mut current_provider_action = state.provider_action.lock().unwrap().clone();
+        let expected_catalog = fixture.values.clone();
+        for field in 0..6 {
+            match field {
+                0 => current_provider_action.label.push_str(" changed"),
+                1 => current_provider_action.desc.push_str(" changed"),
+                2 => current_provider_action.action.push_str(":changed"),
+                3 => current_provider_action.args = None,
+                4 => current_provider_action.args = Some(String::new()),
+                5 => current_provider_action.args = Some("payload".into()),
+                _ => unreachable!(),
+            }
+            *state.provider_action.lock().unwrap() = current_provider_action.clone();
+            state.app.selected = Some(0);
+            let generation_before = state.app.root_list_geometry.result_generation_for_test();
+            let provider_generation_before = state.app.plugins.search_generation();
+            let output = track_c2c_run_owner(&mut state);
+            let mut expected = expected_catalog.clone();
+            expected.push(current_provider_action.clone());
+            assert_eq!(state.app.results, expected, "Action field case {field}");
+            assert_eq!(
+                state.app.selected, None,
+                "selection clears for field {field}"
+            );
+            assert_eq!(
+                state.app.root_list_geometry.result_generation_for_test(),
+                generation_before + 1,
+                "a changed complete Action replaces results for field {field}"
+            );
+            assert_eq!(
+                state.app.plugins.search_generation(),
+                provider_generation_before + 1
+            );
+            assert_eq!(state.app.last_search_query, TRACK_C2C_QUERY);
+            assert!(state.app.last_results_valid);
+            assert_eq!(
+                state
+                    .app
+                    .root_list_geometry
+                    .test_observation()
+                    .rebuild_count,
+                geometry_before.rebuild_count + 1 + field as u64,
+                "changed Action field invalidates geometry"
+            );
+            drop(output);
+        }
+
+        let reordered = expected_catalog.iter().cloned().rev().collect::<Vec<_>>();
+        state.app.actions = Arc::new(reordered.clone());
+        state.app.update_action_cache();
+        let before_order_refresh = state.app.root_list_geometry.result_generation_for_test();
+        let output = track_c2c_run_owner(&mut state);
+        let mut reordered_expected = reordered.clone();
+        reordered_expected.push(current_provider_action.clone());
+        assert_eq!(state.app.results, reordered_expected);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            before_order_refresh + 1,
+            "a changed ordered result vector is replaced"
+        );
+        drop(output);
+
+        let before_text_edit = state.app.root_list_geometry.result_generation_for_test();
+        let same_output = state.app.results.clone();
+        state.app.selected = Some(0);
+        state.app.query = format!("{TRACK_C2C_QUERY} ");
+        state.app.handle_query_text_changed();
+        assert_eq!(state.app.results, same_output);
+        assert_eq!(state.app.last_search_query, state.app.query);
+        assert_eq!(state.app.selected, None);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            before_text_edit + 1,
+            "a real query text change replaces equal output because the raw query differs"
+        );
+
+        let before_empty_query = state.app.root_list_geometry.result_generation_for_test();
+        let observer_before_empty_query = state.installation_observer.receipt();
+        state.app.query.clear();
+        state.app.selected = Some(0);
+        state.app.handle_query_text_changed();
+        let mut expected_empty_browse = state.app.command_cache.clone();
+        expected_empty_browse.extend(reordered.iter().map(|action| Action {
+            label: format!("app {}", action.label),
+            desc: action.desc.clone(),
+            action: action.action.clone(),
+            args: action.args.clone(),
+        }));
+        assert_eq!(state.app.results, expected_empty_browse);
+        assert_eq!(state.app.suggestions, Vec::<String>::new());
+        assert_eq!(state.app.selected, None);
+        assert_eq!(
+            state.app.root_list_geometry.result_generation_for_test(),
+            before_empty_query + 1,
+            "empty browse still follows its established replacement path"
+        );
+        assert_eq!(
+            state.installation_observer.receipt(),
+            observer_before_empty_query,
+            "empty browse remains outside the nonempty-result installation observer"
+        );
+
+        let receipt = state.installation_observer.receipt();
+        assert_eq!(receipt.equal_reuses, 1);
+        assert_eq!(
+            receipt.discarded_incoming_actions,
+            fixture.values.len() as u64 + 1
+        );
+        assert_eq!(receipt.replacements, 8);
+        assert_eq!(
+            receipt.installed_actions,
+            8 * (fixture.values.len() as u64 + 1)
+        );
+        assert_eq!(receipt.comparison_calls, 8);
+        assert_eq!(
+            receipt.comparison_input_results,
+            8 * (fixture.values.len() as u64 + 1)
+        );
+        drop(state);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2c_equal_refresh_updates_capacity_deferral_and_resumes() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, fixture.values.clone(), workspace.root());
+        app.update_action_cache();
+        app.query = TRACK_C2C_QUERY.into();
+        app.handle_query_text_changed();
+        assert_eq!(app.results, fixture.values);
+        let expected = app.results.clone();
+        let generation_before = app.root_list_geometry.result_generation_for_test();
+        let provider_generation = app.plugins.search_generation();
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let _capacity = app
+            .radial_provider_search_capacity
+            .try_acquire()
+            .expect("test owns the provider-capacity slot");
+        app.last_results_valid = false;
+        let observer = search::c2c_install_observer::Scope::install();
+
+        app.search();
+
+        assert_eq!(app.results, expected);
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            generation_before
+        );
+        assert!(app.last_search_pending);
+        assert!(!app.last_results_valid);
+        assert_eq!(app.last_search_provider_revision, provider_generation);
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+        assert!(!app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::Capacity
+        );
+        assert_eq!(observer.receipt().equal_reuses, 1);
+        assert_eq!(
+            observer.receipt().discarded_incoming_actions,
+            expected.len() as u64
+        );
+
+        drop(_capacity);
+        app.resume_capacity_deferred_search();
+        assert_eq!(app.results, expected);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert_eq!(app.last_search_provider_revision, provider_generation);
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            generation_before
+        );
+        assert_eq!(observer.receipt().comparison_calls, 2);
+        assert_eq!(observer.receipt().equal_reuses, 2);
+        assert_eq!(observer.receipt().replacements, 0);
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c2c_equal_refresh_queues_popup_cleanup_and_preserves_display_invalidation() {
+        let ctx = egui::Context::default();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let results = (0..120).map(root_list_action).collect::<Vec<_>>();
+        let mut app = root_list_app_at(&ctx, results, workspace.root());
+        app.update_action_cache();
+        app.query = TRACK_C2C_QUERY.into();
+        app.handle_query_text_changed();
+
+        let mut frame = 0;
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        let row_zero = app
+            .test_root_rendered_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 0).then_some(*rect))
+            .expect("the settled viewport contains the popup target");
+        let pointer = row_zero.center();
+        let pressed = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+        frame += 1;
+        let released = vec![
+            egui::Event::PointerMoved(pointer),
+            egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+        frame += 1;
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+
+        let scroll_id = app.test_root_scroll_area_id.unwrap();
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
+        scroll_state.offset.y = app.root_list_geometry.row_tops[25];
+        scroll_state.store(&ctx, scroll_id);
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert!(ctx.is_context_menu_open());
+        assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
+        let viewport = app
+            .test_root_scroll_viewport_rect
+            .expect("the root list records its actual viewport");
+        let owner_rect = app
+            .test_root_rendered_row_rects
+            .iter()
+            .find_map(|(index, rect)| (*index == 0).then_some(*rect))
+            .expect("the popup retains its absolute owner row");
+        assert!(
+            !viewport.intersects(owner_rect),
+            "the retained popup owner is outside the visible viewport"
+        );
+
+        let result_generation = app.root_list_geometry.result_generation_for_test();
+        app.last_results_valid = false;
+        app.search();
+        assert!(
+            ctx.is_context_menu_open(),
+            "equal refresh queues, not closes, the popup"
+        );
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            result_generation
+        );
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        frame += 1;
+        assert!(
+            !ctx.is_context_menu_open(),
+            "the next frame applies queued cleanup"
+        );
+        assert_eq!(app.root_list_geometry.popup_owner(), None);
+
+        app.invalidate_root_list_display_geometry();
+        let geometry_before = app.root_list_geometry.test_observation();
+        app.last_results_valid = false;
+        app.search();
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            result_generation
+        );
+        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        let geometry_after = app.root_list_geometry.test_observation();
+        assert_eq!(
+            geometry_after.rebuild_count,
+            geometry_before.rebuild_count + 1,
+            "result reuse leaves an independent display invalidation effective"
+        );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C forced provider refresh and equal-result reuse"]
+    fn track_c2c_benchmark_equal_refresh_reuse() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, TrackCWorkspace, action_fixture, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            for case in TrackC2CRefreshCase::ALL {
+                let fixture_signature = track_c2c_fixture_signature(
+                    &fixture.values,
+                    case,
+                    &track_c2c_provider_action(Some("")),
+                    &if case.changes_provider_action() {
+                        track_c2c_provider_action(Some("changed"))
+                    } else {
+                        track_c2c_provider_action(Some(""))
+                    },
+                );
+                assert_eq!(
+                    fixture_signature,
+                    track_c2c_expected_fixture_signature(*count, case)
+                );
+                let samples = measure_owner(
+                    || track_c2c_prepare_state(workspace.root(), &fixture.values, case),
+                    track_c2c_run_owner,
+                    |state, output| track_c2c_validate_owner(state, output),
+                );
+                assert!(samples.iter().all(|sample| {
+                    sample.structural_signature == track_c2c_expected_action_identity(*count, case)
+                }));
+                track_c2c_emit_samples(case, *count, fixture_signature, mode, &samples);
+            }
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C end-to-end query-to-current CPU root frame owner"]
+    fn track_c_benchmark_root_query_to_usable_cpu_frame() {
+        use crate::performance::track_c_workloads::{
+            BenchmarkMode, ReportMetadata, StableSignature, TrackCWorkspace, action_fixture,
+            action_fixture_identity, emit_samples, measure_owner,
+        };
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C mode");
+        let workspace = TrackCWorkspace::new();
+        for count in mode.action_sizes() {
+            let fixture = action_fixture(*count);
+            let mut fixture_signature = StableSignature::new(
+                0x435F_5155_4552_5949,
+                "track-c-root-query-input",
+                fixture.values.len(),
+            );
+            fixture_signature.number(action_fixture_identity(&fixture.values));
+            fixture_signature.bytes(b"app 00009");
+            fixture_signature.number(1); // exact matching
+            fixture_signature.number(0); // no aliases or usage weights
+            let fixture_signature = fixture_signature.finish();
+            let samples = measure_owner(
+                || track_c_prepare_root_query_state(workspace.root(), &fixture.values),
+                track_c_run_root_query_owner,
+                |state, output| track_c_validate_root_query_frame(state, output),
+            );
+            emit_samples(
+                ReportMetadata {
+                    owner: "query_event+egui_Context_run+LauncherApp::render_root_frame",
+                    fixture_name: "root_query_action_fixture",
+                    fixture_signature,
+                    item_count: *count,
+                    viewport: "960x640",
+                    scale_milli: 1_000,
+                    font_state: "warm_egui_font_atlas",
+                    settings: "app_prefix_exact_match_default_list",
+                    cold_type: "fresh_query_geometry_cold_warm_fonts",
+                    mode,
+                },
+                &samples,
+            );
+        }
+        drop(workspace);
+    }
+
+    #[test]
+    fn track_c_metric_empty_browse_frame_completes_without_last_results_valid() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.query.clear();
+        app.search();
+        app.last_results_valid = false;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+        assert!(!app.last_search_pending);
+        assert_eq!(
+            app.last_search_provider_revision,
+            app.plugins.search_generation()
+        );
+        let invocation_id = 77;
+        let revision = arm_track_c_frame_sample(&mut app, invocation_id);
+
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+
+        let generation = app.root_list_geometry.result_generation;
+        assert!(!app.visibility_revision.complete_first_usable_frame(
+            revision,
+            Some(invocation_id),
+            &app.visible_flag,
+            true,
+            true,
+            Some(generation),
+            generation,
+            true,
+        ));
+    }
+
+    #[test]
+    fn track_c_metric_provider_change_during_root_frame_blocks_completion() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.query.clear();
+        app.search();
+        app.last_results_valid = false;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+        let accepted_provider_revision = app.last_search_provider_revision;
+        assert_eq!(accepted_provider_revision, app.plugins.search_generation());
+        let invocation_id = 78;
+        let revision = arm_track_c_frame_sample(&mut app, invocation_id);
+        app.track_c_test_provider_change_at_frame_end = true;
+
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+
+        let current_provider_revision = app.plugins.search_generation();
+        assert_ne!(accepted_provider_revision, current_provider_revision);
+        let generation = app.root_list_geometry.result_generation;
+        assert!(app.visibility_revision.complete_first_usable_frame(
+            revision,
+            Some(invocation_id),
+            &app.visible_flag,
+            true,
+            true,
+            Some(generation),
+            generation,
+            true,
+        ));
+    }
+
+    #[test]
+    fn track_c_metric_catalog_change_during_root_frame_blocks_completion() {
+        let ctx = egui::Context::default();
+        let (_workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.query.clear();
+        app.search();
+        app.last_results_valid = false;
+        app.pending_query = None;
+        app.background_query_refresh_pending = false;
+        assert!(app.last_search_result_catalog_versions_stable);
+        let accepted_catalog_versions = app
+            .last_search_result_catalog_versions
+            .expect("accepted empty browse results capture mutable catalog versions");
+        assert_eq!(
+            accepted_catalog_versions,
+            crate::radial::dynamic::MutableResultCatalogVersions::current()
+        );
+        let invocation_id = 79;
+        let revision = arm_track_c_frame_sample(&mut app, invocation_id);
+        app.track_c_test_catalog_version_change_at_frame_end = true;
+
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+
+        assert_ne!(
+            accepted_catalog_versions,
+            crate::radial::dynamic::MutableResultCatalogVersions::current()
+        );
+        let generation = app.root_list_geometry.result_generation;
+        assert!(app.visibility_revision.complete_first_usable_frame(
+            revision,
+            Some(invocation_id),
+            &app.visible_flag,
+            true,
+            true,
+            Some(generation),
+            generation,
+            true,
+        ));
     }
 
     fn settle_root_selection(
@@ -5502,6 +13358,7 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(AtomicBool::new(false)),
             );
+            app.dashboard_initial_refresh_queued = true;
             app.actions = Arc::new(fixture.values.clone());
             app.results = fixture.values.clone();
             app.invalidate_root_list_results();
@@ -10869,8 +18726,9 @@ mod tests {
 
     #[test]
     fn query_history_recall_reuses_search_selection_autocomplete_focus_and_cursor_paths() {
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let mut app = root_list_app_at(&ctx, two_results(), workspace.root());
         app.query = "draft".into();
         app.results = two_results();
         app.selected = Some(1);
@@ -10889,6 +18747,8 @@ mod tests {
         assert!(app.last_results_valid);
         assert!(app.focus_query);
         assert!(app.move_cursor_end);
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
@@ -12030,9 +19890,9 @@ mod tests {
 
     #[test]
     fn keyboard_navigation_is_consistent_between_grid_and_list_modes() {
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        app.results = (0..8)
+        let results = (0..8)
             .map(|i| Action {
                 label: format!("A{i}"),
                 desc: "d".into(),
@@ -12040,6 +19900,7 @@ mod tests {
                 args: None,
             })
             .collect();
+        let mut app = root_list_app_at(&ctx, results, workspace.root());
 
         app.resolved_grid_layout = false;
         app.selected = Some(1);
@@ -12059,6 +19920,8 @@ mod tests {
         assert_eq!(app.selected, Some(1));
         app.handle_key(egui::Key::ArrowDown);
         assert_eq!(app.selected, Some(4));
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
@@ -12122,5 +19985,887 @@ mod tests {
         app.update_panel_stack();
         assert!(app.close_front_dialog());
         assert!(!app.clipboard_dialog.open);
+    }
+
+    const TRACK_C3A_WARMUPS: usize = 5;
+    const TRACK_C3A_SAMPLES: usize = 20;
+    const TRACK_C3A_QUERY: &str = "o list ";
+    const TRACK_C3A_HANDLER_TIMEOUT: Duration = Duration::from_secs(5);
+
+    struct TrackC3ASignature(u64);
+
+    impl TrackC3ASignature {
+        fn new(domain: &str) -> Self {
+            let mut signature = Self(0xcbf2_9ce4_8422_2325);
+            signature.string(domain);
+            signature
+        }
+
+        fn raw(&mut self, bytes: &[u8]) {
+            for byte in bytes {
+                self.0 ^= u64::from(*byte);
+                self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        fn bytes(&mut self, bytes: &[u8]) {
+            self.raw(&(bytes.len() as u64).to_le_bytes());
+            self.raw(bytes);
+        }
+
+        fn string(&mut self, value: &str) {
+            self.bytes(value.as_bytes());
+        }
+
+        fn number(&mut self, value: u64) {
+            self.bytes(&value.to_le_bytes());
+        }
+
+        fn finish(self) -> u64 {
+            self.0
+        }
+    }
+
+    struct TrackC3AFixture {
+        workspace: crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace,
+        index_root: std::path::PathBuf,
+        root_text: String,
+        custom_actions: Vec<Action>,
+        indexed_actions: Vec<Action>,
+        config: crate::indexer::coordinator::IndexConfig,
+        fixture_signature: u64,
+        indexed_count: usize,
+    }
+
+    impl TrackC3AFixture {
+        fn new(indexed_count: usize) -> Self {
+            use std::fs;
+
+            let workspace =
+                crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace::new();
+            let root = workspace.root().to_path_buf();
+            let index_root = root.join("startup-index-root");
+            fs::create_dir_all(&index_root).expect("create the owned flat index root");
+            let index_root = fs::canonicalize(index_root).expect("canonicalize the owned root");
+            let root_text = index_root.to_string_lossy().into_owned();
+            let custom_actions = track_c3a_custom_actions();
+            let config = crate::indexer::coordinator::IndexConfig::new(
+                vec![root_text.clone()],
+                Some(indexed_count),
+            );
+
+            let mut fixture_signature =
+                TrackC3ASignature::new("multi-launcher-track-c-startup-fixture-v1");
+            fixture_signature.number(indexed_count as u64);
+            fixture_signature.string("$TRACK_C_ROOT");
+            fixture_signature.number(1);
+            fixture_signature.number(1);
+            fixture_signature.number(indexed_count as u64);
+            fixture_signature.number(custom_actions.len() as u64);
+            for action in &custom_actions {
+                track_c3a_hash_action(&mut fixture_signature, action, None);
+            }
+
+            for index in 0..indexed_count {
+                let name = format!("entry-{index:05}.bin");
+                let content = format!("Track C startup fixture\nindex={index:05}\n");
+                fs::write(index_root.join(&name), content.as_bytes())
+                    .expect("write the deterministic index input outside the owner");
+                fixture_signature.string(&name);
+                fixture_signature.bytes(content.as_bytes());
+            }
+
+            // The callback-owning providers use the process CWD and note
+            // overrides, so all stores exist before their constructors run.
+            fs::write(root.join(crate::plugins::folders::FOLDERS_FILE), b"[]")
+                .expect("write empty folders store");
+            fs::write(root.join(crate::plugins::bookmarks::BOOKMARKS_FILE), b"[]")
+                .expect("write empty bookmarks store");
+            fs::write(root.join(crate::plugins::todo::TODO_FILE), b"[]")
+                .expect("write empty todo store");
+            fs::write(
+                root.join("dashboard.json"),
+                br#"{"version":1,"grid":{"rows":1,"cols":1},"slots":[]}"#,
+            )
+            .expect("write the valid empty dashboard store");
+            fs::write(root.join("settings.json"), b"{}")
+                .expect("write the isolated settings document");
+            assert!(!root.join("actions.json").exists());
+
+            let mut indexed_actions = Vec::with_capacity(indexed_count);
+            for entry in fs::read_dir(&index_root).expect("read the flat owned index root") {
+                let entry = entry.expect("read an owned index entry");
+                if !entry
+                    .file_type()
+                    .expect("inspect an owned index entry")
+                    .is_file()
+                {
+                    continue;
+                }
+                let path = fs::canonicalize(entry.path()).expect("canonicalize indexed action");
+                let label = path
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .expect("fixture filenames are valid Unicode")
+                    .to_owned();
+                let display = path.display().to_string();
+                indexed_actions.push(Action {
+                    label,
+                    desc: display.clone(),
+                    action: display,
+                    args: None,
+                });
+            }
+            assert_eq!(indexed_actions.len(), indexed_count);
+
+            Self {
+                workspace,
+                index_root,
+                root_text,
+                custom_actions,
+                indexed_actions,
+                config,
+                fixture_signature: fixture_signature.finish(),
+                indexed_count,
+            }
+        }
+
+        fn catalog(&self) -> Vec<Action> {
+            let mut catalog = self.custom_actions.clone();
+            catalog.extend(self.indexed_actions.iter().cloned());
+            catalog
+        }
+    }
+
+    fn track_c3a_custom_actions() -> Vec<Action> {
+        vec![
+            Action {
+                label: "Track C custom entry".into(),
+                desc: "synthetic startup prefix".into(),
+                action: "custom:track-c-startup".into(),
+                args: None,
+            },
+            Action {
+                label: "Track C empty arguments".into(),
+                desc: "preserve Some empty arguments".into(),
+                action: "custom:track-c-empty-args".into(),
+                args: Some(String::new()),
+            },
+            Action {
+                label: "Track C Unicode λ".into(),
+                desc: "synthetic startup Unicode payload".into(),
+                action: "custom:track-c-unicode".into(),
+                args: Some("--origin=synthetic".into()),
+            },
+        ]
+    }
+
+    fn track_c3a_hash_action(
+        signature: &mut TrackC3ASignature,
+        action: &Action,
+        root_prefix: Option<&str>,
+    ) {
+        for field in [&action.label, &action.desc, &action.action] {
+            let normalized = root_prefix
+                .and_then(|root| field.strip_prefix(root).map(|suffix| (root, suffix)))
+                .filter(|(_, suffix)| {
+                    suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('\\')
+                })
+                .map(|(_, suffix)| format!("$TRACK_C_ROOT{suffix}"));
+            signature.string(normalized.as_deref().unwrap_or(field));
+        }
+        match action.args.as_deref() {
+            Some(args) => {
+                signature.number(1);
+                signature.string(args);
+            }
+            None => signature.number(0),
+        }
+    }
+
+    fn track_c3a_fixture_signature(fixture: &TrackC3AFixture) -> u64 {
+        fixture.fixture_signature
+    }
+
+    fn track_c3a_structural_catalog_id(
+        catalog: &[Action],
+        custom_len: usize,
+        root_text: &str,
+        indexed_count: usize,
+    ) -> u64 {
+        let mut signature = TrackC3ASignature::new("track-c-startup-structural-output-v1");
+        signature.number(custom_len as u64);
+        signature.number(catalog.len() as u64);
+        for action in catalog {
+            track_c3a_hash_action(&mut signature, action, Some(root_text));
+        }
+        signature.number(1);
+        signature.string("$TRACK_C_ROOT");
+        signature.number(1);
+        signature.number(indexed_count as u64);
+        signature.number(1); // acknowledged generation
+        signature.number(1); // acknowledged-result validation succeeded
+        signature.number(1); // the acknowledged result is no longer queued
+        signature.finish()
+    }
+
+    fn track_c3a_normalized_label(label: &str) -> String {
+        let mut normalized = String::new();
+        let mut pending_space = false;
+        for ch in label.chars() {
+            if ch.is_whitespace() {
+                if !normalized.is_empty() {
+                    pending_space = true;
+                }
+                continue;
+            }
+            if pending_space {
+                normalized.push(' ');
+                pending_space = false;
+            }
+            normalized.extend(ch.to_lowercase());
+        }
+        normalized
+    }
+
+    fn track_c3a_dedup_actions(actions: Vec<Action>) -> Vec<Action> {
+        let mut seen = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for action in actions {
+            let key = format!(
+                "{}\x1f{}",
+                action.action,
+                track_c3a_normalized_label(&action.label)
+            );
+            if seen.insert(key) {
+                result.push(action);
+            }
+        }
+        result
+    }
+
+    fn track_c3a_expected_app_list(catalog: &[Action]) -> Vec<Action> {
+        track_c3a_dedup_actions(catalog.to_vec())
+    }
+
+    fn track_c3a_settings(fixture: &TrackC3AFixture) -> Settings {
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.dashboard.show_when_query_empty = false;
+        settings.dashboard.config_path = Some(
+            fixture
+                .workspace
+                .root()
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        settings.index_paths = Some(vec![fixture.root_text.clone()]);
+        settings.max_indexed_items = Some(fixture.indexed_count);
+        settings.usage_weight = 0.0;
+        settings.match_exact = true;
+        settings.query_autocomplete = false;
+        settings.plugin_dirs = Some(Vec::new());
+        settings.enabled_plugins = Some(std::collections::HashSet::from(["omni_search".into()]));
+        settings.enabled_capabilities = Some(HashMap::new());
+        settings
+    }
+
+    fn track_c3a_prepare_acknowledged_catalog(
+        fixture: &TrackC3AFixture,
+    ) -> (
+        crate::indexer::coordinator::IndexCoordinator,
+        crate::indexer::coordinator::IndexConfig,
+        u64,
+        std::sync::Arc<Vec<Action>>,
+    ) {
+        use crate::indexer::coordinator::IndexCoordinator;
+
+        let coordinator = IndexCoordinator::new().expect("construct the real index coordinator");
+        let generation = coordinator
+            .submit(fixture.config.clone())
+            .expect("submit the fixture index configuration");
+        let waited = coordinator
+            .wait_for_completion(generation)
+            .expect("wait for the submitted generation");
+        assert_eq!(waited.generation(), generation);
+        assert_eq!(waited.config(), &fixture.config);
+        let indexed = waited
+            .outcome()
+            .as_ref()
+            .expect("the owned flat index scan succeeds");
+        assert_eq!(indexed.as_slice(), fixture.indexed_actions.as_slice());
+        let taken = coordinator
+            .take_result()
+            .expect("consume and acknowledge the completed scan exactly once");
+        assert_eq!(taken.generation(), generation);
+        assert_eq!(taken.config(), &fixture.config);
+        assert!(std::sync::Arc::ptr_eq(&waited, &taken));
+        coordinator
+            .validate_acknowledged_result(generation, &fixture.config)
+            .expect("validate the acknowledged exact generation/config");
+        assert!(coordinator.take_result().is_none());
+
+        let mut catalog = fixture.custom_actions.clone();
+        catalog.extend(indexed.as_ref().iter().cloned());
+        assert_eq!(catalog, fixture.catalog());
+        (
+            coordinator,
+            fixture.config.clone(),
+            generation,
+            std::sync::Arc::new(catalog),
+        )
+    }
+
+    struct TrackC3AComponentSample {
+        elapsed_ns: u64,
+        phase_ns: [u64; 7],
+        catalog_receipt: serde_json::Value,
+        query_receipt: serde_json::Value,
+        action_count: u64,
+        custom_count: u64,
+        action_payload_utf8_bytes: u64,
+        action_output_id: u64,
+        structural_catalog_id: u64,
+        full_state_id: u64,
+        geometry_id: u64,
+        viewport_id: u64,
+        result_generation_before_request: u64,
+        result_generation_after_frame: u64,
+        provider_revision_after_frame: u64,
+        catalog_versions_after_frame: [u64; 3],
+        handler_lifecycle: serde_json::Value,
+    }
+
+    fn track_c3a_component_owner(fixture: &mut TrackC3AFixture) -> TrackC3AComponentSample {
+        use crate::gui::track_c_query_observer::{AcceptanceKind, Cause, Origin, Terminal};
+        use crate::performance::track_c_watcher_lifecycle::{HandlerKind, HandlerReleaseProbe};
+        use crate::plugins::omni_search::{OmniSearchPlugin, OmniSearchSettings};
+        use std::sync::atomic::AtomicBool;
+
+        let (coordinator, config, generation, catalog) =
+            track_c3a_prepare_acknowledged_catalog(fixture);
+        let custom_len = fixture.custom_actions.len();
+        let expected = track_c3a_expected_app_list(&catalog);
+        assert_eq!(custom_len, 3);
+        assert_eq!(expected.len(), catalog.len());
+        let settings = track_c3a_settings(fixture);
+        assert_eq!(settings.usage_weight, 0.0);
+        assert!(settings.match_exact);
+        assert!(!settings.query_autocomplete);
+        assert!(
+            crate::plugins::folders::load_folders(crate::plugins::folders::FOLDERS_FILE)
+                .expect("read the owned empty folder-alias input")
+                .is_empty()
+        );
+        assert!(
+            crate::plugins::bookmarks::load_bookmarks(crate::plugins::bookmarks::BOOKMARKS_FILE)
+                .expect("read the owned empty bookmark-alias input")
+                .is_empty()
+        );
+        let actions_path = fixture
+            .workspace
+            .root()
+            .join("actions.json")
+            .to_string_lossy()
+            .into_owned();
+        let settings_path = fixture
+            .workspace
+            .root()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let enabled_plugins = settings.enabled_plugins.clone();
+        let enabled_capabilities = settings.enabled_capabilities.clone();
+        let index_paths = settings.index_paths.clone();
+        let structural_catalog_id = track_c3a_structural_catalog_id(
+            &catalog,
+            custom_len,
+            &fixture.root_text,
+            fixture.indexed_count,
+        );
+        let expected_handler_tokens = HandlerKind::EXPECTED
+            .iter()
+            .map(|kind| kind.token().to_owned())
+            .collect::<Vec<_>>();
+        let mut expected_handler_tokens = expected_handler_tokens;
+        expected_handler_tokens.sort();
+
+        fixture.workspace.callbacks_may_use_paths();
+        let release_probe = HandlerReleaseProbe::begin(fixture.workspace.root());
+        let started = Instant::now();
+        let mut phase_ns = [0_u64; 7];
+
+        let phase_started = Instant::now();
+        let mut omni = OmniSearchPlugin::new(std::sync::Arc::clone(&catalog));
+        phase_ns[0] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let apps_only = OmniSearchSettings {
+            include_apps: true,
+            include_notes: false,
+            include_todos: false,
+            include_calendar: false,
+            include_folders: false,
+            include_bookmarks: false,
+        };
+        omni.apply_settings(&serde_json::to_value(apps_only).expect("serialize Omni settings"));
+        phase_ns[1] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let mut plugins = PluginManager::new_inert_for_test();
+        plugins.register(Box::new(omni));
+        phase_ns[2] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let ctx = egui::Context::default();
+        let visible_flag = Arc::new(AtomicBool::new(true));
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::clone(&catalog),
+            custom_len,
+            plugins,
+            actions_path,
+            settings_path,
+            settings,
+            Some(Vec::new()),
+            index_paths,
+            enabled_plugins,
+            enabled_capabilities,
+            Arc::clone(&visible_flag),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        // Keep the unrelated dashboard All refresh dormant before this one
+        // actual first root frame, without altering app construction.
+        app.dashboard_initial_refresh_queued = true;
+        app.track_c_query_observer.enable_for_test();
+        app.install_startup_indexing(coordinator, config, generation)
+            .expect("install the already acknowledged catalog without resubmitting");
+        let result_generation_before_request = app.root_list_geometry.result_generation_for_test();
+        phase_ns[3] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        app.publish_pending_query(TRACK_C3A_QUERY.to_owned());
+        phase_ns[4] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+
+        let phase_started = Instant::now();
+        let output = run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new());
+        drop(output);
+        phase_ns[5] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let accounted = phase_ns[..6].iter().copied().sum::<u64>();
+        assert!(
+            accounted <= elapsed_ns,
+            "disjoint component phases fit the owner"
+        );
+        phase_ns[6] = elapsed_ns - accounted;
+
+        // Exercise exact command fallback after the measured owner. The `o`
+        // prefix does not activate the local `app` catalog-search route.
+        let provider_revision = app.plugins.search_generation();
+        let local_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let local_only = app.search_read_only_outcome_with_plugin_snapshot(
+            TRACK_C3A_QUERY,
+            crate::plugin::PluginSearchSnapshotResult {
+                actions: Vec::new(),
+                pending: false,
+                start_revision: provider_revision,
+                provider_revision,
+                catalog_versions_at_start: local_catalog_versions,
+                catalog_versions: local_catalog_versions,
+            },
+        );
+        assert!(app.match_exact);
+        assert!(!app.query_autocomplete);
+        assert_eq!(app.usage.len(), 0);
+        assert_eq!(
+            local_only.actions,
+            vec![Action {
+                label: "o list".into(),
+                desc: "Omni".into(),
+                action: "query:o list".into(),
+                args: None,
+            }],
+            "without a provider, exact `o list` yields only its command-cache suggestion"
+        );
+        let local_catalog_match_count = local_only
+            .actions
+            .iter()
+            .filter(|local_result| {
+                app.actions
+                    .iter()
+                    .any(|catalog_action| catalog_action.action == local_result.action)
+            })
+            .count();
+        assert_eq!(
+            local_catalog_match_count, 0,
+            "the exact `o list` local path has no catalog hits"
+        );
+
+        assert_eq!(app.query, TRACK_C3A_QUERY);
+        assert_eq!(app.last_search_query, TRACK_C3A_QUERY);
+        assert_eq!(app.actions.as_ref(), catalog.as_ref());
+        assert_eq!(app.results, expected);
+        assert_eq!(app.custom_len, custom_len);
+        assert!(app.pending_query.is_none());
+        assert!(!app.background_query_refresh_pending);
+        assert!(app.last_results_valid);
+        assert!(!app.last_search_pending);
+        assert_eq!(
+            app.last_search_provider_deferral,
+            search::ProviderSearchDeferral::None
+        );
+        assert_eq!(
+            app.last_search_provider_revision,
+            app.plugins.search_generation()
+        );
+        assert_eq!(
+            app.last_plugin_search_generation,
+            app.plugins.search_generation()
+        );
+        assert!(app.last_search_result_catalog_versions_stable);
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(
+            app.last_search_result_catalog_versions,
+            Some(catalog_versions)
+        );
+        assert_eq!(app.plugins.search_generation(), 0);
+        assert!(!app.radial_provider_search_capacity.is_occupied());
+        assert!(app.last_note_search_change.is_none());
+        assert_eq!(
+            app.root_list_geometry.result_generation_for_test(),
+            result_generation_before_request + 1
+        );
+
+        let observation = app.track_c_query_observer.snapshot();
+        assert_eq!(observation.frame_count, 1);
+        assert_eq!(observation.intent_count, 1);
+        assert_eq!(observation.completed_count, 1);
+        assert_eq!(observation.superseded_count, 0);
+        assert_eq!(observation.cancelled_count, 0);
+        assert_eq!(observation.receipt_count, 1);
+        let query_receipt = observation.receipts[0].expect("one first-frame query receipt");
+        assert_eq!(query_receipt.origin, Origin::PendingQuery);
+        assert_eq!(query_receipt.terminal, Terminal::Completed);
+        assert_eq!(query_receipt.cause, Cause::FirstUsableRootFrame);
+        assert_eq!(query_receipt.started_frame, 1);
+        assert_eq!(query_receipt.terminal_frame, 1);
+        assert_eq!(query_receipt.frames, 1);
+        assert!(query_receipt.completion_latency_ns.is_some());
+        assert_eq!(query_receipt.painted_sequence, Some(query_receipt.sequence));
+        assert_eq!(query_receipt.painted_acceptance_frame, Some(1));
+        assert_eq!(query_receipt.painted_frame, Some(1));
+        assert_eq!(
+            query_receipt.painted_generation,
+            Some(app.root_list_geometry.result_generation_for_test())
+        );
+        let acceptance = query_receipt.acceptance.expect("normal Search acceptance");
+        assert_eq!(acceptance.kind, AcceptanceKind::Search);
+        assert_eq!(acceptance.frame, 1);
+        assert_eq!(
+            acceptance.result_generation,
+            app.root_list_geometry.result_generation_for_test()
+        );
+        assert_eq!(
+            acceptance.provider_revision,
+            app.plugins.search_generation()
+        );
+        assert_eq!(acceptance.catalog_versions, Some(catalog_versions));
+        assert!(acceptance.catalog_versions_stable);
+        assert!(!acceptance.search_pending);
+        assert!(!acceptance.capacity_deferred);
+        assert_eq!(
+            query_receipt.geometry_by_cause
+                [crate::gui::track_c_query_observer::GeometryCause::Query as usize],
+            crate::gui::track_c_query_observer::GeometryWork {
+                rebuilds: 1,
+                rows: expected.len() as u64,
+            }
+        );
+        assert_eq!(query_receipt.geometry_rebuilds, 1);
+        assert_eq!(query_receipt.geometry_rows, expected.len() as u64);
+
+        let available_width = ctx
+            .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
+            .expect("the first actual root frame records available row width");
+        assert!(available_width.is_finite() && available_width > 0.0);
+        let (content_viewport, content_origin) = ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Pos2)>(egui::Id::new(
+                    "track-c2g-root-content-viewport",
+                ))
+            })
+            .expect("the actual first frame records its content viewport and origin");
+        let style = ctx.style().as_ref().clone();
+        let (outer, eager) = track_c_eager_root_list_layout(
+            &ctx,
+            &expected,
+            &app.folder_aliases,
+            false,
+            available_width,
+            &style,
+            app.list_scale,
+        );
+        assert_root_list_cache_matches_eager(
+            &app.root_list_geometry,
+            &eager,
+            outer,
+            "C3-A actual first root frame matches the independent eager list layout",
+        );
+        let rendered_rows = &app.test_root_rendered_rows;
+        let rendered_ids = &app.test_root_rendered_row_ids;
+        let rendered_rects = &app.test_root_rendered_row_rects;
+        assert_eq!(rendered_rows.len(), rendered_ids.len());
+        assert_eq!(rendered_rows.len(), rendered_rects.len());
+        let (inner_rect, content_size, _) = app
+            .test_root_scroll_area_extent
+            .expect("the first frame records ScrollArea extent");
+        assert!((content_size.x - app.root_list_geometry.content_width).abs() <= 1.0);
+        assert!((content_size.y - app.root_list_geometry.total_height).abs() <= 1.0);
+        let clip = app
+            .test_root_scroll_viewport_rect
+            .expect("the first frame records the viewport clip");
+        let visible_start = eager
+            .rows
+            .partition_point(|row| row.bottom() - outer.top() <= content_viewport.min.y);
+        let visible_end = eager
+            .rows
+            .partition_point(|row| row.top() - outer.top() < content_viewport.max.y);
+        let expected_indices = (visible_start.saturating_sub(ROOT_LIST_OVERSCAN_ROWS)
+            ..visible_end
+                .saturating_add(ROOT_LIST_OVERSCAN_ROWS)
+                .min(expected.len()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rendered_rows
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            expected_indices,
+            "the actual first-frame rows equal eager visible rows plus overscan"
+        );
+        for (((index, action_id), (id_index, _)), (rect_index, rect)) in
+            rendered_rows.iter().zip(rendered_ids).zip(rendered_rects)
+        {
+            assert_eq!(*index, *id_index);
+            assert_eq!(*index, *rect_index);
+            assert_eq!(action_id, &expected[*index].action);
+            let expected_rect = egui::Rect::from_min_size(
+                content_origin + (eager.rows[*index].min - outer.min),
+                eager.rows[*index].size(),
+            );
+            assert!(
+                rect.min.distance(expected_rect.min) <= 1.0
+                    && rect.max.distance(expected_rect.max) <= 1.0,
+                "painted row {index} matches the independent eager viewport"
+            );
+            if *index >= visible_start && *index < visible_end {
+                assert!(clip.intersects(*rect));
+            }
+        }
+        assert!(inner_rect.is_positive());
+
+        let result_generation_after_frame = app.root_list_geometry.result_generation_for_test();
+        let provider_revision_after_frame = app.plugins.search_generation();
+        let catalog_versions_after_frame = [
+            catalog_versions.clipboard,
+            catalog_versions.todo,
+            catalog_versions.notes,
+        ];
+        let action_output_id =
+            crate::performance::track_c_workloads::action_fixture_identity(&catalog);
+        let full_state_id = track_c2g_full_state_id(&app);
+        let geometry_id = track_c2g_geometry_id(&app);
+        let viewport_id = track_c2g_viewport_id(&app);
+        let action_payload_utf8_bytes = track_c2g_action_payload_bytes(&catalog);
+        let query_receipt_json = track_c2g_receipt_json(query_receipt);
+        let catalog_receipt = serde_json::json!({
+            "root_count": 1,
+            "max_items_present": 1,
+            "max_items": fixture.indexed_count,
+            "generation": generation,
+            "custom_count": custom_len,
+            "indexed_count": fixture.indexed_count,
+            "catalog_count": catalog.len(),
+            "wait_generation_matches": 1,
+            "taken_generation_matches": 1,
+            "acknowledged_validation_ok": 1,
+            "result_still_queued": 0,
+        });
+
+        drop(app);
+        let lifecycle = release_probe.wait(TRACK_C3A_HANDLER_TIMEOUT);
+        fixture.workspace.callbacks_released(&lifecycle);
+        let tokens = |kinds: &[HandlerKind]| {
+            let mut tokens = kinds
+                .iter()
+                .map(|kind| kind.token().to_owned())
+                .collect::<Vec<_>>();
+            tokens.sort();
+            tokens
+        };
+        let handler_lifecycle = serde_json::json!({
+            "attempts": tokens(&lifecycle.attempts),
+            "created": tokens(&lifecycle.created),
+            "released": tokens(&lifecycle.released),
+            "overflowed": lifecycle.overflowed,
+            "complete": lifecycle.complete,
+        });
+        assert!(
+            lifecycle.complete,
+            "all captured callback closures released"
+        );
+        assert!(!lifecycle.overflowed);
+        assert_eq!(tokens(&lifecycle.attempts), expected_handler_tokens);
+        assert_eq!(tokens(&lifecycle.created), expected_handler_tokens);
+        assert_eq!(tokens(&lifecycle.released), expected_handler_tokens);
+
+        TrackC3AComponentSample {
+            elapsed_ns,
+            phase_ns,
+            catalog_receipt,
+            query_receipt: query_receipt_json,
+            action_count: catalog.len() as u64,
+            custom_count: custom_len as u64,
+            action_payload_utf8_bytes,
+            action_output_id,
+            structural_catalog_id,
+            full_state_id,
+            geometry_id,
+            viewport_id,
+            result_generation_before_request,
+            result_generation_after_frame,
+            provider_revision_after_frame,
+            catalog_versions_after_frame,
+            handler_lifecycle,
+        }
+    }
+
+    fn emit_track_c3a_component(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        fixture: &TrackC3AFixture,
+        samples: &[TrackC3AComponentSample],
+    ) {
+        assert_eq!(samples.len(), TRACK_C3A_SAMPLES);
+        assert_eq!(
+            samples
+                .iter()
+                .map(|sample| sample.action_output_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1,
+            "the same owned root yields a stable raw Action identity"
+        );
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_SOURCE".to_owned());
+        let profile = std::env::var("ML_TRACK_C_PROFILE")
+            .unwrap_or_else(|_| "unspecified-profile".to_owned());
+        let mode = match mode {
+            crate::performance::track_c_workloads::BenchmarkMode::Small => "Small",
+            crate::performance::track_c_workloads::BenchmarkMode::Full => "Full",
+        };
+        let phase_names = [
+            "omni_construct",
+            "apply_apps_only_settings",
+            "inert_manager_register",
+            "launcher_app_construct_and_transfer",
+            "pending_query_publish",
+            "ctx_run_and_fulloutput_drop",
+            "residual",
+        ];
+        let sample_records = samples
+            .iter()
+            .map(|sample| {
+                serde_json::json!({
+                    "elapsed_ns": sample.elapsed_ns,
+                    "phase_ns": sample.phase_ns,
+                    "catalog_receipt": sample.catalog_receipt,
+                    "query_receipt": sample.query_receipt,
+                    "action_count": sample.action_count,
+                    "custom_count": sample.custom_count,
+                    "action_payload_utf8_bytes": sample.action_payload_utf8_bytes,
+                    "action_output_id": format!("{:016x}", sample.action_output_id),
+                    "structural_catalog_id": format!("{:016x}", sample.structural_catalog_id),
+                    "full_state_id": format!("{:016x}", sample.full_state_id),
+                    "geometry_id": format!("{:016x}", sample.geometry_id),
+                    "viewport_id": format!("{:016x}", sample.viewport_id),
+                    "result_generation_before_request": sample.result_generation_before_request,
+                    "result_generation_after_frame": sample.result_generation_after_frame,
+                    "provider_revision_after_frame": sample.provider_revision_after_frame,
+                    "catalog_versions_after_frame": sample.catalog_versions_after_frame,
+                    "handler_lifecycle": sample.handler_lifecycle,
+                })
+            })
+            .collect::<Vec<_>>();
+        let record = serde_json::json!({
+            "schema": 1,
+            "stage": "ready_catalog_restricted_omni_first_cpu_frame",
+            "owner": "real_omni_constructor+LauncherApp::new+one_egui_Context_run+FullOutput_drop",
+            "fixture": "owned_synthetic_index_tree",
+            "source": source,
+            "profile": profile,
+            "mode": mode,
+            "telemetry_enabled": crate::performance::enabled(),
+            "fixture_signature": format!("{:016x}", fixture.fixture_signature),
+            "count": fixture.indexed_count,
+            "warmups": TRACK_C3A_WARMUPS,
+            "samples": TRACK_C3A_SAMPLES,
+            "exclusions": 0,
+            "phase_names": phase_names,
+            "query_recipe": "omni_list_all_apps",
+            "constructor_empty_search_included": true,
+            "exactly_one_frame": true,
+            "sample_records": sample_records,
+        });
+        eprintln!("TRACK_C3A_READY_CATALOG_RESULT {record}");
+    }
+
+    #[test]
+    fn track_c3a_oracle_ready_catalog_runs_omni_first_query_and_releases_handlers() {
+        let mut fixture = TrackC3AFixture::new(16);
+        let sample = track_c3a_component_owner(&mut fixture);
+        assert_eq!(fixture.fixture_signature, 0xd6f2_eaec_0d1b_6dda);
+        assert_eq!(sample.action_count, 19);
+        assert_eq!(sample.custom_count, 3);
+        assert_eq!(sample.structural_catalog_id, 0x5648_9f61_f9fd_eb48);
+        assert_eq!(
+            sample.result_generation_after_frame,
+            sample.result_generation_before_request + 1
+        );
+        assert_eq!(sample.provider_revision_after_frame, 0);
+        assert!(sample.elapsed_ns > 0);
+        assert_eq!(sample.phase_ns.iter().sum::<u64>(), sample.elapsed_ns);
+        assert!(sample.handler_lifecycle["complete"].as_bool().unwrap());
+    }
+
+    #[test]
+    #[ignore = "opt-in C3-A ready-catalog/restricted-Omni first CPU frame benchmark"]
+    fn track_c3a_benchmark_ready_catalog_restricted_omni_first_cpu_frame() {
+        use crate::performance::track_c_workloads::BenchmarkMode;
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        let counts: &[usize] = match mode {
+            BenchmarkMode::Small => &[16],
+            BenchmarkMode::Full => &[16, 1_000, 10_000],
+        };
+        for count in counts {
+            let mut fixture = TrackC3AFixture::new(*count);
+            for _ in 0..TRACK_C3A_WARMUPS {
+                let _ = track_c3a_component_owner(&mut fixture);
+            }
+            let samples = (0..TRACK_C3A_SAMPLES)
+                .map(|_| track_c3a_component_owner(&mut fixture))
+                .collect::<Vec<_>>();
+            emit_track_c3a_component(mode, &fixture, &samples);
+        }
     }
 }

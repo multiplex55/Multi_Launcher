@@ -1,0 +1,23 @@
+{
+  "status": "PASS",
+  "controls": 16,
+  "checks": [
+    "accepted_C1G_four_record_positive",
+    "wrong_source_reject",
+    "missing_record_reject",
+    "duplicate_recipe_reject",
+    "unknown_payload_reject",
+    "old_triple_work_reject",
+    "wrong_complete_identity_reject",
+    "wrong_revision_reject",
+    "bool_work_reject",
+    "negative_elapsed_reject",
+    "wrong_quantile_reject",
+    "overflow_receipt_reject",
+    "native_payload_reject",
+    "duplicate_json_reject",
+    "float_json_reject",
+    "nonfinite_json_reject"
+  ],
+  "basis": "Historical accepted C1G actual records, not finalsource executions"
+}

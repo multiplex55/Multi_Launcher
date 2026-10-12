@@ -20,6 +20,7 @@ pub mod crop_dialog;
 mod dashboard_editor_dialog;
 mod data_recovery_dialog;
 mod diff_dialog;
+mod event_channel;
 mod fav_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
@@ -63,6 +64,9 @@ mod timer_dialog;
 mod toast_log_dialog;
 mod todo_dialog;
 mod todo_view_dialog;
+#[cfg(test)]
+mod track_c_action_observer;
+mod track_c_query_observer;
 pub(crate) mod universal_action_catalog;
 mod universal_action_executor;
 mod unused_assets_dialog;
@@ -139,7 +143,7 @@ struct ScreenDrawRegionOperation {
 }
 
 use crate::actions::folders;
-use crate::actions::{Action, load_actions_typed};
+use crate::actions::{Action, ActionIdLookup, load_actions_typed};
 use crate::actions_editor::ActionsEditor;
 use crate::clipboard_modify::coordinator::{
     ImmediateCompletionEvent, ImmediateExecutionCoordinator,
@@ -159,6 +163,7 @@ use crate::indexer;
 
 use crate::multi_manager::state::MultiManagerState;
 use crate::multi_manager::ui::{MultiManagerDialog, MultiManagerSettingsDialog};
+use crate::performance::track_c::EventOrigin;
 use crate::plugin::{CAP_FORCE_LIST_RESULTS, CAP_GRID_RESULTS_COMPATIBLE, PluginManager};
 use crate::plugin_editor::PluginEditor;
 use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
@@ -178,6 +183,8 @@ use confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveActio
 use dashboard_editor_dialog::DashboardEditorDialog;
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions, Toasts};
+pub use event_channel::EventReceiver;
+use event_channel::EventSender;
 use fst::Map;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -261,9 +268,23 @@ fn normalize_static_window_config(
 
 struct AppEventSink {
     id: u64,
-    sender: Sender<WatchEvent>,
+    sender: AppEventSender,
     wake: Option<ViewportWake>,
     queued: Arc<AtomicUsize>,
+}
+
+enum AppEventSender {
+    Raw(Sender<WatchEvent>),
+    Observed(EventSender),
+}
+
+impl AppEventSender {
+    fn send(&self, event: WatchEvent) -> Result<(), ()> {
+        match self {
+            Self::Raw(sender) => sender.send(event).map_err(|_| ()),
+            Self::Observed(sender) => sender.send_as(event, EventOrigin::Registry).map_err(|_| ()),
+        }
+    }
 }
 
 const APP_EVENT_PENDING_CAPACITY: usize = 256;
@@ -371,7 +392,7 @@ impl Drop for EventSinkRegistration {
 }
 
 fn register_event_sink(
-    tx: Sender<WatchEvent>,
+    sender: AppEventSender,
     wake: Option<ViewportWake>,
 ) -> EventSinkRegistration {
     let registration = EventSinkRegistration {
@@ -384,17 +405,22 @@ fn register_event_sink(
         registry.owner_registered = true;
         let sink = AppEventSink {
             id: registration.id,
-            sender: tx,
+            sender,
             wake,
             queued: Arc::clone(&registration.queued),
         };
         if first_owner {
             let pending = registry.pending_before_owner.drain(..).collect::<Vec<_>>();
             for event in pending {
+                sink.queued.fetch_add(1, Ordering::AcqRel);
                 if sink.sender.send(event).is_err() {
+                    let _ = sink
+                        .queued
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                            Some(n.saturating_sub(1))
+                        });
                     return registration;
                 }
-                sink.queued.fetch_add(1, Ordering::Release);
             }
         }
         if sink.queued.load(Ordering::Acquire) > 0 {
@@ -413,11 +439,15 @@ pub fn register_event_sender_with_wake(
     tx: Sender<WatchEvent>,
     wake: ViewportWake,
 ) -> EventSinkRegistration {
-    register_event_sink(tx, Some(wake))
+    register_event_sink(AppEventSender::Raw(tx), Some(wake))
 }
 
 pub fn register_event_sender(tx: Sender<WatchEvent>) -> EventSinkRegistration {
-    register_event_sink(tx, None)
+    register_event_sink(AppEventSender::Raw(tx), None)
+}
+
+fn register_observed_event_sender(tx: EventSender, wake: ViewportWake) -> EventSinkRegistration {
+    register_event_sink(AppEventSender::Observed(tx), Some(wake))
 }
 
 pub fn send_event(ev: WatchEvent) {
@@ -435,10 +465,15 @@ pub fn send_event(ev: WatchEvent) {
             }
             let mut wakes = Vec::new();
             registry.sinks.retain_mut(|sink| {
+                sink.queued.fetch_add(1, Ordering::AcqRel);
                 if sink.sender.send(ev.clone()).is_err() {
+                    let _ = sink
+                        .queued
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                            Some(n.saturating_sub(1))
+                        });
                     return false;
                 }
-                sink.queued.fetch_add(1, Ordering::Release);
                 if let Some(wake) = &sink.wake {
                     wakes.push(wake.clone());
                 }
@@ -676,7 +711,7 @@ pub struct LauncherApp {
     command_bus: Arc<crate::commands::CommandBus>,
     action_cache: Vec<CachedSearchEntry>,
     action_filter_metadata: Vec<ActionFilterMetadata>,
-    actions_by_id: HashMap<String, Action>,
+    actions_by_id: ActionIdLookup,
     command_cache: Vec<Action>,
     command_search_cache: Vec<CachedSearchEntry>,
     completion_index: Option<Map<Vec<u8>>>,
@@ -757,9 +792,9 @@ pub struct LauncherApp {
     pub show_dashboard_diagnostics: bool,
     pub dashboard_editor: DashboardEditorDialog,
     pub show_dashboard_editor: bool,
-    rx: Receiver<WatchEvent>,
+    rx: EventReceiver,
     event_sink: EventSinkRegistration,
-    event_tx: Sender<WatchEvent>,
+    event_tx: EventSender,
     /// Bounds deferred radial provider work to one in-flight invocation. A
     /// cancelled provider call keeps this slot until the call actually exits.
     pub(crate) radial_provider_search_capacity:
@@ -949,6 +984,18 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    last_search_pending: bool,
+    last_search_provider_revision: u64,
+    last_search_result_catalog_versions:
+        Option<crate::radial::dynamic::MutableResultCatalogVersions>,
+    last_search_result_catalog_versions_stable: bool,
+    #[cfg(test)]
+    track_c_test_force_enabled: bool,
+    #[cfg(test)]
+    track_c_test_provider_change_at_frame_end: bool,
+    #[cfg(test)]
+    track_c_test_catalog_version_change_at_frame_end: bool,
+    track_c_query_observer: track_c_query_observer::Observer,
     background_query_refresh_pending: bool,
     last_search_provider_deferral: search::ProviderSearchDeferral,
     last_plugin_search_generation: u64,
@@ -1052,12 +1099,26 @@ impl LauncherApp {
     /// neither path reconstructs indexed actions from the filesystem. Version
     /// changes remain owned by the persistence/watcher caller.
     fn publish_custom_actions_with_indexed_tail(&mut self, custom: Vec<Action>) {
-        let indexed = self
-            .actions
-            .iter()
-            .skip(self.custom_len.min(self.actions.len()))
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::ActionPublishPrepare,
+        );
+        let indexed = {
+            #[cfg(test)]
+            let _track_c_tail_copy =
+                track_c_action_observer::scope(track_c_action_observer::Phase::TailCopy);
+            self.actions
+                .iter()
+                .skip(self.custom_len.min(self.actions.len()))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        #[cfg(test)]
+        track_c_action_observer::add(
+            track_c_action_observer::Counter::TailActionsCloned,
+            indexed.len(),
+        );
+        timer.set_work_units(indexed.len());
+        timer.finish(crate::performance::track_c::Outcome::Completed);
         self.publish_actions(custom, indexed);
     }
 
@@ -1066,12 +1127,34 @@ impl LauncherApp {
         custom: Vec<Action>,
         additional: impl IntoIterator<Item = Action>,
     ) {
+        let mut timer = crate::performance::track_c::Timer::start(
+            crate::performance::track_c::Phase::ActionPublishCommit,
+        );
         self.custom_len = custom.len();
-        let mut actions = custom;
-        actions.extend(additional);
-        self.actions = Arc::new(actions);
+        let catalog_len = {
+            #[cfg(test)]
+            let _track_c_catalog_assembly =
+                track_c_action_observer::scope(track_c_action_observer::Phase::CatalogAssemblyArc);
+            let mut actions = custom;
+            actions.extend(additional);
+            let catalog_len = actions.len();
+            self.actions = Arc::new(actions);
+            catalog_len
+        };
+        #[cfg(test)]
+        track_c_action_observer::add(
+            track_c_action_observer::Counter::CatalogAssemblyActions,
+            catalog_len,
+        );
+        timer.set_work_units(catalog_len);
         self.update_action_cache();
-        self.request_background_query_refresh();
+        {
+            #[cfg(test)]
+            let _track_c_same_query_refresh =
+                track_c_action_observer::scope(track_c_action_observer::Phase::SameQueryRefresh);
+            self.request_background_query_refresh();
+        }
+        timer.finish(crate::performance::track_c::Outcome::Completed);
     }
 
     pub fn plugin_enabled(&self, name: &str) -> bool {
@@ -1743,8 +1826,8 @@ impl LauncherApp {
             index_paths.unwrap_or_default(),
             settings.max_indexed_items,
         );
-        let (tx, rx) = channel();
-        let event_sink = register_event_sender_with_wake(tx.clone(), ViewportWake::root(ctx));
+        let (tx, rx) = event_channel::channel();
+        let event_sink = register_observed_event_sender(tx.clone(), ViewportWake::root(ctx));
         let mut watchers = Vec::new();
         let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
@@ -1770,7 +1853,7 @@ impl LauncherApp {
         );
         let dashboard_registry = WidgetRegistry::with_defaults();
         let dashboard_event_cb = std::sync::Arc::new({
-            let tx = tx.clone();
+            let tx = tx.with_origin(EventOrigin::Dashboard);
             let ctx = ctx.clone();
             move |ev: DashboardEvent| {
                 if tx.send(WatchEvent::Dashboard(ev)).is_ok() {
@@ -2071,11 +2154,15 @@ impl LauncherApp {
             .internal_services()
             .workspace_catalog
             .attach(&multi_manager.workspaces);
+        #[cfg(test)]
+        let plugin_editor = if plugins.is_inert_for_test() {
+            PluginEditor::new_with_manager_for_test(&settings, &plugins)
+        } else {
+            PluginEditor::new(&settings)
+        };
+        #[cfg(not(test))]
         let plugin_editor = PluginEditor::new(&settings);
-        let actions_by_id = actions
-            .iter()
-            .map(|a| (a.action.clone(), a.clone()))
-            .collect::<HashMap<_, _>>();
+        let actions_by_id = ActionIdLookup::new(Arc::clone(&actions));
         let dashboard_runtime = DashboardRuntime::start({
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -2373,6 +2460,19 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            last_search_pending: false,
+            last_search_provider_revision: 0,
+            last_search_result_catalog_versions: None,
+            last_search_result_catalog_versions_stable: false,
+            #[cfg(test)]
+            track_c_test_force_enabled: false,
+            #[cfg(test)]
+            track_c_test_provider_change_at_frame_end: false,
+            #[cfg(test)]
+            track_c_test_catalog_version_change_at_frame_end: false,
+            track_c_query_observer: track_c_query_observer::Observer::new(
+                crate::performance::enabled(),
+            ),
             background_query_refresh_pending: false,
             last_search_provider_deferral: Default::default(),
             last_plugin_search_generation: 0,
@@ -2508,6 +2608,11 @@ impl LauncherApp {
         {
             let old_suggestions = self.suggestions.clone();
             let old_index = self.autocomplete_index;
+            self.track_c_query_observer.begin_from(
+                self.track_c_query_observer.tentative_start(),
+                track_c_query_observer::Origin::Suggestion,
+                &s,
+            );
             self.query = s;
             self.move_cursor_end = true;
             self.search();
@@ -3729,6 +3834,13 @@ impl LauncherApp {
 }
 
 impl LauncherApp {
+    /// Publish a query for the next root frame, invalidating any one-shot
+    /// command-to-pending association before the independent request is stored.
+    pub(super) fn publish_pending_query(&mut self, query: String) {
+        self.track_c_query_observer.pending_query_published();
+        self.pending_query = Some(query);
+    }
+
     pub fn install_root_window_bridge(&mut self, bridge: RootWindowBridge) {
         self.root_window_bridge = bridge;
     }
@@ -3742,7 +3854,10 @@ impl LauncherApp {
         self.screen_draw_recovery_bridge = bridge;
     }
 
-    pub fn watch_receiver(&self) -> &Receiver<WatchEvent> {
+    /// Returns the app-owned observed event receiver. `try_recv` and
+    /// `recv_timeout` expose plain `WatchEvent` values while internal queue
+    /// age/depth diagnostics remain behind the private envelope.
+    pub fn watch_receiver(&self) -> &EventReceiver {
         &self.rx
     }
 
@@ -4015,7 +4130,7 @@ impl LauncherApp {
                         );
                     }
                     if self.query.trim_start().starts_with("note list") {
-                        self.pending_query = Some(self.query.clone());
+                        self.publish_pending_query(self.query.clone());
                         self.search();
                     }
                     self.notes_dialog.open();
@@ -4048,7 +4163,7 @@ impl LauncherApp {
     }
 }
 
-pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
+pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
     while let Ok(ev) = rx.try_recv() {
         match ev {
             WatchEvent::Actions
@@ -4094,10 +4209,7 @@ pub fn recv_test_event(rx: &Receiver<WatchEvent>) -> Option<TestWatchEvent> {
     None
 }
 
-pub fn recv_test_event_timeout(
-    rx: &Receiver<WatchEvent>,
-    timeout: Duration,
-) -> Option<TestWatchEvent> {
+pub fn recv_test_event_timeout(rx: &EventReceiver, timeout: Duration) -> Option<TestWatchEvent> {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -4230,6 +4342,13 @@ mod tests {
         }
     }
 
+    fn resolved_action_lookup(lookup: &ActionIdLookup) -> HashMap<String, Action> {
+        lookup
+            .iter()
+            .map(|(id, action)| (id.to_owned(), action.clone()))
+            .collect()
+    }
+
     fn wait_for_index_ready(app: &mut LauncherApp) {
         let event = app
             .rx
@@ -4346,7 +4465,7 @@ mod tests {
         assert_eq!(crate::actions::actions_version(), version_before + 1);
         assert_eq!(app.actions_by_id.get("index:retained-id"), Some(&renamed));
         assert_eq!(app.actions_by_id.get("index:new-id"), Some(&added));
-        assert!(!app.actions_by_id.contains_key("index:removed-id"));
+        assert!(app.actions_by_id.get("index:removed-id").is_none());
         assert_eq!(app.action_cache[1].label_lc, "fresh needle retained target");
         assert_eq!(
             app.action_filter_metadata[1].normalized_id,
@@ -4450,7 +4569,7 @@ mod tests {
         );
 
         let actions_after_publication = Arc::clone(&app.actions);
-        let cache_after_publication = app.actions_by_id.clone();
+        let cache_after_publication = resolved_action_lookup(&app.actions_by_id);
         let results_after_publication = app.results.clone();
         let version_after_publication = crate::actions::actions_version();
         let second_config = crate::indexer::coordinator::IndexConfig::new(
@@ -4460,7 +4579,10 @@ mod tests {
         app.request_index_config(second_config);
         process_index_ready_through_watch_event(&mut app);
         assert!(Arc::ptr_eq(&app.actions, &actions_after_publication));
-        assert_eq!(app.actions_by_id, cache_after_publication);
+        assert_eq!(
+            resolved_action_lookup(&app.actions_by_id),
+            cache_after_publication
+        );
         assert_eq!(app.results, results_after_publication);
         assert_eq!(crate::actions::actions_version(), version_after_publication);
         assert!(Arc::ptr_eq(
@@ -4593,7 +4715,7 @@ mod tests {
         app.results = vec![tail.clone()];
         app.selected = Some(0);
         let actions = Arc::clone(&app.actions);
-        let by_id = app.actions_by_id.clone();
+        let by_id = resolved_action_lookup(&app.actions_by_id);
         let results = app.results.clone();
         let query = app.query.clone();
         let selected = app.selected;
@@ -4611,7 +4733,7 @@ mod tests {
         wait_for_index_ready(&mut app);
 
         assert!(Arc::ptr_eq(&app.actions, &actions));
-        assert_eq!(app.actions_by_id, by_id);
+        assert_eq!(resolved_action_lookup(&app.actions_by_id), by_id);
         assert_eq!(app.results, results);
         assert_eq!(app.query, query);
         assert_eq!(app.selected, selected);
@@ -5244,7 +5366,7 @@ mod tests {
         assert_eq!(&app.actions[..app.custom_len], external.as_slice());
         assert_eq!(&app.actions[app.custom_len..], indexed_tail.as_slice());
         assert_eq!(app.actions_by_id.get("external:action"), external.first());
-        assert!(!app.actions_by_id.contains_key("committed:action"));
+        assert!(app.actions_by_id.get("committed:action").is_none());
         assert_eq!(
             app.actions_by_id.get("indexed-first:action"),
             indexed_tail.first()
@@ -5267,7 +5389,7 @@ mod tests {
         app.process_watch_events();
         assert_eq!(app.custom_len, 0);
         assert_eq!(app.actions.as_slice(), indexed_tail.as_slice());
-        assert!(!app.actions_by_id.contains_key("external:action"));
+        assert!(app.actions_by_id.get("external:action").is_none());
         assert_eq!(
             app.actions_by_id.get("indexed-second:action"),
             indexed_tail.get(1)
@@ -6012,7 +6134,41 @@ mod tests {
     #[test]
     fn exact_mode_keeps_plugin_resolved_results_but_filters_query_suggestions() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            workspace
+                .root()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            workspace
+                .root()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::from([
+                "exact-filter-plugin".into()
+            ])),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
         app.match_exact = true;
         app.plugins.register(Box::new(ExactFilterPlugin));
 
@@ -6033,6 +6189,8 @@ mod tests {
         app.last_results_valid = false;
         app.search();
         assert!(app.results.is_empty());
+        drop(app);
+        drop(workspace);
     }
 
     #[test]

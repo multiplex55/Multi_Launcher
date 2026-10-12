@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "status": "FROZEN_METHODS_CLEAN_MEASUREMENT_SOURCE_CAPTURE_PENDING",
+  "original_full_records": 105,
+  "original_retained_samples": 2100,
+  "fresh_companion": "C2C equal-result reuse Full9records/180samples",
+  "historical_companions": [
+    "C2G causal query schema2",
+    "C3A ready-catalog component",
+    "C3C actual frames"
+  ],
+  "historical_rule": "Actual original SHA and reviewed relevant source continuity; never relabel as final execution or unmatched ratios",
+  "method_hashes": {
+    "docs/performance/track_c_run_final.ps1": "4c1f8037dbc84d7fa07b49326cc7b6665ae1b612fd7e5449c10c6d44a4037c9c",
+    "docs/performance/track_c_compare_c1_final.py": "6f382f6cdf954c6c53a50c142af12621723cdab83e784a03310ca73338f7b9fa",
+    "docs/performance/track_c_verify_final_inventory.py": "2f66a84caf75a39f8c66b92c0be1ee628aa081bb3318a2185480dc1d459c4587",
+    "docs/performance/track_c_collect_owner_results.ps1": "3f896e51d5d1b8e2fee2abb67f0f91f2b97c735e65993f92aa5a20f40240e8ac",
+    "docs/performance/track_c_compare_search_geometry.py": "b473c47f9a6b5fcbf36a2b035ff92ea8706a5cb8dcdf11036c2749c3ca98f85b",
+    "docs/performance/track_c_compare_queue_controls.py": "f18e0882dd49a3bb7a9c6cf191ab7af86b349e243f29935fb6a8d4e1ceba692b",
+    "docs/performance/track_c_compare_startup_catalog.py": "603fd5730f7bc91829f097d8a9b134bfb618f108fcf45cffd1ef48d178864d1d",
+    "docs/performance/track_c_collect_search_equal_reuse.ps1": "734b0f8b5d1147cbff7be13039ea21575a187744369c76e5b10125266864d6a2",
+    "docs/performance/track_c_search_invalidation_baseline_full.json": "7e7ebe303c5867c2fc8469bab3945b89d5ab6fef07c747708b65783f07035c23",
+    "docs/performance/track_c_events/reconstruct_watch_identities.py": "64e37642ba4f8799fafef85711976108ff73cba5579c73b5ee7ea0d1b268fd0d"
+  },
+  "representative_reproduction": {
+    "method": "docs/performance/track_c_events/reconstruct_watch_identities.py",
+    "sha256": "64e37642ba4f8799fafef85711976108ff73cba5579c73b5ee7ea0d1b268fd0d",
+    "expression": "aid(actions(1000),'track-c-action-state',0x435f574f524b4c44)",
+    "expected": "9a958b83b7e7345f",
+    "reviewer_method_acceptance": "CLEAR; independent pure signature reproduction; final N1k raw record match pending",
+    "scope": "fixture signature only, not owner timing/font/display replay",
+    "exact_original_record_key": {
+      "owner": "egui_Context_run+LauncherApp::render_root_frame",
+      "fixture": "root-list-default-layout",
+      "fixture_signature": "9a958b83b7e7345f",
+      "item_count": 1000,
+      "viewport": "960x640",
+      "scale_milli": 1000,
+      "fonts": "warm-egui-font-atlas",
+      "settings": "list-wrap-default",
+      "cold_type": "geometry-cold-warm-fonts"
+    }
+  },
+  "sample_protocol": {
+    "profile": "fast-dev",
+    "mode": "Full",
+    "warmups": 5,
+    "retained": 20,
+    "exclusions": 0
+  },
+  "reviewer": "c0_boundary_review",
+  "native": "NOT RUN",
+  "local_only": true,
+  "accepted_source_before_protocol_commit": "9ba2b3a26a73123ec8d19653ebaa58508aa2f6ea",
+  "measurement_source_rule": "Exact clean protocol-commit HEAD captured in runner source argument and ignored source manifest before execution; published after collection, never self-reference invented commit",
+  "baseline": {
+    "path": "docs/performance/track_c_baseline.json",
+    "source": "071243db068835617a054a74fb5734a6dd9f128d",
+    "sha256": "ee6c71106d08d46fcfae06c1f7aceebd9e6131c4f27e54df7aac3106c5825599",
+    "immutable": true
+  },
+  "semantic_subsets": {
+    "search_geometry_query": 96,
+    "original_queue": 2,
+    "startup": 3,
+    "notes_actions": 4
+  },
+  "inventory_receipts": {
+    "geometry_pairs": 39,
+    "width_arrays": 6,
+    "width_values": 120,
+    "event_age_rows": 40,
+    "individual_ages": 440
+  },
+  "runner_stages": [
+    "OriginalLib:exact9owners/102records",
+    "Startup:exact1owner/3records",
+    "EqualReuse:exact1owner/9separate-domainrecords"
+  ],
+  "final_publication_gates": [
+    "105original/2100samples inventory plus all four family semantic comparators",
+    "9equal-reuse records strict collector and own eager-invalidation baseline only",
+    "Independent raw quantiles/identity/work/privacy audit; all adverse outcomes retained",
+    "Accepted independent N1k fixture signature reproduction matched to fresh final record",
+    "Historical companion source continuity, no relabeled timings or native/display claims"
+  ]
+}

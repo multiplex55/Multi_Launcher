@@ -1,0 +1,243 @@
+{
+  "schema": 1,
+  "state": "FROZEN_REVIEWED_ONE_EXPERIMENT_APPROVED",
+  "baseline_source": "804d221cdb4c6f0145213ac52f2ef7b2cb4b77c6",
+  "baseline_sha256": "bd14705756554040f3c62efa6f228d78c2c4a06c9357ab32dd89049d985e40d8",
+  "profile": "fast-dev",
+  "full_records": 30,
+  "retained_samples": 600,
+  "warmups": 5,
+  "samples_per_record": 20,
+  "exclusions": 0,
+  "comparison": "candidate_ns*100 <= baseline_ns*candidate_percent_limit; no rounding or reruns",
+  "candidate_scope": "geometry_only_one_use_exact_prefix_proof",
+  "candidate_execution_authorized": true,
+  "gates": [
+    {
+      "key": "revision_final_preview:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 18677000,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "metadata_settings_only:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 14939300,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "search_sparse:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 3978400,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "search_case_only:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 491000,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "geometry_cold:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 15101700,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "geometry_cold:100:180000",
+      "quantile": "p95_ns",
+      "baseline_ns": 12197800,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "warm_repeat:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 1028800,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "warm_repeat:100:180000",
+      "quantile": "p95_ns",
+      "baseline_ns": 606800,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "early_wide_unicode:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 30726300,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "width_960_to_300:100:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 12472500,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "revision_final_preview:1000:640000",
+      "quantile": "p50_ns",
+      "baseline_ns": 144788800,
+      "candidate_percent_limit": 80,
+      "kind": "material_owner_benefit"
+    },
+    {
+      "key": "revision_final_preview:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 155715800,
+      "candidate_percent_limit": 80,
+      "kind": "material_owner_benefit"
+    },
+    {
+      "key": "metadata_settings_only:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 129732400,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "search_sparse:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 19052800,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "search_case_only:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 496700,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "geometry_cold:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 116523800,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "geometry_cold:1000:180000",
+      "quantile": "p95_ns",
+      "baseline_ns": 119737900,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "warm_repeat:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 869100,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "warm_repeat:1000:180000",
+      "quantile": "p95_ns",
+      "baseline_ns": 863200,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "early_wide_unicode:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 163250300,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "width_960_to_300:1000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 122034200,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "revision_final_preview:5000:640000",
+      "quantile": "p50_ns",
+      "baseline_ns": 740444200,
+      "candidate_percent_limit": 80,
+      "kind": "material_owner_benefit"
+    },
+    {
+      "key": "revision_final_preview:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 781905200,
+      "candidate_percent_limit": 80,
+      "kind": "material_owner_benefit"
+    },
+    {
+      "key": "metadata_settings_only:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 681337400,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "search_sparse:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 97912800,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "search_case_only:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 531100,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "geometry_cold:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 559816100,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "geometry_cold:5000:180000",
+      "quantile": "p95_ns",
+      "baseline_ns": 628895900,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "warm_repeat:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 845500,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "warm_repeat:5000:180000",
+      "quantile": "p95_ns",
+      "baseline_ns": 846700,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "early_wide_unicode:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 895927100,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    },
+    {
+      "key": "width_960_to_300:5000:640000",
+      "quantile": "p95_ns",
+      "baseline_ns": 559252200,
+      "candidate_percent_limit": 105,
+      "kind": "matched_owner_control"
+    }
+  ],
+  "runtime_candidate_accepted": false,
+  "independent_method_review": "CLEAR: baseline hash and all32 gates independently checked; no waiver"
+}

@@ -1089,6 +1089,273 @@ pub fn note_version() -> u64 {
     NOTE_VERSION.load(Ordering::SeqCst)
 }
 
+/// A coherent set of display labels for notes that already claim `alias`.
+///
+/// The revision, alias candidates, and ordered note entries are read while one
+/// cache lock is held. `None` means there is no conflicting slug after
+/// excluding the current draft; `Some` preserves the cache's note order and
+/// duplicate source entries.
+pub(crate) fn note_alias_conflict_display_labels(
+    alias: &str,
+    excluded_slug: &str,
+) -> anyhow::Result<(u64, Option<Vec<String>>)> {
+    #[cfg(test)]
+    let query_started = note_alias_conflict_query_test_started();
+    #[cfg(test)]
+    let mut observed = NoteAliasConflictQueryTestStats::default();
+
+    let normalized_alias = alias.trim().to_lowercase();
+    #[cfg(test)]
+    if take_note_alias_conflict_query_failure_for_test() {
+        finish_note_alias_conflict_query_test(query_started, false, observed);
+        return Err(anyhow::anyhow!(
+            "note cache conflict-label query failed in the scoped test seam"
+        ));
+    }
+
+    #[cfg(test)]
+    let lock_wait_started = query_started.map(|_| std::time::Instant::now());
+    let cache = match CACHE.lock() {
+        Ok(cache) => cache,
+        Err(_) => {
+            #[cfg(test)]
+            {
+                observed.lock_wait_nanos = lock_wait_started
+                    .map(|started| elapsed_nanos(started.elapsed()))
+                    .unwrap_or(0);
+                finish_note_alias_conflict_query_test(query_started, false, observed);
+            }
+            return Err(anyhow::anyhow!(
+                "note cache lock poisoned while querying alias conflicts"
+            ));
+        }
+    };
+    #[cfg(test)]
+    {
+        observed.lock_wait_nanos = lock_wait_started
+            .map(|started| elapsed_nanos(started.elapsed()))
+            .unwrap_or(0);
+    }
+    #[cfg(test)]
+    let lock_hold_started = query_started.map(|_| std::time::Instant::now());
+
+    let revision = NOTE_VERSION.load(Ordering::SeqCst);
+    #[cfg(test)]
+    {
+        observed.note_revision = revision;
+    }
+    #[cfg(test)]
+    run_note_alias_conflict_query_test_hook();
+
+    let mut conflicting_slugs = HashSet::new();
+    if let Some(slugs) = cache.aliases.get(&normalized_alias) {
+        #[cfg(test)]
+        {
+            observed.candidate_entries = slugs.len() as u64;
+        }
+        for slug in slugs {
+            #[cfg(test)]
+            {
+                observed.candidate_slugs_examined =
+                    observed.candidate_slugs_examined.saturating_add(1);
+            }
+            if slug.as_str() != excluded_slug {
+                conflicting_slugs.insert(slug.as_str());
+            }
+        }
+    }
+
+    let labels = if conflicting_slugs.is_empty() {
+        None
+    } else {
+        let mut labels = Vec::new();
+        for note in &cache.notes {
+            #[cfg(test)]
+            {
+                observed.notes_visited = observed.notes_visited.saturating_add(1);
+            }
+            if conflicting_slugs.contains(note.slug.as_str()) {
+                labels.push(note_display_with_secondary(note));
+            }
+        }
+        #[cfg(test)]
+        {
+            observed.labels_returned = labels.len() as u64;
+            observed.label_bytes = labels
+                .iter()
+                .map(|label| label.len() as u64)
+                .fold(0, u64::saturating_add);
+        }
+        Some(labels)
+    };
+
+    #[cfg(test)]
+    {
+        observed.lock_hold_nanos = lock_hold_started
+            .map(|started| elapsed_nanos(started.elapsed()))
+            .unwrap_or(0);
+    }
+    drop(cache);
+    #[cfg(test)]
+    finish_note_alias_conflict_query_test(query_started, true, observed);
+    Ok((revision, labels))
+}
+
+/// Format a note label using its primary alias when one is available.
+fn note_display_with_secondary(note: &Note) -> String {
+    if let Some(alias) = note
+        .alias
+        .as_deref()
+        .filter(|alias| !alias.trim().is_empty())
+    {
+        format!("{alias} ({} · {})", note.title, note.slug)
+    } else {
+        format!("{} ({})", note.title, note.slug)
+    }
+}
+
+#[cfg(test)]
+fn elapsed_nanos(duration: std::time::Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NoteAliasConflictQueryTestStats {
+    pub calls: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub lock_wait_nanos: u64,
+    pub lock_hold_nanos: u64,
+    pub candidate_entries: u64,
+    pub candidate_slugs_examined: u64,
+    pub notes_visited: u64,
+    pub labels_returned: u64,
+    pub label_bytes: u64,
+    pub query_nanos: u64,
+    pub note_revision: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static NOTE_ALIAS_CONFLICT_QUERY_TEST_STATS:
+        std::cell::RefCell<Option<NoteAliasConflictQueryTestStats>> = const { std::cell::RefCell::new(None) };
+    static NOTE_ALIAS_CONFLICT_QUERY_FAIL_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static NOTE_ALIAS_CONFLICT_QUERY_TEST_HOOK:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct NoteAliasConflictQueryTestObserver;
+
+#[cfg(test)]
+impl NoteAliasConflictQueryTestObserver {
+    pub(crate) fn begin() -> Self {
+        NOTE_ALIAS_CONFLICT_QUERY_TEST_STATS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(
+                slot.is_none(),
+                "alias conflict query observer is already active"
+            );
+            *slot = Some(NoteAliasConflictQueryTestStats::default());
+        });
+        Self
+    }
+
+    pub(crate) fn snapshot(&self) -> NoteAliasConflictQueryTestStats {
+        NOTE_ALIAS_CONFLICT_QUERY_TEST_STATS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .copied()
+                .expect("alias conflict query observer remains active")
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoteAliasConflictQueryTestObserver {
+    fn drop(&mut self) {
+        NOTE_ALIAS_CONFLICT_QUERY_TEST_STATS.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn note_alias_conflict_query_test_started() -> Option<std::time::Instant> {
+    NOTE_ALIAS_CONFLICT_QUERY_TEST_STATS
+        .with(|slot| slot.borrow().is_some().then(std::time::Instant::now))
+}
+
+#[cfg(test)]
+fn finish_note_alias_conflict_query_test(
+    started: Option<std::time::Instant>,
+    success: bool,
+    mut sample: NoteAliasConflictQueryTestStats,
+) {
+    let Some(started) = started else {
+        return;
+    };
+    sample.calls = 1;
+    sample.successes = u64::from(success);
+    sample.failures = u64::from(!success);
+    sample.query_nanos = elapsed_nanos(started.elapsed());
+    NOTE_ALIAS_CONFLICT_QUERY_TEST_STATS.with(|slot| {
+        if let Some(total) = slot.borrow_mut().as_mut() {
+            total.calls = total.calls.saturating_add(sample.calls);
+            total.successes = total.successes.saturating_add(sample.successes);
+            total.failures = total.failures.saturating_add(sample.failures);
+            total.lock_wait_nanos = total.lock_wait_nanos.saturating_add(sample.lock_wait_nanos);
+            total.lock_hold_nanos = total.lock_hold_nanos.saturating_add(sample.lock_hold_nanos);
+            total.candidate_entries = total
+                .candidate_entries
+                .saturating_add(sample.candidate_entries);
+            total.candidate_slugs_examined = total
+                .candidate_slugs_examined
+                .saturating_add(sample.candidate_slugs_examined);
+            total.notes_visited = total.notes_visited.saturating_add(sample.notes_visited);
+            total.labels_returned = total.labels_returned.saturating_add(sample.labels_returned);
+            total.label_bytes = total.label_bytes.saturating_add(sample.label_bytes);
+            total.query_nanos = total.query_nanos.saturating_add(sample.query_nanos);
+            total.note_revision = sample.note_revision;
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) struct NoteAliasConflictQueryFailureGuard;
+
+#[cfg(test)]
+pub(crate) fn fail_next_note_alias_conflict_query_for_test() -> NoteAliasConflictQueryFailureGuard {
+    NOTE_ALIAS_CONFLICT_QUERY_FAIL_NEXT.with(|pending| {
+        assert!(
+            !pending.replace(true),
+            "a scoped query failure is already armed"
+        );
+    });
+    NoteAliasConflictQueryFailureGuard
+}
+
+#[cfg(test)]
+impl Drop for NoteAliasConflictQueryFailureGuard {
+    fn drop(&mut self) {
+        NOTE_ALIAS_CONFLICT_QUERY_FAIL_NEXT.with(|pending| pending.set(false));
+    }
+}
+
+#[cfg(test)]
+fn take_note_alias_conflict_query_failure_for_test() -> bool {
+    NOTE_ALIAS_CONFLICT_QUERY_FAIL_NEXT.with(|pending| pending.replace(false))
+}
+
+#[cfg(test)]
+fn run_note_alias_conflict_query_test_hook() {
+    let hook = NOTE_ALIAS_CONFLICT_QUERY_TEST_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// Publish a deterministic in-memory cache through the real owner path while
 /// retaining the original cache for isolated workload-test cleanup.
 #[cfg(test)]
@@ -1105,6 +1372,16 @@ pub(crate) fn publish_note_cache_for_test(notes: Vec<Note>) -> NoteCachePublicat
         original
     };
     NoteCachePublicationGuard(Some(original))
+}
+
+/// Build the canonical cache candidate without publishing it globally.
+///
+/// Track C's test-only projection gate uses this seam to compare equal and
+/// changed local candidate construction/replacement costs while keeping the
+/// process-wide cache and revision untouched.
+#[cfg(test)]
+pub(crate) fn build_note_cache_candidate_for_test(notes: Vec<Note>) -> NoteCache {
+    NoteCache::from_notes(notes)
 }
 
 #[cfg(test)]
@@ -1233,7 +1510,71 @@ fn estimated_note_clone_bytes(note: &Note) -> usize {
 
 /// Return the cached lowercased alias -> note slug map without hitting disk.
 pub fn note_alias_map_snapshot() -> HashMap<String, Vec<String>> {
-    CACHE.lock().map(|c| c.aliases.clone()).unwrap_or_default()
+    let snapshot = CACHE.lock().map(|cache| cache.aliases.clone());
+    #[cfg(test)]
+    record_note_alias_snapshot_for_test(snapshot.as_ref().ok().map(|aliases| aliases.len()));
+    snapshot.unwrap_or_default()
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NoteAliasSnapshotTestStats {
+    pub calls: u64,
+    pub key_entries: u64,
+    pub failures: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    static NOTE_ALIAS_SNAPSHOT_TEST_STATS: std::cell::RefCell<Option<NoteAliasSnapshotTestStats>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct NoteAliasSnapshotTestObserver;
+
+#[cfg(test)]
+impl NoteAliasSnapshotTestObserver {
+    pub(crate) fn begin() -> Self {
+        NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            assert!(slot.is_none(), "alias snapshot observer is already active");
+            *slot = Some(NoteAliasSnapshotTestStats::default());
+        });
+        Self
+    }
+
+    pub(crate) fn snapshot(&self) -> NoteAliasSnapshotTestStats {
+        NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .copied()
+                .expect("alias snapshot observer remains active")
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for NoteAliasSnapshotTestObserver {
+    fn drop(&mut self) {
+        NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_note_alias_snapshot_for_test(key_entries: Option<usize>) {
+    NOTE_ALIAS_SNAPSHOT_TEST_STATS.with(|slot| {
+        if let Some(stats) = slot.borrow_mut().as_mut() {
+            stats.calls = stats.calls.saturating_add(1);
+            if let Some(key_entries) = key_entries {
+                stats.key_entries = stats.key_entries.saturating_add(key_entries as u64);
+            } else {
+                stats.failures = stats.failures.saturating_add(1);
+            }
+        }
+    });
 }
 
 /// Return lightweight note link menu targets from the in-memory cache without hitting disk.
@@ -1710,6 +2051,13 @@ impl NotePlugin {
         let watch_target = dir.clone();
         let coordinator = NoteReloadCoordinator::start(refresh_cache).ok();
         let requester = coordinator.as_ref().map(NoteReloadCoordinator::requester);
+        #[cfg(test)]
+        let release = crate::performance::track_c_watcher_lifecycle::capture(
+            crate::performance::track_c_watcher_lifecycle::HandlerKind::NotePlugin,
+            &watch_target,
+        );
+        #[cfg(test)]
+        let release_registration = release.as_ref().map(|sentinel| sentinel.registration());
         let watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| match res {
                 Ok(event)
@@ -1722,10 +2070,19 @@ impl NotePlugin {
                         true,
                     ) && let Some(requester) = &requester =>
                 {
+                    #[cfg(test)]
+                    let _keep_handler_release = &release;
                     NoteReloadCoordinator::request(requester);
                 }
-                Ok(_) => {}
-                Err(error) => tracing::error!(%error, "notes watcher notification failed"),
+                Ok(_) => {
+                    #[cfg(test)]
+                    let _keep_handler_release = &release;
+                }
+                Err(error) => {
+                    #[cfg(test)]
+                    let _keep_handler_release = &release;
+                    tracing::error!(%error, "notes watcher notification failed");
+                }
             },
             Config::default(),
         )
@@ -1741,6 +2098,12 @@ impl NotePlugin {
                 .is_ok()
                 .then_some(watcher)
         });
+        #[cfg(test)]
+        if watcher.is_some()
+            && let Some(registration) = release_registration
+        {
+            registration.registered();
+        }
         let watcher = match (watcher, coordinator) {
             (Some(watcher), Some(coordinator)) => Some(NoteWatcher {
                 watcher: Some(watcher),
@@ -3592,6 +3955,160 @@ mod tests {
             .collect();
         open_slugs.sort_unstable();
         assert_eq!(open_slugs, vec!["note:open:alpha", "note:open:beta"]);
+    }
+
+    #[test]
+    fn note_conflicting_display_labels_matches_snapshot_reference() {
+        let notes = vec![
+            test_note(
+                "Current",
+                "current",
+                "# Current\nAliases: Self only, Éclair, 東京\n\nBody",
+            ),
+            test_note(
+                "Duplicate first",
+                "duplicate-source",
+                "# Duplicate first\nAlias: Shared first\nAliases: Shared\n\nBody",
+            ),
+            test_note(
+                "Duplicate second",
+                "duplicate-source",
+                "# Duplicate second\nAlias: Shared second\nAliases: shared\n\nBody",
+            ),
+            test_note(
+                "Ambiguous",
+                "ambiguous-source",
+                "# Ambiguous\nAlias: Ambiguous primary\nAliases: SHARED, ÉCLAIR, 東京\n\nBody",
+            ),
+        ];
+        let _cache_guard = publish_note_cache_for_test(notes);
+        let captured_revision = note_version();
+
+        let observer = NoteAliasConflictQueryTestObserver::begin();
+        let (revision, duplicate_labels) =
+            note_alias_conflict_display_labels("  SHARED  ", "current")
+                .expect("healthy cache query succeeds");
+        assert_eq!(revision, captured_revision);
+        assert_eq!(
+            duplicate_labels,
+            Some(vec![
+                "Shared first (Duplicate first · duplicate-source)".to_string(),
+                "Shared second (Duplicate second · duplicate-source)".to_string(),
+                "Ambiguous primary (Ambiguous · ambiguous-source)".to_string(),
+            ])
+        );
+
+        let (unicode_revision, unicode_labels) =
+            note_alias_conflict_display_labels("  ÉCLAIR  ", "current")
+                .expect("Unicode alias query succeeds");
+        assert_eq!(unicode_revision, captured_revision);
+        assert_eq!(
+            unicode_labels,
+            Some(vec![
+                "Ambiguous primary (Ambiguous · ambiguous-source)".to_string()
+            ])
+        );
+        assert_eq!(
+            note_alias_conflict_display_labels(" Self only ", "current")
+                .expect("self-only query succeeds"),
+            (captured_revision, None)
+        );
+        assert_eq!(
+            note_alias_conflict_display_labels(" Self only ", "unsaved-current-slug")
+                .expect("changed draft slug remains eligible"),
+            (
+                captured_revision,
+                Some(vec!["Self only (Current · current)".to_string()])
+            )
+        );
+
+        let observed = observer.snapshot();
+        assert_eq!(observed.calls, 4);
+        assert_eq!(observed.successes, 4);
+        assert_eq!(observed.failures, 0);
+        assert_eq!(observed.candidate_entries, 2 + 2 + 1 + 1);
+        assert_eq!(observed.candidate_slugs_examined, 2 + 2 + 1 + 1);
+        assert_eq!(observed.notes_visited, 4 + 4 + 0 + 4);
+        assert_eq!(observed.labels_returned, 3 + 1 + 0 + 1);
+        drop(observer);
+    }
+
+    #[test]
+    fn note_conflicting_display_labels_holds_one_generation_across_publication() {
+        let initial = vec![test_note(
+            "Published old",
+            "published-old",
+            "# Published old\nAlias: Shared\n\nBody",
+        )];
+        let replacement = vec![test_note(
+            "Published new",
+            "published-new",
+            "# Published new\nAlias: Shared\n\nBody",
+        )];
+        let _cache_guard = publish_note_cache_for_test(initial);
+        let initial_revision = note_version();
+
+        std::thread::scope(|scope| {
+            let (query_entered_tx, query_entered_rx) = std::sync::mpsc::channel();
+            let (release_query_tx, release_query_rx) = std::sync::mpsc::channel();
+            let hook_completed = Arc::new(AtomicBool::new(false));
+            let query_hook_completed = Arc::clone(&hook_completed);
+            let query = scope.spawn(move || {
+                NOTE_ALIAS_CONFLICT_QUERY_TEST_HOOK.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        let notified = query_entered_tx.send(()).is_ok();
+                        let released = release_query_rx
+                            .recv_timeout(std::time::Duration::from_secs(3))
+                            .is_ok();
+                        query_hook_completed.store(notified && released, Ordering::Release);
+                    }));
+                });
+                note_alias_conflict_display_labels("Shared", "current")
+            });
+            let mut release_query = ReleaseOnDrop(Some(release_query_tx));
+            query_entered_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("query reached its under-lock checkpoint");
+
+            let (publisher_blocked_tx, publisher_blocked_rx) = std::sync::mpsc::channel();
+            let publisher = scope.spawn(move || {
+                let blocked = matches!(CACHE.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+                let notified = publisher_blocked_tx.send(blocked).is_ok();
+                let published = publish_note_cache(replacement);
+                (notified, published)
+            });
+            assert!(
+                publisher_blocked_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .expect("publisher checks lock while query is paused"),
+                "the query holds CACHE across its revision and ordered note traversal"
+            );
+
+            release_query.release();
+            let (query_revision, labels) = query
+                .join()
+                .expect("query worker does not panic")
+                .expect("query returns a coherent result");
+            assert!(hook_completed.load(Ordering::Acquire));
+            assert_eq!(query_revision, initial_revision);
+            assert_eq!(
+                labels,
+                Some(vec!["Shared (Published old · published-old)".to_string()])
+            );
+            let (publisher_notified, published) =
+                publisher.join().expect("publisher worker does not panic");
+            assert!(publisher_notified);
+            assert!(published.expect("replacement publication succeeds"));
+        });
+
+        let (published_revision, published_labels) =
+            note_alias_conflict_display_labels("Shared", "current")
+                .expect("query sees the fully published replacement generation");
+        assert!(published_revision > initial_revision);
+        assert_eq!(
+            published_labels,
+            Some(vec!["Shared (Published new · published-new)".to_string()])
+        );
     }
 
     #[test]

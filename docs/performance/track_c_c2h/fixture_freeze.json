@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "status": "INDEPENDENT_FIXTURE_SOURCE_SELECTION_CLEAR_BEFORE_EXECUTION",
+  "source_parent": "6340c6b50200ab3a89fb8f182c98a10671973409",
+  "source_sha256": {
+    "src/gui/notes_dialog.rs": "6c0e76f41767b9eae13dd5b8499d0026c25097fe431003beffc966d71e4fafd1",
+    "src/gui/render.rs": "a6e44baa93e69c485bdc64be08735ae25fe60cd1d3c6d8f578f3ac472d264078"
+  },
+  "runner_sha256": "8c79d8048ded8d4ba77054a03ca36c975752e78c7ad4d8d6c7ddf2c2cf560e72",
+  "source_scope": "cfgtest_only_5Notesfixtures_owned_workspace_scoped_env_and_1TrackAwarmdashboardflag",
+  "expected_ordinary_tests": 32,
+  "protected_helpers": "42_IDENTICAL",
+  "production_change": false,
+  "native": false
+}

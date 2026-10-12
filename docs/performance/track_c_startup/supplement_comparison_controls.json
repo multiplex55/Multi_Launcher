@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "status": "21_SYNTHETIC_SUPPLEMENT_CONTROLS_PASS_NOT_MEASUREMENTS",
+  "method_sha256": "0266ee346cd042ada56a5870c06a45ff9efc51f7e64c64bd94adf2f1db325f2e",
+  "controls": [
+    {
+      "control": "valid_full_synthetic",
+      "passed": true
+    },
+    {
+      "control": "valid_small_synthetic",
+      "passed": true
+    },
+    {
+      "control": "duplicate_recipe",
+      "passed": true
+    },
+    {
+      "control": "float_count",
+      "passed": true
+    },
+    {
+      "control": "bool_schema",
+      "passed": true
+    },
+    {
+      "control": "extra_field",
+      "passed": true
+    },
+    {
+      "control": "wrong_phase_order",
+      "passed": true
+    },
+    {
+      "control": "phase_over_owner",
+      "passed": true
+    },
+    {
+      "control": "bool_phase",
+      "passed": true
+    },
+    {
+      "control": "wrong_elapsed_join",
+      "passed": true
+    },
+    {
+      "control": "wrong_fixture",
+      "passed": true
+    },
+    {
+      "control": "wrong_scan_calls",
+      "passed": true
+    },
+    {
+      "control": "wrong_scan_work",
+      "passed": true
+    },
+    {
+      "control": "scan_over_owner",
+      "passed": true
+    },
+    {
+      "control": "scan_error",
+      "passed": true
+    },
+    {
+      "control": "wrong_scope",
+      "passed": true
+    },
+    {
+      "control": "wrong_overlap",
+      "passed": true
+    },
+    {
+      "control": "wrong_latency_claim",
+      "passed": true
+    },
+    {
+      "control": "original_wrong_profile",
+      "passed": true
+    },
+    {
+      "control": "original_wrong_mode",
+      "passed": true
+    },
+    {
+      "control": "original_frozen_fixture",
+      "passed": true
+    }
+  ]
+}

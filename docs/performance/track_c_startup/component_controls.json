@@ -1,0 +1,120 @@
+{
+  "schema": 1,
+  "status": "28_SYNTHETIC_COMPONENT_CONTROLS_PASS_NOT_MEASUREMENTS",
+  "method_sha256": "0266ee346cd042ada56a5870c06a45ff9efc51f7e64c64bd94adf2f1db325f2e",
+  "independent_real_fixture_bindings": "PENDING_SOURCE_HANDOFF",
+  "controls": [
+    {
+      "control": "valid_full_synthetic",
+      "passed": true
+    },
+    {
+      "control": "valid_small_synthetic",
+      "passed": true
+    },
+    {
+      "control": "bool_schema",
+      "passed": true
+    },
+    {
+      "control": "float_count",
+      "passed": true
+    },
+    {
+      "control": "wrong_signature",
+      "passed": true
+    },
+    {
+      "control": "wrong_structural",
+      "passed": true
+    },
+    {
+      "control": "bool_catalog_count",
+      "passed": true
+    },
+    {
+      "control": "queued_result",
+      "passed": true
+    },
+    {
+      "control": "wrong_phase_sum",
+      "passed": true
+    },
+    {
+      "control": "bool_phase",
+      "passed": true
+    },
+    {
+      "control": "wrong_query_origin",
+      "passed": true
+    },
+    {
+      "control": "wrong_frame",
+      "passed": true
+    },
+    {
+      "control": "wrong_painted_generation",
+      "passed": true
+    },
+    {
+      "control": "wrong_final_generation",
+      "passed": true
+    },
+    {
+      "control": "wrong_current_catalog",
+      "passed": true
+    },
+    {
+      "control": "wrong_current_provider",
+      "passed": true
+    },
+    {
+      "control": "pending_acceptance",
+      "passed": true
+    },
+    {
+      "control": "latency_outside_frame",
+      "passed": true
+    },
+    {
+      "control": "geometry_incomplete",
+      "passed": true
+    },
+    {
+      "control": "cause_accounting",
+      "passed": true
+    },
+    {
+      "control": "missing_handler",
+      "passed": true
+    },
+    {
+      "control": "overflowed",
+      "passed": true
+    },
+    {
+      "control": "bool_complete",
+      "passed": true
+    },
+    {
+      "control": "changed_raw_action_fixed_root",
+      "passed": true
+    },
+    {
+      "control": "extra_private_field",
+      "passed": true
+    },
+    {
+      "control": "query_cause_shift_preserves_totals",
+      "passed": true
+    },
+    {
+      "control": "changed_payload_fixed_root",
+      "passed": true
+    },
+    {
+      "control": "duplicate_recipe",
+      "passed": true
+    }
+  ]
+}

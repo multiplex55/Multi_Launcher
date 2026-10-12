@@ -51,6 +51,7 @@ fn search_returns_action() {
 }
 
 #[test]
+#[ignore = "empties the real Windows Recycle Bin; run only in an explicitly authorized disposable native environment"]
 fn command_returns_immediately_and_cleans() {
     let ctx = egui::Context::default();
     let actions: Vec<Action> = Vec::new();

@@ -1,0 +1,9 @@
+# C3-D coalescing gate — LOCAL ONLY
+
+Disposition: **SKIPPED (measured gate)**. Independent reviewer c0_boundary_review CLEAR; all7 source hashes match and source/Cargo diff from measured source is empty.23/29 checkpoints closed. C3-C closed at `2663db36c64f1aabbc0308655416f85cb52e9d49`; accepted measurements use exact source `c6c9d7edf16a8c6b77a44656ffee46275a08abfe`, fast-dev Full20k.
+
+Duplicate cost is material. Original concurrent13 FileReload calls have median353.7329ms summed outside the largest call; finite6 calls have142.7658ms outside the largest. The new sixteen-equal-Actions producer has owner/drain p95 686.1509/685.0458ms. Those measured costs are retained; this is not a low-cost skip.
+
+The trigger also requires a proven coalescible per-variant contract. No variant in the reviewed33-variant matrix has that transport proof. Actions envelopes carry no immutable content/version: separate reads may observe malformed/missing/changed/recovered files, produce diagnostic or last-good transitions and affect subsequent commands. Publication equality in one fixture cannot authorize deleting notifications generally. Other file/domain refresh reducers have their own semantics; irreversible operations, urgent recovery, radial identities, diagnostics and worker/capacity acknowledgments must remain delivered. No blanket latest-state whitelist is defensible from the accepted evidence.
+
+Keep the existing queue and reducers. No source/test/benchmark changes or extra candidate state machine is justified. Reuse C3-C9unique ordinary PASS and200 retained samples with their actual provenance. The active unbounded mpsc and domain reducers are unchanged; no new worker/coalescing marker/accounting path is added. A future snapshot/version protocol would be a separate design, not an inferred authorization here. No optimality, native display or workload-prevalence claim follows.

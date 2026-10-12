@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "checkpoint": "C3-C",
+  "status": "C3C_CHARACTERIZATION_ACCEPTED",
+  "reviewer": "c0_boundary_review",
+  "method": "docs/performance/track_c_collect_event_frames.py",
+  "owner_runs": 0,
+  "local_only": true,
+  "findings": [
+    "Reject unknown fields, duplicate keys and nonfinite JSON constants",
+    "Sum handler durations <= drain <= sum actual frame durations <= whole owner",
+    "Validate setup/owner registry/wake accounting and producer acknowledgment nesting",
+    "Validate accepted/current provider and catalog revision slots",
+    "Derive separate 20-sample drain/frame/burst-age summaries; pooled ages remain event weighted"
+  ],
+  "parent_corrections": "Exact field sets, duplicate/nonfinite/float rejection, bounded static scopes, accounting/nested timing/revisions/wakes, separate age/frame/drain distributions and conditional precomputed full identities. Synthetic22PASS; final method/source recheck pending. Finite generation delta0 matched accepted equal-result reuse; synthetic22PASS rerun.",
+  "additional_source_findings": [
+    "Read lifecycle only after current app drop",
+    "Capture finite owner accepted delta/depth before untimed B cleanup",
+    "Capture whole-owner wake counters, not sum of frame deltas",
+    "Construct finite producer outside owner clock",
+    "Generation oracle must allow finite changed publication but not invent replenish publication",
+    "Record actual pending/rebuilt completion state and validate full suggestions without forcing debounce",
+    "Quiet/replenishing require actual root settling outside owner, not merely empty Context run"
+  ],
+  "identity_status": "Independent source-derived recipe and Action/projection identities reproduced; no measured output used",
+  "remaining": [],
+  "method_sha256": "fafa79e8d724236299b87548af1a6a9de72f8fd77321dc27263b0d4cfe2103ac",
+  "synthetic_controls_passed": 22,
+  "synthetic_controls_log_sha256": "7ae86b02168dd89e3e57e85a163973534bd07be9f101b9eb21b145806fd549d5",
+  "independent_reconstruction": "Reviewer reproduced1kcontrol and200/20k pending/rebuilt identities; no app/Cargo/native",
+  "small_independent_review": {
+    "reviewer": "c0_boundary_review",
+    "records": 3,
+    "samples": 60,
+    "frames": 60,
+    "individual_ages": 560,
+    "raw_collected_equal": true,
+    "nearest_rank_and_nesting": "PASS",
+    "identity_bindings": "PASS",
+    "exact_four_handler_release": "PASS",
+    "producer_ack_advance_during_drain_samples": 0,
+    "limits": "Observed bounded offered load only; all16 producer sends acknowledged before drain in Small. No sustained arrivals/starvation/native benefit claim."
+  },
+  "full_review": "full_review.json"
+}

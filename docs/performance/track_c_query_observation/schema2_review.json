@@ -1,0 +1,47 @@
+{
+  "schema": 2,
+  "status": "CLEAR_SOURCE_SMALL_AND_EXACT_SOURCE_FULL",
+  "source_binding": "protocol_schema2_freeze.json",
+  "reviewer": "independent_repository_reviewer",
+  "independent_method_reviewer": "repository_planner",
+  "scope": "cfgtest source correction, exact nine-frame protocol, independent12fixture57stepbindings, collector, oracle10, Small03",
+  "source_hashes_matched": 6,
+  "protected_helpers_identical": 42,
+  "notes_file_identical": true,
+  "collector_controls_passed": 25,
+  "small": {
+    "records": 4,
+    "sequences": 80,
+    "intents": 200,
+    "frames": 380,
+    "completed": 180,
+    "superseded": 20,
+    "cancelled": 0,
+    "independent_timing_triplets": 42,
+    "raw_summary_equality": true,
+    "source_paint_geometry_output_tick_selection_popup_accounting": "PASS",
+    "privacy": "CLEAR"
+  },
+  "full_acceptance": {
+    "status": "CLEAR",
+    "source": "c6c0f64a5f10f290e95c43bdf2a7104a2a209e67",
+    "records": 12,
+    "sequences": 240,
+    "intents": 600,
+    "frames": 1140,
+    "completed": 540,
+    "superseded": 60,
+    "cancelled": 0,
+    "independent_timing_triplets": 126,
+    "independent_step_bindings": 57,
+    "raw_summary_equality": true,
+    "source_paint_tick_selection_popup_provider_geometry_accounting": "PASS",
+    "privacy": "CLEAR"
+  },
+  "limitations": [
+    "nine-frameviewport_not_comparable_to_schema1seven-frame",
+    "adverse_tails_retained",
+    "CPUheadless_not_native_orGPU",
+    "simulatedinputtime_not_humanlatency"
+  ]
+}
