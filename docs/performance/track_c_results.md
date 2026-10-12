@@ -96,3 +96,6 @@ C3-B closes **SKIPPED (measured gate)** (plan: readiness contract),21/29closed, 
 
 
 C3-C PASS at clean measured `c6c9d7edf16a8c6b77a44656ffee46275a08abfe`;22/29closed. NineuniqueordinaryPASS, Small100/Full100retainedowner samples, source/method/identity/numerical/privacy/lifecycle independentlyCLEAR. Full actualframe owner p50/p95/maxms quiet .3275/.6325/.7338, finite325.5210/346.4083/408.1639, boundedproducer555.7800/686.1509/916.5359. Originalconcurrent maximum adverse611.4708→655.9699ms; no runtimepolicy/speedupclaim. Producerackadvancement0/20reducerwindows,10/20wholeframes; sustainedstarvationNOTESTABLISHED/nativeNOTRUN. Fullarrays and limitations in [event characterization](track_c_events/results.md). LOCAL ONLY.
+
+
+C3-D **SKIPPED (measured gate)**,23/29closed. Duplicate Actions loading is material, but the reviewed33-variant inventory/source establishes no notification transport whitelist preserving live-file error/recovery/version and dependent-command semantics. Independent gateCLEAR; all7sourcehashes/sourceCargo continuityPASS, no sourcecandidate/tests/benchmarks. See [coalescing gate](track_c_event_coalescing_gate.md). LOCAL ONLY.
