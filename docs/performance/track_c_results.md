@@ -99,3 +99,6 @@ C3-C PASS at clean measured `c6c9d7edf16a8c6b77a44656ffee46275a08abfe`;22/29clos
 
 
 C3-D **SKIPPED (measured gate)**,23/29closed. Duplicate Actions loading is material, but the reviewed33-variant inventory/source establishes no notification transport whitelist preserving live-file error/recovery/version and dependent-command semantics. Independent gateCLEAR; all7sourcehashes/sourceCargo continuityPASS, no sourcecandidate/tests/benchmarks. See [coalescing gate](track_c_event_coalescing_gate.md). LOCAL ONLY.
+
+
+C3-E **SKIPPED (measured gate)**,24/29closed. Bounded16send production completed before all20reducerwindows; sustained-flood starvation trigger unestablished. Long Full CPU ownerp95/max686.1509/916.5359ms retained, no responsiveness/optimality/native claim. No drainbudget/priority/sourcecandidate/newtests/benchmarks; sourcecontinuity and independent gateCLEAR. See [drain gate](track_c_event_drain_gate.md). LOCAL ONLY.

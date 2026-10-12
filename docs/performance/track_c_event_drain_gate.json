@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "checkpoint": "C3-E",
+  "status": "SKIPPED_MEASURED_GATE",
+  "plan": "docs/plans/multi_launcher_track_c_codex_plan.md C3-E",
+  "prerequisite_C3C": "2663db36c64f1aabbc0308655416f85cb52e9d49",
+  "prerequisite_C3D": "c15fe8aff7dd49326c0efed08967b8633c1da300",
+  "measured_source": "c6c9d7edf16a8c6b77a44656ffee46275a08abfe",
+  "profile": "fast-dev",
+  "mode": "Full",
+  "gate": {
+    "sustained_flood_causing_frame_starvation_established": false,
+    "coalescing_disposition": "C3-D skipped: no proved transport whitelist",
+    "decision": "Do not add a drain budget or priority policy"
+  },
+  "evidence": {
+    "full_bounded_sequences": 20,
+    "producer_events_per_sequence": 16,
+    "urgent_events_per_sequence": 2,
+    "actual_frames_per_sequence": 1,
+    "drain_windows_with_send_ack_advancement": 0,
+    "whole_frame_windows_with_send_ack_advancement": 10,
+    "all_drain_ack_windows": [
+      16,
+      16
+    ],
+    "owner_p50_ns": 555780000,
+    "owner_p95_ns": 686150900,
+    "owner_max_ns": 916535900,
+    "drain_p95_ns": 685045800,
+    "individual_age_events": 360,
+    "age_p95_ns": 460704800,
+    "final_backlog": 0,
+    "overflow": 0,
+    "abandoned": 0,
+    "send_failed": 0
+  },
+  "reason": "Measured finite bursts can occupy the CPU frame owner for hundreds of milliseconds, but bounded16-event production ended before every reducer entry and all work drained within one actual frame. There is no sustained-flood/starvation observation or query/keyboard/input-to-display latency distribution. The required trigger is unestablished. A drain cap might split future bursts but cannot shorten indivisible synchronous handlers or guarantee safe urgency ordering from these data.",
+  "verification": {
+    "new_tests": 0,
+    "new_benchmarks": 0,
+    "reused": "Accepted C3-C9uniqueordinaryPASS/200retained samples and C3-D semantic decision with original provenance",
+    "source_continuity": "No source/Cargo change since c6c9d7e; all7 measured source hashes match"
+  },
+  "preserved": [
+    "Existing FIFO and completion/ack/urgent dependencies",
+    "Existing wake/deferred behavior and unbounded mpsc; no new queue",
+    "No budget, priority bypass, busy repaint or worker per event"
+  ],
+  "reviewer": "c0_boundary_review CLEAR",
+  "limits": [
+    "No claim current drain is responsive or optimal under arbitrary load",
+    "Long finite CPU frames are retained as adverse observations",
+    "No inference of native displayed/input latency or successful emergency/action execution",
+    "Future sustained workload characterization and split-handler design are separate opportunities"
+  ],
+  "local_only": true
+}

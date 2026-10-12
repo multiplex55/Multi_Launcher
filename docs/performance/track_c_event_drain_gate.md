@@ -1,0 +1,9 @@
+# C3-E drain budget gate — LOCAL ONLY
+
+Disposition: **SKIPPED (measured gate)**. Independent reviewer c0_boundary_review CLEAR.24/29 checkpoints closed. C3-C accepted at `2663db36c64f1aabbc0308655416f85cb52e9d49`; C3-D skip at `c15fe8aff7dd49326c0efed08967b8633c1da300`. Actual fast-dev Full20k source remains `c6c9d7edf16a8c6b77a44656ffee46275a08abfe`.
+
+The approved trigger requires a sustained flood causing measured frame starvation, with targeted coalescing inadequate. The reviewed bounded producer sent sixteen equal Actions plus two urgent rejection requests. All twenty retained sequences completed in one actual frame, reached zero backlog and had16→16 acknowledged sends across the reducer window. Ten whole-frame windows observed producer advancement before draining. No reducer had measured ongoing acknowledged production, and the producer terminates; this is finite offered load, not evidence of continuous-flood prevalence/starvation.
+
+The long CPU stalls are real within this recipe: owner p50/p95/max555.7800/686.1509/916.5359ms, drain p95685.0458ms, event-weighted age p95460.7048ms across360events. Preserve these adverse costs. They do not establish keyboard/query frame latency or actual displayed latency, and a cap cannot shorten one synchronous handler. C3-D supplies no safe transport whitelist; that alone does not satisfy this separate sustained-starvation trigger.
+
+Keep existing FIFO, wake ownership, acknowledgments and urgent/state dependencies. Add no budget, priority bypass, busy repaint or worker. No new tests/benchmarks are needed for a no-source decision: reuse C3-C9uniqueordinaryPASS/200retained samples, exact measured source and source-continuity checks. Native input/display and successful emergency/action execution remain NOT RUN/NOT MEASURED. This skip makes no claim that arbitrary future floods are responsive or that the current drain is optimal. Further sustained-workload or split-handler work is separate scope.
