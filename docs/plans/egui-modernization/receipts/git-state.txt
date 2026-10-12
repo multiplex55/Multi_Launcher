@@ -1,0 +1,16 @@
+Commands: git status --short --branch; git rev-parse HEAD; git branch --show-current; git diff --name-only; git diff --cached --name-only; Get-FileHash Cargo.lock -Algorithm SHA256
+
+git status --short --branch:
+## egui-modernization
+?? docs/plans/egui-modernization/
+
+HEAD: 72a01bd5451060d3f6b640b83acd081d7db76e77
+Branch: egui-modernization
+
+Unstaged diff file inventory:
+(none)
+
+Staged diff file inventory:
+(none)
+
+Cargo.lock SHA256: A9DA377E18592D87734FF50B14F051E59E0E602E5C94D860183891C0E7682DF1

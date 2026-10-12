@@ -1,0 +1,19 @@
+Command: cargo tree --locked --offline -e features -i eframe
+Exit code: 0
+
+eframe v0.27.2
+├── eframe feature "accesskit"
+│   └── eframe feature "default"
+│       └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher)
+│           └── multi_launcher feature "default" (command-line)
+├── eframe feature "default" (*)
+├── eframe feature "default_fonts"
+│   └── eframe feature "default" (*)
+├── eframe feature "glow"
+│   └── eframe feature "default" (*)
+├── eframe feature "wayland"
+│   └── eframe feature "default" (*)
+├── eframe feature "web_screen_reader"
+│   └── eframe feature "default" (*)
+└── eframe feature "x11"
+    └── eframe feature "default" (*)

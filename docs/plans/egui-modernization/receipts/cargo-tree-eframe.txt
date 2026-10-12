@@ -1,0 +1,5 @@
+Command: cargo tree --locked --offline -i eframe
+Exit code: 0
+
+eframe v0.27.2
+└── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher)

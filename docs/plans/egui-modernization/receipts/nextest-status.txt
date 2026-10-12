@@ -1,0 +1,5 @@
+Command: cargo nextest run --locked --offline --profile default --cargo-profile fast-dev
+Environment: ML_SKIP_CLIPBOARD_SYNC=1
+Session: parent-owned session 52943
+Status: RUNNING when this receipt was updated; no pass/fail result recorded.
+Output log: target/egui-modernization/baseline/nextest.log
