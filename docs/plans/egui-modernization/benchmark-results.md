@@ -1,6 +1,6 @@
 # M0-B original baseline measurements
 
-Status: **PARTIAL.** The root-list CPU owner has passed and its raw log is preserved; the remaining CPU owners are in progress. Two isolated native launches were attempted, but capture timed out before visual interaction. Native CPU/GPU/latency, screenshot and native acceptance results remain unmeasured.
+Status: **PARTIAL.** All five original CPU owners passed (84 cases, five warmups/twenty measured samples per case); native visual/GPU/display latency acceptance remains unproven. Original profile build timings are in progress.
 
 ## Provenance and run constraints
 
@@ -94,3 +94,17 @@ These unoptimized fast-dev CPU values are an initial baseline, not shipping/GPU/
 ## Captured grid CPU baseline
 
 Full grid owner passed in 556.405 s: 30 cases (100/1,000/10,000 actions, columns1/2/3/5/6, cold/warm), each with five warmups and twenty samples. Warm p50 values range 0.73–2.09 ms in fast-dev. Raw arrays, independent oracles and exact per-case metrics are retained in target/egui-modernization/baseline/track_c_benchmark_root_grid_frame_geometry.log; parsed local summary is grid-summary.json beside it. Notes is running; query and startup remain queued. No native or cross-version parity claim follows from these CPU passes.
+
+## Completed original CPU owner series
+
+All five full-mode owners passed, with production source72a01bd5 and test-only runner/source prefix f45e3773. The table supersedes earlier running/queued preparation entries. No samples were excluded; all independent owner assertions passed.
+
+| Owner | Cases | Test wall time s | Evidence log under local baseline directory |
+|---|---|---|---|
+| Root list | 6 | 97.792 | owner-list.log |
+| Root grid | 30 | 556.405 | track_c_benchmark_root_grid_frame_geometry.log |
+| Notes (including width transitions) | 42 | 896.719 | track_c_benchmark_quick_notes_dialog_geometry.log |
+| Query to usable CPU frame | 3 | 22.972 | track_c_benchmark_root_query_to_usable_cpu_frame.log |
+| Startup catalog/index owner | 3 | 41.563 | track_c_benchmark_startup_action_catalog_owner.log |
+
+[Sanitized per-case summary](receipts/cpu-original-summary.json) retains fixture identity, profile, sizes, warmups/sample counts and quantiles. Full arrays, signatures, structural/revision/work receipts remain in ignored target/egui-modernization/baseline logs and cpu-original-results.json. Startup uses16/1,000/10,000 synthetic index entries; its CPU medians are1.739/95.360/926.490 ms. Query uses100/1,000/10,000 actions; medians0.608/1.110/5.614 ms. Startup CPU/catalog timing is not process-to-display latency.

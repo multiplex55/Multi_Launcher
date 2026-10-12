@@ -5,7 +5,7 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 | Checkpoint | Status | Current evidence / exit gap |
 |---|---|---|
 | M0-A — repository and toolchain preflight | `complete` | The Windows MSVC `cargo check --locked --all-targets --offline` passed. Original Nextest diagnostics completed with three classified stale fixture failures; a separate focused test-only correction passed 4/4. Current HEAD is the objective's working baseline; comparison with the separately named archive remains unresolved. No remote builder was configured or supplied. |
-| M0-B — golden interaction and render inventory | `in_progress` | Source inventory and isolated fixture prepared; full root-list CPU owner passed, serial remaining owners active. Native capture failed twice; screenshots, display/GPU timing and native interactions remain unproven. |
+| M0-B — golden interaction and render inventory | `in_progress` | Source inventory and isolated fixture prepared; all five full-mode original CPU owners passed (84 cases), independently reviewed. Original profile build timings are active. Native capture failed twice; screenshots, display/GPU timing and native interactions remain unproven. |
 | M0-C — dependency/API breakage worklist | `complete` | Planner source-backed worklist and handoffs independently reviewed against cached released sources; accepted. No dependency changes. M0-B native evidence remains outstanding. |
 | M1-A — align Rust toolchain and egui dependency graph | `pending` | Not started. |
 | M1-B — app lifecycle migration | `pending` | Not started. |
@@ -40,3 +40,15 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 - [x] Save local M0-A checkpoints: inventory `050a922f`, reviewed fixture correction `f45e3773` (four focused tests passed). Original failed full-suite receipts are retained. User directed local-only checkpoints. Archive comparison remains an explicit evidence limitation; current HEAD is the objective-authorized baseline.
 
 See [baseline.md](baseline.md), [dependency-audit.md](dependency-audit.md), [migration-decisions.md](migration-decisions.md), and raw command outputs under `receipts/`.
+
+## Active execution handoff
+
+Local-only checkpoints: f45e3773 (reviewed fixture correction), 2e9f4a9f (partial M0-B), de6bcd22 (reviewed M0-C). No push is authorized under the user's latest instruction.
+
+Original CPU owners: root list PASS97.792s/sixcases; grid PASS556.405s/30cases. Parent exec session17135 runs notes, query, startup serially with full fixtures and success-output final. At this handoff notes is active (>720s), with no failure reported; query/startup queued. Do not start concurrent Cargo/build/measurement. Logs remain under target/egui-modernization/baseline. Original app and library-test binaries are preserved under its bin directory. Check session completion and actual logs before changing statuses.
+
+Pending after CPU series: record results, capture original dev/fast-dev/release build times, obtain exact Cargo JSON artifact paths to compile the revised fixture helper and roundtrip a new fixture, and finish native original visual evidence. Revised helper has static parser/rustfmt checks and independent review only; no compilation/new run is claimed. Both isolated native app processes were gracefully terminated. Native capture hit app approval timeout then FrameArrived timeout after refreshed selection and one retry. Desktop/access clarification is pending; do not infer approval from elapsed time. Archive comparison remains unresolved because the named archive was absent. M0-B acceptance remains incomplete; no dependency or theme implementation has started.
+
+## CPU-series completion and current work
+
+Session17135 completed successfully: all five owners PASS,84cases,5warmups/20samples each,zero exclusions. Reviewer independently checked all arrays/quantiles/summarymatches and accepted original fast-dev CPU evidence only. Profile build session45005 now owns Cargo (fast-dev PASS124.450s, dev/releasepending); no concurrent build/measurement. CPU evidence is in receipts/cpu-original-summary.json plus preserved local rawlogs. M1-A dependency feature proposal prepared; directwinitdefaults will supply winit/default without invalid slash dependencyfeature syntax. No Cargo.toml/lock edits yet. After original builds: compile explicit-artifact helper, new fixture/native activation attempt, then source migration with native gap kept open until M2-D. This entry supersedes prior session17135 active status.

@@ -1,6 +1,6 @@
 # M0-B test and interaction matrix
 
-Status: **PARTIAL; fixture generation and the root-list Track C owner passed. Other Track C owners are still running, and no visual/native interaction passed. Two native launch attempts are documented below; neither produced a screenshot or valid native measured result.** This matrix separates automated/headless assertions from observations that require the actual Windows app.
+Status: **PARTIAL; all five full-mode CPU benchmark owners passed (84 cases).** Fixture generation roundtrips passed for the earlier runs, with their serializer-artifact provenance limitation retained. No visual/native interaction passed.
 
 ## Automated and headless evidence
 
@@ -41,3 +41,7 @@ The original default-environment baseline Nextest invocation failed two telemetr
 ## Evidence format
 
 Every row gets its own status and evidence path. A screenshot may prove a visible composition only; it does not prove latency, focus ownership, hotkey timing, renderer identity, texture lifetime or resource cleanup. Preserve failures and outliers. Use `NOT MEASURED` where an attempted scenario ran without a valid metric, and `NOT RUN` where the scenario was not attempted. Record supported sky-driven native smoke separately from physical/hardware validation; the exact physical Win-key chord remains `NOT RUN` unless physically exercised, and an automated key sequence does not count as hardware validation.
+
+## CPU series final receipt
+
+The previously running/queued CPU rows are now PASS: list6cases, grid30, notes42, query3, startup3. Each retains five warmups/twenty samples; all owner assertions passed. See benchmark-results.md and receipts/cpu-original-summary.json for exact logs/metrics. Native/manual rows remain unproven. Profile timing and revised helper compilation are separate pending tasks.
