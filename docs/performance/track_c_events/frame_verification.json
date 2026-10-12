@@ -1,0 +1,75 @@
+{
+  "schema": 1,
+  "checkpoint": "C3-C",
+  "status": "ORDINARY_AND_SMALL_PASS_FULL_PENDING",
+  "source_parent": "ba195f658747cedeafd69cb2126d7b30899e2696",
+  "attempts": [
+    {
+      "stage": "exact5_ordinary_01",
+      "source_watch_sha256": "5170375c33b45a6382874c9a7c8f87d752c29cb09560d29a45a432aa9db23049",
+      "profile": "fast-dev",
+      "result": "COMPILE_FAIL",
+      "tests_executed": 0,
+      "tests_passed": 0,
+      "root_cause": "serde_json::json per-sample object exceeded default macro recursion limit",
+      "raw_log_sha256": "c55df44a6cc0c36f27569b0d740a59bcc40a7f3ece26f7530d3303ad65a8af35",
+      "correction": "Split post-timer JSON construction; preserve schema and values; no crate recursion-limit change"
+    },
+    {
+      "stage": "exact5_ordinary_02",
+      "source_watch_sha256": "38e5073ca61bc9e14bc2dc7314310a7ac039603d99ac33e5693525fa11e5c5b7",
+      "profile": "fast-dev",
+      "result": "COMPILE_FAIL",
+      "tests_executed": 0,
+      "tests_passed": 0,
+      "root_cause": "Viewport receipt treated Option<(Rect,Vec2,Vec2)> as Vec2; two E0609 errors",
+      "raw_log_sha256": "c61c341f9ce673c382eb121bd86c76dfe85f6e337d2bb471f0e0943dcdd95d40",
+      "correction": "Hash full actual viewport rectangle/content/offset tuple; remove two new unused bindings"
+    },
+    {
+      "stage": "exact5_ordinary_03",
+      "source_watch_sha256": "2217ad371b909e18bde3cdcfd0dc5720b4132d6e85be0e9f2e0e4b97b3db28a8",
+      "profile": "fast-dev",
+      "result": "TEST_FAIL",
+      "tests_executed": 5,
+      "tests_passed": 4,
+      "run_id": "f68e3db8-fec8-471c-8a6a-236b5f599530",
+      "root_cause": "New recipe oracle expected app.error despite show_inline_errors=false; four existing controls passed",
+      "raw_log_sha256": "dc5516ce0c279dc87f5d1bbef14af32ec5cf5b34cd24fb472ee0e65e5ae14420",
+      "correction": "Use actual dispatched radial receipt and absent/current lease predicates; finite equal complete result retains generation zero while search acceptance independently clears selection"
+    },
+    {
+      "stage": "exact1_ordinary_04",
+      "source_watch_sha256": "785a956ffbcf79f4e32e318721494246723c0fa0dae4c9c59a9d0da0abc11249",
+      "profile": "fast-dev",
+      "result": "PASS",
+      "tests_executed": 1,
+      "tests_passed": 1,
+      "run_id": "61149ebf-d228-4b7b-9cc5-e60635a5f105",
+      "raw_log_sha256": "792cb20fcb1d9856db6d81e2aaf8bf6cdf435fe9baa646a8b71f9e21cba05e36",
+      "compile_seconds": 57.85,
+      "test_seconds": 0.305
+    }
+  ],
+  "owner_runs": 3,
+  "local_only": true,
+  "unique_ordinary_pass": 9,
+  "unique_ordinary_basis": "Foundation exact8PASS plus corrected new recipePASS; attempt03 four controls repeatPASS",
+  "small_runs": [
+    {
+      "recipe": "companion_three_recipes",
+      "owners_executed": 1,
+      "retained_samples": 60,
+      "collector": "PASS",
+      "source": "UNCOMMITTED_SOURCE",
+      "raw_log_sha256": "f16049470ed7ae7cf2900f5e1535a9ffb9b23c91baf7a53cdf1d9c8efdd32f32"
+    },
+    {
+      "recipe": "original_two_controls",
+      "owners_executed": 2,
+      "retained_samples": 40,
+      "source": "UNCOMMITTED_SOURCE",
+      "raw_log_sha256": "605695b18f11c94d72351441742cf7d9ba8da599d76147881785c66438b265bb"
+    }
+  ]
+}

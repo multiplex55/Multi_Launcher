@@ -25,3 +25,7 @@ Done: exhaustive delivery matrix; source/protocol/inventory frozen; complete ora
 Genuine uncertainties: minimal safe urgent constructors, need for a passive per-dispatch receipt seam, and observed producer/drain overlap. Routine helper/schema naming belongs to sole writer. Source implementation and evidence closure may be separate coherent local commits after appropriate checks.
 
 Foundation checkpoint: source lifecycle and passive observer independently CLEAR after tracking GuiActions and enforcing exact four attempted/created/released kinds before workspace restoration. Compilation/discovery PASS125s, zero executed; corrected exact eight ordinary tests actually PASS (compile62s, execution0.520s). No benchmark run. Shared fixture data and original metric/emitter/oracle boundaries retained; teardown is outside owner clocks. Frame recipes and full C3-C acceptance remain pending.
+
+Foundation local commit: `ba195f658747cedeafd69cb2126d7b30899e2696`. The sole writer resumes the three frame recipes from this clean reviewed base; no new Cargo process is active.
+
+Frame recipes: source/method independently CLEAR after retained compile and disabled-feedback oracle corrections. All9unique ordinaryPASS (foundation8 plus newcontract); corrected exact1 retry compiled57.85s/test0.305s. Small companion actual1owner/60retained and original2controls/40retainedPASS; companion strictcollectorPASS. Sourcecommit and clean Full evidence remain pending; C3-C is not closed.

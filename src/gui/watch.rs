@@ -12,6 +12,7 @@ mod track_c3c_dispatch_receipt {
     };
 
     const RECEIPT_CAPACITY: usize = 32;
+    const DRAIN_RECEIPT_CAPACITY: usize = 8;
     static ACTIVE_FAST_PATH: AtomicBool = AtomicBool::new(false);
 
     #[derive(Clone, Debug)]
@@ -25,12 +26,23 @@ mod track_c3c_dispatch_receipt {
     #[derive(Clone, Debug, Default)]
     pub(super) struct Snapshot {
         pub events: Vec<Dispatch>,
+        pub drains: Vec<Drain>,
         pub overflow: bool,
+        pub drain_overflow: bool,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub(super) struct Drain {
+        pub frame: u64,
+        pub producer_successful_sends_before: Option<usize>,
+        pub producer_successful_sends_after: Option<usize>,
     }
 
     #[derive(Default)]
     struct State {
         frame: u64,
+        producer_successful_sends: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+        active_drain: Option<(u64, Option<usize>)>,
         receipt: Snapshot,
     }
 
@@ -53,9 +65,13 @@ mod track_c3c_dispatch_receipt {
             );
             let state = Rc::new(RefCell::new(State {
                 frame: 0,
+                producer_successful_sends: None,
+                active_drain: None,
                 receipt: Snapshot {
                     events: Vec::with_capacity(RECEIPT_CAPACITY),
+                    drains: Vec::with_capacity(DRAIN_RECEIPT_CAPACITY),
                     overflow: false,
+                    drain_overflow: false,
                 },
             }));
             let previous = ACTIVE.with(|active| active.replace(Some(Rc::clone(&state))));
@@ -66,9 +82,70 @@ mod track_c3c_dispatch_receipt {
             self.state.borrow_mut().frame = frame;
         }
 
+        pub(super) fn set_producer_successful_sends(
+            &self,
+            sends: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        ) {
+            self.state.borrow_mut().producer_successful_sends = Some(sends);
+        }
+
         pub(super) fn snapshot(&self) -> Snapshot {
             self.state.borrow().receipt.clone()
         }
+
+        pub(super) fn event_count(&self) -> usize {
+            self.state.borrow().receipt.events.len()
+        }
+    }
+
+    pub(super) fn drain_started() {
+        if !ACTIVE_FAST_PATH.load(Ordering::Acquire) {
+            return;
+        }
+        ACTIVE.with(|active| {
+            let Some(state) = active.borrow().as_ref().cloned() else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            let sends = state
+                .producer_successful_sends
+                .as_ref()
+                .map(|sends| sends.load(std::sync::atomic::Ordering::Acquire));
+            if state.active_drain.is_some() {
+                state.receipt.drain_overflow = true;
+            } else {
+                state.active_drain = Some((state.frame, sends));
+            }
+        });
+    }
+
+    pub(super) fn drain_finished() {
+        if !ACTIVE_FAST_PATH.load(Ordering::Acquire) {
+            return;
+        }
+        ACTIVE.with(|active| {
+            let Some(state) = active.borrow().as_ref().cloned() else {
+                return;
+            };
+            let mut state = state.borrow_mut();
+            let Some((frame, before)) = state.active_drain.take() else {
+                state.receipt.drain_overflow = true;
+                return;
+            };
+            let after = state
+                .producer_successful_sends
+                .as_ref()
+                .map(|sends| sends.load(std::sync::atomic::Ordering::Acquire));
+            if state.receipt.drains.len() == DRAIN_RECEIPT_CAPACITY {
+                state.receipt.drain_overflow = true;
+                return;
+            }
+            state.receipt.drains.push(Drain {
+                frame,
+                producer_successful_sends_before: before,
+                producer_successful_sends_after: after,
+            });
+        });
     }
 
     impl Drop for Guard {
@@ -227,6 +304,8 @@ fn track_c_gui_handler_release(
 
 impl LauncherApp {
     pub fn process_watch_events(&mut self) {
+        #[cfg(test)]
+        track_c3c_dispatch_receipt::drain_started();
         let mut timer = crate::performance::track_c::Timer::start(
             crate::performance::track_c::Phase::EventDrain,
         );
@@ -586,6 +665,8 @@ impl LauncherApp {
         self.maybe_rebuild_completion_index(Instant::now());
         timer.set_work_units(drained);
         timer.finish(crate::performance::track_c::Outcome::Completed);
+        #[cfg(test)]
+        track_c3c_dispatch_receipt::drain_finished();
     }
 }
 
@@ -4212,6 +4293,1744 @@ mod tests {
             };
             track_c_workloads::emit_samples(metadata, &samples);
             emit_track_c_watch_event_age_rows(metadata, RECORDER_CAPACITY, &samples, &receipts);
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum TrackC3CRecipe {
+        Quiet,
+        Finite,
+        Replenishing,
+    }
+
+    impl TrackC3CRecipe {
+        fn token(self) -> &'static str {
+            match self {
+                Self::Quiet => "quiet_settled_frame",
+                Self::Finite => "finite_burst_frame",
+                Self::Replenishing => "bounded_replenishing_frame",
+            }
+        }
+
+        fn setup_events(self) -> usize {
+            if self == Self::Finite { 8 } else { 1 }
+        }
+
+        fn measured_events(self) -> usize {
+            match self {
+                Self::Quiet => 0,
+                Self::Finite => 10,
+                Self::Replenishing => 18,
+            }
+        }
+
+        fn producer_events(self) -> usize {
+            if self == Self::Replenishing { 16 } else { 0 }
+        }
+
+        fn trigger_events(self) -> usize {
+            if self == Self::Quiet { 0 } else { 2 }
+        }
+    }
+
+    enum TrackC3CState {
+        Actions {
+            owner: TrackCActionsOwnerState,
+            age_recorder: super::event_channel::EventAgeRecorder,
+            _registry_guard: std::sync::MutexGuard<'static, ()>,
+        },
+        StaleIndex(TrackCStaleIndexQueueOwnerState),
+    }
+
+    impl TrackC3CState {
+        fn owner(&self) -> &TrackCActionsOwnerState {
+            match self {
+                Self::Actions { owner, .. } => owner,
+                Self::StaleIndex(state) => &state.queue.owner,
+            }
+        }
+
+        fn app(&self) -> &LauncherApp {
+            &self.owner().app
+        }
+
+        fn app_mut(&mut self) -> &mut LauncherApp {
+            match self {
+                Self::Actions { owner, .. } => &mut owner.app,
+                Self::StaleIndex(state) => &mut state.queue.owner.app,
+            }
+        }
+
+        fn age_recorder(&self) -> &super::event_channel::EventAgeRecorder {
+            match self {
+                Self::Actions { age_recorder, .. } => age_recorder,
+                Self::StaleIndex(state) => &state.queue.age_recorder,
+            }
+        }
+
+        fn registry_queue_depth(&self) -> usize {
+            let app = self.app();
+            let registry = crate::gui::APP_EVENT_REGISTRY
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry
+                .sinks
+                .iter()
+                .find(|sink| sink.id == app.event_sink.id)
+                .map_or(0, |sink| sink.queued.load(Ordering::Acquire))
+        }
+
+        fn finalize_stale_index(&mut self, measured_events: usize) -> serde_json::Value {
+            let Self::StaleIndex(state) = self else {
+                return serde_json::Value::Null;
+            };
+            let queue = &mut state.queue;
+            assert_eq!(queue.owner.app.rx.queued_depth(), Some(0));
+            let sends_before_cleanup = queue.age_recorder.successful_sends();
+            let delivered_before_cleanup = queue.age_recorder.snapshot().delivered.len();
+            let release = state
+                .release_blocked_scan
+                .take()
+                .expect("bounded replacement scan is released once");
+            release
+                .send(())
+                .expect("replacement scanner remains behind its owned gate");
+            queue
+                .owner
+                .app
+                .wait_for_index_completion_for_test(state.blocked_generation)
+                .expect("replacement scan completes after the measured owner");
+            wait_for_track_c_successful_enqueue(
+                &queue.owner.app,
+                &queue.age_recorder,
+                sends_before_cleanup + 1,
+                1,
+            );
+            let version_before_equal_completion = crate::actions::actions_version();
+            queue.owner.app.process_watch_events();
+            assert_eq!(queue.owner.app.rx.queued_depth(), Some(0));
+            assert_eq!(
+                crate::actions::actions_version(),
+                version_before_equal_completion,
+                "untimed B completion is equal and retains the accepted catalog"
+            );
+            assert_track_c_actions_owner_state(
+                &queue.owner,
+                &queue.owner.expected_actions,
+                queue.owner.actions_version_before + 1,
+            );
+
+            let all_delivered = queue.age_recorder.snapshot();
+            assert_eq!(all_delivered.overflow, 0);
+            assert_eq!(all_delivered.abandoned, 0);
+            assert_eq!(all_delivered.delivered.len(), measured_events + 1);
+            assert_eq!(delivered_before_cleanup, measured_events);
+            assert_eq!(sends_before_cleanup, measured_events);
+            assert_eq!(queue.age_recorder.successful_sends(), measured_events + 1);
+            let cleanup = all_delivered.delivered[measured_events];
+            assert_eq!(
+                (cleanup.class, cleanup.origin),
+                (
+                    crate::performance::track_c::EventClass::IndexCompletion,
+                    EventOrigin::IndexCoordinator,
+                ),
+                "B's coordinator envelope remains separate from measured traffic"
+            );
+            serde_json::json!({
+                "scope": "untimed_blocked_index_B_completion",
+                "accepted": queue.age_recorder.successful_sends() - sends_before_cleanup,
+                "dequeued": all_delivered.delivered.len() - delivered_before_cleanup,
+                "kind": "index_ready",
+                "class": "IndexCompletion",
+                "origin": "IndexCoordinator",
+                "age_ns": cleanup.age_nanos,
+                "queue_depth_after": queue.owner.app.rx.queued_depth().unwrap_or(usize::MAX),
+                "final_successful_sends": queue.age_recorder.successful_sends(),
+                "final_dequeued": all_delivered.delivered.len(),
+                "overflow": all_delivered.overflow,
+                "abandoned": all_delivered.abandoned,
+            })
+        }
+    }
+
+    struct TrackC3CFrame {
+        frame: usize,
+        owner_start_ns: u64,
+        owner_complete_ns: u64,
+        elapsed_ns: u64,
+        queue_depth_before: usize,
+        queue_depth_after: usize,
+        registry_queued_before: usize,
+        registry_queued_after: usize,
+        dequeued: usize,
+        dispatch_ordinal_start: usize,
+        dispatch_ordinal_end: usize,
+        producer_sends_before: Option<usize>,
+        producer_sends_after: Option<usize>,
+        viewport_wake_requests: usize,
+        egui_repaint_requests: usize,
+        full_output_dropped: bool,
+    }
+
+    struct TrackC3CPrepared {
+        state: TrackC3CState,
+        handler_report_index: usize,
+        setup_accepted: usize,
+        setup_dequeued: usize,
+        setup_root_frames: usize,
+        queue_depth_before_owner: usize,
+        registry_queued_before_owner: usize,
+        setup_viewport_wake_requests: usize,
+        setup_egui_repaint_requests: usize,
+        wake: ViewportWake,
+        wake_requests: Arc<std::sync::atomic::AtomicUsize>,
+        repaint_requests: Arc<std::sync::atomic::AtomicUsize>,
+        producer_sends: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    }
+
+    fn track_c3c_signature_token(
+        signature: &mut crate::performance::track_c_workloads::StableSignature,
+        token: &str,
+    ) {
+        signature.number(token.len() as u64);
+        signature.bytes(token.as_bytes());
+    }
+
+    fn track_c3c_fixture_signature(
+        fixture: &TrackCActionsFixture,
+        recipe: TrackC3CRecipe,
+        total_count: usize,
+    ) -> u64 {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let mut signature =
+            StableSignature::new(0x4333_435f_4556_454e, "track-c3c-event-frame", total_count);
+        signature.number(fixture.fixture_signature);
+        signature.number(total_count as u64);
+        signature.number(fixture.custom_len as u64);
+        signature.number(fixture.indexed_tail.len() as u64);
+        track_c3c_signature_token(&mut signature, recipe.token());
+        signature.number(recipe.setup_events() as u64);
+        signature.number(recipe.trigger_events() as u64);
+        signature.number(recipe.producer_events() as u64);
+        signature.number(32);
+        signature.number(8);
+        signature.number(960);
+        signature.number(640);
+        for token in [
+            "query=app Synthetic action 00009",
+            "match_exact=true;usage=empty;usage_weight=0;fuzzy_weight=1",
+            "plugins=inert;dashboard_initial_refresh_queued=true;toasts=off;hotkeys=off",
+            "fixture_origin=owned_actions_owner;paths=owned_root_only",
+        ] {
+            track_c3c_signature_token(&mut signature, token);
+        }
+        let order: &[&str] = match recipe {
+            TrackC3CRecipe::Quiet => &[],
+            TrackC3CRecipe::Finite => &[
+                "setup:actions_file_changed",
+                "setup:index_ready_candidate_stale_under_B",
+                "setup:five_equal_actions",
+                "setup:registry_recycle_ok_inert",
+                "trigger:screen_draw_emergency_stale",
+                "trigger:radial_dispatch_missing_lease",
+                "untimed:release_and_drain_index_B",
+            ],
+            TrackC3CRecipe::Replenishing => &[
+                "gate:barrier_start",
+                "producer:sixteen_actions_file_watcher_send_then_viewport_wake",
+                "trigger:screen_draw_emergency_stale",
+                "trigger:radial_dispatch_missing_lease",
+                "stop:producer_ack_and_zero_app_depth",
+            ],
+        };
+        signature.number(order.len() as u64);
+        for token in order {
+            track_c3c_signature_token(&mut signature, token);
+        }
+        signature.finish()
+    }
+
+    fn track_c3c_registry_queued(app: &LauncherApp) -> usize {
+        let registry = crate::gui::APP_EVENT_REGISTRY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry
+            .sinks
+            .iter()
+            .find(|sink| sink.id == app.event_sink.id)
+            .map_or(0, |sink| sink.queued.load(Ordering::Acquire))
+    }
+
+    fn track_c3c_prepare(
+        fixture: &TrackCActionsFixture,
+        recipe: TrackC3CRecipe,
+    ) -> TrackC3CPrepared {
+        const RECORDER_CAPACITY: usize = 32;
+
+        let handler_report_index = fixture
+            .handler_reports
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+
+        let (mut state, setup_accepted, setup_dequeued) = if recipe == TrackC3CRecipe::Finite {
+            let mut stale =
+                make_track_c_stale_index_watch_queue_owner_state(fixture, RECORDER_CAPACITY, 5, 0);
+            // Route the original inert Recycle receipt through the registry so
+            // this recipe also observes attach-after-queue wake bookkeeping.
+            crate::gui::send_event(WatchEvent::Recycle(Ok(())));
+            let queue = &mut stale.queue;
+            queue.expected_recycle_events = 1;
+            queue.expected_event_count += 1;
+            queue.expected_metadata.push((
+                crate::performance::track_c::EventClass::Clipboard,
+                EventOrigin::Registry,
+            ));
+            assert_eq!(queue.expected_event_count, 8);
+            assert_eq!(queue.owner.app.rx.queued_depth(), Some(8));
+            assert_eq!(queue.age_recorder.successful_sends(), 8);
+            (TrackC3CState::StaleIndex(stale), 8, 0)
+        } else {
+            let (mut owner, age_recorder, registry_guard) =
+                make_track_c_actions_owner_state_with_recorder(fixture, RECORDER_CAPACITY);
+            let setup_accepted = age_recorder.successful_sends();
+            assert_eq!(
+                setup_accepted, 1,
+                "one initial owned Actions event is queued"
+            );
+            assert_eq!(owner.app.rx.queued_depth(), Some(1));
+            owner.app.process_watch_events();
+            assert_eq!(owner.app.rx.queued_depth(), Some(0));
+            let setup_dequeued = age_recorder.snapshot().delivered.len();
+            assert_eq!(setup_dequeued, 1);
+            assert_track_c_actions_owner_state(
+                &owner,
+                &owner.expected_actions,
+                owner.actions_version_before + 1,
+            );
+            // The only setup envelope is fully consumed, so resetting its
+            // bounded recorder cannot erase a live send or dequeue.
+            age_recorder.reset();
+            crate::performance::track_c::reset();
+            (
+                TrackC3CState::Actions {
+                    owner,
+                    age_recorder,
+                    _registry_guard: registry_guard,
+                },
+                setup_accepted,
+                setup_dequeued,
+            )
+        };
+
+        let setup_age_recorder = state.age_recorder().clone();
+        let app = state.app_mut();
+        app.dashboard_initial_refresh_queued = true;
+        let wake_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let wake_counter = Arc::clone(&wake_requests);
+        let context = app.egui_ctx.clone();
+        let wake_context = context.clone();
+        let wake = ViewportWake::from_callback(egui::ViewportId::ROOT, move |viewport| {
+            wake_counter.fetch_add(1, Ordering::AcqRel);
+            wake_context.request_repaint_of(viewport);
+        });
+        let repaint_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let repaint_counter = Arc::clone(&repaint_requests);
+        context.set_request_repaint_callback(move |_| {
+            repaint_counter.fetch_add(1, Ordering::AcqRel);
+        });
+        app.event_sink.attach_wake(wake.clone());
+        let setup_viewport_wake_requests = wake_requests.load(Ordering::Acquire);
+        // Settle the non-finite recipes through the real root owner before the
+        // measured interval. The finite recipe deliberately keeps its original
+        // queued envelopes for the measured first root frame.
+        let setup_root_frames = if recipe == TrackC3CRecipe::Finite {
+            let setup_output = context.run(egui::RawInput::default(), |_| {});
+            drop(setup_output);
+            0
+        } else {
+            let setup_output = context.run(track_c3c_raw_input(), |ctx| {
+                app.render_root_frame(ctx, None);
+            });
+            drop(setup_output);
+            assert_eq!(app.rx.queued_depth(), Some(0));
+            assert!(app.last_results_valid);
+            assert!(!app.last_search_pending);
+            assert!(!app.background_query_refresh_pending);
+            let setup_delivery = setup_age_recorder.snapshot();
+            assert!(setup_delivery.delivered.is_empty());
+            assert_eq!(setup_delivery.overflow, 0);
+            assert_eq!(setup_delivery.abandoned, 0);
+            let setup_registry_queued = {
+                let registry = crate::gui::APP_EVENT_REGISTRY
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                registry
+                    .sinks
+                    .iter()
+                    .find(|sink| sink.id == app.event_sink.id)
+                    .map_or(0, |sink| sink.queued.load(Ordering::Acquire))
+            };
+            assert_eq!(setup_registry_queued, 0);
+            1
+        };
+        let setup_egui_repaint_requests = repaint_requests.load(Ordering::Acquire);
+        assert_eq!(
+            state.app().rx.queued_depth(),
+            Some(if recipe == TrackC3CRecipe::Finite {
+                8
+            } else {
+                0
+            })
+        );
+        if recipe != TrackC3CRecipe::Finite {
+            assert_eq!(state.age_recorder().successful_sends(), 0);
+        }
+        crate::performance::track_c::reset();
+        let queue_depth_before_owner = state.app().rx.queued_depth().unwrap_or(usize::MAX);
+        let registry_queued_before_owner = state.registry_queue_depth();
+        if recipe == TrackC3CRecipe::Finite {
+            assert_eq!(setup_viewport_wake_requests, 1);
+            assert_eq!(registry_queued_before_owner, 1);
+        } else {
+            assert_eq!(setup_viewport_wake_requests, 0);
+            assert_eq!(registry_queued_before_owner, 0);
+        }
+        TrackC3CPrepared {
+            state,
+            handler_report_index,
+            setup_accepted,
+            setup_dequeued,
+            setup_root_frames,
+            queue_depth_before_owner,
+            registry_queued_before_owner,
+            setup_viewport_wake_requests,
+            setup_egui_repaint_requests,
+            wake,
+            wake_requests,
+            repaint_requests,
+            producer_sends: None,
+        }
+    }
+
+    struct TrackC3CUrgentEvents {
+        intent: crate::screen_draw::ScreenDrawRecoveryIntent,
+        radial_request: crate::radial::handoff::RadialDispatchRequest,
+        before_query: String,
+        before_last_query: String,
+        before_history: u64,
+        before_visible: bool,
+        before_restore: bool,
+        before_selected: Option<usize>,
+        before_result_generation: u64,
+        before_provider_revision: u64,
+        before_catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
+    }
+
+    struct TrackC3CBridgeReset(Arc<crate::screen_draw::ScreenDrawRecoveryBridge>);
+
+    impl Drop for TrackC3CBridgeReset {
+        fn drop(&mut self) {
+            self.0.set_active(false);
+        }
+    }
+
+    fn track_c3c_prepare_urgent(app: &LauncherApp) -> TrackC3CUrgentEvents {
+        use crate::radial::handoff::{InteractionRequirement, RadialDispatchIdentity};
+        use crate::radial::model::{
+            ActionBinding, AfterActionPolicy, ConfigRevision, InvocationId, SessionId,
+        };
+        use crate::radial::session::DispatchToken;
+        use crate::universal_actions::{ActionId, PersistedUniversalActionRef};
+
+        let bridge = Arc::clone(&app.screen_draw_recovery_bridge);
+        let reset = TrackC3CBridgeReset(Arc::clone(&bridge));
+        bridge.stage_start();
+        let screen_draw_intent = bridge
+            .admit(crate::screen_draw::ScreenDrawRecoveryKind::Emergency, None)
+            .expect("staged inert Screen Draw emergency admission exists");
+        bridge.set_active(false);
+        assert!(!bridge.is_active());
+        drop(reset);
+
+        let identity = RadialDispatchIdentity {
+            session_id: SessionId::new("track-c3c-unregistered"),
+            selected_cell_id: "missing-binding".into(),
+            invocation_id: InvocationId(0xC3C),
+            session_generation: 1,
+            token: DispatchToken {
+                session_generation: 1,
+                ordinal: 1,
+            },
+            config_revision: ConfigRevision(1),
+            preparation_generation: crate::radial::bindings::PreparationGeneration(1),
+        };
+        let radial_request = crate::radial::handoff::RadialDispatchRequest {
+            identity: identity.clone(),
+            binding: crate::radial::dynamic::FrozenBinding::Stable(ActionBinding::Persisted {
+                action: PersistedUniversalActionRef {
+                    target: None,
+                    action_id: ActionId::new("track_c3c_missing_lease"),
+                },
+            }),
+            requirement: InteractionRequirement::ExclusiveCapture,
+            deferred_origin: None,
+            history_query: "track-c3c inert rejection".into(),
+            context: crate::radial::context::InvocationContext::empty(1),
+            after_action: AfterActionPolicy::KeepOpen,
+            source: crate::commands::ActivationSource::Click,
+        };
+        assert!(
+            !app.radial_preparations
+                .contains_key(&identity.invocation_id)
+        );
+        assert_ne!(
+            app.radial_current_preparation,
+            Some((
+                identity.invocation_id,
+                identity.preparation_generation,
+                identity.config_revision,
+            ))
+        );
+        TrackC3CUrgentEvents {
+            intent: screen_draw_intent,
+            radial_request,
+            before_query: app.query.clone(),
+            before_last_query: app.last_search_query.clone(),
+            before_history: app.query_history.acceptance_digest(),
+            before_visible: app.visible_flag_state(),
+            before_restore: app.restore_flag_state(),
+            before_selected: app.selected,
+            before_result_generation: app.root_list_geometry.result_generation_for_test(),
+            before_provider_revision: app.plugins.search_generation(),
+            before_catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions::current(
+            ),
+        }
+    }
+
+    fn track_c3c_send_urgent_events(events: &TrackC3CUrgentEvents) {
+        crate::gui::send_event(WatchEvent::ScreenDrawEmergency(events.intent));
+        crate::gui::send_event(WatchEvent::RadialDispatch(events.radial_request.clone()));
+    }
+
+    fn track_c3c_raw_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn track_c3c_elapsed_ns(started: std::time::Instant) -> u64 {
+        started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+    }
+
+    fn track_c3c_run_frame(
+        prepared: &mut TrackC3CPrepared,
+        observer: &super::track_c3c_dispatch_receipt::Guard,
+        owner_started: std::time::Instant,
+        frame: usize,
+    ) -> TrackC3CFrame {
+        let queue_depth_before = prepared.state.app().rx.queued_depth().unwrap_or(usize::MAX);
+        let registry_queued_before = prepared.state.registry_queue_depth();
+        let dispatch_ordinal_start = observer.event_count();
+        let producer_sends_before = prepared
+            .producer_sends
+            .as_ref()
+            .map(|sends| sends.load(Ordering::Acquire));
+        let wake_before = prepared.wake_requests.load(Ordering::Acquire);
+        let repaint_before = prepared.repaint_requests.load(Ordering::Acquire);
+        let owner_start_ns = track_c3c_elapsed_ns(owner_started);
+        let frame_started = std::time::Instant::now();
+        observer.set_frame(frame as u64);
+        let app = prepared.state.app_mut();
+        let context = app.egui_ctx.clone();
+        let output = context.run(track_c3c_raw_input(), |ctx| {
+            app.render_root_frame(ctx, None);
+        });
+        drop(output);
+        let elapsed_ns = track_c3c_elapsed_ns(frame_started);
+        let owner_complete_ns = track_c3c_elapsed_ns(owner_started);
+        let queue_depth_after = prepared.state.app().rx.queued_depth().unwrap_or(usize::MAX);
+        let registry_queued_after = prepared.state.registry_queue_depth();
+        let dispatch_ordinal_end = observer.event_count();
+        TrackC3CFrame {
+            frame,
+            owner_start_ns,
+            owner_complete_ns,
+            elapsed_ns,
+            queue_depth_before,
+            queue_depth_after,
+            registry_queued_before,
+            registry_queued_after,
+            dequeued: dispatch_ordinal_end.saturating_sub(dispatch_ordinal_start),
+            dispatch_ordinal_start,
+            dispatch_ordinal_end,
+            producer_sends_before,
+            producer_sends_after: prepared
+                .producer_sends
+                .as_ref()
+                .map(|sends| sends.load(Ordering::Acquire)),
+            viewport_wake_requests: prepared
+                .wake_requests
+                .load(Ordering::Acquire)
+                .saturating_sub(wake_before),
+            egui_repaint_requests: prepared
+                .repaint_requests
+                .load(Ordering::Acquire)
+                .saturating_sub(repaint_before),
+            full_output_dropped: true,
+        }
+    }
+
+    struct TrackC3CMeasuredRun {
+        owner_elapsed_ns: u64,
+        event_ages_ns: Vec<u64>,
+        frame_elapsed_ns: Vec<u64>,
+        record: serde_json::Value,
+    }
+
+    fn track_c3c_validate_urgent(
+        app: &LauncherApp,
+        urgent: &TrackC3CUrgentEvents,
+        dispatch: &super::track_c3c_dispatch_receipt::Snapshot,
+        expected_action_refresh_generation_delta: u64,
+        expected_selection: Option<usize>,
+    ) -> serde_json::Value {
+        use crate::radial::acceptance_trace::Event;
+        use crate::screen_draw::ScreenDrawRestoreOutcome;
+
+        let events = crate::radial::acceptance_trace::take_screen_draw_restore_test_events();
+        let stale = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    Event::ScreenDrawRestoreDecision {
+                        intent_id,
+                        outcome: ScreenDrawRestoreOutcome::StaleIntent,
+                        ..
+                    } if *intent_id == urgent.intent.id()
+                )
+            })
+            .count();
+        assert_eq!(
+            stale, 1,
+            "the actual root-frame reducer rejects the stale emergency"
+        );
+        assert!(
+            !app.screen_draw_recovery_bridge.is_active(),
+            "the stale emergency admission cannot reactivate Screen Draw"
+        );
+        let radial_dispatches = dispatch
+            .events
+            .iter()
+            .filter(|event| event.kind == "radial_dispatch")
+            .count();
+        assert_eq!(
+            radial_dispatches, 1,
+            "the root-frame event reducer received the invalid radial request"
+        );
+        let radial_identity = &urgent.radial_request.identity;
+        let expected_radial_lease = (
+            radial_identity.preparation_generation,
+            radial_identity.config_revision,
+        );
+        let radial_lease_registered = app.radial_preparations.get(&radial_identity.invocation_id)
+            == Some(&expected_radial_lease);
+        let radial_current_preparation_matches = app.radial_current_preparation
+            == Some((
+                radial_identity.invocation_id,
+                radial_identity.preparation_generation,
+                radial_identity.config_revision,
+            ));
+        assert!(!radial_lease_registered);
+        assert!(!radial_current_preparation_matches);
+        assert!(
+            !app.radial_preparations
+                .contains_key(&radial_identity.invocation_id)
+        );
+        assert!(
+            !app.radial_consumed_dispatches
+                .contains(&urgent.radial_request.identity)
+        );
+        assert_eq!(app.query, urgent.before_query);
+        assert_eq!(app.last_search_query, urgent.before_last_query);
+        assert_eq!(app.query_history.acceptance_digest(), urgent.before_history);
+        assert_eq!(app.visible_flag_state(), urgent.before_visible);
+        assert_eq!(app.restore_flag_state(), urgent.before_restore);
+        let result_generation = app.root_list_geometry.result_generation_for_test();
+        let result_generation_delta =
+            result_generation.saturating_sub(urgent.before_result_generation);
+        assert_eq!(
+            result_generation_delta, expected_action_refresh_generation_delta,
+            "result generation follows complete-result equality for the query"
+        );
+        assert_eq!(
+            app.selected, expected_selection,
+            "selection follows the independently expected search acceptance"
+        );
+        assert_eq!(
+            app.plugins.search_generation(),
+            urgent.before_provider_revision
+        );
+        let catalogs = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        assert_eq!(catalogs.clipboard, urgent.before_catalog_versions.clipboard);
+        assert_eq!(catalogs.todo, urgent.before_catalog_versions.todo);
+        assert_eq!(catalogs.notes, urgent.before_catalog_versions.notes);
+        serde_json::json!({
+            "screen_draw_intent_id": urgent.intent.id(),
+            "screen_draw_activity_epoch": urgent.intent.activity_epoch(),
+            "screen_draw_bridge_active_after_admission": false,
+            "screen_draw_stale_intent_receipts": stale,
+            "radial_invocation_id": urgent.radial_request.identity.invocation_id.0,
+            "radial_lease_registered": radial_lease_registered,
+            "radial_rejected_before_resolution": radial_dispatches == 1 && !radial_lease_registered && !radial_current_preparation_matches,
+            "radial_consumed": false,
+            "query_unchanged": app.query == urgent.before_query,
+            "last_query_unchanged": app.last_search_query == urgent.before_last_query,
+            "history_unchanged": app.query_history.acceptance_digest() == urgent.before_history,
+            "visibility_unchanged": app.visible_flag_state() == urgent.before_visible,
+            "restore_unchanged": app.restore_flag_state() == urgent.before_restore,
+            "result_generation_delta": result_generation_delta,
+            "expected_action_refresh_generation_delta": expected_action_refresh_generation_delta,
+            "provider_revision_unchanged": app.plugins.search_generation() == urgent.before_provider_revision,
+            "catalog_versions_unchanged": true,
+        })
+    }
+
+    fn track_c3c_state_signatures(state: &TrackC3CState) -> (u64, u64, u64, u64, Vec<u64>) {
+        use crate::performance::track_c_workloads::StableSignature;
+
+        let owner = state.owner();
+        let app = state.app();
+        // Compare the complete, unnormalized Action sequence and every derived
+        // cache before producing any root-normalized identity.
+        assert_track_c_actions_owner_state(
+            owner,
+            &owner.expected_actions,
+            owner.actions_version_before + 1,
+        );
+        let action_output_id =
+            track_c_watch_action_signature(&owner.index_root, app.actions.as_slice());
+        let projection_output_id = track_c_watch_projection_signature(app, &owner.index_root);
+        let mut full_state = StableSignature::new(
+            0x4333_435f_5354_4154,
+            "track-c3c-full-state",
+            app.results.len(),
+        );
+        full_state.number(action_output_id);
+        full_state.number(projection_output_id);
+        full_state.number(app.query_history.acceptance_digest());
+        full_state.number(app.visible_flag_state() as u64);
+        full_state.number(app.restore_flag_state() as u64);
+        full_state.number(app.last_results_valid as u64);
+        full_state.number(app.last_search_pending as u64);
+        full_state.number(app.background_query_refresh_pending as u64);
+        full_state.number(app.last_search_result_catalog_versions_stable as u64);
+        full_state.number(app.error.is_some() as u64);
+        match app.selected {
+            Some(index) => {
+                full_state.number(1);
+                full_state.number(index as u64);
+            }
+            None => full_state.number(0),
+        }
+        let full_state_id = full_state.finish();
+
+        let mut viewport = StableSignature::new(
+            0x4333_435f_5650_5254,
+            "track-c3c-root-viewport",
+            app.test_root_rendered_row_ids.len(),
+        );
+        viewport.number(app.test_root_rendered_rows.len() as u64);
+        viewport.number(app.test_root_rendered_row_rects.len() as u64);
+        for ((index, id), (rect_index, rect)) in app
+            .test_root_rendered_row_ids
+            .iter()
+            .zip(&app.test_root_rendered_row_rects)
+        {
+            assert_eq!(index, rect_index);
+            viewport.number(*index as u64);
+            viewport.number(id.value());
+            for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                viewport.number(u64::from(value.to_bits()));
+            }
+        }
+        match app.test_root_scroll_viewport_rect {
+            Some(rect) => {
+                viewport.number(1);
+                for value in [rect.min.x, rect.min.y, rect.max.x, rect.max.y] {
+                    viewport.number(u64::from(value.to_bits()));
+                }
+            }
+            None => viewport.number(0),
+        }
+        match app.test_root_scroll_area_extent {
+            Some((inner_rect, content_size, offset)) => {
+                viewport.number(1);
+                for value in [
+                    inner_rect.min.x,
+                    inner_rect.min.y,
+                    inner_rect.max.x,
+                    inner_rect.max.y,
+                    content_size.x,
+                    content_size.y,
+                    offset.x,
+                    offset.y,
+                ] {
+                    viewport.number(u64::from(value.to_bits()));
+                }
+            }
+            None => viewport.number(0),
+        }
+        let viewport_id = viewport.finish();
+        let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let revisions = vec![
+            owner.actions_version_before,
+            crate::actions::actions_version(),
+            app.plugins.search_generation(),
+            app.last_search_provider_revision,
+            catalog_versions.clipboard,
+            catalog_versions.todo,
+            catalog_versions.notes,
+            app.last_search_result_catalog_versions
+                .map_or(u64::MAX, |versions| versions.clipboard),
+            app.last_search_result_catalog_versions
+                .map_or(u64::MAX, |versions| versions.todo),
+            app.last_search_result_catalog_versions
+                .map_or(u64::MAX, |versions| versions.notes),
+            app.last_search_result_catalog_versions_stable as u64,
+            app.root_list_geometry.result_generation_for_test(),
+        ];
+        (
+            action_output_id,
+            projection_output_id,
+            full_state_id,
+            viewport_id,
+            revisions,
+        )
+    }
+
+    fn track_c3c_completion_receipt(state: &TrackC3CState) -> serde_json::Value {
+        let app = state.app();
+        assert!(
+            app.query_autocomplete,
+            "the owned fixture enables autocomplete"
+        );
+        let expected_keys =
+            track_c1e_expected_completion_keys(app, &state.owner().expected_actions);
+        let expected_suggestions = track_c1e_expected_suggestions(&expected_keys, &app.query, 5);
+        let (completion_state, suggestions_count) = if app.completion_index.is_some() {
+            assert_eq!(track_c1e_completion_keys(app), expected_keys);
+            assert_eq!(app.suggestions, expected_suggestions);
+            assert!(!app.action_completion_dirty);
+            assert!(!app.command_completion_dirty);
+            assert!(app.completion_rebuild_after.is_none());
+            ("rebuilt", app.suggestions.len())
+        } else {
+            assert!(app.action_completion_dirty || app.command_completion_dirty);
+            assert!(app.completion_rebuild_after.is_some());
+            assert!(app.suggestions.is_empty());
+            ("pending", 0)
+        };
+        serde_json::json!({
+            "state": completion_state,
+            "suggestions_count": suggestions_count,
+        })
+    }
+
+    fn track_c3c_event_class_origin_counts(
+        expected_ages: &[super::event_channel::EventAgeSample],
+    ) -> serde_json::Value {
+        use crate::performance::track_c::{self, EventClass, EventOrigin};
+
+        let expected = track_c::snapshot_events();
+        let mut output = Vec::new();
+        for event in expected {
+            if event.dequeued == 0
+                && event.handler_calls == 0
+                && event.send_failed == 0
+                && event.abandoned == 0
+            {
+                continue;
+            }
+            let actual_dequeued = expected_ages
+                .iter()
+                .filter(|age| age.class == event.class && age.origin == event.origin)
+                .count() as u64;
+            assert_eq!(event.dequeued, actual_dequeued);
+            assert_eq!(event.handler_calls, actual_dequeued);
+            assert_eq!(event.send_failed, 0);
+            assert_eq!(event.abandoned, 0);
+            output.push(serde_json::json!({
+                "class": format!("{:?}", event.class),
+                "origin": format!("{:?}", event.origin),
+                "enqueued": event.enqueued,
+                "dequeued": event.dequeued,
+                "send_failed": event.send_failed,
+                "abandoned": event.abandoned,
+                "age_ns_total": event.age_nanos_total,
+                "age_ns_max": event.age_nanos_max,
+                "handler_calls": event.handler_calls,
+                "handler_ns_total": event.handler_nanos_total,
+                "handler_ns_max": event.handler_nanos_max,
+            }));
+        }
+        assert_eq!(
+            output
+                .iter()
+                .map(|entry| entry["dequeued"].as_u64().unwrap_or(0))
+                .sum::<u64>(),
+            expected_ages.len() as u64,
+        );
+        let _ = (EventClass::COUNT, EventOrigin::COUNT);
+        serde_json::Value::Array(output)
+    }
+
+    fn track_c3c_merge_record_fields(record: &mut serde_json::Value, fields: serde_json::Value) {
+        let serde_json::Value::Object(fields) = fields else {
+            panic!("C3-C record fields must be a JSON object");
+        };
+        record
+            .as_object_mut()
+            .expect("C3-C sample record remains a JSON object")
+            .extend(fields);
+    }
+
+    fn track_c3c_class_token(class: crate::performance::track_c::EventClass) -> &'static str {
+        use crate::performance::track_c::EventClass;
+        match class {
+            EventClass::FileReload => "FileReload",
+            EventClass::IndexCompletion => "IndexCompletion",
+            EventClass::Action => "Action",
+            EventClass::Radial => "Radial",
+            EventClass::Recovery => "Recovery",
+            EventClass::Clipboard => "Clipboard",
+            EventClass::Dashboard => "Dashboard",
+            EventClass::Other => "Other",
+        }
+    }
+
+    fn track_c3c_origin_token(origin: EventOrigin) -> &'static str {
+        match origin {
+            EventOrigin::Gui => "Gui",
+            EventOrigin::FileWatcher => "FileWatcher",
+            EventOrigin::IndexCoordinator => "IndexCoordinator",
+            EventOrigin::RadialProvider => "RadialProvider",
+            EventOrigin::CommandHost => "CommandHost",
+            EventOrigin::Dashboard => "Dashboard",
+            EventOrigin::Registry => "Registry",
+            EventOrigin::Startup => "Startup",
+            EventOrigin::Hotkey => "Hotkey",
+        }
+    }
+
+    fn track_c3c_run_recipe(
+        fixture: &TrackCActionsFixture,
+        recipe: TrackC3CRecipe,
+    ) -> TrackC3CMeasuredRun {
+        use crate::performance::track_c::{self, Phase};
+        use std::sync::atomic::{AtomicU64, AtomicUsize};
+
+        let mut prepared = track_c3c_prepare(fixture, recipe);
+        let urgent = (recipe != TrackC3CRecipe::Quiet)
+            .then(|| track_c3c_prepare_urgent(prepared.state.app()));
+        let producer_successful_sends = Arc::new(AtomicUsize::new(0));
+        if recipe == TrackC3CRecipe::Replenishing {
+            prepared.producer_sends = Some(Arc::clone(&producer_successful_sends));
+        }
+        let producer_failures = Arc::new(AtomicUsize::new(0));
+        let producer_ack_elapsed_ns = Arc::new(AtomicU64::new(u64::MAX));
+        crate::radial::acceptance_trace::take_screen_draw_restore_test_events();
+        track_c::reset();
+        let dispatch_observer = super::track_c3c_dispatch_receipt::Guard::install();
+        if recipe == TrackC3CRecipe::Replenishing {
+            dispatch_observer.set_producer_successful_sends(Arc::clone(&producer_successful_sends));
+        }
+
+        let age_recorder = prepared.state.age_recorder().clone();
+        let sends_before_owner = age_recorder.successful_sends();
+        let viewport_wakes_before_owner = prepared.wake_requests.load(Ordering::Acquire);
+        let egui_repaints_before_owner = prepared.repaint_requests.load(Ordering::Acquire);
+        let mut owner_started = None;
+        let mut frames = Vec::with_capacity(8);
+        let mut queue_depth_after_triggers = None;
+        let mut registry_queued_after_triggers = None;
+        let mut producer_joined = true;
+
+        match recipe {
+            TrackC3CRecipe::Quiet => {
+                let started = std::time::Instant::now();
+                owner_started = Some(started);
+                frames.push(track_c3c_run_frame(
+                    &mut prepared,
+                    &dispatch_observer,
+                    started,
+                    1,
+                ));
+                queue_depth_after_triggers = Some(0);
+                registry_queued_after_triggers = Some(prepared.state.registry_queue_depth());
+            }
+            TrackC3CRecipe::Finite => {
+                let started = std::time::Instant::now();
+                owner_started = Some(started);
+                track_c3c_send_urgent_events(urgent.as_ref().unwrap());
+                queue_depth_after_triggers =
+                    Some(prepared.state.app().rx.queued_depth().unwrap_or(usize::MAX));
+                registry_queued_after_triggers = Some(prepared.state.registry_queue_depth());
+                assert_eq!(queue_depth_after_triggers, Some(10));
+                assert_eq!(
+                    age_recorder
+                        .successful_sends()
+                        .saturating_sub(sends_before_owner),
+                    2
+                );
+                for frame in 1..=8 {
+                    frames.push(track_c3c_run_frame(
+                        &mut prepared,
+                        &dispatch_observer,
+                        started,
+                        frame,
+                    ));
+                    if prepared.state.app().rx.queued_depth() == Some(0)
+                        && dispatch_observer.event_count() == recipe.measured_events()
+                    {
+                        break;
+                    }
+                }
+            }
+            TrackC3CRecipe::Replenishing => {
+                let barrier = Arc::new(std::sync::Barrier::new(2));
+                let producer_tx = prepared
+                    .state
+                    .app()
+                    .event_tx
+                    .with_origin(EventOrigin::FileWatcher);
+                let producer_wake = prepared.wake.clone();
+                let producer_barrier = Arc::clone(&barrier);
+                let producer_success = Arc::clone(&producer_successful_sends);
+                let producer_failed = Arc::clone(&producer_failures);
+                let producer_ack = Arc::clone(&producer_ack_elapsed_ns);
+                std::thread::scope(|scope| {
+                    let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+                    let handle = scope.spawn(move || {
+                        let producer_owner_started = started_rx
+                            .recv()
+                            .expect("the finite owner start receipt is sent before the barrier");
+                        producer_barrier.wait();
+                        for _ in 0..16 {
+                            match producer_tx.send(WatchEvent::Actions) {
+                                Ok(()) => {
+                                    producer_success.fetch_add(1, Ordering::AcqRel);
+                                    // Match the file watcher ordering boundary:
+                                    // enqueue first, then wake the owning viewport.
+                                    producer_wake.wake();
+                                }
+                                Err(_) => {
+                                    producer_failed.fetch_add(1, Ordering::AcqRel);
+                                }
+                            }
+                        }
+                        producer_ack.store(
+                            track_c3c_elapsed_ns(producer_owner_started),
+                            Ordering::Release,
+                        );
+                    });
+                    let started = std::time::Instant::now();
+                    owner_started = Some(started);
+                    started_tx
+                        .send(started)
+                        .expect("the bounded producer is waiting for the owner start receipt");
+                    barrier.wait();
+                    track_c3c_send_urgent_events(urgent.as_ref().unwrap());
+                    queue_depth_after_triggers =
+                        Some(prepared.state.app().rx.queued_depth().unwrap_or(usize::MAX));
+                    registry_queued_after_triggers = Some(prepared.state.registry_queue_depth());
+                    for frame in 1..=8 {
+                        frames.push(track_c3c_run_frame(
+                            &mut prepared,
+                            &dispatch_observer,
+                            started,
+                            frame,
+                        ));
+                        if producer_successful_sends.load(Ordering::Acquire) == 16
+                            && prepared.state.app().rx.queued_depth() == Some(0)
+                        {
+                            break;
+                        }
+                    }
+                    if producer_successful_sends.load(Ordering::Acquire) != 16
+                        || prepared.state.app().rx.queued_depth() != Some(0)
+                    {
+                        producer_joined = false;
+                    }
+                    handle
+                        .join()
+                        .expect("finite C3-C producer exits without blocking");
+                });
+            }
+        }
+
+        let owner_started = owner_started.expect("each recipe starts one measured owner");
+        let owner_elapsed_ns = track_c3c_elapsed_ns(owner_started);
+        let viewport_wakes_after_owner = prepared.wake_requests.load(Ordering::Acquire);
+        let egui_repaints_after_owner = prepared.repaint_requests.load(Ordering::Acquire);
+        let queue_depth_after_triggers = queue_depth_after_triggers
+            .expect("each C3-C recipe captures its post-trigger app queue depth");
+        let registry_queued_after_triggers = registry_queued_after_triggers
+            .expect("each C3-C recipe captures its post-trigger registry queue count");
+        assert!(!frames.is_empty());
+        assert!(frames.len() <= 8);
+        assert_eq!(prepared.state.app().rx.queued_depth(), Some(0));
+        let dispatch = dispatch_observer.snapshot();
+        let age_snapshot = age_recorder.snapshot();
+        let drain = track_c::snapshot()[Phase::EventDrain as usize].1;
+        let event_ages_ns = age_snapshot
+            .delivered
+            .iter()
+            .map(|sample| sample.age_nanos)
+            .collect::<Vec<_>>();
+        assert!(!dispatch.overflow && !dispatch.drain_overflow);
+        assert_eq!(dispatch.events.len(), recipe.measured_events());
+        assert_eq!(dispatch.drains.len(), frames.len());
+        assert_eq!(age_snapshot.delivered.len(), recipe.measured_events());
+        assert_eq!(age_snapshot.overflow, 0);
+        assert_eq!(age_snapshot.abandoned, 0);
+        let successful_sends_after_owner = age_recorder.successful_sends();
+        let accepted_in_owner = successful_sends_after_owner.saturating_sub(sends_before_owner);
+        assert_eq!(
+            accepted_in_owner,
+            recipe.trigger_events() + recipe.producer_events(),
+            "owner acceptance excludes any finite recipe setup queue"
+        );
+        if recipe == TrackC3CRecipe::Finite {
+            assert_eq!(
+                sends_before_owner, 8,
+                "finite original envelopes keep setup timestamps"
+            );
+            assert_eq!(successful_sends_after_owner, 10);
+            assert_eq!(prepared.setup_accepted + accepted_in_owner, 10);
+        }
+        let producer_count = producer_successful_sends.load(Ordering::Acquire);
+        let producer_failed_count = producer_failures.load(Ordering::Acquire);
+        assert_eq!(producer_count, recipe.producer_events());
+        assert_eq!(producer_failed_count, 0);
+        assert!(producer_joined);
+        if recipe == TrackC3CRecipe::Replenishing {
+            assert_ne!(producer_ack_elapsed_ns.load(Ordering::Acquire), u64::MAX);
+        }
+        if crate::performance::enabled() {
+            assert_eq!(drain.calls, frames.len() as u64);
+            assert_eq!(drain.completed, drain.calls);
+            assert_eq!(drain.errors, 0);
+            assert_eq!(drain.abandoned, 0);
+            assert_eq!(drain.work_units, recipe.measured_events() as u64);
+        }
+        let expected_action_classes = age_snapshot
+            .delivered
+            .iter()
+            .map(|sample| (sample.class, sample.origin))
+            .collect::<Vec<_>>();
+        let event_handler_receipts = track_c3c_event_class_origin_counts(&age_snapshot.delivered);
+        let urgent_receipt = if let Some(urgent) = urgent.as_ref() {
+            // Finite mutates an unrelated catalog row; the complete search
+            // result is still equal, so the C2-C reuse path retains generation.
+            // Search acceptance nevertheless clears selection after replacing
+            // the result projection, even when the generation is retained.
+            let expected_selection = if recipe == TrackC3CRecipe::Finite {
+                None
+            } else {
+                urgent.before_selected
+            };
+            track_c3c_validate_urgent(
+                prepared.state.app(),
+                urgent,
+                &dispatch,
+                0,
+                expected_selection,
+            )
+        } else {
+            serde_json::Value::Null
+        };
+        let owner = prepared.state.owner();
+        assert_track_c_actions_owner_state(
+            owner,
+            &owner.expected_actions,
+            owner.actions_version_before + 1,
+        );
+        let (action_output_id, projection_output_id, full_state_id, viewport_id, revisions) =
+            track_c3c_state_signatures(&prepared.state);
+        let completion_receipt = track_c3c_completion_receipt(&prepared.state);
+        let queue_depth_after_owner = prepared.state.app().rx.queued_depth().unwrap_or(usize::MAX);
+        let registry_queued_after_owner = prepared.state.registry_queue_depth();
+        assert_eq!(queue_depth_after_owner, 0);
+        drop(dispatch_observer);
+
+        let finalization = prepared
+            .state
+            .finalize_stale_index(recipe.measured_events());
+        let final_queue_depth = prepared.state.app().rx.queued_depth().unwrap_or(usize::MAX);
+        assert_eq!(final_queue_depth, 0);
+        let final_age_snapshot = age_recorder.snapshot();
+        let expected_final_delivered =
+            recipe.measured_events() + usize::from(recipe == TrackC3CRecipe::Finite);
+        assert_eq!(final_age_snapshot.delivered.len(), expected_final_delivered);
+        assert_eq!(final_age_snapshot.overflow, 0);
+        assert_eq!(final_age_snapshot.abandoned, 0);
+
+        let dispatch_rows = dispatch
+            .events
+            .iter()
+            .zip(&age_snapshot.delivered)
+            .map(|(event, age)| {
+                let age_origin = match recipe {
+                    TrackC3CRecipe::Finite
+                        if event.ordinal < prepared.setup_dequeued as u64 + 8 =>
+                    {
+                        "setup_before_owner"
+                    }
+                    TrackC3CRecipe::Finite => "urgent_trigger_in_owner",
+                    TrackC3CRecipe::Replenishing
+                        if event.kind == "screen_draw_emergency"
+                            || event.kind == "radial_dispatch" =>
+                    {
+                        "urgent_trigger_in_owner"
+                    }
+                    TrackC3CRecipe::Replenishing => "bounded_producer_in_owner",
+                    TrackC3CRecipe::Quiet => "not_applicable",
+                };
+                serde_json::json!({
+                    "ordinal": event.ordinal,
+                    "kind": event.kind,
+                    "frame": event.frame,
+                    "class": track_c3c_class_token(age.class),
+                    "origin": track_c3c_origin_token(age.origin),
+                    "age_origin": age_origin,
+                    "age_ns": age.age_nanos,
+                    "depth_after_dequeue": event.depth_after_dequeue,
+                })
+            })
+            .collect::<Vec<_>>();
+        let frame_elapsed_ns = frames
+            .iter()
+            .map(|frame| frame.elapsed_ns)
+            .collect::<Vec<_>>();
+        let frame_elapsed_ns_sum = frame_elapsed_ns.iter().copied().sum::<u64>();
+        let frame_elapsed_ns_max = frame_elapsed_ns.iter().copied().max().unwrap_or(0);
+        let frames_json = frames
+            .iter()
+            .map(|frame| {
+                serde_json::json!({
+                    "frame": frame.frame,
+                    "owner_start_ns": frame.owner_start_ns,
+                    "owner_complete_ns": frame.owner_complete_ns,
+                    "elapsed_ns": frame.elapsed_ns,
+                    "queue_depth_before": frame.queue_depth_before,
+                    "queue_depth_after": frame.queue_depth_after,
+                    "registry_queued_before": frame.registry_queued_before,
+                    "registry_queued_after": frame.registry_queued_after,
+                    "dequeued": frame.dequeued,
+                    "dispatch_ordinal_start": frame.dispatch_ordinal_start,
+                    "dispatch_ordinal_end": frame.dispatch_ordinal_end,
+                    "producer_successful_sends_before": frame.producer_sends_before,
+                    "producer_successful_sends_after": frame.producer_sends_after,
+                    "viewport_wake_requests": frame.viewport_wake_requests,
+                    "egui_repaint_requests": frame.egui_repaint_requests,
+                    "full_output_dropped": frame.full_output_dropped,
+                })
+            })
+            .collect::<Vec<_>>();
+        let drain_windows = dispatch
+            .drains
+            .iter()
+            .map(|drain| {
+                serde_json::json!({
+                    "frame": drain.frame,
+                    "producer_successful_sends_before": drain.producer_successful_sends_before,
+                    "producer_successful_sends_after": drain.producer_successful_sends_after,
+                })
+            })
+            .collect::<Vec<_>>();
+        let (age_p50_ns, age_p95_ns, age_max_ns, age_mean_ns) = if event_ages_ns.is_empty() {
+            (
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            )
+        } else {
+            (
+                serde_json::json!(crate::performance::track_c_workloads::nearest_rank(
+                    &event_ages_ns,
+                    50
+                )),
+                serde_json::json!(crate::performance::track_c_workloads::nearest_rank(
+                    &event_ages_ns,
+                    95
+                )),
+                serde_json::json!(event_ages_ns.iter().copied().max().unwrap_or(0)),
+                serde_json::json!(
+                    event_ages_ns.iter().map(|age| *age as u128).sum::<u128>()
+                        / event_ages_ns.len() as u128
+                ),
+            )
+        };
+        assert_eq!(
+            expected_action_classes.len(),
+            recipe.measured_events(),
+            "the event-age sequence records every measured dequeue"
+        );
+        let urgent_dispatched = dispatch
+            .events
+            .iter()
+            .filter(|event| {
+                event.kind == "screen_draw_emergency" || event.kind == "radial_dispatch"
+            })
+            .count();
+        let send_failures =
+            producer_failed_count + recipe.trigger_events().saturating_sub(urgent_dispatched);
+        let mut record = serde_json::json!({
+            "sample": 0,
+            "owner_elapsed_ns": owner_elapsed_ns,
+            "setup_accepted": prepared.setup_accepted,
+            "setup_dequeued": prepared.setup_dequeued,
+            "setup_root_frames": prepared.setup_root_frames,
+            "trigger_accepted": urgent_dispatched,
+            "producer_accepted": producer_count,
+            "accepted_in_owner": accepted_in_owner,
+            "dequeued_in_owner": dispatch.events.len(),
+            "queue_depth_before_owner": prepared.queue_depth_before_owner,
+            "queue_depth_after_triggers": queue_depth_after_triggers,
+            "queue_depth_after_owner": queue_depth_after_owner,
+            "final_queue_depth": final_queue_depth,
+        });
+        track_c3c_merge_record_fields(
+            &mut record,
+            serde_json::json!({
+                "registry_queued_before_owner": prepared.registry_queued_before_owner,
+                "registry_queued_after_triggers": registry_queued_after_triggers,
+                "registry_queued_after_owner": registry_queued_after_owner,
+                "send_failures": send_failures,
+                "overflow": age_snapshot.overflow != 0 || dispatch.overflow || dispatch.drain_overflow,
+                "abandoned": age_snapshot.abandoned,
+                "event_ages": dispatch_rows,
+                "age_p50_ns": age_p50_ns,
+                "age_p95_ns": age_p95_ns,
+                "age_max_ns": age_max_ns,
+                "age_mean_ns": age_mean_ns,
+                "age_scope": if recipe == TrackC3CRecipe::Finite {
+                    "event_weighted_owner_dequeues_including_setup_aged_envelopes"
+                } else if recipe == TrackC3CRecipe::Quiet {
+                    "NOT_APPLICABLE_zero_events"
+                } else {
+                    "event_weighted_owner_dequeues"
+                },
+            }),
+        );
+        track_c3c_merge_record_fields(
+            &mut record,
+            serde_json::json!({
+                "frames": frames_json,
+                "frame_elapsed_ns_sum": frame_elapsed_ns_sum,
+                "frame_elapsed_ns_max": frame_elapsed_ns_max,
+                "event_drain_calls": drain.calls,
+                "event_drain_ns": drain.elapsed_nanos_total,
+                "event_drain_work_units": drain.work_units,
+                "drain_send_ack_windows": drain_windows,
+                "handler_receipts": event_handler_receipts,
+                "setup_viewport_wake_requests": prepared.setup_viewport_wake_requests,
+                "setup_egui_repaint_requests": prepared.setup_egui_repaint_requests,
+                "viewport_wake_requests_in_owner": viewport_wakes_after_owner.saturating_sub(viewport_wakes_before_owner),
+                "egui_repaint_requests_in_owner": egui_repaints_after_owner.saturating_sub(egui_repaints_before_owner),
+            }),
+        );
+        track_c3c_merge_record_fields(
+            &mut record,
+            serde_json::json!({
+                "producer_ack_elapsed_ns": if recipe == TrackC3CRecipe::Replenishing {
+                    serde_json::Value::from(producer_ack_elapsed_ns.load(Ordering::Acquire))
+                } else {
+                    serde_json::Value::Null
+                },
+                "producer_sends_total": producer_count,
+                "producer_quiescent": producer_joined && prepared.state.app().rx.queued_depth() == Some(0),
+                "coordinator_B_pending_during_owner": recipe == TrackC3CRecipe::Finite,
+                "action_output_id": format!("{action_output_id:016x}"),
+                "projection_output_id": format!("{projection_output_id:016x}"),
+                "full_state_id": format!("{full_state_id:016x}"),
+                "viewport_id": format!("{viewport_id:016x}"),
+                "revision_receipts": revisions,
+                "completion_receipt": completion_receipt,
+                "urgent_receipts": urgent_receipt,
+                "finalization": finalization,
+            }),
+        );
+        record["sample"] = serde_json::json!(0);
+        drop(prepared.state);
+        let lifecycle = {
+            let reports = fixture
+                .handler_reports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let report = reports
+                .get(prepared.handler_report_index)
+                .expect("dropping the app records this sample's callback release report");
+            assert!(report.complete && !report.overflowed);
+            assert_eq!(report.attempts, TRACK_C_EXPECTED_HANDLER_KINDS);
+            assert_eq!(report.created, TRACK_C_EXPECTED_HANDLER_KINDS);
+            assert_eq!(report.released, TRACK_C_EXPECTED_HANDLER_KINDS);
+            serde_json::json!({
+                "attempted": report.attempts.iter().map(|kind| kind.token()).collect::<Vec<_>>(),
+                "created": report.created.iter().map(|kind| kind.token()).collect::<Vec<_>>(),
+                "released": report.released.iter().map(|kind| kind.token()).collect::<Vec<_>>(),
+                "complete": report.complete,
+                "overflow": report.overflowed,
+            })
+        };
+        record["handler_lifecycle"] = lifecycle;
+        TrackC3CMeasuredRun {
+            owner_elapsed_ns,
+            event_ages_ns,
+            frame_elapsed_ns,
+            record,
+        }
+    }
+
+    fn track_c3c_emit_result(
+        mode: crate::performance::track_c_workloads::BenchmarkMode,
+        fixture: &TrackCActionsFixture,
+        recipe: TrackC3CRecipe,
+        count: usize,
+        samples: &[TrackC3CMeasuredRun],
+    ) {
+        use crate::performance::track_c_workloads::{MEASURED_SAMPLES, WARMUPS, nearest_rank};
+
+        assert_eq!(samples.len(), MEASURED_SAMPLES);
+        let source =
+            std::env::var("ML_TRACK_C_SOURCE_SHA").unwrap_or_else(|_| "UNCOMMITTED_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let owner_elapsed_ns = samples
+            .iter()
+            .map(|sample| sample.owner_elapsed_ns)
+            .collect::<Vec<_>>();
+        let owner_mean_ns = owner_elapsed_ns
+            .iter()
+            .map(|elapsed| *elapsed as u128)
+            .sum::<u128>()
+            / owner_elapsed_ns.len() as u128;
+        let mut pooled_event_ages = samples
+            .iter()
+            .flat_map(|sample| sample.event_ages_ns.iter().copied())
+            .collect::<Vec<_>>();
+        pooled_event_ages.sort_unstable();
+        let age_distribution = if pooled_event_ages.is_empty() {
+            serde_json::json!({
+                "scope": "NOT_APPLICABLE_zero_events",
+                "weighting": "event_weighted",
+                "events": 0,
+                "p50_ns": null,
+                "p95_ns": null,
+                "max_ns": null,
+                "mean_ns": null,
+            })
+        } else {
+            serde_json::json!({
+                "scope": "owner_dequeued_events_including_setup_aged_envelopes_when_present",
+                "weighting": "event_weighted_pooled_across_retained_samples",
+                "events": pooled_event_ages.len(),
+                "p50_ns": nearest_rank(&pooled_event_ages, 50),
+                "p95_ns": nearest_rank(&pooled_event_ages, 95),
+                "max_ns": pooled_event_ages.iter().copied().max().unwrap_or(0),
+                "mean_ns": pooled_event_ages.iter().map(|age| *age as u128).sum::<u128>() / pooled_event_ages.len() as u128,
+            })
+        };
+        let sample_records = samples
+            .iter()
+            .enumerate()
+            .map(|(index, sample)| {
+                let mut record = sample.record.clone();
+                record["sample"] = serde_json::json!(index);
+                record
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "TRACK_C3C_EVENT_RESULT {}",
+            serde_json::json!({
+                "schema": 1,
+                "stage": "gui_event_frame_characterization",
+                "owner": "LauncherApp::process_watch_events+LauncherApp::render_root_frame",
+                "measurement_scope": "trigger_enqueue_or_start_gate+event_drain+egui_Context_run+FullOutput_drop",
+                "sequence_elapsed_scope": "whole_controlled_sequence_including_trigger_setup_gate_frame_and_full_output_drop",
+                "setup_root_frame_scope": "quiet_and_replenishing_use_one_actual_root_frame_outside_owner; finite_keeps_original_queue_for_measured_frame",
+                "completion_scope": "post_owner_state_observation; natural_debounce_only; no_forced_rebuild",
+                "source": source,
+                "profile": profile,
+                "mode": format!("{:?}", mode),
+                "telemetry_enabled": crate::performance::enabled(),
+                "fixture": "synthetic_owned_actions_watch_queue",
+                "fixture_signature": format!("{:016x}", track_c3c_fixture_signature(fixture, recipe, count)),
+                "case": recipe.token(),
+                "count": count,
+                "warmups": WARMUPS,
+                "samples": MEASURED_SAMPLES,
+                "exclusions": 0,
+                "recorder_capacity": 32,
+                "max_frames": 8,
+                "age_scope": "event_weighted_individual_dequeues; finite includes setup-aged original queue; quiet has no age quantiles",
+                "frame_scope": "actual ctx.run LauncherApp::render_root_frame through FullOutput drop; CPU only",
+                "registry_scope": "registry queued is wake bookkeeping, distinct from app channel depth",
+                "depth_scope": "reserved app queue depth sampled at boundaries, not exact concurrent peak",
+                "finite_finalization_scope": "blocked index B IndexReady is measured only as a separate untimed finalization receipt",
+                "original_setup_scope": if recipe == TrackC3CRecipe::Finite { "original eight event sequence accepted before owner; ages retain original timestamps" } else { "one fixture Actions event drained outside owner; recorder reset only after zero depth" },
+                "owner_elapsed_p50_ns": nearest_rank(&owner_elapsed_ns, 50),
+                "owner_elapsed_p95_ns": nearest_rank(&owner_elapsed_ns, 95),
+                "owner_elapsed_max_ns": owner_elapsed_ns.iter().copied().max().unwrap_or(0),
+                "owner_elapsed_mean_ns": owner_mean_ns,
+                "frame_elapsed_ns_sum": samples.iter().map(|sample| sample.frame_elapsed_ns.iter().copied().sum::<u64>()).collect::<Vec<_>>(),
+                "frame_elapsed_ns_max": samples.iter().map(|sample| sample.frame_elapsed_ns.iter().copied().max().unwrap_or(0)).collect::<Vec<_>>(),
+                "event_age_distribution": age_distribution,
+                "sample_records": sample_records,
+            })
+        );
+    }
+
+    #[test]
+    fn track_c_oracle_c3c_frame_recipes_preserve_delivery_and_safety() {
+        let fixture = track_c_actions_fixture(200);
+
+        let quiet = track_c3c_run_recipe(&fixture, TrackC3CRecipe::Quiet).record;
+        assert_eq!(quiet["accepted_in_owner"], 0);
+        assert_eq!(quiet["dequeued_in_owner"], 0);
+        assert_eq!(quiet["setup_accepted"], 1);
+        assert_eq!(quiet["setup_dequeued"], 1);
+        assert_eq!(quiet["setup_root_frames"], 1);
+        assert_eq!(quiet["frames"].as_array().unwrap().len(), 1);
+        assert!(quiet["event_ages"].as_array().unwrap().is_empty());
+        assert!(quiet["age_p50_ns"].is_null());
+        assert!(quiet["age_p95_ns"].is_null());
+        assert!(quiet["age_max_ns"].is_null());
+        assert_eq!(quiet["age_scope"], "NOT_APPLICABLE_zero_events");
+        assert!(quiet["handler_lifecycle"]["complete"].as_bool().unwrap());
+        assert_eq!(quiet["queue_depth_after_owner"], 0);
+        assert!(matches!(
+            quiet["completion_receipt"]["state"].as_str(),
+            Some("pending" | "rebuilt")
+        ));
+        assert!(
+            quiet["completion_receipt"]["suggestions_count"]
+                .as_u64()
+                .is_some()
+        );
+
+        let finite = track_c3c_run_recipe(&fixture, TrackC3CRecipe::Finite).record;
+        assert_eq!(finite["setup_accepted"], 8);
+        assert_eq!(finite["setup_dequeued"], 0);
+        assert_eq!(finite["setup_root_frames"], 0);
+        assert_eq!(finite["queue_depth_before_owner"], 8);
+        assert_eq!(finite["queue_depth_after_triggers"], 10);
+        assert_eq!(finite["accepted_in_owner"], 2);
+        assert_eq!(finite["dequeued_in_owner"], 10);
+        assert_eq!(finite["event_ages"].as_array().unwrap().len(), 10);
+        let finite_tags = finite["event_ages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| {
+                (
+                    event["kind"].as_str().unwrap(),
+                    event["class"].as_str().unwrap(),
+                    event["origin"].as_str().unwrap(),
+                    event["age_origin"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            finite_tags,
+            [
+                ("actions", "FileReload", "FileWatcher", "setup_before_owner"),
+                (
+                    "index_ready",
+                    "IndexCompletion",
+                    "IndexCoordinator",
+                    "setup_before_owner"
+                ),
+                ("actions", "FileReload", "FileWatcher", "setup_before_owner"),
+                ("actions", "FileReload", "FileWatcher", "setup_before_owner"),
+                ("actions", "FileReload", "FileWatcher", "setup_before_owner"),
+                ("actions", "FileReload", "FileWatcher", "setup_before_owner"),
+                ("actions", "FileReload", "FileWatcher", "setup_before_owner"),
+                ("recycle", "Clipboard", "Registry", "setup_before_owner"),
+                (
+                    "screen_draw_emergency",
+                    "Recovery",
+                    "Registry",
+                    "urgent_trigger_in_owner"
+                ),
+                (
+                    "radial_dispatch",
+                    "Radial",
+                    "Registry",
+                    "urgent_trigger_in_owner"
+                ),
+            ]
+        );
+        assert_eq!(finite["final_queue_depth"], 0);
+        assert_eq!(
+            finite["finalization"]["scope"],
+            "untimed_blocked_index_B_completion"
+        );
+        assert_eq!(finite["finalization"]["accepted"], 1);
+        assert_eq!(finite["finalization"]["dequeued"], 1);
+        assert_eq!(finite["finalization"]["class"], "IndexCompletion");
+        assert_eq!(finite["finalization"]["origin"], "IndexCoordinator");
+        assert_eq!(
+            finite["urgent_receipts"]["screen_draw_stale_intent_receipts"],
+            1
+        );
+        assert_eq!(
+            finite["urgent_receipts"]["radial_rejected_before_resolution"],
+            true
+        );
+        assert_eq!(
+            finite["urgent_receipts"]["catalog_versions_unchanged"],
+            true
+        );
+        assert_eq!(finite["urgent_receipts"]["result_generation_delta"], 0);
+        assert_eq!(finite["send_failures"], 0);
+        assert_eq!(finite["overflow"], false);
+        assert_eq!(finite["abandoned"], 0);
+        assert!(matches!(
+            finite["completion_receipt"]["state"].as_str(),
+            Some("pending" | "rebuilt")
+        ));
+        assert!(
+            finite["completion_receipt"]["suggestions_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            finite["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|frame| frame["full_output_dropped"] == true)
+        );
+        assert!(finite["handler_lifecycle"]["complete"].as_bool().unwrap());
+
+        let replenishing = track_c3c_run_recipe(&fixture, TrackC3CRecipe::Replenishing).record;
+        assert_eq!(replenishing["setup_accepted"], 1);
+        assert_eq!(replenishing["setup_dequeued"], 1);
+        assert_eq!(replenishing["setup_root_frames"], 1);
+        assert_eq!(replenishing["accepted_in_owner"], 18);
+        assert_eq!(replenishing["producer_accepted"], 16);
+        assert_eq!(replenishing["trigger_accepted"], 2);
+        assert_eq!(replenishing["dequeued_in_owner"], 18);
+        let replenishing_events = replenishing["event_ages"].as_array().unwrap();
+        assert_eq!(replenishing_events.len(), 18);
+        assert_eq!(
+            replenishing_events
+                .iter()
+                .filter(|event| event["kind"] == "actions" && event["origin"] == "FileWatcher")
+                .count(),
+            16
+        );
+        assert_eq!(
+            replenishing_events
+                .iter()
+                .filter(|event| event["kind"] == "screen_draw_emergency")
+                .count(),
+            1
+        );
+        assert_eq!(
+            replenishing_events
+                .iter()
+                .filter(|event| event["kind"] == "radial_dispatch")
+                .count(),
+            1
+        );
+        assert_eq!(replenishing["send_failures"], 0);
+        assert_eq!(replenishing["overflow"], false);
+        assert_eq!(replenishing["abandoned"], 0);
+        assert!(replenishing["frames"].as_array().unwrap().len() <= 8);
+        assert!(
+            replenishing["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|frame| frame["full_output_dropped"] == true)
+        );
+        assert_eq!(replenishing["queue_depth_after_owner"], 0);
+        assert!(replenishing["producer_quiescent"].as_bool().unwrap());
+        assert!(replenishing["producer_ack_elapsed_ns"].as_u64().unwrap() > 0);
+        assert!(replenishing["age_p50_ns"].as_u64().is_some());
+        assert!(
+            replenishing["handler_lifecycle"]["complete"]
+                .as_bool()
+                .unwrap()
+        );
+        assert!(matches!(
+            replenishing["completion_receipt"]["state"].as_str(),
+            Some("pending" | "rebuilt")
+        ));
+        assert!(
+            replenishing["completion_receipt"]["suggestions_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert_eq!(
+            replenishing["urgent_receipts"]["screen_draw_stale_intent_receipts"],
+            1
+        );
+        assert_eq!(
+            replenishing["urgent_receipts"]["radial_rejected_before_resolution"],
+            true
+        );
+        assert_eq!(
+            replenishing["urgent_receipts"]["result_generation_delta"],
+            0
+        );
+        assert_eq!(quiet["action_output_id"], finite["action_output_id"]);
+        assert_eq!(finite["action_output_id"], replenishing["action_output_id"]);
+        // The real completion debounce may still be pending or may have
+        // rebuilt by the time each recipe ends. Its complete keys and
+        // suggestions are checked above, so projection identities can
+        // legitimately reflect either state.
+    }
+
+    #[test]
+    #[ignore = "opt-in Track C GUI event-frame characterization; use an owned isolated process"]
+    fn track_c_benchmark_gui_event_frame_recipes() {
+        use crate::performance::track_c_workloads::{BenchmarkMode, MEASURED_SAMPLES, WARMUPS};
+
+        assert!(crate::performance::enabled());
+        let mode = BenchmarkMode::from_process_env().expect("valid Track C benchmark mode");
+        for total_count in mode.combined_action_sizes() {
+            for recipe in [
+                TrackC3CRecipe::Quiet,
+                TrackC3CRecipe::Finite,
+                TrackC3CRecipe::Replenishing,
+            ] {
+                let fixture = track_c_actions_fixture(*total_count);
+                for _ in 0..WARMUPS {
+                    let warmup = track_c3c_run_recipe(&fixture, recipe);
+                    assert!(warmup.owner_elapsed_ns > 0);
+                    drop(warmup);
+                }
+                let mut samples = Vec::with_capacity(MEASURED_SAMPLES);
+                for _ in 0..MEASURED_SAMPLES {
+                    samples.push(track_c3c_run_recipe(&fixture, recipe));
+                }
+                assert_eq!(samples.len(), MEASURED_SAMPLES);
+                assert!(samples.iter().all(|sample| sample.owner_elapsed_ns > 0));
+                track_c3c_emit_result(mode, &fixture, recipe, *total_count, &samples);
+                drop(samples);
+                drop(fixture);
+            }
         }
     }
 
