@@ -7,7 +7,7 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 | M0-A — repository and toolchain preflight | `complete` | The Windows MSVC `cargo check --locked --all-targets --offline` passed. Original Nextest diagnostics completed with three classified stale fixture failures; a separate focused test-only correction passed 4/4. Current HEAD is the objective's working baseline; comparison with the separately named archive remains unresolved. No remote builder was configured or supplied. |
 | M0-B — golden interaction and render inventory | `in_progress` | Source inventory and isolated fixture prepared; all five full-mode original CPU owners passed (84 cases), independently reviewed. All three original profile builds passed and are preserved; revised helper compiled and generated a provenance-bound third fixture. Native capture failed twice; screenshots, display/GPU timing and native interactions remain unproven. |
 | M0-C — dependency/API breakage worklist | `complete` | Planner source-backed worklist and handoffs independently reviewed against cached released sources; accepted. No dependency changes. M0-B native evidence remains outstanding. |
-| M1-A — align Rust toolchain and egui dependency graph | `pending` | Not started. |
+| M1-A — align Rust toolchain and egui dependency graph | `complete` | Independently reviewed graph: one egui 0.36.2 family, aligned wrappers/windowing, explicit Glow. All-target check reaches expected source API errors (621 library / 1,269 library-test); runnable acceptance remains pending M1-C/M2-D. |
 | M1-B — app lifecycle migration | `pending` | Not started. |
 | M1-C — mechanical egui API compatibility | `pending` | Not started. |
 | M1-D — rich text, toasts, image and third-party compatibility | `pending` | Not started. |
@@ -63,3 +63,9 @@ Planner clarified that local checkpoint commits and acceptance are distinct. M1-
 ## Baseline build and fixture completion
 
 Session45005 finished successfully: fast-dev124.450s, dev261.312s, release419.488s. The revised helper then compiled and generated run-original-003 with exact artifact/hash binding and typed roundtrips. Original startup-test executable was preserved from the Nextest JSON list (SHA-256611F93C7662DACF38E9F815833A59CD63C464A9EE27EC7176B4217805A771E1E). Prior pending build/helper entries are now superseded. Native activation/capture remains next; M1-A source changes have not begun.
+
+## Current execution state after M1-A
+
+This section supersedes the earlier active handoff's running/pending entries. Original builds, helper compilation and third fixture generation completed in local checkpoint `61fbe4a7`. M1-A graph/API-backlog review passed without findings; all-target compilation is intentionally pending source migration. Preserve checkpoint cadence and enable M1-B tests after M1-C closes the single-crate API backlog.
+
+User explicitly authorized launching, interacting with and screenshotting Multi Launcher for this mission. Run-original-003 activation succeeded after access was granted. Screenshot capture failed with `FrameArrived timed out: timed out waiting on channel`; refreshed unique-window recovery failed with `window capture timed out: timed out waiting on channel`. No screenshot, UI input, native behavior or display-performance pass was obtained. Exact owned PID 21352/path/start-time was checked before graceful taskkill succeeded. Capture remains an external tool limitation; preserved original binaries permit later retries. Continue M1-B while retaining this open M0-B/M2-D evidence gap. Checkpoints remain local only.

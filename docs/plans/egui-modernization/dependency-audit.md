@@ -34,3 +34,15 @@ The parent separately reports successful `cargo info` lookups for eframe 0.36.2,
 - No dependency or feature was edited during M0-A.
 
 All requested tree commands used the direct Rust 1.99 toolchain with `--locked --offline`; each exited 0. The lockfile digest is recorded in [baseline.md](baseline.md) and [`git-state.txt`](receipts/git-state.txt).
+
+## M1-A resolved graph
+
+The manifest now selects the released 0.36.2 egui family: `eframe`, `egui_extras`, `egui`, `egui-toast` 0.22.0, and `egui_commonmark` 0.25.0. Direct `winit` is 0.30.13 and `raw-window-handle` remains 0.6. The resolved lockfile SHA-256 is `15edbfc05ac4d528c5ce63e96c69236d302ecd07c9caa88c109e04fd14a5b21a`.
+
+`eframe` disables defaults and explicitly enables `accesskit`, `default_fonts`, `glow`, `links`, `wayland`, `web_screen_reader`, and `x11`. Its new default `wgpu` feature is absent from the resolved eframe feature receipt. No `winit/default` dependency-of-dependency feature is declared; the direct `winit = "0.30.13"` dependency retains its own defaults, including `rwh_06`, X11, and Wayland. The inverse tree has one `egui v0.36.2` family, and one `raw-window-handle v0.6.2` is resolved for the typed-handle callers.
+
+The `egui_extras` 0.27.2 manifest's default was `dep:mime_guess2`; 0.36.2 still maps its default to `dep:mime_guess2`, and its explicit `file` feature maps to the same dependency. The manifest disables extras defaults and enables `file` explicitly to preserve that behavior. CommonMark's former defaults are retained explicitly as `load-images` and `pulldown_cmark`; `load-images` enables extras `image` and `file`. The resolved graph therefore contains image 0.24.9 for existing application code and image 0.25.6 for the new extras image loader. Decoder-format parity on image 0.25 remains an M1-D decision; this graph checkpoint does not claim it.
+
+The lockfile update selected 160 packages compatible with the installed Rust 1.99 toolchain. Remaining duplicates in [`m1a-cargo-tree-duplicates.txt`](receipts/m1a-cargo-tree-duplicates.txt), including image 0.24/0.25 and several platform-support families, are not duplicate egui types. Feature/inverse receipts are [`m1a-cargo-tree-egui-features.txt`](receipts/m1a-cargo-tree-egui-features.txt), [`m1a-cargo-tree-eframe-features.txt`](receipts/m1a-cargo-tree-eframe-features.txt), [`m1a-cargo-tree-extras-features.txt`](receipts/m1a-cargo-tree-extras-features.txt), [`m1a-cargo-tree-winit-features.txt`](receipts/m1a-cargo-tree-winit-features.txt), and [`m1a-cargo-tree-raw-window-handle-features.txt`](receipts/m1a-cargo-tree-raw-window-handle-features.txt). Each was generated with the direct Cargo 1.99.0 binary and `--locked`; each command exited 0.
+
+The Windows `cargo check --all-targets` resolved and checked this graph but exited 101 on the expected source/API backlog. The unchanged source is not an accepted or runnable migration. The raw output is preserved at `target/egui-modernization/m1a/cargo-check.log`; the categorized inventory is in [m1a-api-errors.md](m1a-api-errors.md). No application source, edition, project feature, Windows API feature, profile, or `rdev` pin was changed in M1-A.

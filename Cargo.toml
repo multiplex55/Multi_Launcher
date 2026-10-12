@@ -5,7 +5,19 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-eframe = "0.27"               # egui-based GUI
+eframe = {
+    version = "0.36.2",
+    default-features = false,
+    features = [
+        "accesskit",
+        "default_fonts",
+        "glow",
+        "links",
+        "wayland",
+        "web_screen_reader",
+        "x11",
+    ],
+} # egui-based GUI; preserve Glow instead of enabling the new Wgpu default
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 fuzzy-matcher = "0.3"
@@ -19,7 +31,7 @@ tracing-appender = "0.2"
 exmex = "0.20"
 libloading = "0.8"
 notify = "6"
-winit = "0.29"
+winit = "0.30.13"
 once_cell = "1"
 regex = "1"
 regex-syntax = "0.8"
@@ -72,8 +84,12 @@ windows = { version = "0.58", features = [
 log = "0.4"
 raw-window-handle = "0.6"
 arboard = "3"
-egui-toast = "0.13"
-egui_extras = "0.27"
+egui-toast = { version = "0.22.0", default-features = false }
+egui_extras = {
+    version = "0.36.2",
+    default-features = false,
+    features = ["file"],
+}
 figlet-rs = "0.1"
 dirs-next = "2"
 shlex = "1.3"
@@ -95,7 +111,11 @@ base64 = "0.21"
 hex = "0.4"
 rand = "0.10.1"
 lipsum = "0.9"
-egui_commonmark = "0.15.0"
+egui_commonmark = {
+    version = "0.25.0",
+    default-features = false,
+    features = ["load-images", "pulldown_cmark"],
+}
 rfd = { version = "0.15.3", features = ["common-controls-v6"] }
 slab = "0.4.11"
 rdev = { git = "https://github.com/Narsil/rdev", rev = "c14f2dc5c8100a96c5d7e3013de59d6aa0b9eae2", features = ["x11"] }

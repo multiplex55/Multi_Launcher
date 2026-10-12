@@ -1,0 +1,102 @@
+winit v0.30.13
+├── accesskit_winit v0.32.2
+│   ├── accesskit_winit feature "accesskit_unix"
+│   │   └── accesskit_winit feature "default"
+│   │       └── egui-winit v0.36.2
+│   │           ├── egui-winit feature "accesskit"
+│   │           │   └── eframe feature "accesskit"
+│   │           │       └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher)
+│   │           │           └── multi_launcher feature "default" (command-line)
+│   │           ├── egui-winit feature "arboard"
+│   │           │   └── egui-winit feature "clipboard"
+│   │           │       └── eframe v0.36.2
+│   │           │           ├── eframe feature "accesskit" (*)
+│   │           │           ├── eframe feature "default_fonts"
+│   │           │           │   └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher) (*)
+│   │           │           ├── eframe feature "glow"
+│   │           │           │   └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher) (*)
+│   │           │           ├── eframe feature "links"
+│   │           │           │   └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher) (*)
+│   │           │           ├── eframe feature "wayland"
+│   │           │           │   └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher) (*)
+│   │           │           ├── eframe feature "web_screen_reader"
+│   │           │           │   └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher) (*)
+│   │           │           └── eframe feature "x11"
+│   │           │               └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher) (*)
+│   │           ├── egui-winit feature "bytemuck"
+│   │           │   ├── egui-winit feature "clipboard" (*)
+│   │           │   ├── egui-winit feature "wayland"
+│   │           │   │   └── eframe feature "wayland" (*)
+│   │           │   └── egui-winit feature "x11"
+│   │           │       └── eframe feature "x11" (*)
+│   │           ├── egui-winit feature "clipboard" (*)
+│   │           ├── egui-winit feature "links"
+│   │           │   └── eframe feature "links" (*)
+│   │           ├── egui-winit feature "smithay-clipboard"
+│   │           │   └── egui-winit feature "clipboard" (*)
+│   │           ├── egui-winit feature "wayland" (*)
+│   │           ├── egui-winit feature "webbrowser"
+│   │           │   └── egui-winit feature "links" (*)
+│   │           └── egui-winit feature "x11" (*)
+│   ├── accesskit_winit feature "async-io"
+│   │   └── accesskit_winit feature "default" (*)
+│   ├── accesskit_winit feature "default" (*)
+│   └── accesskit_winit feature "rwh_06"
+│       └── accesskit_winit feature "default" (*)
+└── egui-winit v0.36.2 (*)
+├── winit feature "ahash"
+│   └── winit feature "wayland"
+│       ├── egui-winit feature "wayland" (*)
+│       ├── accesskit_winit feature "default" (*)
+│       ├── winit feature "default"
+│       │   └── multi_launcher v0.1.0 (G:\Repos\rust\Multi_Launcher) (*)
+│       └── glutin-winit feature "wayland"
+│           └── eframe feature "wayland" (*)
+├── winit feature "bytemuck"
+│   └── winit feature "x11"
+│       ├── egui-winit feature "x11" (*)
+│       ├── accesskit_winit feature "default" (*)
+│       ├── winit feature "default" (*)
+│       └── glutin-winit feature "x11"
+│           ├── eframe feature "x11" (*)
+│           └── glutin-winit feature "glx"
+│               └── eframe feature "x11" (*)
+├── winit feature "default" (*)
+├── winit feature "memmap2"
+│   └── winit feature "wayland" (*)
+├── winit feature "percent-encoding"
+│   └── winit feature "x11" (*)
+├── winit feature "rwh_06"
+│   ├── eframe v0.36.2 (*)
+│   └── glutin-winit v0.5.0
+│       ├── glutin-winit feature "egl"
+│       │   └── eframe v0.36.2 (*)
+│       ├── glutin-winit feature "glx" (*)
+│       ├── glutin-winit feature "wayland" (*)
+│       ├── glutin-winit feature "wgl"
+│       │   └── eframe v0.36.2 (*)
+│       └── glutin-winit feature "x11" (*)
+│   ├── accesskit_winit feature "rwh_06" (*)
+│   └── winit feature "default" (*)
+├── winit feature "sctk"
+│   └── winit feature "wayland" (*)
+├── winit feature "sctk-adwaita"
+│   └── winit feature "wayland-csd-adwaita"
+│       └── winit feature "default" (*)
+├── winit feature "wayland" (*)
+├── winit feature "wayland-backend"
+│   └── winit feature "wayland" (*)
+├── winit feature "wayland-client"
+│   └── winit feature "wayland" (*)
+├── winit feature "wayland-csd-adwaita" (*)
+├── winit feature "wayland-dlopen"
+│   └── winit feature "default" (*)
+├── winit feature "wayland-protocols"
+│   └── winit feature "wayland" (*)
+├── winit feature "wayland-protocols-plasma"
+│   └── winit feature "wayland" (*)
+├── winit feature "x11" (*)
+├── winit feature "x11-dl"
+│   └── winit feature "x11" (*)
+└── winit feature "x11rb"
+    └── winit feature "x11" (*)
