@@ -108,3 +108,15 @@ All five full-mode owners passed, with production source72a01bd5 and test-only r
 | Startup catalog/index owner | 3 | 41.563 | track_c_benchmark_startup_action_catalog_owner.log |
 
 [Sanitized per-case summary](receipts/cpu-original-summary.json) retains fixture identity, profile, sizes, warmups/sample counts and quantiles. Full arrays, signatures, structural/revision/work receipts remain in ignored target/egui-modernization/baseline logs and cpu-original-results.json. Startup uses16/1,000/10,000 synthetic index entries; its CPU medians are1.739/95.360/926.490 ms. Query uses100/1,000/10,000 actions; medians0.608/1.110/5.614 ms. Startup CPU/catalog timing is not process-to-display latency.
+
+## Original profile build receipts
+
+All three serial builds passed with the existing cache state; no clean was run. These are single observed build times, not clean-build benchmarks or statistical comparisons. The series began at documentation HEAD `de6bcd22`; the later CPU-receipt commit changed documentation only. Source, manifest, lockfile and build script remained byte-identical to `f45e3773` throughout.
+
+| Profile | Wall seconds | Executable SHA-256 |
+|---|---:|---|
+| fast-dev | 124.450 | 49873783D3BB1C6A57488D432A3EFAAD0088B310936EA2E9B2F55F638CEEFB35 |
+| dev | 261.312 | 1C305F28494C496147E3BA55378B39F26AFEA378FC7803FCEEFBE0D1F2D5FA0A |
+| release | 419.488 | 4266A55233B5B94EB4C2276559EB16CF954306EB0B2FBA49C78E0F51507F2715 |
+
+[Exact commands and receipts](receipts/original-build-times.json). Original executables and startup/library test binaries are preserved locally under ignored `target/egui-modernization/baseline/bin/`. No native latency or GPU result follows from successful builds.

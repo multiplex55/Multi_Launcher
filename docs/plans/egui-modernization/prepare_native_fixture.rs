@@ -247,10 +247,14 @@ fn validate_build_receipt(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| format!("build receipt has no SHA-256 for {crate_name}"))?;
         let expected_prefix = format!("lib{crate_name}-");
-        let expected_path = format!("target/fast-dev/deps/{filename}");
-        if !filename.starts_with(expected_prefix.as_str())
-            || !filename.ends_with(".rlib")
-            || path != expected_path.as_str()
+        let is_canonical_launcher = crate_name == "multi_launcher"
+            && filename == "libmulti_launcher.rlib"
+            && path == "target/fast-dev/libmulti_launcher.rlib";
+        let is_hashed_dependency = filename.starts_with(expected_prefix.as_str())
+            && filename.ends_with(".rlib")
+            && filename.len() > expected_prefix.len() + ".rlib".len()
+            && path == format!("target/fast-dev/deps/{filename}");
+        if (!is_canonical_launcher && !is_hashed_dependency)
             || hash.len() != 64
             || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         {

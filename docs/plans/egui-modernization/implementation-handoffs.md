@@ -173,3 +173,15 @@ requirements. Existing model and behavioral tests remain the source of truth.
 | M5-C1..n | Actual remaining inventory: JSON/QR/calendar/crop/image/aliases/bookmarks/recovery/prompts/timers/snippets/toasts/secondary windows. Record migrated/exception/deferred per path and reason; verify inheritance and parent position. |
 | M6-A | Prefer explicit justified omission of optional effects. Any accepted effect is measured, default off, bounded and ceases idle repaint; no native acrylic/blur. |
 | M6-B | Original vs M2-D vs themed matched distributions, required final suites/native checks/persistence/rollback and independent review. Deliver versions/backend/SHAs/surface ledger/screenshots/unrun checks/rollback commits with honest limits. |
+
+## Checkpoint commits and compilation dependencies
+
+The planner clarified the single-crate compilation dependency. Preserve the exact checkpoint commit cadence, while recording acceptance separately. A coherent local commit may remain validation-pending until later required API adapters permit execution; never label it runnable or accepted prematurely.
+
+- M1-A aligns the graph and inventories known API errors, as the contract permits.
+- M1-B owns lifecycle/startup and its test adaptations. Its runtime acceptance can remain pending until M1-C closes unrelated compiler errors.
+- M1-C closes compilation across all targets. Include only compiler-required M1-D glue (toast defaults/Ui plumbing, CommonMark constructor/stable IDs, viewport callbacks) and the intended shared font-revision interface replacing removed atlas types. If a small part of M2-A is required early, record it as an M2-A prerequisite implemented here.
+- M1-D completes integration behavior and parity: markdown/cache/image formats, toast lifetime/position and native picker ownership.
+- M2-A completes font activation, geometry invalidation/reuse, pointer-test migration, bounded storage and comparative cache benchmarks. Earlier interface work does not establish behavioral or performance acceptance.
+
+Use the actual requested/active font-revision boundary with existing layout keys. Never use constant generations, borrowed atlas addresses, unconditional invalidation or full-font hashing as disposable adapters. After M1-C compiles, run pending M1-B targeted tests and record both the implementing and enabling commits without rewriting historical receipts. Each checkpoint records actual checks, remaining compiler/acceptance dependencies and reviewer disposition. M2-D remains the integrated migration gate; styling waits for it.

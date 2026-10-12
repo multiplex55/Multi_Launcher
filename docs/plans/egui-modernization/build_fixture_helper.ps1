@@ -16,7 +16,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $taskRepository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
+$taskFastDev = [IO.Path]::GetFullPath((Join-Path $taskRepository 'target/fast-dev'))
 $taskDependencies = [IO.Path]::GetFullPath((Join-Path $taskRepository 'target/fast-dev/deps'))
+$taskCanonicalLauncher = [IO.Path]::GetFullPath((Join-Path $taskFastDev 'libmulti_launcher.rlib'))
 $taskRustc = Join-Path $ToolchainBin 'rustc.exe'
 $taskSource = Join-Path $PSScriptRoot 'prepare_native_fixture.rs'
 $taskOutput = Join-Path $taskRepository 'target/egui-modernization/prepare_native_fixture.exe'
@@ -43,22 +45,33 @@ foreach ($taskInput in $taskLibraryInputs) {
 
     $taskLibrary = Get-Item -LiteralPath $taskLibraryPath
     $taskExpectedPrefix = "lib$($taskInput.Crate)-"
-    if (-not $taskLibrary.Name.StartsWith($taskExpectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
-        $taskLibrary.Extension -ne '.rlib') {
-        throw "Expected a $($taskInput.Crate) rlib, received: $taskLibraryPath"
-    }
-    if (-not [System.String]::Equals(
-        [IO.Path]::GetFullPath($taskLibrary.DirectoryName),
-        $taskDependencies,
-        [System.StringComparison]::OrdinalIgnoreCase
-    )) {
-        throw "The explicit $($taskInput.Crate) rlib must be in target/fast-dev/deps: $taskLibraryPath"
+    $taskIsCanonicalLauncher = $taskInput.Crate -eq 'multi_launcher' -and
+        $taskLibrary.Name -ceq 'libmulti_launcher.rlib' -and
+        [System.String]::Equals(
+            $taskLibraryPath,
+            $taskCanonicalLauncher,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    $taskIsHashedDependency = $taskLibrary.Name.StartsWith($taskExpectedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $taskLibrary.Extension -eq '.rlib' -and
+        [System.String]::Equals(
+            [IO.Path]::GetFullPath($taskLibrary.DirectoryName),
+            $taskDependencies,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+    if (-not $taskIsCanonicalLauncher -and -not $taskIsHashedDependency) {
+        throw "The explicit $($taskInput.Crate) rlib must be its canonical launcher artifact or a correctly named hashed artifact under target/fast-dev/deps: $taskLibraryPath"
     }
 
     $taskLibraryHash = (Get-FileHash -LiteralPath $taskLibrary.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     $taskExternArgs += @('--extern', "$($taskInput.Crate)=$($taskLibrary.FullName)")
+    $taskArtifactRelativePath = if ($taskIsCanonicalLauncher) {
+        "target/fast-dev/$($taskLibrary.Name)"
+    } else {
+        "target/fast-dev/deps/$($taskLibrary.Name)"
+    }
     $taskResolvedLibraries[$taskInput.Crate] = [ordered]@{
-        path = "target/fast-dev/deps/$($taskLibrary.Name)"
+        path = $taskArtifactRelativePath
         file = $taskLibrary.Name
         sha256 = $taskLibraryHash
     }
