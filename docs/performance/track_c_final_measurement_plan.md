@@ -1,6 +1,6 @@
 # C4-C final matched measurement — LOCAL ONLY
 
-Status: in_progress;27/29closed. C4-A accepted `eec4f458b84e7f5d476eba82c5939931cf486151`; C4-B documented native NOT RUN at `9ba2b3a26a73123ec8d19653ebaa58508aa2f6ea`. Adopt target/performance/track-c/next-packets/c4-c-prospective.md. No runtime edits are authorized.
+Status: complete;28/29closed after C4-C closure. C4-A accepted `eec4f458b84e7f5d476eba82c5939931cf486151`; C4-B documented native NOT RUN at `9ba2b3a26a73123ec8d19653ebaa58508aa2f6ea`. Adopt target/performance/track-c/next-packets/c4-c-prospective.md. No runtime edits are authorized.
 
 One bounded measurement/report milestone. Freeze reviewed methods and protocol in a local preparation commit, then capture that exact clean HEAD plus required owner/context/method hashes before running. No source/evidence writer during Full execution. Parent owns serial Cargo, collection, evidence and Git; independent reviewer owns method/signature/numerical/privacy review. No broad test suite, release/native campaign or rejected candidate rerun.
 
@@ -13,3 +13,5 @@ Collect original logs with track_c_collect_owner_results.ps1, verify105inventory
 Reviewer accepts independent pure N1k action fixture signature reconstruction from track_c_events/reconstruct_watch_identities.py, frozen expression/hash in protocol, as representative signature reproduction. It must match a fresh final original N1k record. This reproduces fixture identity, not owner timing, fonts or displayed latency; no favorable replay replaces original samples.
 
 Acceptance: all ten original owners and one selected companion actually PASS, exact inventories and four original family joins PASS, full distributions/work/output receipts accepted, representative reproduction and independent numerical/privacy/source review CLEAR. Publish track_c_final.json and track_c_results.md with actual measurement SHA, explicit source-specific companion references, adverse cases, memory/copy estimates and native/allocator/OS-cache limitations. Commit closure only after acceptance; C4-D then audits all29local records and cumulative diff.
+
+All stages terminal PASS at clean18f8cac44f92fa18feee16b81f222953a622059a. Inventory105+9, four family joins and independent raw/source/numerical/privacy/signature review CLEAR. See track_c_final.json, track_c_results.md and track_c_final/review.json. No replay/new source changes. C4-D remains.
