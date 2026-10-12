@@ -6,7 +6,7 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 |---|---|---|
 | M0-A — repository and toolchain preflight | `complete` | The Windows MSVC `cargo check --locked --all-targets --offline` passed. Original Nextest diagnostics completed with three classified stale fixture failures; a separate focused test-only correction passed 4/4. Current HEAD is the objective's working baseline; comparison with the separately named archive remains unresolved. No remote builder was configured or supplied. |
 | M0-B — golden interaction and render inventory | `in_progress` | Source inventory and isolated fixture prepared; full root-list CPU owner passed, serial remaining owners active. Native capture failed twice; screenshots, display/GPU timing and native interactions remain unproven. |
-| M0-C — dependency/API breakage worklist | `in_progress` | Planner source-backed worklist written; independent review pending. No dependency changes. |
+| M0-C — dependency/API breakage worklist | `complete` | Planner source-backed worklist and handoffs independently reviewed against cached released sources; accepted. No dependency changes. M0-B native evidence remains outstanding. |
 | M1-A — align Rust toolchain and egui dependency graph | `pending` | Not started. |
 | M1-B — app lifecycle migration | `pending` | Not started. |
 | M1-C — mechanical egui API compatibility | `pending` | Not started. |
