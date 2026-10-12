@@ -1,0 +1,17 @@
+{
+  "status": "PASS",
+  "controls": 10,
+  "checks": [
+    "frozen105inventory_positive_method_only",
+    "missing_record_reject",
+    "duplicate_recipe_reject",
+    "bool_timing_reject",
+    "wrong_quantile_reject",
+    "unknown_record_field_reject",
+    "wrong_source_reject",
+    "duplicate_json_reject",
+    "float_json_reject",
+    "nonfinite_json_reject"
+  ],
+  "basis": "Frozen G0 inventory method only; not finalsource executions"
+}
