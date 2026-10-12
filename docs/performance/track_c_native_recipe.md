@@ -1,4 +1,16 @@
-# Track C native responsiveness protocol (frozen C0-D, not executed)
+# Track C native responsiveness protocol — C4-B HOLD / NOT RUN
+
+C4-B disposition: closed with native NOT RUN and displayed latency NOT MEASURED. Accepted source `eec4f458b84e7f5d476eba82c5939931cf486151`; no native launch, hotkey, input, screenshot, recycle-bin query or cleanup was executed in this checkpoint. Source/method review independently CLEAR; this is an explicit evidence limitation, not native PASS.
+
+**The historical launch/interaction sequence below is not executable under this campaign's current limits.** Computer tools expose browsers only and disable native APIs. Independently, the first production root frame unconditionally requests DashboardRefreshRequest::All (src/gui/render.rs:3653); RefreshBatch includes every category for All (src/dashboard/data_cache.rs:119,147), reaching launcher::query_recycle_bin at line449. dashboard.enabled=false affects presentation and is not a backend suppression switch. The campaign's existing no-probe restriction therefore prevents production launch. Do not introduce a production/test bypass, synthetic desktop workaround or recycle-bin probe to gather evidence.
+
+A future native run requires a separately authorized, reviewed safe dashboard boundary and an actual interactive Windows observation capability before proceeding. Preparation alone may inventory current Settings fields, synthetic files and hashes. Any eventual child must inherit ML_NOTES_DIR pointing to owned notes: notes_dir otherwise falls back beside the executable (src/plugins/note.rs:871), not owned CWD. Capture/restore the launch shell's prior Option<OsString> for ML_NOTES_DIR along with the two telemetry/clipboard switches immediately after child launch; never change user/machine environment.
+
+Future recipe requirements also include a complete current-serializer settings/fixture manifest, human collision-checked hotkey, safe owned marker action and expected catalog/query identities; configured tap/hold intervals (current default threshold350ms, never infer an active user's setting); fixed focus/observation boundaries; a bounded owned-file producer with explicit count, cancellation and join (file writes do not prove WatchEvent count); identified urgent interaction; and a bounded30s ordinary shutdown deadline. A timeout is FAIL with owned evidence retained, not permission to delete live fixture paths or terminate unknown processes. Input-to-display latency stays NOT MEASURED without an appropriate visible observation method. These are prerequisites for separately authorized future work, not actions executed here.
+
+The frozen C0-D protocol is retained below as historical reference. Its headless counterparts are C3-F12 exact contracts and C4-A6 integrations/production check, with their actual source provenance; none establishes Win32 composition, focus, hotkey or native resource cleanup.
+
+## Historical C0-D reference (execution held)
 
 Execution status: NOT RUN. Protocol FROZEN at C0-D after independent fixture/source/method review CLEAR. Native desktop control is unavailable in this session's configured computer-use surface; headless egui timing is CPU evidence only. Process/API observations cannot substitute for visible composition or input-to-display latency.
 
