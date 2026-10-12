@@ -4,7 +4,7 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 
 | Checkpoint | Status | Current evidence / exit gap |
 |---|---|---|
-| M0-A — repository and toolchain preflight | `in_progress` | The Windows MSVC `cargo check --locked --all-targets --offline` passed. Baseline Nextest is still running. Current HEAD is the objective's working baseline; comparison with the separately named archive remains unresolved. No remote builder was configured or supplied. |
+| M0-A — repository and toolchain preflight | `in_progress` | The Windows MSVC `cargo check --locked --all-targets --offline` passed. Original Nextest diagnostics completed with three classified stale fixture failures; a separate focused test-only correction passed 4/4. Current HEAD is the objective's working baseline; comparison with the separately named archive remains unresolved. No remote builder was configured or supplied. |
 | M0-B — golden interaction and render inventory | `pending` | Not started. |
 | M0-C — dependency/API breakage worklist | `pending` | Not started. |
 | M1-A — align Rust toolchain and egui dependency graph | `pending` | Not started. |
@@ -35,7 +35,7 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 - [x] Inventory the current egui family, direct `winit` and `raw-window-handle` dependencies/usages, active eframe feature flags, and Cargo patch/git dependency declarations.
 - [ ] Reconcile HEAD with `multi_launcher(20261012-203406).zip`; the archive was not present in the attachment's recursive file inventory or repository search, so the comparison is unresolved. The mission objective's current-HEAD baseline is recorded and parent requested archive clarification asynchronously.
 - [x] Record original Windows compile diagnostics: `cargo check --locked --all-targets --offline` passed, exit 0, dev profile, 4m11s; compiler warnings are summarized in [baseline.md](baseline.md).
-- [ ] Complete original test diagnostics: baseline Nextest is still running; it has not passed or failed yet. See [`nextest-status.txt`](receipts/nextest-status.txt).
+- [x] Complete and classify original test diagnostics: the full no-fail-fast run completed with 6,442 run, 6,439 passed, 3 failed and 41 skipped. The focused fixture-correction run passed 4/4 without changing the original receipt. See [`nextest-status.txt`](receipts/nextest-status.txt) and [`regressions.md`](regressions.md).
 - [x] Confirm remote builder applicability: no remote Windows builder is configured or supplied; the local `x86_64-pc-windows-msvc` host is the migration host.
 - [ ] Satisfy the M0-A exit and checkpoint commit. The parent owns Git operations; no commit was made in this scoped receipt task.
 

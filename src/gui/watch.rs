@@ -1361,6 +1361,9 @@ mod tests {
         expected_custom: Vec<crate::actions::Action>,
         expected_tail: Vec<crate::actions::Action>,
         expected_actions: Vec<crate::actions::Action>,
+        initial_query_results: Vec<crate::actions::Action>,
+        expected_query_results: Vec<crate::actions::Action>,
+        expected_result_generation_delta: u64,
         fixture_signature: u64,
     }
 
@@ -1378,6 +1381,8 @@ mod tests {
         expected_custom: Vec<crate::actions::Action>,
         expected_tail: Vec<crate::actions::Action>,
         expected_actions: Vec<crate::actions::Action>,
+        expected_query_results: Vec<crate::actions::Action>,
+        expected_result_generation_delta: u64,
         fixture_signature: u64,
         initial_actions_ptr: usize,
         initial_radial_ptr: usize,
@@ -1539,6 +1544,25 @@ mod tests {
         let mut expected_actions = expected_custom.clone();
         expected_actions.extend(expected_tail.iter().cloned());
 
+        // The fixed exact query in this fixture resolves to the eager row-9
+        // action before and after publication. Compare complete Action values:
+        // catalog publication alone does not imply that query-result geometry
+        // changed.
+        let initial_query_results = vec![
+            base.initial_custom
+                .get(9)
+                .expect("fixture includes the exact-query action")
+                .clone(),
+        ];
+        let expected_query_results = vec![
+            expected_actions
+                .get(9)
+                .expect("expected catalog retains the exact-query action")
+                .clone(),
+        ];
+        let expected_result_generation_delta =
+            u64::from(initial_query_results != expected_query_results);
+
         let mut signature =
             StableSignature::new(0, "track-c1e-action-publication-fixture", total_count);
         signature.number(base.fixture_signature);
@@ -1573,6 +1597,9 @@ mod tests {
             expected_custom,
             expected_tail,
             expected_actions,
+            initial_query_results,
+            expected_query_results,
+            expected_result_generation_delta,
             fixture_signature,
         }
     }
@@ -1638,14 +1665,25 @@ mod tests {
         }
     }
 
-    fn make_track_c1e_owner_state(fixture: &TrackC1EFixture) -> TrackC1EOwnerState {
+    fn make_track_c1e_owner_state(
+        fixture: &TrackC1EFixture,
+        observe_custom_channel: bool,
+    ) -> TrackC1EOwnerState {
         use crate::indexer::coordinator::{IndexConfig, IndexCoordinator};
 
         let registry_guard = TRACK_C_EVENT_REGISTRY_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut owner = make_track_c_actions_owner_state(&fixture.base);
-        let mut age_recorder = None;
+        // Tests need queue-depth observations regardless of MULTI_LAUNCHER_PERF.
+        // The ignored Track C owner keeps its original channel/measurement
+        // semantics; only explicit test callers request this observed channel.
+        let (mut owner, mut age_recorder) =
+            if observe_custom_channel && fixture.case != TrackC1ECase::IndexAcceptedChanged {
+                make_track_c_actions_owner_state_inner(&fixture.base, Some(2))
+            } else {
+                (make_track_c_actions_owner_state(&fixture.base), None)
+            };
+        assert_eq!(owner.app.results, fixture.initial_query_results);
         let mut setup_observer = super::track_c_action_observer::Snapshot::default();
         let mut accepted_index_config = None;
         let mut accepted_index_generation = None;
@@ -1797,6 +1835,8 @@ mod tests {
             expected_custom: fixture.expected_custom.clone(),
             expected_tail: fixture.expected_tail.clone(),
             expected_actions: fixture.expected_actions.clone(),
+            expected_query_results: fixture.expected_query_results.clone(),
+            expected_result_generation_delta: fixture.expected_result_generation_delta,
             fixture_signature: fixture.fixture_signature,
             initial_actions_ptr,
             initial_radial_ptr,
@@ -1926,7 +1966,7 @@ mod tests {
             );
             assert_eq!(app.query, "app Synthetic action 00009");
             assert_eq!(app.last_search_query, app.query);
-            assert_eq!(app.results, vec![state.expected_actions[9].clone()]);
+            assert_eq!(app.results, state.expected_query_results);
             assert!(app.last_results_valid);
             assert!(!app.last_search_pending);
             assert!(!app.background_query_refresh_pending);
@@ -1967,7 +2007,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(app.action_filter_metadata, expected_filter);
         track_c_assert_action_lookup_matches(&app.actions_by_id, &state.expected_actions);
-        assert_eq!(app.results, vec![state.expected_actions[9].clone()]);
+        assert_eq!(app.results, state.expected_query_results);
         assert_eq!(app.query, "app Synthetic action 00009");
         assert_eq!(app.last_search_query, app.query);
         assert!(app.last_results_valid);
@@ -1981,8 +2021,8 @@ mod tests {
         );
         assert_eq!(
             app.root_list_geometry.result_generation_for_test(),
-            state.initial_root_generation + published as u64,
-            "only a changed catalog/search refresh invalidates root result geometry"
+            state.initial_root_generation + state.expected_result_generation_delta,
+            "root result geometry follows complete query-result equality, independently of catalog publication"
         );
 
         let diagnostic_present = app.actions_persistence_diagnostic.is_some();
@@ -2514,7 +2554,7 @@ mod tests {
             TrackC1ECase::IndexAcceptedChanged,
         ] {
             let fixture = track_c1e_fixture(100, case);
-            let mut state = make_track_c1e_owner_state(&fixture);
+            let mut state = make_track_c1e_owner_state(&fixture, true);
             // Setup completion is acknowledged before this owner call; an
             // accepted index remains the coordinator's original envelope.
             assert_eq!(state.owner.app.rx.queued_depth(), Some(1));
@@ -2670,7 +2710,7 @@ mod tests {
     #[test]
     fn track_c_oracle_local_equal_empty_prefix_and_recovery_publication() {
         let fixture = track_c1e_fixture(100, TrackC1ECase::CustomEqual);
-        let mut state = make_track_c1e_owner_state(&fixture);
+        let mut state = make_track_c1e_owner_state(&fixture, true);
 
         // The queued watcher notification is equal and must retain the app's
         // original catalog Arc and generation.
@@ -2705,7 +2745,7 @@ mod tests {
                 .app
                 .root_list_geometry
                 .result_generation_for_test(),
-            root_generation_before_local_equal + 1
+            root_generation_before_local_equal + fixture.expected_result_generation_delta
         );
         assert_ne!(
             Arc::as_ptr(&state.owner.app.actions) as usize,
@@ -2722,7 +2762,7 @@ mod tests {
             &fixture.expected_actions,
             fixture.expected_custom.len(),
             "app Synthetic action 00009",
-            &fixture.expected_actions[9..10],
+            &fixture.expected_query_results,
             version_after_local_equal,
         );
         assert!(matches!(
@@ -2755,7 +2795,7 @@ mod tests {
                 .app
                 .root_list_geometry
                 .result_generation_for_test(),
-            root_generation_before_local_equal + 1
+            root_generation_before_local_equal + fixture.expected_result_generation_delta
         );
         assert_track_c_actions_owner_state(
             &state.owner,
@@ -2767,7 +2807,7 @@ mod tests {
             &fixture.expected_actions,
             fixture.expected_custom.len(),
             "app Synthetic action 00009",
-            &fixture.expected_actions[9..10],
+            &fixture.expected_query_results,
             version_after_local_equal,
         );
 
@@ -2886,7 +2926,7 @@ mod tests {
                 let fixture = track_c1e_fixture(*total_count, case);
                 let mut validations = Vec::with_capacity(WARMUPS + MEASURED_SAMPLES);
                 let samples = measure_owner(
-                    || make_track_c1e_owner_state(&fixture),
+                    || make_track_c1e_owner_state(&fixture, false),
                     |state| {
                         state.owner.app.process_watch_events();
                         crate::actions::actions_version()

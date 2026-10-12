@@ -1,5 +1,8 @@
-Command: cargo nextest run --locked --offline --profile default --cargo-profile fast-dev
-Environment: ML_SKIP_CLIPBOARD_SYNC=1
-Session: parent-owned session 52943
-Status: RUNNING when this receipt was updated; no pass/fail result recorded.
-Output log: target/egui-modernization/baseline/nextest.log
+Original fail-fast command: cargo nextest run --locked --offline --profile default --cargo-profile fast-dev
+Environment: ML_SKIP_CLIPBOARD_SYNC=1; performance telemetry disabled by default.
+Original fail-fast result: 2,653 run, 2,651 passed, 2 failed, 41 skipped, 3,789 not run; build 7m30s, test summary 64.501s.
+Original full diagnostic: 6,442 run, 6,439 passed, 3 failed, 41 skipped; 134.496s.
+Original logs: target/egui-modernization/baseline/nextest.log and nextest-complete.log. They are preserved unchanged.
+Focused fixture-correction run: 4 passed, 5,207 filtered out, exit 0; compile 1m10s, test summary 0.595s.
+Focused command output: target/egui-modernization/baseline/fixture-repair.log.
+Classification: the original failures were stale test fixtures in two watch tests and one plugin-manager inventory test; see ../regressions.md. The focused repair run does not alter the original full-suite result.
