@@ -4,9 +4,9 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 
 | Checkpoint | Status | Current evidence / exit gap |
 |---|---|---|
-| M0-A — repository and toolchain preflight | `in_progress` | The Windows MSVC `cargo check --locked --all-targets --offline` passed. Original Nextest diagnostics completed with three classified stale fixture failures; a separate focused test-only correction passed 4/4. Current HEAD is the objective's working baseline; comparison with the separately named archive remains unresolved. No remote builder was configured or supplied. |
-| M0-B — golden interaction and render inventory | `pending` | Not started. |
-| M0-C — dependency/API breakage worklist | `pending` | Not started. |
+| M0-A — repository and toolchain preflight | `complete` | The Windows MSVC `cargo check --locked --all-targets --offline` passed. Original Nextest diagnostics completed with three classified stale fixture failures; a separate focused test-only correction passed 4/4. Current HEAD is the objective's working baseline; comparison with the separately named archive remains unresolved. No remote builder was configured or supplied. |
+| M0-B — golden interaction and render inventory | `in_progress` | Source inventory and isolated fixture prepared; full root-list CPU owner passed, serial remaining owners active. Native capture failed twice; screenshots, display/GPU timing and native interactions remain unproven. |
+| M0-C — dependency/API breakage worklist | `in_progress` | Planner source-backed worklist written; independent review pending. No dependency changes. |
 | M1-A — align Rust toolchain and egui dependency graph | `pending` | Not started. |
 | M1-B — app lifecycle migration | `pending` | Not started. |
 | M1-C — mechanical egui API compatibility | `pending` | Not started. |
@@ -37,6 +37,6 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 - [x] Record original Windows compile diagnostics: `cargo check --locked --all-targets --offline` passed, exit 0, dev profile, 4m11s; compiler warnings are summarized in [baseline.md](baseline.md).
 - [x] Complete and classify original test diagnostics: the full no-fail-fast run completed with 6,442 run, 6,439 passed, 3 failed and 41 skipped. The focused fixture-correction run passed 4/4 without changing the original receipt. See [`nextest-status.txt`](receipts/nextest-status.txt) and [`regressions.md`](regressions.md).
 - [x] Confirm remote builder applicability: no remote Windows builder is configured or supplied; the local `x86_64-pc-windows-msvc` host is the migration host.
-- [ ] Satisfy the M0-A exit and checkpoint commit. The parent owns Git operations; no commit was made in this scoped receipt task.
+- [x] Save local M0-A checkpoints: inventory `050a922f`, reviewed fixture correction `f45e3773` (four focused tests passed). Original failed full-suite receipts are retained. User directed local-only checkpoints. Archive comparison remains an explicit evidence limitation; current HEAD is the objective-authorized baseline.
 
 See [baseline.md](baseline.md), [dependency-audit.md](dependency-audit.md), [migration-decisions.md](migration-decisions.md), and raw command outputs under `receipts/`.
