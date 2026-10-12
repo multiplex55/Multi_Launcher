@@ -7256,6 +7256,294 @@ mod tests {
         );
     }
 
+    struct TrackC3FScannerReleaseGuard(Option<std::sync::mpsc::SyncSender<()>>);
+
+    impl TrackC3FScannerReleaseGuard {
+        fn release(&mut self) -> Result<(), std::sync::mpsc::TrySendError<()>> {
+            self.0.take().map_or(Ok(()), |release| release.try_send(()))
+        }
+    }
+
+    impl Drop for TrackC3FScannerReleaseGuard {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.try_send(());
+            }
+        }
+    }
+
+    #[test]
+    fn track_c_c3f_note_save_while_initial_index_scan_is_blocked() {
+        use crate::common::entity_ref::{EntityKind, EntityRef};
+        use crate::indexer::coordinator::{IndexConfig, IndexCoordinator};
+        use crate::performance::track_c_watcher_lifecycle::{
+            HandlerKind, HandlerOwnedWorkspace, HandlerReleaseProbe,
+        };
+        use crate::plugins::todo::TodoEntry;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        const DEADLINE: Duration = Duration::from_secs(10);
+
+        // Acquire the owned CWD/environment before note guards or any app,
+        // watcher, or coordinator that can retain these paths.
+        let mut workspace = HandlerOwnedWorkspace::new();
+        let _notes_env_guard = NOTES_ENV_LOCK.lock().expect("notes env lock");
+        let _note_cache_guard = crate::plugins::note::publish_note_cache_for_test(Vec::new());
+        let notes_dir = workspace.root().join("notes");
+        std::fs::create_dir_all(&notes_dir).expect("create owned notes directory");
+        let initial_content = "# Current\n\nOriginal body";
+        std::fs::write(notes_dir.join("current.md"), initial_content)
+            .expect("write owned current note");
+        std::fs::write(
+            notes_dir.join("other.md"),
+            "# Other\n\n[[Current]]\n@note:current",
+        )
+        .expect("write owned related and mentioning note");
+        let actions_path = workspace.root().join("actions.json");
+        std::fs::write(&actions_path, b"[]").expect("write owned Actions watcher target");
+        crate::plugins::note::refresh_cache().expect("publish owned note files");
+        let (initial_revision, initial_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("owned initial cache is healthy");
+        let current = initial_notes
+            .iter()
+            .find(|note| note.slug == "current")
+            .expect("current note loaded from the owned workspace")
+            .clone();
+        assert_eq!(current.path, notes_dir.join("current.md"));
+
+        let todos = vec![TodoEntry {
+            id: "todo-close-save".into(),
+            text: "Synthetic TODO linked to Current".into(),
+            done: false,
+            priority: 0,
+            tags: Vec::new(),
+            entity_refs: vec![EntityRef::new(
+                EntityKind::Note,
+                "current",
+                Some("Current".into()),
+            )],
+        }];
+        let _todo_guard = TrackC1ATodoSnapshotGuard::publish(TODO_FILE, &todos);
+
+        let context = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enable_toasts = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.enabled_plugins = Some(HashSet::new());
+        settings.enabled_capabilities = Some(HashMap::new());
+        settings.plugin_dirs = Some(Vec::new());
+        settings.index_paths = Some(Vec::new());
+        settings.note.backlinks_enabled = true;
+        settings.note.collapsed_sections_persist = false;
+        let settings_path = workspace.root().join("settings.json");
+
+        let release_probe = HandlerReleaseProbe::begin(workspace.root());
+        workspace.callbacks_may_use_paths();
+        let mut app = LauncherApp::new(
+            &context,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            actions_path.to_string_lossy().into_owned(),
+            settings_path.to_string_lossy().into_owned(),
+            settings,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some(HashSet::new()),
+            Some(HashMap::new()),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.note_save_on_close = true;
+        app.note_always_overwrite = true;
+
+        let index_root = workspace.root().join("blocked-initial-index");
+        std::fs::create_dir_all(&index_root).expect("create owned index root");
+        let config = IndexConfig::new(vec![index_root.to_string_lossy().into_owned()], Some(1));
+        let expected_indexed = crate::actions::Action {
+            label: "Released indexed action".into(),
+            desc: "Synthetic scanner result".into(),
+            action: "index:released-action".into(),
+            args: Some("after-release".into()),
+        };
+        let scanner_config = config.clone();
+        let scanner_action = expected_indexed.clone();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let coordinator = IndexCoordinator::with_test_scanner(move |actual_config| {
+            if actual_config != &scanner_config {
+                return Err("initial scanner received an unexpected config".to_owned());
+            }
+            entered_tx
+                .send(())
+                .map_err(|_| "initial scan owner left before scanner entry".to_owned())?;
+            release_rx
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv_timeout(DEADLINE)
+                .map_err(|error| format!("initial scan release deadline elapsed: {error}"))?;
+            Ok(vec![scanner_action.clone()])
+        })
+        .expect("channel-gated initial coordinator starts");
+        // Keep the release guard newer than the coordinator and app so an
+        // unwind opens the scanner gate before either owner is dropped.
+        let mut scanner_release = TrackC3FScannerReleaseGuard(Some(release_tx));
+        app.install_test_index_coordinator(coordinator);
+        app.request_index_config(config.clone());
+        let generation = app
+            .indexing
+            .expected_generation
+            .expect("the requested initial scan is accepted");
+        assert_eq!(app.indexing.desired, config);
+
+        entered_rx
+            .recv_timeout(DEADLINE)
+            .expect("the actual initial scanner reaches its release gate");
+        let blocked_actions = Arc::clone(&app.actions);
+        assert!(blocked_actions.is_empty());
+        assert!(Arc::ptr_eq(&app.actions, &blocked_actions));
+
+        let draft = format!("{initial_content}\n\n@todo:todo-close-save");
+        let mut panel = NotePanel::from_note(current);
+        panel.replace_content_from_mutation(draft.clone(), 10.0);
+        app.push_note_panel(panel);
+        assert!(
+            app.close_front_dialog(),
+            "the note panel is closed and saved"
+        );
+
+        let saved_path = notes_dir.join("current.md");
+        assert_eq!(std::fs::read_to_string(&saved_path).unwrap(), draft);
+        let (saved_revision, saved_notes) =
+            crate::plugins::note::note_cache_snapshot_with_version()
+                .expect("save publishes a healthy current note snapshot");
+        assert_ne!(saved_revision, initial_revision);
+        let saved_current = saved_notes
+            .iter()
+            .find(|note| note.slug == "current")
+            .expect("saved note remains in the canonical cache");
+        assert_eq!(saved_current.content, draft);
+        assert_eq!(
+            saved_current.entity_refs,
+            vec![EntityRef::new(EntityKind::Todo, "todo-close-save", None,)]
+        );
+        let saved_other = saved_notes
+            .iter()
+            .find(|note| note.slug == "other")
+            .expect("the related note remains in the canonical cache");
+        assert!(saved_other.links.iter().any(|link| link == "current"));
+        assert!(
+            saved_other.entity_refs.iter().any(|reference| {
+                reference.kind == EntityKind::Note && reference.id == "current"
+            })
+        );
+
+        let tabs = [
+            BacklinkTab::LinkedTodos,
+            BacklinkTab::RelatedNotes,
+            BacklinkTab::Mentions,
+        ];
+        let expected_rows = tabs
+            .into_iter()
+            .map(|tab| {
+                backlink_rows_signature(&track_c_eager_note_rows(
+                    saved_current,
+                    tab,
+                    &todos,
+                    &saved_notes,
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert!(expected_rows.iter().all(|rows| !rows.is_empty()));
+        let mut refreshed_panel = NotePanel::from_note(saved_current.clone());
+        refreshed_panel.last_backlinks_enabled = None;
+        refreshed_panel.maybe_refresh_heavy_derived(&context, true);
+        let actual_rows = [
+            &refreshed_panel.derived.backlink_rows_linked_todos,
+            &refreshed_panel.derived.backlink_rows_related_notes,
+            &refreshed_panel.derived.backlink_rows_mentions,
+        ]
+        .into_iter()
+        .map(|rows| backlink_rows_signature(rows))
+        .collect::<Vec<_>>();
+        assert_eq!(actual_rows, expected_rows);
+
+        assert!(Arc::ptr_eq(&app.actions, &blocked_actions));
+        assert_eq!(app.indexing.expected_generation, Some(generation));
+        assert_eq!(app.indexing.desired, config);
+
+        scanner_release
+            .release()
+            .expect("the gated initial scanner is released exactly once");
+        let completion = app
+            .wait_for_index_completion_for_test(generation)
+            .expect("the accepted scan completes after release");
+        assert_eq!(completion.generation(), generation);
+        assert_eq!(completion.config(), &config);
+        assert_eq!(
+            completion
+                .outcome()
+                .as_ref()
+                .expect("scanner succeeds")
+                .as_slice(),
+            std::slice::from_ref(&expected_indexed)
+        );
+
+        let deadline = Instant::now() + DEADLINE;
+        while app.actions.as_slice() != std::slice::from_ref(&expected_indexed) {
+            app.process_watch_events();
+            assert!(
+                Instant::now() < deadline,
+                "the app processes its original IndexReady envelope before the deadline"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(app.indexing.expected_generation, Some(generation));
+        assert_eq!(app.indexing.desired, config);
+        assert_eq!(
+            app.actions.as_slice(),
+            std::slice::from_ref(&expected_indexed)
+        );
+        assert_eq!(app.custom_len, 0);
+        assert!(matches!(
+            app.wait_for_index_completion_for_test(generation),
+            Err(crate::indexer::coordinator::CoordinatorError::ResultAlreadyAcknowledged(
+                acknowledged_generation
+            )) if acknowledged_generation == generation
+        ));
+
+        drop(app);
+        let mut release_report = release_probe.wait(Duration::from_secs(5));
+        let expected_handlers = [
+            HandlerKind::ClipboardModify,
+            HandlerKind::GuiActions,
+            HandlerKind::GuiNotes,
+            HandlerKind::GuiTodos,
+            HandlerKind::JsonDashboard,
+        ]
+        .to_vec();
+        release_report.attempts.sort_by_key(|kind| kind.token());
+        release_report.created.sort_by_key(|kind| kind.token());
+        release_report.released.sort_by_key(|kind| kind.token());
+        let exact_inventory = release_report.attempts == expected_handlers
+            && release_report.created == expected_handlers
+            && release_report.released == expected_handlers;
+        release_report.complete &= exact_inventory;
+        assert!(
+            release_report.complete && !release_report.overflowed,
+            "all five fixture-owned watcher callback closures release before workspace teardown"
+        );
+        workspace.callbacks_released(&release_report);
+    }
+
     #[test]
     #[ignore = "opt-in C1-B fused note refresh attribution; synthetic owned workspace only"]
     fn track_c_c1b_benchmark_open_note_panel_refresh_attribution() {

@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "checkpoint": "C3-F",
+  "status": "PASS_12_EXACT_CONTRACTS",
+  "source_manifest": "track_c_startup_event_source.json",
+  "attempts": [
+    {
+      "stage": "exact9_library_01",
+      "profile": "fast-dev",
+      "result": "COMPILE_FAIL",
+      "tests_executed": 0,
+      "errors": [
+        "E0422 note fixture missing Action qualification",
+        "E0308 startup fixture Option<Vec<String>> mismatches Action.args Option<String>"
+      ],
+      "raw_log": "ordinary-lib-01.log",
+      "raw_log_sha256": "50f646f4dd2c2a770df7c828b438fd7992889b387dcc582fde489f075b0b0141",
+      "tests_passed": 0,
+      "exit_code": 1,
+      "cargo_build_exit_code": 101,
+      "build_scope_note": "Nextest logged Cargo test --no-run without target restriction; other test targets compiled, but zero tests executed. Exact execution inventory remains nine library contracts."
+    },
+    {
+      "stage": "exact9_library_02",
+      "profile": "fast-dev",
+      "result": "PASS",
+      "tests_executed": 9,
+      "tests_passed": 9,
+      "tests": [
+        "gui::note_panel::tests::track_c_c3f_note_save_while_initial_index_scan_is_blocked",
+        "gui::radial_actions::tests::watch_route_accepts_an_exact_dispatch_lease_only_once",
+        "gui::tests::gui_index_completion_merges_the_latest_actions_prefix_after_a_blocked_scan",
+        "gui::tests::gui_index_config_identity_includes_cap_and_root_order_and_coalesces_equal_requests",
+        "gui::tests::gui_index_empty_config_clears_tail_immediately_and_ignores_cancelled_result",
+        "gui::tests::gui_index_failure_retains_last_good_actions_then_recovers",
+        "gui::tests::gui_index_wake_is_app_scoped_and_shutdown_ignores_late_completion",
+        "indexer::coordinator::tests::index_coordinator_shutdown_is_nonblocking_and_wakes_waiters",
+        "startup_catalog_tests::startup_action_catalog_waits_for_blocked_initial_scan_before_publication"
+      ],
+      "compile_seconds": 705,
+      "test_seconds": 0.721,
+      "skipped": 6474,
+      "run_id": "eb720305-f8d5-4f92-91d7-928717da90af",
+      "raw_log_sha256": "4bdfce4ffc1fa4ba414e2ccc1045952244700bf98fe5d33148ed2c7b66c440e4",
+      "source_manifest": "track_c_startup_event_source.json"
+    },
+    {
+      "stage": "exact3_binary_01",
+      "profile": "fast-dev",
+      "result": "PASS",
+      "tests_executed": 3,
+      "tests_passed": 3,
+      "tests": [
+        "tests::startup_index_returns_the_complete_catalog_and_acknowledges_before_transfer",
+        "tests::startup_index_skips_empty_roots_and_propagates_scan_failures",
+        "tests::track_c_oracle_startup_action_catalog_matches_complete_acknowledged_output"
+      ],
+      "compile_seconds": 2.95,
+      "test_seconds": 0.079,
+      "skipped": 35,
+      "run_id": "65e88652-9f79-48e1-8d4e-df89aaee2a61",
+      "raw_log_sha256": "1023ef984c62bc61e09635054c99dbc135d32a1d6db12373cce58a1fb9116606",
+      "source_manifest": "track_c_startup_event_source.json"
+    }
+  ],
+  "local_only": true,
+  "source_parent": "0c344b863207d902ca0def2c71f64d32117838f0",
+  "initial_source_manifest": "track_c_startup_event_source_initial.json",
+  "unique_contracts_passed": 12,
+  "native": "NOT RUN",
+  "source_hash_checks": "All ten pre/post hashes and parent HEAD unchanged"
+}

@@ -5394,8 +5394,43 @@ mod tests {
 
     #[test]
     fn watch_route_accepts_an_exact_dispatch_lease_only_once() {
+        let mut workspace =
+            crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace::new();
+        let release_probe =
+            crate::performance::track_c_watcher_lifecycle::HandlerReleaseProbe::begin(
+                workspace.root(),
+            );
+        workspace.callbacks_may_use_paths();
         let ctx = eframe::egui::Context::default();
-        let mut app = crate::gui::actions::tests::new_app(&ctx);
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = true;
+        settings.show_error_toasts = false;
+        settings.plugin_dirs = Some(Vec::new());
+        settings.index_paths = Some(Vec::new());
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        let actions_path = workspace.root().join("actions.json");
+        let settings_path = workspace.root().join("settings.json");
+        let mut app = crate::gui::LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            actions_path.to_string_lossy().into_owned(),
+            settings_path.to_string_lossy().into_owned(),
+            settings,
+            Some(Vec::new()),
+            Some(Vec::new()),
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
         let request = leased_request();
         app.radial_preparations.insert(
             request.identity.invocation_id,
@@ -5423,6 +5458,25 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("stale or duplicate"))
         );
+        drop(app);
+        let mut release_report = release_probe.wait(std::time::Duration::from_secs(5));
+        let expected_handlers = [
+            crate::performance::track_c_watcher_lifecycle::HandlerKind::ClipboardModify,
+            crate::performance::track_c_watcher_lifecycle::HandlerKind::GuiNotes,
+            crate::performance::track_c_watcher_lifecycle::HandlerKind::JsonDashboard,
+        ];
+        release_report.attempts.sort_by_key(|kind| kind.token());
+        release_report.created.sort_by_key(|kind| kind.token());
+        release_report.released.sort_by_key(|kind| kind.token());
+        let exact_inventory = release_report.attempts == expected_handlers
+            && release_report.created == expected_handlers
+            && release_report.released == expected_handlers;
+        release_report.complete &= exact_inventory;
+        assert!(
+            release_report.complete && !release_report.overflowed,
+            "the exact inert radial-test callback inventory releases before its paths are restored"
+        );
+        workspace.callbacks_released(&release_report);
     }
 
     #[test]

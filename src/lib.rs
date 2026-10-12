@@ -83,6 +83,27 @@ pub mod window_manager;
 pub mod windows_layout;
 pub mod workspace;
 
+// The shared startup owner is compiled into the library only for its
+// deterministic scanner-injection contract. Production library builds expose
+// no startup-catalog testing API.
+#[cfg(test)]
+use crate as startup_runtime;
+#[cfg(test)]
+#[path = "startup_catalog.rs"]
+mod startup_catalog;
+#[cfg(test)]
+#[path = "startup_catalog_tests.rs"]
+mod startup_catalog_tests;
+
+#[cfg(test)]
+fn startup_index_coordinator_for_owner()
+-> Result<indexer::coordinator::IndexCoordinator, indexer::coordinator::CoordinatorError> {
+    match startup_catalog_tests::take_startup_coordinator_override() {
+        Some(coordinator) => Ok(coordinator),
+        None => indexer::coordinator::IndexCoordinator::new(),
+    }
+}
+
 pub fn request_hotkey_restart(_settings: settings::Settings) {
     // no-op stub for library context
 }
