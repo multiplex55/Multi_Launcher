@@ -14,16 +14,22 @@ static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 struct OwnedCwdGuard {
     previous: std::path::PathBuf,
+    previous_home: Option<std::ffi::OsString>,
+    previous_notes_dir: Option<std::ffi::OsString>,
     _workspace: tempfile::TempDir,
 }
 
 impl OwnedCwdGuard {
     fn new() -> Self {
         let previous = std::env::current_dir().expect("capture test working directory");
+        let previous_home = std::env::var_os("HOME");
+        let previous_notes_dir = std::env::var_os("ML_NOTES_DIR");
         let workspace = tempdir().expect("create isolated test working directory");
         std::env::set_current_dir(workspace.path()).expect("enter isolated test working directory");
         Self {
             previous,
+            previous_home,
+            previous_notes_dir,
             _workspace: workspace,
         }
     }
@@ -32,6 +38,16 @@ impl OwnedCwdGuard {
 impl Drop for OwnedCwdGuard {
     fn drop(&mut self) {
         let _ = std::env::set_current_dir(&self.previous);
+        unsafe {
+            match &self.previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.previous_notes_dir {
+                Some(value) => std::env::set_var("ML_NOTES_DIR", value),
+                None => std::env::remove_var("ML_NOTES_DIR"),
+            }
+        }
     }
 }
 

@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "checkpoint": "C4-A",
+  "status": "C4A_ACCEPTED",
+  "source_parent": "92058848dd7166db65f9058738c9e8f93e330f7d",
+  "source_manifest": "track_c_cross_surface_source.json",
+  "production_changes": false,
+  "fixture_change": "OwnedCwdGuard restores prior HOME/ML_NOTES_DIR Option<OsString> before workspace cleanup",
+  "fresh_tests": {
+    "profile": "fast-dev",
+    "passed": 6,
+    "failed": 0,
+    "tests": [
+      "usage::save_then_load_usage",
+      "plugin_clear_action",
+      "extract_tags_skips_code_fences",
+      "note_alias_supports_open_rm_and_labels",
+      "note_link_dedupes_backlinks",
+      "note_meta_wrap_links_integration_parses_aliases_and_preserves_links_regression"
+    ],
+    "run_id": "c0f11c5f-0d48-4886-93bb-71fdbe7ea6ff",
+    "compile_seconds": 6.04,
+    "test_seconds": 0.229,
+    "skipped": 124,
+    "raw_log_sha256": "a980997d446b9d23ac09a49a8fb5105bbc8ea5b500f1fba0f4e97dd543cecef0"
+  },
+  "production_check": {
+    "command": "cargo check --lib --bin multi_launcher --profile fast-dev",
+    "status": "PASS",
+    "finish_line": "Finished `fast-dev` profile [unoptimized + debuginfo] target(s) in 48.48s",
+    "raw_log_sha256": "5e6cdccdeb54f1faedde55a6587a8a943da4024b08469a4f5ac1a2f3574028f1"
+  },
+  "reused_evidence": {
+    "track_c_c1f_evidence.json": {
+      "sha256": "3ad7193b72a05f1ef230ab722a6b3508e461ea7a45b099b5c83cc751e6b09239",
+      "source_rule": "Actual original source/execution fields retained in reference; not new final-SHA execution"
+    },
+    "track_c_notes_actions_acceptance.md": {
+      "sha256": "a4b4fe58048b566e4aab49a99f6818e1e17061bb1d6eac9fee8d250d412a9fab",
+      "source_rule": "Actual original source/execution fields retained in reference; not new final-SHA execution"
+    },
+    "track_c_query_observation/verification.json": {
+      "sha256": "a9dcc4c623a094598308beb855c1ec4323abd0707293a2dc013471ecf0f8f404",
+      "source_rule": "Actual original source/execution fields retained in reference; not new final-SHA execution"
+    },
+    "track_c_c2h/verification.json": {
+      "sha256": "7b103ac5746f0fe77846ef9736f6b55532b19fd67c893e1fb1de1f822484611e",
+      "source_rule": "Actual original source/execution fields retained in reference; not new final-SHA execution"
+    },
+    "track_c_startup_event_verification.json": {
+      "sha256": "28fb579a5aac3ee27a01803a2b04cdf9041f82e8b018eab97f8135c1747262a1",
+      "source_rule": "Actual original source/execution fields retained in reference; not new final-SHA execution"
+    }
+  },
+  "reuse_counts": {
+    "C1F_action_units": 10,
+    "C1G_semantic_cases": 10,
+    "C2G_cases": 23,
+    "C2H_cases": 32,
+    "C3F_cases": 12
+  },
+  "reuse_count_rule": "Counts may overlap; not summed as distinct final-source tests",
+  "source_compatibility_review": "Independent CLEAR: persisted Action/Note definitions, settings, Cargo profiles/lock unchanged; accepted paths/eager fallbacks and bounded telemetry preserve reviewed invariants",
+  "format_and_diff": "PASS",
+  "native": "NOT RUN; production launch hold detailed in C4B",
+  "local_only": true,
+  "independent_evidence_review": "CLEAR: exact six ordered names/counts/run/build/execution/log hashes; combined check48.48s;23live source hashes and five reused reference hashes; privacy/source provenance"
+}
