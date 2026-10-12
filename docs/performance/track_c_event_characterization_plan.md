@@ -1,6 +1,6 @@
 # C3-C event characterization implementation plan — LOCAL ONLY
 
-Status: in_progress. Source base `464bd5db2d876ac7e9da688d41b22bc398794647`; C3-B closed,21/29 checkpoints. Planner c0_recon refreshed actual source at827990c, unchanged by B. Parent owns evidence, protocol, Cargo and Git; c0_docs is sole source writer. Reviewer c0_boundary_review independently gates source/method/execution evidence.
+Status: complete. Source base `464bd5db2d876ac7e9da688d41b22bc398794647`; C3-B closed,21/29 checkpoints. Planner c0_recon refreshed actual source at827990c, unchanged by B. Parent owns evidence, protocol, Cargo and Git; c0_docs is sole source writer. Reviewer c0_boundary_review independently gates source/method/execution evidence.
 
 Objective: characterize existing GUI channel, handlers, wakes and actual egui frames before C3-D/E decisions. No queue policy, scheduling, coalescing or drain budget changes.
 
@@ -29,3 +29,5 @@ Foundation checkpoint: source lifecycle and passive observer independently CLEAR
 Foundation local commit: `ba195f658747cedeafd69cb2126d7b30899e2696`. The sole writer resumes the three frame recipes from this clean reviewed base; no new Cargo process is active.
 
 Frame recipes: source/method independently CLEAR after retained compile and disabled-feedback oracle corrections. All9unique ordinaryPASS (foundation8 plus newcontract); corrected exact1 retry compiled57.85s/test0.305s. Small companion actual1owner/60retained and original2controls/40retainedPASS; companion strictcollectorPASS. Sourcecommit and clean Full evidence remain pending; C3-C is not closed.
+
+C3-C accepted: exact clean c6c9d7edf16a8c6b77a44656ffee46275a08abfe Full100retained samples; independent Full source/method/numerical/privacy/lifecycle CLEAR. No coalescing/drain policy change. Wholeframeackadvance10/20, reduceradvance0/20; no sustainedstarvation proof. See track_c_events/results.md.22/29closed.

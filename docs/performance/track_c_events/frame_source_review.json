@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "checkpoint": "C3-C",
-  "status": "SMALL_SOURCE_METHOD_NUMERICAL_PRIVACY_CLEAR_FULL_AUTHORIZED",
+  "status": "C3C_CHARACTERIZATION_ACCEPTED",
   "reviewer": "c0_boundary_review",
   "source_parent": "ba195f658747cedeafd69cb2126d7b30899e2696",
   "watch_sha256": "785a956ffbcf79f4e32e318721494246723c0fa0dae4c9c59a9d0da0abc11249",
@@ -49,5 +49,6 @@
     "exact_four_handler_release": "PASS",
     "producer_ack_advance_during_drain_samples": 0,
     "limits": "Observed bounded offered load only; all16 producer sends acknowledged before drain in Small. No sustained arrivals/starvation/native benefit claim."
-  }
+  },
+  "full_review": "full_review.json"
 }

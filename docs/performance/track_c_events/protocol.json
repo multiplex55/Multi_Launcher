@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "checkpoint": "C3-C",
-  "status": "SMALL_INDEPENDENT_CLEAR_FULL_AUTHORIZED_AFTER_SOURCE_COMMIT",
+  "status": "C3C_CHARACTERIZATION_ACCEPTED",
   "source_base": "464bd5db2d876ac7e9da688d41b22bc398794647",
   "profile": "fast-dev",
   "mode_counts": {
@@ -63,11 +63,7 @@
     "Missing radiallease rejectsbeforeresolve",
     "One Cargo process, exact tests serial; no fullsuite/release/native campaign"
   ],
-  "pending": [
-    "Controlled-source commit",
-    "Exact-source Full controls and companion",
-    "Independent Full numerical/privacy/publication closure"
-  ],
+  "pending": [],
   "local_only": true,
   "quiet_age": "NOT_APPLICABLE: zeroevents, empty individual age vector; no age p50/p95/max or fabricated0ns latency",
   "draft_review": {
@@ -275,5 +271,7 @@
   "root_setup": "Quiet/replenish one actual root frame outside owner after initial event drain; finite retains original8queued messages for first measured actualroot frame.",
   "wake_accounting": "Urgent events use real registry: finite registry1->3->0 and ownerViewportWake2; replenish registry0->2->0 and ownerViewportWake18 including16producer; quiet0. Per-frame callback deltas are subsets of whole-owner deltas; egui repaint callback remains separate.",
   "source_method_gate": "Reviewer c0_boundary_review independently CLEAR exact5ordinary; Small owner only after ordinaryPASS; Full requires clean committedsource.",
-  "generation_selection_oracle": "Finite changed catalog leaves complete query result equal, generation delta0; search acceptance clears selectionNone independently. Replenishing equal envelopes retain generation0 and priorNone."
+  "generation_selection_oracle": "Finite changed catalog leaves complete query result equal, generation delta0; search acceptance clears selectionNone independently. Replenishing equal envelopes retain generation0 and priorNone.",
+  "source_measured": "c6c9d7edf16a8c6b77a44656ffee46275a08abfe",
+  "full_review": "full_review.json"
 }

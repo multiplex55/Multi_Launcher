@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "checkpoint": "C3-C",
-  "status": "ORDINARY_AND_SMALL_PASS_FULL_PENDING",
+  "status": "C3C_CHARACTERIZATION_ACCEPTED",
   "source_parent": "ba195f658747cedeafd69cb2126d7b30899e2696",
   "attempts": [
     {
@@ -51,7 +51,7 @@
       "test_seconds": 0.305
     }
   ],
-  "owner_runs": 3,
+  "owner_runs": 6,
   "local_only": true,
   "unique_ordinary_pass": 9,
   "unique_ordinary_basis": "Foundation exact8PASS plus corrected new recipePASS; attempt03 four controls repeatPASS",
@@ -71,5 +71,29 @@
       "source": "UNCOMMITTED_SOURCE",
       "raw_log_sha256": "605695b18f11c94d72351441742cf7d9ba8da599d76147881785c66438b265bb"
     }
-  ]
+  ],
+  "source_full": "c6c9d7edf16a8c6b77a44656ffee46275a08abfe",
+  "full_runs": [
+    {
+      "recipe": "original_two_controls",
+      "owners_executed": 2,
+      "retained_samples": 40,
+      "test_seconds": 103.548,
+      "run_id": "74e75607-77fc-4036-a073-fbcd625eadc1",
+      "collector": "PASS",
+      "frozen_G0_comparator": "PASS",
+      "raw_log_sha256": "c1510bd29d1ca97e48054015ec85a0d92c09c21a130f99a3aa76e7cc15ca7ebb"
+    },
+    {
+      "recipe": "companion_three_recipes",
+      "owners_executed": 1,
+      "retained_samples": 60,
+      "test_seconds": 162.385,
+      "run_id": "47c92195-9a18-4e15-9f5d-404814e79ddc",
+      "collector": "PASS",
+      "raw_log_sha256": "0577cf01d9a023c6b25799e900c2ed769c5b1565459ef5ac01194397dbed3779"
+    }
+  ],
+  "unique_retained_samples_all_modes": 200,
+  "full_review": "full_review.json"
 }
