@@ -37,3 +37,23 @@ Final read-only output audit found that all four timed owners returned `FullOutp
 After accepted source release/checkpoint, run four existing ignored owners serially: list 6, grid 30, Notes 42, query 3. Preserve original full fixtures, five warmups, twenty raw samples, settings, viewport and scale. Use the actual accepted source SHA and fast-dev profile; omit framebuffer QA and its request manifest. Startup's three catalog cases are outside M2-A.
 
 Original arrays and all five owner logs were independently reparsed before this milestone; all 84 rows matched the stored original results, including nearest-rank p50/p95. Join the 81 affected comparisons by fixture/count/settings/cold type/viewport/scale, not obsolete owner label. Preserve outliers and investigate meaningful reproducible regressions. No current performance result is claimed yet.
+
+## First measured source checkpoint — performance regression
+
+Accepted source checkpoint: `df27da179ebc2b29e5c54801293163181ffe2920`. The full root-list owner completed and passed its independent oracles: six matched cases, five warmups and twenty samples each, zero exclusions. Nextest test wall time was 1,109.357 seconds, versus original 97.792 seconds. The fast-dev build took 3m29s; enclosing invocation wall time including build was 1,320.261 seconds. These total durations are distinct from the sample timers.
+
+| Actions | Original cold p50 ms | Current cold p50 ms | Original warm p50 ms | Current warm p50 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 5.4931 | 59.2506 | 0.9283 | 2.2208 |
+| 1,000 | 52.5765 | 731.0243 | 0.8957 | 2.2087 |
+| 10,000 | 526.4549 | 7,596.9763 | 1.0012 | 2.3015 |
+
+This is not performance acceptance. Cold medians increased about 10.8–14.4 times and warm medians about 2.3–2.5 times. The twenty samples are consistent enough to require root-cause investigation; do not explain this away using an allowance or infer native/display latency. Grid/Notes/query comparisons remain queued while this demonstrated issue is investigated.
+
+Parent independently parsed all six raw records, verified original fixture signatures and full protocol, recomputed nearest-rank quantiles and retained every sample. Cold work remains one rebuild and exactly the action count measured; warm work remains zero rebuild/measured rows. Actual painted rows are 25 versus original 26, and cross-version structural/viewport identities differ; independent eager geometry assertions passed. These facts cannot explain an order-of-magnitude cold timing increase by themselves.
+
+Local artifacts: `target/egui-modernization/m2a/owner-list-df27da17.log`, SHA256 `B12D3CDB15FB406DF3464D997D8F8F15390D34316E674E4051E8E878E8BA92A8`; `.run.json` records native owner exit0 and source/profile/environment/command. The enclosing PowerShell returned1 after successful receipt creation, consistent with its final silent removal of an already absent process environment variable; future wrappers must check presence and return explicit success. This bookkeeping result does not change the independently observed Nextest pass or samples.
+
+Preserved test binary and parsed analysis are under `target/egui-modernization/m2a/df27da17-list-analysis/`. Executable SHA256 `D4FFD2FE04ABD0211B6EED30DCF49DFB65FE45B1B8EFA1B3D6A8B121629E8DE1`; copy hash verified. No original artifact was overwritten. QA feature/request were excluded, all fixture processes were closed, and no other build/test was run concurrently. Parent made two bounded process-progress observations; read-only planner source inspection occurred during the series. Retain this context when repeating measurements.
+
+Read-only diagnostic inspection found no extra visible-only domain workload: inert provider, worker suppression, seeded generations and visibility transition avoidance remain intact. Actual migration costs include the mock frame/native-handle path, lifecycle receipt/finalization and changed released-egui text layout. In0.27 `WidgetText::from(String)` produced RichText; in0.36 Text resolves line height through a font access before another access for layout. This is a source-backed candidate, not measured attribution. Next work is a bounded phase/text-layout diagnostic and root-cause correction with existing eager invariants retained. No styling or renderer changes are authorized by this failure.
