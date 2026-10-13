@@ -10,7 +10,10 @@ use crate::{
     stroke::PathStroke,
     text::{
         ByteIndex, ByteRange,
-        font::{StyledMetrics, UvRect, is_cjk, is_cjk_break_allowed},
+        font::{
+            LayoutShapeBuffer, ShapeBufferProvenance, StyledMetrics, UvRect, is_cjk,
+            is_cjk_break_allowed,
+        },
         fonts::FontFaceKey,
     },
 };
@@ -221,7 +224,7 @@ struct TextRun {
     byte_range: ByteRange,
 }
 
-/// Emit shaped glyphs from a [`harfrust::GlyphBuffer`] into a [`Paragraph`].
+/// Emit shaped glyphs from a layout result into a [`Paragraph`].
 ///
 /// When a cluster maps multiple characters to fewer glyphs (e.g. flag emojis,
 /// ligatures), zero-width "continuation" glyphs are emitted for the extra
@@ -231,7 +234,7 @@ fn layout_shaped_run(
     font: &mut Font<'_>,
     run: &TextRun,
     run_text: &str,
-    glyph_buffer: &harfrust::GlyphBuffer,
+    glyph_buffer: &LayoutShapeBuffer,
     face_metrics: &StyledMetrics,
     ctx: &mut ShapingContext,
     paragraph: &mut Paragraph,
@@ -501,8 +504,13 @@ fn layout_section(
                 flags |= harfrust::BufferFlags::END_OF_TEXT;
             }
 
-            let glyph_buffer =
-                font_face.shape_for_layout(run_text, &format.coords, shape_buffer, flags);
+            let glyph_buffer = font_face.shape_for_layout(
+                run_text,
+                &format.coords,
+                shape_buffer,
+                flags,
+                ShapeBufferProvenance::LayoutOwnedClean,
+            );
 
             layout_shaped_run(
                 font,

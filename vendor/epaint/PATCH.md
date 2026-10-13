@@ -1,4 +1,4 @@
-# Local epaint shaping-plan patch
+# Local epaint shaping-cache patch
 
 This directory vendors the crates.io `epaint` 0.36.2 package. The original
 archive SHA-256 is
@@ -18,15 +18,52 @@ correctly share a plan when that selection is unchanged, while the actual
 instance is still supplied for every shaping operation. A miss builds the
 same plan for the same shaping inputs, evicting the oldest plan only when the
 face reaches capacity. `src/text/text_layout.rs` passes the selected face
-mutably to that owner and still emits glyphs only after shaping returns its
-`GlyphBuffer`. Shaping flags, segmentation, variation ordering, buffer reuse,
-and glyph output remain unchanged.
+mutably to that owner and emits glyphs from the returned layout-shaping
+carrier. Shaping flags, segmentation, variation ordering, buffer reuse, and
+visible glyph output remain unchanged.
 
 Private tests cover each key component, face isolation and recreation, the
 bounded FIFO behavior, multilingual default-font glyph parity, and parity at
 the supported minimum and maximum `wght` coordinates of the available local
 Bahnschrift variable font. The test reads the system font only when it exists;
 it does not bundle or require that asset on other hosts.
+
+`src/text/font.rs` also owns a per-face LRU of up to 128 raw shaping results.
+The cache key contains the complete run text, resolved script and direction,
+language, and buffer flags; face identity is provided by the owning `FontFace`.
+Only the proven layout-owned new-or-cleared buffer path with default cluster
+policy and no actual HarfRust instance is admitted. Any actual variation
+instance, unknown buffer provenance, pre-populated buffer, non-default cluster
+policy, oversized text, or oversized entry follows normal shaping. Hits retain
+the exact `GlyphInfo` and `GlyphPosition` arrays and return the cleared input
+buffer for reuse before glyph emission.
+
+The raw key is complete for the fixed layout call contract: empty feature list,
+default HarfRust font-unit scale, and no point-size or custom shaping functions.
+The proven fresh-or-cleared input also has empty pre/post context and the
+default missing-variation-selector replacement policy. These options remain
+outside the key because this production call site fixes them; future changes to
+that contract must either extend the key or bypass raw reuse.
+
+The cache allows at most 128 entries, 1 MiB of accounted payload per face,
+4 KiB of run text, and 64 KiB per entry. Accounted payload is owned UTF-8 run
+text, dynamic language bytes, and the complete retained glyph-info and
+glyph-position elements. Fixed entry metadata, `Arc` control headers, `Vec`
+spare capacity, and allocator overhead are outside that payload count. A
+temporary shared handle can keep an evicted entry's arrays alive until the
+corresponding glyph emission finishes.
+
+The accepted archive-only raw-reuse prototype used frozen source manifest
+`4F4CE0C6092301D159EDD33C0ADAFF436E563B012D30062EAA22F6F1C32CDA44` and
+recorded complete ordered glyph and eager geometry parity for its 1,000-row
+fixture. Its five-sample fast-dev owner medians were 373.0338 ms with reuse
+disabled and 227.9875 ms with reuse enabled; the enabled owner recorded 3,046
+hits and 1,001 misses among 4,047 face runs. These measurements describe the
+instrumented archive prototype only. They do not establish production timing,
+warm, release, or native acceptance. The live private tests cover LRU and
+payload bounds, exact hit/miss output, buffer allocation recycling, unknown
+buffer and custom-policy bypass, and variation-instance bypass at Bahnschrift
+`wght` 300 and 700.
 
 The accepted archive-only prototype and its limits are documented in
 `docs/plans/egui-modernization/receipts/m2a-plan-reuse-prototype.md` at
@@ -41,8 +78,8 @@ did not establish variable-font glyph parity, which the focused live-package
 test now checks at both supported `wght` extrema.
 
 Remove this override after an upstream epaint release provides equivalent
-face-owned bounded plan reuse, and the locked egui stack can use that release
-with the focused parity tests passing.
+face-owned bounded plan and raw-result reuse, and the locked egui stack can use
+that release with the focused glyph and geometry parity tests passing.
 
 ## Released text-stack alignment
 
@@ -77,7 +114,8 @@ identity. Its five-sample 1,000-row cold owner medians were 390.7041 ms on the
 does not establish warm, release, native, or whole-application parity and does
 not complete or accept M2-A.
 
-The local delta consists of the bounded per-face FIFO plan reuse above and
-these compatible dependency bounds. Remove this patch only after an upstream
-epaint release supplies equivalent bounded face-owned plan reuse and the
-locked egui stack can use it with focused glyph/geometry parity passing.
+The local delta consists of the bounded per-face FIFO plan reuse, bounded
+raw-result reuse, and these compatible dependency bounds. Remove this patch
+only after an upstream epaint release supplies equivalent bounded face-owned
+plan and raw-result reuse and the locked egui stack can use it with focused
+glyph/geometry parity passing.

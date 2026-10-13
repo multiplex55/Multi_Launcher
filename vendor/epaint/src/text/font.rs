@@ -4,7 +4,7 @@ use ecolor::Color32;
 use emath::{GuiRounding as _, OrderedFloat, Vec2, vec2};
 use self_cell::self_cell;
 use skrifa::{GlyphId, MetadataProvider as _};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 use vello_cpu::{color, kurbo};
 
 use crate::{
@@ -348,6 +348,183 @@ impl skrifa::outline::OutlinePen for VelloPen<'_> {
     }
 }
 
+const RAW_SHAPE_CACHE_MAX_ENTRIES: usize = 128;
+const RAW_SHAPE_CACHE_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+const RAW_SHAPE_CACHE_MAX_TEXT_BYTES: usize = 4 * 1024;
+const RAW_SHAPE_CACHE_MAX_ENTRY_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShapeBufferProvenance {
+    /// `layout_section` uses only a new buffer or one returned by `clear`.
+    LayoutOwnedClean,
+    /// Callers without the layout lifecycle proof must bypass raw-result reuse.
+    Unknown,
+}
+
+#[derive(Clone, Copy)]
+struct RawShapeCacheKeyRef<'a> {
+    text: &'a str,
+    script: harfrust::Script,
+    direction: harfrust::Direction,
+    language: Option<&'a harfrust::Language>,
+    flags: u32,
+}
+
+struct RawShapeCacheEntry {
+    text: String,
+    script: harfrust::Script,
+    direction: harfrust::Direction,
+    language: Option<harfrust::Language>,
+    flags: u32,
+    glyph_infos: Arc<[harfrust::GlyphInfo]>,
+    glyph_positions: Arc<[harfrust::GlyphPosition]>,
+    payload_bytes: usize,
+}
+
+impl RawShapeCacheKeyRef<'_> {
+    fn matches(self, entry: &RawShapeCacheEntry) -> bool {
+        self.text == entry.text
+            && self.script == entry.script
+            && self.direction == entry.direction
+            && self.language == entry.language.as_ref()
+            && self.flags == entry.flags
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawShapeCacheBypass {
+    TextLimit,
+    EntryPayloadLimit,
+    ArithmeticOverflow,
+    UnsupportedBuffer,
+}
+
+#[derive(Default)]
+struct RawShapeCache {
+    /// The least-recently used entry is first. Entries are owned by one face.
+    entries: Vec<RawShapeCacheEntry>,
+    payload_bytes: usize,
+}
+
+impl RawShapeCache {
+    fn lookup(
+        &mut self,
+        key: RawShapeCacheKeyRef<'_>,
+    ) -> Option<(Arc<[harfrust::GlyphInfo]>, Arc<[harfrust::GlyphPosition]>)> {
+        let index = self.entries.iter().position(|entry| key.matches(entry))?;
+        let entry = self.entries.remove(index);
+        let result = (
+            Arc::clone(&entry.glyph_infos),
+            Arc::clone(&entry.glyph_positions),
+        );
+        self.entries.push(entry);
+        Some(result)
+    }
+
+    fn insert(
+        &mut self,
+        key: RawShapeCacheKeyRef<'_>,
+        glyph_infos: &[harfrust::GlyphInfo],
+        glyph_positions: &[harfrust::GlyphPosition],
+    ) -> Result<usize, RawShapeCacheBypass> {
+        if key.text.len() > RAW_SHAPE_CACHE_MAX_TEXT_BYTES {
+            return Err(RawShapeCacheBypass::TextLimit);
+        }
+        if glyph_infos.len() != glyph_positions.len() {
+            return Err(RawShapeCacheBypass::UnsupportedBuffer);
+        }
+
+        let language_bytes = key.language.map_or(0, |language| language.as_bytes().len());
+        let payload_bytes = raw_shape_payload_bytes(
+            key.text.len(),
+            language_bytes,
+            glyph_infos.len(),
+            glyph_positions.len(),
+        )
+        .ok_or(RawShapeCacheBypass::ArithmeticOverflow)?;
+        if payload_bytes > RAW_SHAPE_CACHE_MAX_ENTRY_BYTES {
+            return Err(RawShapeCacheBypass::EntryPayloadLimit);
+        }
+        self.payload_bytes
+            .checked_add(payload_bytes)
+            .ok_or(RawShapeCacheBypass::ArithmeticOverflow)?;
+
+        let mut evictions = 0;
+        while self.entries.len() >= RAW_SHAPE_CACHE_MAX_ENTRIES
+            || self.payload_bytes > RAW_SHAPE_CACHE_MAX_PAYLOAD_BYTES - payload_bytes
+        {
+            let oldest = self.entries.remove(0);
+            debug_assert!(self.payload_bytes >= oldest.payload_bytes);
+            self.payload_bytes -= oldest.payload_bytes;
+            evictions += 1;
+        }
+
+        self.entries.push(RawShapeCacheEntry {
+            text: key.text.to_owned(),
+            script: key.script,
+            direction: key.direction,
+            language: key.language.cloned(),
+            flags: key.flags,
+            glyph_infos: Arc::from(glyph_infos),
+            glyph_positions: Arc::from(glyph_positions),
+            payload_bytes,
+        });
+        self.payload_bytes += payload_bytes;
+        Ok(evictions)
+    }
+}
+
+fn raw_shape_payload_bytes(
+    text_bytes: usize,
+    language_bytes: usize,
+    glyph_info_count: usize,
+    glyph_position_count: usize,
+) -> Option<usize> {
+    text_bytes
+        .checked_add(language_bytes)?
+        .checked_add(glyph_info_count.checked_mul(std::mem::size_of::<harfrust::GlyphInfo>())?)?
+        .checked_add(
+            glyph_position_count.checked_mul(std::mem::size_of::<harfrust::GlyphPosition>())?,
+        )
+}
+
+pub(crate) enum LayoutShapeBuffer {
+    GlyphBuffer(harfrust::GlyphBuffer),
+    Cached {
+        glyph_infos: Arc<[harfrust::GlyphInfo]>,
+        glyph_positions: Arc<[harfrust::GlyphPosition]>,
+        buffer: harfrust::UnicodeBuffer,
+    },
+}
+
+impl LayoutShapeBuffer {
+    pub(crate) fn glyph_infos(&self) -> &[harfrust::GlyphInfo] {
+        match self {
+            Self::GlyphBuffer(buffer) => buffer.glyph_infos(),
+            Self::Cached { glyph_infos, .. } => glyph_infos,
+        }
+    }
+
+    pub(crate) fn glyph_positions(&self) -> &[harfrust::GlyphPosition] {
+        match self {
+            Self::GlyphBuffer(buffer) => buffer.glyph_positions(),
+            Self::Cached {
+                glyph_positions, ..
+            } => glyph_positions,
+        }
+    }
+
+    pub(crate) fn clear(self) -> harfrust::UnicodeBuffer {
+        match self {
+            Self::GlyphBuffer(buffer) => buffer.clear(),
+            Self::Cached { mut buffer, .. } => {
+                buffer.clear();
+                buffer
+            }
+        }
+    }
+}
+
 /// A specific font face.
 /// The interface uses points as the unit for everything.
 pub struct FontFace {
@@ -362,6 +539,9 @@ pub struct FontFace {
 
     /// Bounded FIFO cache of shaping plans for this face's actual shaping inputs.
     shape_plans: Vec<harfrust::ShapePlan>,
+
+    /// Bounded LRU cache of raw shaping results for clean layout-owned buffers.
+    raw_shape_cache: RawShapeCache,
 
     /// Location-independent: `char → GlyphId | Invisible`.
     ///
@@ -457,6 +637,7 @@ impl FontFace {
             subpixel_binning,
             shaper_data,
             shape_plans: Vec::new(),
+            raw_shape_cache: RawShapeCache::default(),
             glyph_id_cache: Default::default(),
             advance_width_cache: Default::default(),
             glyph_alloc_cache: Default::default(),
@@ -618,22 +799,22 @@ impl FontFace {
         &self.tweak
     }
 
-    /// Shape one already-segmented run while keeping reusable plans owned by
-    /// this font face. The field split allows shaping data and the plan cache
-    /// to be borrowed independently, and the returned buffer releases all face
-    /// borrows before glyph emission begins.
+    /// Shape one already-segmented run with face-owned plan and raw-result caches.
+    /// The returned carrier releases all face borrows before glyph emission.
     pub(crate) fn shape_for_layout(
         &mut self,
         text: &str,
         coords: &VariationCoords,
         mut buffer: harfrust::UnicodeBuffer,
         flags: harfrust::BufferFlags,
-    ) -> harfrust::GlyphBuffer {
+        provenance: ShapeBufferProvenance,
+    ) -> LayoutShapeBuffer {
         let Self {
             font,
             tweak,
             shaper_data,
             shape_plans,
+            raw_shape_cache,
             ..
         } = self;
         let font_data = font.borrow_dependent();
@@ -659,12 +840,31 @@ impl FontFace {
             .instance(instance.as_ref())
             .build();
 
+        // Eligibility is decided before changing the input buffer. Hidden
+        // context and replacement policy are trusted only on the proven
+        // new-or-cleared layout path.
+        let raw_cache_eligible = provenance == ShapeBufferProvenance::LayoutOwnedClean
+            && buffer.is_empty()
+            && buffer.cluster_level() == harfrust::BufferClusterLevel::default()
+            && instance.is_none()
+            && text.len() <= RAW_SHAPE_CACHE_MAX_TEXT_BYTES;
+
         buffer.set_flags(flags);
         buffer.push_str(text);
         buffer.guess_segment_properties();
 
+        let direction = buffer.direction();
+        let script = buffer.script();
         let language = buffer.language();
-        let key = harfrust::ShapePlanKey::new(Some(buffer.script()), buffer.direction())
+        let raw_cache_key = raw_cache_eligible.then_some(RawShapeCacheKeyRef {
+            text,
+            script,
+            direction,
+            language: language.as_ref(),
+            flags: flags.bits(),
+        });
+
+        let key = harfrust::ShapePlanKey::new(Some(script), direction)
             .language(language.as_ref())
             .instance(instance.as_ref())
             .features(&[]);
@@ -672,19 +872,33 @@ impl FontFace {
         let plan_index = if let Some(index) = shape_plan_index(shape_plans, &key) {
             index
         } else {
-            let plan = harfrust::ShapePlan::new(
-                &shaper,
-                buffer.direction(),
-                Some(buffer.script()),
-                language.as_ref(),
-                &[],
-            );
+            let plan =
+                harfrust::ShapePlan::new(&shaper, direction, Some(script), language.as_ref(), &[]);
             insert_shape_plan(shape_plans, plan);
             shape_plans.len() - 1
         };
 
         let plan = &shape_plans[plan_index];
-        shaper.shape(buffer, harfrust::ShapeOptions::new().plan(Some(plan)))
+        if let Some(key) = raw_cache_key
+            && let Some((glyph_infos, glyph_positions)) = raw_shape_cache.lookup(key)
+        {
+            buffer.clear();
+            return LayoutShapeBuffer::Cached {
+                glyph_infos,
+                glyph_positions,
+                buffer,
+            };
+        }
+
+        let glyph_buffer = shaper.shape(buffer, harfrust::ShapeOptions::new().plan(Some(plan)));
+        if let Some(key) = raw_cache_key {
+            let _ = raw_shape_cache.insert(
+                key,
+                glyph_buffer.glyph_infos(),
+                glyph_buffer.glyph_positions(),
+            );
+        }
+        LayoutShapeBuffer::GlyphBuffer(glyph_buffer)
     }
 
     pub fn allocate_glyph(
@@ -1103,7 +1317,7 @@ mod shape_plan_cache_tests {
 
     fn assert_glyph_output_equal(
         expected: &harfrust::GlyphBuffer,
-        actual: &harfrust::GlyphBuffer,
+        actual: &LayoutShapeBuffer,
         context: &str,
     ) {
         let expected_infos: Vec<_> = expected
@@ -1144,15 +1358,26 @@ mod shape_plan_cache_tests {
         language: Option<Language>,
     ) {
         let expected = implicit_shape(face, text, coords, language.clone());
-        let actual = face.shape_for_layout(text, coords, empty_buffer(language.clone()), flags());
+        let actual = face.shape_for_layout(
+            text,
+            coords,
+            empty_buffer(language.clone()),
+            flags(),
+            ShapeBufferProvenance::Unknown,
+        );
         assert_glyph_output_equal(&expected, &actual, text);
         let matching_plan_index = cached_plan_index(face, text, coords, language.clone())
             .expect("actual shaping inputs should match a cached plan");
 
         let plan_count = face.shape_plans.len();
         let expected_hit = implicit_shape(face, text, coords, language.clone());
-        let actual_hit =
-            face.shape_for_layout(text, coords, empty_buffer(language.clone()), flags());
+        let actual_hit = face.shape_for_layout(
+            text,
+            coords,
+            empty_buffer(language.clone()),
+            flags(),
+            ShapeBufferProvenance::Unknown,
+        );
         assert_glyph_output_equal(&expected_hit, &actual_hit, text);
         assert_eq!(
             face.shape_plans.len(),
@@ -1373,5 +1598,763 @@ mod shape_plan_cache_tests {
             weights[1],
             plan_indices
         );
+    }
+}
+
+#[cfg(all(test, feature = "default_fonts"))]
+mod raw_shape_cache_tests {
+    use super::*;
+    use crate::text::{FontData, FontDefinitions};
+    use std::path::Path;
+
+    fn face_from_data(name: &str, data: &FontData, tweak: FontTweak) -> FontFace {
+        let bytes = data.font.clone().into_owned();
+        let blob: Blob = std::sync::Arc::new(bytes);
+        FontFace::new(
+            TextOptions::default(),
+            name.to_owned(),
+            blob,
+            data.index,
+            tweak,
+        )
+        .expect("test font data should load")
+    }
+
+    fn default_face(name: &str) -> FontFace {
+        let definitions = FontDefinitions::default();
+        let data = definitions
+            .font_data
+            .get(name)
+            .expect("requested default test font exists");
+        face_from_data(name, data, data.tweak.clone())
+    }
+
+    fn key<'a>(
+        text: &'a str,
+        script: harfrust::Script,
+        direction: harfrust::Direction,
+        language: Option<&'a harfrust::Language>,
+        flags: u32,
+    ) -> RawShapeCacheKeyRef<'a> {
+        RawShapeCacheKeyRef {
+            text,
+            script,
+            direction,
+            language,
+            flags,
+        }
+    }
+
+    fn flags() -> harfrust::BufferFlags {
+        harfrust::BufferFlags::BEGINNING_OF_TEXT | harfrust::BufferFlags::END_OF_TEXT
+    }
+
+    fn shape(
+        face: &mut FontFace,
+        text: &str,
+        coords: &VariationCoords,
+        buffer: harfrust::UnicodeBuffer,
+        flags: harfrust::BufferFlags,
+        provenance: ShapeBufferProvenance,
+    ) -> LayoutShapeBuffer {
+        face.shape_for_layout(text, coords, buffer, flags, provenance)
+    }
+
+    fn reference_shape(
+        face: &FontFace,
+        text: &str,
+        coords: &VariationCoords,
+        mut buffer: harfrust::UnicodeBuffer,
+        flags: harfrust::BufferFlags,
+    ) -> harfrust::GlyphBuffer {
+        let font_data = face.font.borrow_dependent();
+        let font_ref = &font_data.skrifa;
+        let variations: Vec<harfrust::Variation> =
+            core::iter::chain(face.tweak.coords.as_ref(), coords.as_ref())
+                .map(|&(tag, value)| harfrust::Variation { tag, value })
+                .collect();
+        let instance = if variations.is_empty() {
+            None
+        } else {
+            Some(harfrust::ShaperInstance::from_variations(
+                font_ref, variations,
+            ))
+        };
+        let shaper = face
+            .shaper_data
+            .shaper(font_ref)
+            .instance(instance.as_ref())
+            .build();
+        buffer.set_flags(flags);
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        shaper.shape(buffer, harfrust::ShapeOptions::new())
+    }
+
+    fn projection(
+        glyph_infos: &[harfrust::GlyphInfo],
+        glyph_positions: &[harfrust::GlyphPosition],
+    ) -> Vec<(u32, u32, u32, i32, i32, i32, i32)> {
+        glyph_infos
+            .iter()
+            .zip(glyph_positions)
+            .map(|(info, position)| {
+                (
+                    info.glyph_id,
+                    info.cluster,
+                    info.flags().to_bits(),
+                    position.x_advance,
+                    position.y_advance,
+                    position.x_offset,
+                    position.y_offset,
+                )
+            })
+            .collect()
+    }
+
+    fn signature(
+        glyph_infos: &[harfrust::GlyphInfo],
+        glyph_positions: &[harfrust::GlyphPosition],
+    ) -> (Vec<(u32, u32, u32, i32, i32, i32, i32)>, String) {
+        (
+            projection(glyph_infos, glyph_positions),
+            format!("{glyph_infos:?}\n{glyph_positions:?}"),
+        )
+    }
+
+    fn layout_signature(
+        output: &LayoutShapeBuffer,
+    ) -> (Vec<(u32, u32, u32, i32, i32, i32, i32)>, String) {
+        signature(output.glyph_infos(), output.glyph_positions())
+    }
+
+    fn assert_matches_reference(
+        output: &LayoutShapeBuffer,
+        expected: &harfrust::GlyphBuffer,
+        context: &str,
+    ) {
+        assert_eq!(
+            layout_signature(output),
+            signature(expected.glyph_infos(), expected.glyph_positions()),
+            "complete glyph output differs: {context}"
+        );
+    }
+
+    fn cache_snapshot(face: &FontFace) -> (Vec<String>, usize) {
+        let entries = face
+            .raw_shape_cache
+            .entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}|{:?}|{:?}|{:?}|{}|{}",
+                    entry.text,
+                    entry.script,
+                    entry.direction,
+                    entry.language,
+                    entry.flags,
+                    entry.payload_bytes
+                )
+            })
+            .collect();
+        (entries, face.raw_shape_cache.payload_bytes)
+    }
+
+    #[test]
+    fn raw_cache_key_covers_resolved_components_and_is_face_scoped() {
+        let language_en: harfrust::Language = "en".parse().unwrap();
+        let language_fr: harfrust::Language = "fr".parse().unwrap();
+        let base = key(
+            "office",
+            harfrust::script::LATIN,
+            harfrust::Direction::LeftToRight,
+            Some(&language_en),
+            harfrust::BufferFlags::BEGINNING_OF_TEXT.bits(),
+        );
+        let glyph_infos = [harfrust::GlyphInfo::default()];
+        let glyph_positions = [harfrust::GlyphPosition::default()];
+        let mut face = default_face("Hack");
+        face.raw_shape_cache
+            .insert(base, &glyph_infos, &glyph_positions)
+            .expect("small result should be admitted");
+        let stored = &face.raw_shape_cache.entries[0];
+
+        assert!(base.matches(stored));
+        assert!(
+            !key(
+                "offices",
+                base.script,
+                base.direction,
+                base.language,
+                base.flags,
+            )
+            .matches(stored)
+        );
+        assert!(
+            !key(
+                base.text,
+                harfrust::script::CYRILLIC,
+                base.direction,
+                base.language,
+                base.flags,
+            )
+            .matches(stored)
+        );
+        assert!(
+            !key(
+                base.text,
+                base.script,
+                harfrust::Direction::RightToLeft,
+                base.language,
+                base.flags,
+            )
+            .matches(stored)
+        );
+        assert!(
+            !key(
+                base.text,
+                base.script,
+                base.direction,
+                Some(&language_fr),
+                base.flags,
+            )
+            .matches(stored)
+        );
+        assert!(
+            !key(
+                base.text,
+                base.script,
+                base.direction,
+                base.language,
+                harfrust::BufferFlags::END_OF_TEXT.bits(),
+            )
+            .matches(stored)
+        );
+
+        let mut other_face = default_face("Hack");
+        let recreated_face = default_face("Hack");
+        assert!(other_face.raw_shape_cache.entries.is_empty());
+        assert!(recreated_face.raw_shape_cache.entries.is_empty());
+        assert!(other_face.raw_shape_cache.lookup(base).is_none());
+        assert_eq!(face.raw_shape_cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn raw_cache_enforces_lru_payload_and_oversize_limits() {
+        let mut lru = RawShapeCache::default();
+        for index in 0..RAW_SHAPE_CACHE_MAX_ENTRIES {
+            let text = format!("entry-{index:03}");
+            lru.insert(
+                key(
+                    &text,
+                    harfrust::script::LATIN,
+                    harfrust::Direction::LeftToRight,
+                    None,
+                    0,
+                ),
+                &[],
+                &[],
+            )
+            .expect("small key should be admitted");
+        }
+        assert_eq!(lru.entries.len(), RAW_SHAPE_CACHE_MAX_ENTRIES);
+
+        let least_recent = String::from("entry-000");
+        assert!(
+            lru.lookup(key(
+                &least_recent,
+                harfrust::script::LATIN,
+                harfrust::Direction::LeftToRight,
+                None,
+                0,
+            ))
+            .is_some()
+        );
+        let newest = String::from("entry-128");
+        let evictions = lru
+            .insert(
+                key(
+                    &newest,
+                    harfrust::script::LATIN,
+                    harfrust::Direction::LeftToRight,
+                    None,
+                    0,
+                ),
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(evictions, 1);
+        assert_eq!(lru.entries.len(), RAW_SHAPE_CACHE_MAX_ENTRIES);
+        assert!(
+            lru.lookup(key(
+                &least_recent,
+                harfrust::script::LATIN,
+                harfrust::Direction::LeftToRight,
+                None,
+                0,
+            ))
+            .is_some()
+        );
+        assert!(
+            lru.lookup(key(
+                "entry-001",
+                harfrust::script::LATIN,
+                harfrust::Direction::LeftToRight,
+                None,
+                0,
+            ))
+            .is_none()
+        );
+        assert!(lru.entries.iter().all(|entry| entry.text != "entry-001"));
+
+        let mut byte_bounded = RawShapeCache::default();
+        let infos = vec![harfrust::GlyphInfo::default(); 1024];
+        let positions = vec![harfrust::GlyphPosition::default(); 1024];
+        let mut saw_payload_eviction = false;
+        for index in 0..64 {
+            let text = format!("payload-{index:02}");
+            saw_payload_eviction |= byte_bounded
+                .insert(
+                    key(
+                        &text,
+                        harfrust::script::LATIN,
+                        harfrust::Direction::LeftToRight,
+                        None,
+                        0,
+                    ),
+                    &infos,
+                    &positions,
+                )
+                .unwrap()
+                > 0;
+        }
+        assert!(saw_payload_eviction);
+        assert!(byte_bounded.payload_bytes <= RAW_SHAPE_CACHE_MAX_PAYLOAD_BYTES);
+        assert!(byte_bounded.entries.len() <= RAW_SHAPE_CACHE_MAX_ENTRIES);
+
+        let mut protected = RawShapeCache::default();
+        protected
+            .insert(
+                key(
+                    "retained",
+                    harfrust::script::LATIN,
+                    harfrust::Direction::LeftToRight,
+                    None,
+                    0,
+                ),
+                &[],
+                &[],
+            )
+            .unwrap();
+        let before = protected
+            .entries
+            .iter()
+            .map(|entry| entry.text.clone())
+            .collect::<Vec<_>>();
+        let before_payload = protected.payload_bytes;
+
+        let overlong = "x".repeat(RAW_SHAPE_CACHE_MAX_TEXT_BYTES + 1);
+        assert_eq!(
+            protected.insert(
+                key(
+                    &overlong,
+                    harfrust::script::LATIN,
+                    harfrust::Direction::LeftToRight,
+                    None,
+                    0,
+                ),
+                &[],
+                &[],
+            ),
+            Err(RawShapeCacheBypass::TextLimit)
+        );
+
+        let oversized_infos = vec![harfrust::GlyphInfo::default(); 4096];
+        let oversized_positions = vec![harfrust::GlyphPosition::default(); 4096];
+        assert_eq!(
+            protected.insert(
+                key(
+                    "oversized-result",
+                    harfrust::script::LATIN,
+                    harfrust::Direction::LeftToRight,
+                    None,
+                    0,
+                ),
+                &oversized_infos,
+                &oversized_positions,
+            ),
+            Err(RawShapeCacheBypass::EntryPayloadLimit)
+        );
+        assert_eq!(
+            protected.insert(
+                key(
+                    "mismatched-arrays",
+                    harfrust::script::LATIN,
+                    harfrust::Direction::LeftToRight,
+                    None,
+                    0,
+                ),
+                &glyph_infos_for_cache_test(),
+                &[],
+            ),
+            Err(RawShapeCacheBypass::UnsupportedBuffer)
+        );
+        assert_eq!(
+            raw_shape_payload_bytes(usize::MAX, 1, 0, 0),
+            None,
+            "key payload accounting rejects arithmetic overflow"
+        );
+        assert_eq!(
+            protected
+                .entries
+                .iter()
+                .map(|entry| entry.text.clone())
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(protected.payload_bytes, before_payload);
+        assert!(
+            protected
+                .entries
+                .iter()
+                .any(|entry| entry.text == "retained")
+        );
+    }
+
+    fn glyph_infos_for_cache_test() -> [harfrust::GlyphInfo; 1] {
+        [harfrust::GlyphInfo::default()]
+    }
+
+    #[test]
+    fn raw_cache_hit_miss_recycling_and_unknown_buffer_bypass_match_reference() {
+        let texts = [
+            "office affine AV",
+            "x\u{0301}",
+            "مرحبا بالعالم",
+            "🇺🇸 family 👨‍👩‍👧‍👦",
+        ];
+        let coords = VariationCoords::default();
+        let mut face = default_face("Ubuntu-Light");
+        let reference_face = default_face("Ubuntu-Light");
+        let mut recycled = harfrust::UnicodeBuffer::new();
+        let mut default_signatures = Vec::new();
+
+        for text in texts {
+            let expected = reference_shape(
+                &reference_face,
+                text,
+                &coords,
+                harfrust::UnicodeBuffer::new(),
+                flags(),
+            );
+            let miss = shape(
+                &mut face,
+                text,
+                &coords,
+                recycled,
+                flags(),
+                ShapeBufferProvenance::LayoutOwnedClean,
+            );
+            assert!(matches!(&miss, LayoutShapeBuffer::GlyphBuffer(_)));
+            assert_matches_reference(&miss, &expected, text);
+            let expected_signature = signature(expected.glyph_infos(), expected.glyph_positions());
+            let miss_signature = layout_signature(&miss);
+            assert_eq!(miss_signature, expected_signature);
+            default_signatures.push(miss_signature);
+            recycled = miss.clear();
+            assert!(recycled.is_empty());
+
+            let entries_before_hit = face.raw_shape_cache.entries.len();
+            let hit = shape(
+                &mut face,
+                text,
+                &coords,
+                recycled,
+                flags(),
+                ShapeBufferProvenance::LayoutOwnedClean,
+            );
+            assert!(matches!(&hit, LayoutShapeBuffer::Cached { .. }));
+            assert_eq!(layout_signature(&hit), expected_signature);
+            assert_eq!(face.raw_shape_cache.entries.len(), entries_before_hit);
+            recycled = hit.clear();
+            assert!(recycled.is_empty());
+        }
+        assert_eq!(face.raw_shape_cache.entries.len(), texts.len());
+
+        let before_unknown = cache_snapshot(&face);
+        let unknown_text = "A\u{FE0F}";
+        let fallback_glyph = match face.glyph_id_resolution('B').expect("Ubuntu-Light maps B") {
+            GlyphIdResolution::Glyph(glyph_id) => glyph_id.to_u32(),
+            GlyphIdResolution::Invisible => panic!("B is visible in Ubuntu-Light"),
+        };
+        let mut unknown_buffer = harfrust::UnicodeBuffer::new();
+        unknown_buffer.set_pre_context("pre");
+        unknown_buffer.set_post_context("post");
+        unknown_buffer.set_not_found_variation_selector_glyph(fallback_glyph);
+        let unknown = shape(
+            &mut face,
+            unknown_text,
+            &coords,
+            unknown_buffer,
+            flags(),
+            ShapeBufferProvenance::Unknown,
+        );
+        assert!(matches!(&unknown, LayoutShapeBuffer::GlyphBuffer(_)));
+        let unknown_signature = layout_signature(&unknown);
+        let mut unknown_reference_buffer = harfrust::UnicodeBuffer::new();
+        unknown_reference_buffer.set_pre_context("pre");
+        unknown_reference_buffer.set_post_context("post");
+        unknown_reference_buffer.set_not_found_variation_selector_glyph(fallback_glyph);
+        let unknown_reference = reference_shape(
+            &reference_face,
+            unknown_text,
+            &coords,
+            unknown_reference_buffer,
+            flags(),
+        );
+        assert_eq!(
+            unknown_signature,
+            signature(
+                unknown_reference.glyph_infos(),
+                unknown_reference.glyph_positions()
+            )
+        );
+        let default_unknown_reference = reference_shape(
+            &reference_face,
+            unknown_text,
+            &coords,
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+        );
+        assert_ne!(
+            unknown_signature,
+            signature(
+                default_unknown_reference.glyph_infos(),
+                default_unknown_reference.glyph_positions()
+            ),
+            "the hidden replacement policy must observably affect the reference output"
+        );
+        assert_eq!(cache_snapshot(&face), before_unknown);
+        drop(unknown.clear());
+
+        // A pre-populated input appends text to its existing buffer. Compare the
+        // exact same buffer-building sequence; concatenating strings separately
+        // would not preserve its cluster and context semantics.
+        let make_prepopulated_buffer = || {
+            let mut buffer = harfrust::UnicodeBuffer::new();
+            buffer.set_pre_context("before");
+            buffer.push_str("prefix ");
+            buffer.set_post_context("after");
+            buffer
+        };
+        let before_prepopulated = cache_snapshot(&face);
+        let appended_text = "office";
+        let prepopulated = shape(
+            &mut face,
+            appended_text,
+            &coords,
+            make_prepopulated_buffer(),
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        assert!(matches!(&prepopulated, LayoutShapeBuffer::GlyphBuffer(_)));
+        let prepopulated_reference = reference_shape(
+            &reference_face,
+            appended_text,
+            &coords,
+            make_prepopulated_buffer(),
+            flags(),
+        );
+        assert_matches_reference(
+            &prepopulated,
+            &prepopulated_reference,
+            "pre-populated append",
+        );
+        assert_eq!(cache_snapshot(&face), before_prepopulated);
+        drop(prepopulated.clear());
+
+        let custom_text = texts[1];
+        let mut custom_buffer = harfrust::UnicodeBuffer::new();
+        custom_buffer.set_cluster_level(harfrust::BufferClusterLevel::Characters);
+        let before_custom = cache_snapshot(&face);
+        let custom = shape(
+            &mut face,
+            custom_text,
+            &coords,
+            custom_buffer,
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        assert!(matches!(&custom, LayoutShapeBuffer::GlyphBuffer(_)));
+        let mut custom_reference_buffer = harfrust::UnicodeBuffer::new();
+        custom_reference_buffer.set_cluster_level(harfrust::BufferClusterLevel::Characters);
+        let custom_reference = reference_shape(
+            &reference_face,
+            custom_text,
+            &coords,
+            custom_reference_buffer,
+            flags(),
+        );
+        assert_matches_reference(&custom, &custom_reference, "custom character clusters");
+        assert_ne!(
+            layout_signature(&custom),
+            default_signatures[1],
+            "character clusters observably differ from the default grapheme policy"
+        );
+        assert_eq!(cache_snapshot(&face), before_custom);
+        drop(custom.clear());
+
+        // The first miss leaves ample native glyph-buffer capacity. A cache hit
+        // returns the same UnicodeBuffer, and a later miss must reuse its storage.
+        let mut reuse_face = default_face("Ubuntu-Light");
+        let reuse_reference = default_face("Ubuntu-Light");
+        let long_text = "office ".repeat(256);
+        let short_text = "office";
+        let first_miss = shape(
+            &mut reuse_face,
+            &long_text,
+            &coords,
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        let (native_allocation, first_glyph_count) = match &first_miss {
+            LayoutShapeBuffer::GlyphBuffer(buffer) => {
+                (buffer.glyph_infos().as_ptr(), buffer.glyph_infos().len())
+            }
+            LayoutShapeBuffer::Cached { .. } => panic!("the first long input is a cache miss"),
+        };
+        assert!(first_glyph_count > 1_000);
+        let expected_long = reference_shape(
+            &reuse_reference,
+            &long_text,
+            &coords,
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+        );
+        assert_matches_reference(&first_miss, &expected_long, "long cache miss");
+        let recycled = first_miss.clear();
+        let hit = shape(
+            &mut reuse_face,
+            &long_text,
+            &coords,
+            recycled,
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        assert!(matches!(&hit, LayoutShapeBuffer::Cached { .. }));
+        assert_eq!(
+            layout_signature(&hit),
+            signature(expected_long.glyph_infos(), expected_long.glyph_positions())
+        );
+        let recycled = hit.clear();
+        let forced_miss = shape(
+            &mut reuse_face,
+            short_text,
+            &coords,
+            recycled,
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        let (reused_allocation, forced_glyph_count) = match &forced_miss {
+            LayoutShapeBuffer::GlyphBuffer(buffer) => {
+                (buffer.glyph_infos().as_ptr(), buffer.glyph_infos().len())
+            }
+            LayoutShapeBuffer::Cached { .. } => panic!("different short text is a cache miss"),
+        };
+        assert!(forced_glyph_count < first_glyph_count);
+        assert_eq!(
+            reused_allocation, native_allocation,
+            "a cache hit followed by a forced miss reuses native glyph allocation"
+        );
+        let expected_short = reference_shape(
+            &reuse_reference,
+            short_text,
+            &coords,
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+        );
+        assert_matches_reference(&forced_miss, &expected_short, "forced short miss");
+        drop(forced_miss.clear());
+    }
+
+    #[test]
+    fn raw_cache_bypasses_variable_instances_and_preserves_extrema_outputs() {
+        let path = Path::new(r"C:\Windows\Fonts\Bahnschrift.ttf");
+        let Ok(bytes) = std::fs::read(path) else {
+            eprintln!(
+                "M2A_RAW_SHAPE_VARIATION_FIXTURE status=unavailable reason=local_Bahnschrift_not_found path={}",
+                path.display()
+            );
+            return;
+        };
+        let data = FontData::from_owned(bytes);
+        let axes = data.variation_axes();
+        let axis = axes
+            .iter()
+            .find(|axis| axis.tag == crate::text::Tag::new(b"wght"))
+            .expect("Bahnschrift provides the wght variation axis");
+        let weights = [300.0, 700.0];
+        assert!(axis.range.min <= weights[0] && weights[1] <= axis.range.max);
+
+        let text = "Variable font: office AV — café";
+        let mut format_face = face_from_data("Bahnschrift-format", &data, data.tweak.clone());
+        let format_reference =
+            face_from_data("Bahnschrift-format-reference", &data, data.tweak.clone());
+        for weight in weights {
+            let coords = VariationCoords::new([(axis.tag, weight)]);
+            let output = shape(
+                &mut format_face,
+                text,
+                &coords,
+                harfrust::UnicodeBuffer::new(),
+                flags(),
+                ShapeBufferProvenance::LayoutOwnedClean,
+            );
+            assert!(matches!(&output, LayoutShapeBuffer::GlyphBuffer(_)));
+            let reference = reference_shape(
+                &format_reference,
+                text,
+                &coords,
+                harfrust::UnicodeBuffer::new(),
+                flags(),
+            );
+            assert_matches_reference(&output, &reference, &format!("Bahnschrift wght={weight}"));
+            assert!(format_face.raw_shape_cache.entries.is_empty());
+            assert_eq!(format_face.raw_shape_cache.payload_bytes, 0);
+            drop(output.clear());
+        }
+
+        let mut tweak = data.tweak.clone();
+        tweak.coords = VariationCoords::new([(axis.tag, weights[0])]);
+        let mut tweak_face = face_from_data("Bahnschrift-face-tweak", &data, tweak.clone());
+        let tweak_reference = face_from_data("Bahnschrift-tweak-reference", &data, tweak);
+        let tweaked = shape(
+            &mut tweak_face,
+            text,
+            &VariationCoords::default(),
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        assert!(matches!(&tweaked, LayoutShapeBuffer::GlyphBuffer(_)));
+        let reference = reference_shape(
+            &tweak_reference,
+            text,
+            &VariationCoords::default(),
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+        );
+        assert_matches_reference(&tweaked, &reference, "Bahnschrift face-tweak wght=300");
+        assert!(tweak_face.raw_shape_cache.entries.is_empty());
+        assert_eq!(tweak_face.raw_shape_cache.payload_bytes, 0);
+        eprintln!(
+            "M2A_RAW_SHAPE_VARIATION_FIXTURE status=passed path={} axis=wght weights={}..{} format_and_face_tweak_bypass=passed complete_glyph_output_parity=passed",
+            path.display(),
+            weights[0],
+            weights[1]
+        );
+        drop(tweaked.clear());
     }
 }
