@@ -88,9 +88,7 @@ impl ShellCmdDialog {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Command");
-                        ui.add(
-                            egui::TextEdit::multiline(&mut self.args).id_source("shell_cmd_args"),
-                        );
+                        ui.add(egui::TextEdit::multiline(&mut self.args).id_salt("shell_cmd_args"));
                         if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             self.args.push('\n');
                             let modifiers = ui.input(|i| i.modifiers);
@@ -214,24 +212,26 @@ mod tests {
         dlg.edit_idx = Some(0);
         dlg.args = "echo hi".into();
 
-        ctx.begin_frame(Default::default());
+        ctx.begin_pass(Default::default());
         dlg.ui(&ctx, &mut app);
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
         ctx.memory_mut(|m| m.request_focus(egui::Id::new("shell_cmd_args")));
 
-        ctx.begin_frame(egui::RawInput {
-            modifiers,
-            events: vec![egui::Event::Key {
-                key: egui::Key::Enter,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers,
-            }],
+        ctx.begin_pass(egui::RawInput {
+            events: vec![
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                },
+                egui::Event::ModifiersChanged(modifiers),
+            ],
             ..Default::default()
         });
         dlg.ui(&ctx, &mut app);
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
 
         dlg.args
     }

@@ -24,6 +24,7 @@ mod event_channel;
 mod fav_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
+mod font_revision;
 pub mod image_crop_editor;
 mod image_panel;
 mod indexing;
@@ -235,7 +236,7 @@ pub const APP_PREFIX: &str = "app";
 fn scale_ui<R>(ui: &mut egui::Ui, scale: f32, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
         if (scale - 1.0).abs() > f32::EPSILON {
-            let mut style: egui::Style = (*ui.ctx().style()).clone();
+            let mut style: egui::Style = (**ui.style()).clone();
             style.spacing.item_spacing *= scale;
             style.spacing.interact_size *= scale;
             for font in style.text_styles.values_mut() {
@@ -1185,6 +1186,8 @@ impl LauncherApp {
                 text: msg.into().into(),
                 kind: ToastKind::Error,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+
+                style: Default::default(),
             });
         }
     }
@@ -1416,6 +1419,8 @@ impl LauncherApp {
                 text: msg.into(),
                 kind: ToastKind::Error,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+
+                style: Default::default(),
             });
         }
     }
@@ -1830,6 +1835,9 @@ impl LauncherApp {
         restore_flag: Arc<AtomicBool>,
         help_flag: Arc<AtomicBool>,
     ) -> Self {
+        // egui snapshots context plugins when a UI run begins, so install the
+        // font-revision owner before the first eframe pass can begin.
+        crate::gui::font_revision::register(ctx);
         crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
         let desired_index_config = crate::indexer::coordinator::IndexConfig::new(
             index_paths.unwrap_or_default(),
@@ -1925,6 +1933,8 @@ impl LauncherApp {
                             kind: ToastKind::Error,
                             options: ToastOptions::default()
                                 .duration_in_seconds(toast_duration as f64),
+
+                            style: Default::default(),
                         },
                     );
                 }
@@ -1949,6 +1959,8 @@ impl LauncherApp {
                         text: format!("Failed to watch {}", actions_path).into(),
                         kind: ToastKind::Error,
                         options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
+
+                        style: Default::default(),
                     },
                 );
             }
@@ -1972,6 +1984,8 @@ impl LauncherApp {
                             kind: ToastKind::Error,
                             options: ToastOptions::default()
                                 .duration_in_seconds(toast_duration as f64),
+
+                            style: Default::default(),
                         },
                     );
                 }
@@ -1992,6 +2006,8 @@ impl LauncherApp {
                         text: "Failed to watch folders.json".into(),
                         kind: ToastKind::Error,
                         options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
+
+                        style: Default::default(),
                     },
                 );
             }
@@ -2015,6 +2031,8 @@ impl LauncherApp {
                             kind: ToastKind::Error,
                             options: ToastOptions::default()
                                 .duration_in_seconds(toast_duration as f64),
+
+                            style: Default::default(),
                         },
                     );
                 }
@@ -2035,6 +2053,8 @@ impl LauncherApp {
                         text: "Failed to watch bookmarks.json".into(),
                         kind: ToastKind::Error,
                         options: ToastOptions::default().duration_in_seconds(toast_duration as f64),
+
+                        style: Default::default(),
                     },
                 );
             }
@@ -3943,6 +3963,8 @@ impl LauncherApp {
                     kind: ToastKind::Info,
                     options: ToastOptions::default()
                         .duration_in_seconds(self.toast_duration as f64),
+
+                    style: Default::default(),
                 },
             );
         }
@@ -4012,6 +4034,8 @@ impl LauncherApp {
                     kind: ToastKind::Info,
                     options: ToastOptions::default()
                         .duration_in_seconds(self.toast_duration as f64),
+
+                    style: Default::default(),
                 },
             );
         }
@@ -4069,6 +4093,8 @@ impl LauncherApp {
                                     kind: ToastKind::Info,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(self.toast_duration as f64),
+
+                                    style: Default::default(),
                                 },
                             );
                         }
@@ -4138,6 +4164,8 @@ impl LauncherApp {
                                 kind: ToastKind::Success,
                                 options: ToastOptions::default()
                                     .duration_in_seconds(self.toast_duration as f64),
+
+                                style: Default::default(),
                             },
                         );
                     }
@@ -4156,20 +4184,19 @@ impl LauncherApp {
     }
 
     /// Process dropped files or directories.
-    pub fn handle_dropped_files(&mut self, files: Vec<egui::DroppedFile>) {
+    pub fn handle_dropped_files(&mut self, files: Vec<egui::DroppedFileHandle>) {
         for file in files {
-            if let Some(path) = file.path {
-                if path.is_dir() {
-                    if let Err(e) = folders::add(path.to_str().unwrap_or_default()) {
-                        self.report_error_message("launcher", format!("Failed to add folder: {e}"));
-                    }
-                    if let Some(p) = path.to_str() {
-                        self.alias_dialog.open(p);
-                    }
-                } else if let Some(p) = path.to_str() {
-                    self.show_editor = true;
-                    self.editor.open_add_with_path(p);
+            let path = file.path().to_path_buf();
+            if path.is_dir() {
+                if let Err(e) = folders::add(path.to_str().unwrap_or_default()) {
+                    self.report_error_message("launcher", format!("Failed to add folder: {e}"));
                 }
+                if let Some(p) = path.to_str() {
+                    self.alias_dialog.open(p);
+                }
+            } else if let Some(p) = path.to_str() {
+                self.show_editor = true;
+                self.editor.open_add_with_path(p);
             }
         }
     }
@@ -5159,7 +5186,7 @@ mod tests {
         app: &LauncherApp,
     ) -> (egui::FullOutput, Arc<egui::DeferredViewportUiCallback>) {
         ctx.set_embed_viewports(false);
-        let output = ctx.run(egui::RawInput::default(), |root| {
+        let output = ctx.run_ui(egui::RawInput::default(), |root| {
             radial_editor::RadialEditorState::show_deferred(&app.radial_editor, root, app);
         });
         let callback = output
@@ -6724,10 +6751,10 @@ mod tests {
         assert_eq!(focus_commands(&root_output, viewport_id), 1);
         assert!(ctx.has_requested_repaint_for(&viewport_id));
 
-        let first = ctx.run(deferred_child_input(viewport_id), |child| {
+        let first = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             callback(child);
         });
-        let second = ctx.run(deferred_child_input(viewport_id), |child| {
+        let second = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             callback(child);
         });
 
@@ -6745,7 +6772,7 @@ mod tests {
         let (initial, callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&initial, viewport_id), 1);
 
-        let initial_child = ctx.run(deferred_child_input(viewport_id), |child| {
+        let initial_child = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             callback(child);
         });
         assert_eq!(focus_commands(&initial_child, viewport_id), 0);
@@ -6754,7 +6781,7 @@ mod tests {
         app.enforce_pinned();
         let (maintained, maintained_callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&maintained, viewport_id), 0);
-        let maintained_child = ctx.run(deferred_child_input(viewport_id), |child| {
+        let maintained_child = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             maintained_callback(child);
         });
         assert_eq!(focus_commands(&maintained_child, viewport_id), 0);
@@ -6762,7 +6789,7 @@ mod tests {
         app.focus_panel(Panel::RadialEditor);
         let (explicit, explicit_callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&explicit, viewport_id), 1);
-        let explicit_child = ctx.run(deferred_child_input(viewport_id), |child| {
+        let explicit_child = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             explicit_callback(child);
         });
         assert_eq!(focus_commands(&explicit_child, viewport_id), 0);

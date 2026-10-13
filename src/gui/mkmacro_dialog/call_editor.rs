@@ -14,7 +14,7 @@ pub(super) struct CallUiOutcome {
 
 fn source_ui(
     ui: &mut egui::Ui,
-    id: impl std::hash::Hash + Copy,
+    id: impl std::hash::Hash + Copy + std::fmt::Debug,
     source: &mut MkValueSource,
     expected: Option<MkValueType>,
     catalog: &VariableCatalog,
@@ -129,7 +129,7 @@ pub(super) fn call_ui(
                 if ui
                     .add_enabled(
                         target.id != caller_id,
-                        egui::SelectableLabel::new(*pending_target == Some(target.id), label),
+                        egui::Button::selectable(*pending_target == Some(target.id), label),
                     )
                     .on_hover_text(&target.description)
                     .clicked()

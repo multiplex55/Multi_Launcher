@@ -87,10 +87,10 @@ impl MouseSettingsDialog {
             .open(&mut open)
             .resizable(true)
             .default_width(420.0)
-            .max_width((ctx.screen_rect().width() - 16.0).max(240.0))
+            .max_width((ctx.content_rect().width() - 16.0).max(240.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
-                    .id_source("mouse_settings_form")
+                    .id_salt("mouse_settings_form")
                     .max_height(ui.available_height().max(1.0))
                     .show(ui, |ui| {
                         ui.label("Configure coordinate overlays. Session switches take effect immediately; appearance changes stay in draft until Apply.");
@@ -133,19 +133,19 @@ impl MouseSettingsDialog {
                             ui.label("Thickness");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.crosshair.thickness)
-                                    .clamp_range(1..=16),
+                                    .range(1..=16),
                             );
                             ui.label("Arm length");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.crosshair.arm_length)
-                                    .clamp_range(2..=256),
+                                    .range(2..=256),
                             );
                         });
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Center gap (physical pixels)");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.crosshair.center_gap)
-                                    .clamp_range(0..=128),
+                                    .range(0..=128),
                             )
                             .on_hover_text(
                                 "Per-arm distance from the cursor hotspot to the first visible pixel, including the outline, in physical pixels. Set to 0 to meet at the hotspot.",
@@ -223,7 +223,7 @@ impl MouseSettingsDialog {
                             ui.label("Thickness (px)");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.halo.outline_thickness)
-                                    .clamp_range(1..=8),
+                                    .range(1..=8),
                             );
                         });
 
@@ -252,7 +252,7 @@ impl MouseSettingsDialog {
                         ui.small(applied_zoom_summary(adapter.preferences()));
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Destination mode");
-                            egui::ComboBox::from_id_source("mouse_settings_zoom_mode")
+                            egui::ComboBox::from_id_salt("mouse_settings_zoom_mode")
                                 .selected_text(zoom_mode_label(self.draft.zoom.mode))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
@@ -286,12 +286,12 @@ impl MouseSettingsDialog {
                             ui.label("Destination X offset (physical px)");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.zoom.destination_offset.x)
-                                    .clamp_range(-2048..=2048),
+                                    .range(-2048..=2048),
                             );
                             ui.label("Y offset");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.zoom.destination_offset.y)
-                                    .clamp_range(-2048..=2048),
+                                    .range(-2048..=2048),
                             );
                         })
                         .response
@@ -316,7 +316,7 @@ impl MouseSettingsDialog {
                             ui.label("Thickness (px)");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.zoom.outline_thickness)
-                                    .clamp_range(1..=8),
+                                    .range(1..=8),
                             );
                         });
 
@@ -337,7 +337,7 @@ impl MouseSettingsDialog {
 
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Coordinate space");
-                            egui::ComboBox::from_id_source("mouse_settings_coordinate_space")
+                            egui::ComboBox::from_id_salt("mouse_settings_coordinate_space")
                                 .selected_text(space_label(self.draft.space))
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(
@@ -366,11 +366,11 @@ impl MouseSettingsDialog {
                             ui.label("Cursor offset (physical pixels)");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.cursor_offset.x)
-                                    .clamp_range(-512..=512),
+                                    .range(-512..=512),
                             );
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.cursor_offset.y)
-                                    .clamp_range(-512..=512),
+                                    .range(-512..=512),
                             );
                         });
 
@@ -764,7 +764,7 @@ mod tests {
             ..Default::default()
         };
         let mut scroll = None;
-        let _ = ctx.run(input, |ctx| {
+        let _ = ctx.run_ui(input, |ctx| {
             scroll = dialog.show_ui(ctx, &mut adapter);
         });
 

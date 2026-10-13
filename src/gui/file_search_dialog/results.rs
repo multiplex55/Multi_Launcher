@@ -403,13 +403,23 @@ pub(super) fn non_wrapping_selectable_label(
     let text = text.into();
     let button_padding = ui.spacing().button_padding;
     let total_extra = button_padding + button_padding;
-    let galley = text.into_galley(ui, Some(false), f32::INFINITY, egui::TextStyle::Button);
+    let galley = text.into_galley(
+        ui,
+        Some(egui::TextWrapMode::Extend),
+        f32::INFINITY,
+        egui::TextStyle::Button,
+    );
     let mut desired_size = total_extra + galley.size();
     desired_size.y = desired_size.y.max(ui.spacing().interact_size.y);
     let (rect, response) = ui.allocate_at_least(desired_size, egui::Sense::click());
 
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, selected, galley.text())
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            selected,
+            galley.text(),
+        )
     });
 
     if ui.is_rect_visible(response.rect) {
@@ -422,9 +432,10 @@ pub(super) fn non_wrapping_selectable_label(
             let rect = rect.expand(visuals.expansion);
             ui.painter().rect(
                 rect,
-                visuals.rounding,
+                visuals.corner_radius,
                 visuals.weak_bg_fill,
                 visuals.bg_stroke,
+                egui::StrokeKind::Middle,
             );
         }
         ui.painter().galley(text_pos, galley, visuals.text_color());
@@ -442,10 +453,10 @@ pub fn content_line_label(m: &ContentMatch) -> WidgetText {
     job.append(&prefix, 0.0, TextFormat::default());
     let highlighted = highlighted_content_job(&m.line, &m.ranges);
     for section in highlighted.sections {
-        let text = &highlighted.text[section.byte_range];
+        let text = &highlighted.text[section.byte_range.start.0..section.byte_range.end.0];
         job.append(text, section.leading_space, section.format);
     }
-    WidgetText::LayoutJob(job)
+    WidgetText::LayoutJob(job.into())
 }
 
 pub fn row_matches_refinement(
@@ -604,9 +615,9 @@ mod tests {
 
         assert_eq!(job.text, "café needle");
         assert!(
-            job.sections
-                .iter()
-                .any(|section| { section.byte_range.start == 6 && section.byte_range.end == 12 })
+            job.sections.iter().any(|section| {
+                section.byte_range.start.0 == 6 && section.byte_range.end.0 == 12
+            })
         );
     }
 
@@ -629,7 +640,7 @@ mod tests {
         let highlighted: Vec<_> = job
             .sections
             .iter()
-            .map(|section| (section.byte_range.start, section.byte_range.end))
+            .map(|section| (section.byte_range.start.0, section.byte_range.end.0))
             .filter(|range| *range == (0, 6) || *range == (11, 17))
             .collect();
         assert_eq!(highlighted, vec![(0, 6), (11, 17)]);
@@ -657,9 +668,9 @@ mod tests {
 
         assert_eq!(job.text, "café");
         assert!(
-            job.sections
-                .iter()
-                .any(|section| { section.byte_range.start == 3 && section.byte_range.end == 5 })
+            job.sections.iter().any(|section| {
+                section.byte_range.start.0 == 3 && section.byte_range.end.0 == 5
+            })
         );
     }
 

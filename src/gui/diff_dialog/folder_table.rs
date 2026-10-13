@@ -72,7 +72,11 @@ pub(super) fn show(
     // dimension can affect the parent Ui or the Diff window.
     let available = ui.available_size().max(egui::Vec2::ZERO);
     let (outer, _) = ui.allocate_exact_size(available, egui::Sense::hover());
-    let mut viewport_ui = ui.child_ui(outer, egui::Layout::top_down(egui::Align::Min));
+    let mut viewport_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(outer)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
     viewport_ui.set_clip_rect(viewport_ui.clip_rect().intersect(outer));
 
     state.column_widths = state.column_widths.validated();
@@ -92,13 +96,13 @@ pub(super) fn show(
     let data_height = (available.y - FOLDER_HEADER_HEIGHT).max(0.0);
 
     let output = egui::ScrollArea::horizontal()
-        .id_source("folder-results-horizontal")
+        .id_salt("folder-results-horizontal")
         .auto_shrink([false, false])
         .show(&mut viewport_ui, |ui| {
             ui.set_min_width(layout.total_width);
             render_header(ui, layout, state, available.x);
             let mut scroll = egui::ScrollArea::vertical()
-                .id_source("folder-results-vertical")
+                .id_salt("folder-results-vertical")
                 .auto_shrink([false, false])
                 .max_height(data_height);
             if let Some(index) = anchor_index {
@@ -173,9 +177,10 @@ fn render_header(
     .into_iter()
     .enumerate()
     {
-        let mut cell = ui.child_ui(
-            cell_rect(rect, layout, column),
-            egui::Layout::left_to_right(egui::Align::Center),
+        let mut cell = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(cell_rect(rect, layout, column))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
         );
         if column == 7 {
             if cell.small_button("Reset Columns").clicked() {
@@ -328,9 +333,10 @@ fn render_row(
             .map(folder_view::format_modified)
             .unwrap_or_else(|| "—".into()),
     );
-    let mut cell = ui.child_ui(
-        cell_rect(rect, layout, 7),
-        egui::Layout::left_to_right(egui::Align::Center),
+    let mut cell = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(cell_rect(rect, layout, 7))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     if cell
         .small_button(if folder_view::is_directory(&entry) {
@@ -345,8 +351,12 @@ fn render_row(
 }
 
 fn label_cell(ui: &mut egui::Ui, rect: egui::Rect, text: impl Into<egui::WidgetText>) {
-    let mut cell = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center));
-    cell.add(egui::Label::new(text).wrap(false));
+    let mut cell = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    cell.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -361,7 +371,11 @@ fn render_path_cell(
     operation_active: bool,
     action: &mut FolderViewAction,
 ) {
-    let mut cell = ui.child_ui(rect, egui::Layout::left_to_right(egui::Align::Center));
+    let mut cell = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
     if left {
         cell.add_space(row.depth as f32 * 14.0);
         if row.has_children {
@@ -407,15 +421,15 @@ fn render_path_cell(
     } else {
         String::new()
     };
-    cell.style_mut().wrap = Some(false);
-    let response = cell.add(egui::SelectableLabel::new(
+    cell.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+    let response = cell.add(egui::Button::selectable(
         state.selected_paths.contains(&row.path),
         text,
     ));
     response.clone().context_menu(|ui| {
         if present && ui.button("Align With…").clicked() {
             state.pending_alignment = Some((left, side_relative.clone()));
-            ui.close_menu();
+            ui.close();
         }
         if let Some(index) = state
             .alignment_overrides
@@ -425,7 +439,7 @@ fn render_path_cell(
         {
             state.alignment_overrides.remove(index);
             state.pending_alignment = None;
-            ui.close_menu();
+            ui.close();
         }
         if let Some((source_left, source)) = state.pending_alignment.clone()
             && source_left != left
@@ -451,7 +465,7 @@ fn render_path_cell(
                 state.alignment_overrides = candidate;
             }
             state.pending_alignment = None;
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         folder_view::mutation_menu(ui, state, operation_active, action);

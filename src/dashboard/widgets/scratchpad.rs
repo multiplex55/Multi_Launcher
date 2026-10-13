@@ -207,7 +207,7 @@ impl ScratchpadWidget {
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut cfg.debounce_secs)
-                            .clamp_range(0.1..=5.0)
+                            .range(0.1..=5.0)
                             .speed(0.1),
                     )
                     .changed();
@@ -285,8 +285,8 @@ impl ScratchpadWidget {
             .cursor
             .char_range()
             .map(|range| range.primary.index)
-            .unwrap_or_else(|| self.content.chars().count());
-        let new_cursor = insert_at_char_index(&mut self.content, &timestamp, cursor_index);
+            .unwrap_or_else(|| egui::text::CharIndex(self.content.chars().count()));
+        let new_cursor = insert_at_char_index(&mut self.content, &timestamp, cursor_index.0);
         state
             .cursor
             .set_char_range(Some(egui::text::CCursorRange::one(
@@ -339,7 +339,9 @@ impl Widget for ScratchpadWidget {
         ui.horizontal(|ui| {
             if ui.button("Copy").clicked() {
                 ui.ctx().output_mut(|output| {
-                    output.copied_text = self.content.clone();
+                    output
+                        .commands
+                        .push(egui::OutputCommand::CopyText(self.content.clone()));
                 });
             }
             if ui.button("Append timestamp").clicked() {
@@ -354,10 +356,9 @@ impl Widget for ScratchpadWidget {
         let text_id = self.text_edit_id(ui);
         let resp = ui.add(
             egui::TextEdit::multiline(&mut self.content)
-                .id_source(text_id)
+                .id_salt(text_id)
                 .desired_rows(8)
-                .desired_width(f32::INFINITY)
-                .frame(true),
+                .desired_width(f32::INFINITY),
         );
         if resp.changed() {
             self.schedule_save();

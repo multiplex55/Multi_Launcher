@@ -143,7 +143,7 @@ impl SettingsEditor {
     pub(crate) fn settings_window_default_size(ctx: &egui::Context) -> [f32; 2] {
         [
             Self::SETTINGS_WINDOW_DEFAULT_WIDTH,
-            Self::settings_window_default_height(ctx.available_rect().height()),
+            Self::settings_window_default_height(ctx.content_rect().height()),
         ]
     }
 

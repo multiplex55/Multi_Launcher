@@ -15,9 +15,13 @@ enum StructuralEdit {
     Move(DefinitionKind, usize, bool),
 }
 
-fn type_selector(ui: &mut egui::Ui, id: impl std::hash::Hash, kind: &mut MkValueType) -> bool {
+fn type_selector(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    kind: &mut MkValueType,
+) -> bool {
     let before = *kind;
-    egui::ComboBox::from_id_source(id)
+    egui::ComboBox::from_id_salt(id)
         .selected_text(kind.label())
         .show_ui(ui, |ui| {
             for candidate in [

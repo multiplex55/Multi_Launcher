@@ -1010,10 +1010,10 @@ mod tests {
             assert!(d.folder_delete_confirmation.is_open());
             let ctx = Context::default();
             // A second frame includes the window after egui's initial sizing pass.
-            let _ = ctx.run(Default::default(), |ctx| {
+            let _ = ctx.run_ui(Default::default(), |ctx| {
                 d.folder_delete_confirmation.ui(ctx);
             });
-            let output = ctx.run(Default::default(), |ctx| {
+            let output = ctx.run_ui(Default::default(), |ctx| {
                 d.folder_delete_confirmation.ui(ctx);
             });
             let mut text = String::new();

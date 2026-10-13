@@ -105,7 +105,7 @@ impl Plugin for FileSearchPlugin {
             ui.add(
                 egui::DragValue::new(&mut cfg.max_content_search_file_size_bytes)
                     .speed(1024.0)
-                    .clamp_range(1..=u64::MAX),
+                    .range(1..=u64::MAX),
             );
         });
         full_preview_limit_mib_editor(ui, &mut cfg.max_full_preview_file_size_bytes);
@@ -179,11 +179,7 @@ fn full_preview_limit_mib_editor(ui: &mut egui::Ui, bytes: &mut u64) {
     ui.horizontal(|ui| {
         ui.label("Full-file preview limit (MiB)");
         if ui
-            .add(
-                egui::DragValue::new(&mut mib)
-                    .speed(1.0)
-                    .clamp_range(1..=max_mib),
-            )
+            .add(egui::DragValue::new(&mut mib).speed(1.0).range(1..=max_mib))
             .changed()
         {
             *bytes = mib

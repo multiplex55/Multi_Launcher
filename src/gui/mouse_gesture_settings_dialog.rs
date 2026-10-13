@@ -147,7 +147,7 @@ impl MouseGestureSettingsDialog {
                     changed |= ui
                         .add(
                             egui::DragValue::new(&mut self.settings.trail_width)
-                                .clamp_range(1.0..=20.0)
+                                .range(1.0..=20.0)
                                 .speed(0.5),
                         )
                         .changed();
@@ -161,7 +161,7 @@ impl MouseGestureSettingsDialog {
                         .add(
                             egui::DragValue::new(&mut self.settings.trail_interval_ms)
                                 .speed(1)
-                                .clamp_range(4..=250),
+                                .range(4..=250),
                         )
                         .changed();
                 });
@@ -171,7 +171,7 @@ impl MouseGestureSettingsDialog {
                         .add(
                             egui::DragValue::new(&mut self.settings.recognition_interval_ms)
                                 .speed(1)
-                                .clamp_range(4..=500),
+                                .range(4..=500),
                         )
                         .changed();
                 });
@@ -185,14 +185,14 @@ impl MouseGestureSettingsDialog {
                     changed |= ui
                         .add(
                             egui::DragValue::new(&mut self.settings.hint_offset.0)
-                                .clamp_range(-200.0..=200.0)
+                                .range(-200.0..=200.0)
                                 .speed(1.0),
                         )
                         .changed();
                     changed |= ui
                         .add(
                             egui::DragValue::new(&mut self.settings.hint_offset.1)
-                                .clamp_range(-200.0..=200.0)
+                                .range(-200.0..=200.0)
                                 .speed(1.0),
                         )
                         .changed();
@@ -200,7 +200,7 @@ impl MouseGestureSettingsDialog {
 
                 ui.horizontal(|ui| {
                     ui.label("Wheel cycling");
-                    egui::ComboBox::from_id_source("mg_settings_wheel_cycle_gate")
+                    egui::ComboBox::from_id_salt("mg_settings_wheel_cycle_gate")
                         .selected_text(wheel_cycle_gate_label(self.settings.wheel_cycle_gate))
                         .show_ui(ui, |ui| {
                             changed |= ui
@@ -224,7 +224,7 @@ impl MouseGestureSettingsDialog {
 
                 ui.horizontal(|ui| {
                     ui.label("Cancel behavior");
-                    egui::ComboBox::from_id_source("mg_settings_cancel_behavior")
+                    egui::ComboBox::from_id_salt("mg_settings_cancel_behavior")
                         .selected_text(cancel_behavior_label(self.settings.cancel_behavior))
                         .show_ui(ui, |ui| {
                             changed |= ui
@@ -246,7 +246,7 @@ impl MouseGestureSettingsDialog {
 
                 ui.horizontal(|ui| {
                     ui.label("No-match behavior");
-                    egui::ComboBox::from_id_source("mg_settings_no_match_behavior")
+                    egui::ComboBox::from_id_salt("mg_settings_no_match_behavior")
                         .selected_text(no_match_behavior_label(self.settings.no_match_behavior))
                         .show_ui(ui, |ui| {
                             changed |= ui

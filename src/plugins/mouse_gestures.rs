@@ -612,7 +612,7 @@ impl Plugin for MouseGesturesPlugin {
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut cfg.trail_width)
-                        .clamp_range(1.0..=20.0)
+                        .range(1.0..=20.0)
                         .speed(0.5),
                 )
                 .changed();
@@ -627,14 +627,14 @@ impl Plugin for MouseGesturesPlugin {
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut cfg.hint_offset.0)
-                        .clamp_range(-200.0..=200.0)
+                        .range(-200.0..=200.0)
                         .speed(1.0),
                 )
                 .changed();
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut cfg.hint_offset.1)
-                        .clamp_range(-200.0..=200.0)
+                        .range(-200.0..=200.0)
                         .speed(1.0),
                 )
                 .changed();
@@ -642,7 +642,7 @@ impl Plugin for MouseGesturesPlugin {
 
         ui.horizontal(|ui| {
             ui.label("Cancel behavior");
-            egui::ComboBox::from_id_source("mg_cancel_behavior")
+            egui::ComboBox::from_id_salt("mg_cancel_behavior")
                 .selected_text(cancel_behavior_label(cfg.cancel_behavior))
                 .show_ui(ui, |ui| {
                     changed |= ui
@@ -664,7 +664,7 @@ impl Plugin for MouseGesturesPlugin {
 
         ui.horizontal(|ui| {
             ui.label("No-match behavior");
-            egui::ComboBox::from_id_source("mg_no_match_behavior")
+            egui::ComboBox::from_id_salt("mg_no_match_behavior")
                 .selected_text(no_match_behavior_label(cfg.no_match_behavior))
                 .show_ui(ui, |ui| {
                     changed |= ui

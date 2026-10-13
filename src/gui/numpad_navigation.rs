@@ -173,7 +173,7 @@ mod tests {
         down: Option<PhysicalNumpadKey>,
     ) -> (Vec<LauncherNumpadNavigation>, Vec<egui::Event>, usize) {
         let ctx = egui::Context::default();
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events,
             ..Default::default()
         });
@@ -187,7 +187,7 @@ mod tests {
         let navigation =
             ctx.input_mut(|input| consume_physical_numpad_navigation(focused, input, &probe));
         let remaining = ctx.input(|input| input.events.clone());
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
         (navigation, remaining, probe.calls.get())
     }
 
@@ -283,7 +283,7 @@ mod tests {
             key_press(egui::Key::Num8, egui::Modifiers::NONE),
             egui::Event::Text("8".into()),
         ];
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: events.clone(),
             ..Default::default()
         });
@@ -299,7 +299,7 @@ mod tests {
         assert!(navigation.is_empty());
         assert_eq!(ctx.input(|input| input.events.clone()), events);
         assert_eq!(probe.calls.get(), 1);
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
     }
 
     #[test]

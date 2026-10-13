@@ -133,13 +133,13 @@ impl CalendarWidget {
                 ui.horizontal(|ui| {
                     ui.label("Range days");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.range_days).clamp_range(1..=30))
+                        .add(egui::DragValue::new(&mut cfg.range_days).range(1..=30))
                         .changed();
                 });
                 ui.horizontal(|ui| {
                     ui.label("Max items");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.max_items).clamp_range(1..=50))
+                        .add(egui::DragValue::new(&mut cfg.max_items).range(1..=50))
                         .changed();
                 });
                 changed |= ui

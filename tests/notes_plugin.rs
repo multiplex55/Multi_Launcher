@@ -426,8 +426,8 @@ fn missing_link_colored_red() {
     let _tmp = setup();
     let ctx = egui::Context::default();
     let mut app = new_app(&ctx);
-    let output = ctx.run(Default::default(), |ctx| {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    let output = ctx.run_ui(Default::default(), |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             show_wiki_link(ui, &mut app, "missing");
         });
     });

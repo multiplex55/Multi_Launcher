@@ -208,7 +208,7 @@ impl NoteGraphDialog {
 
         let mut persist_requested = false;
         let mut window_open = self.open;
-        let screen_size = ctx.screen_rect().size();
+        let screen_size = ctx.content_rect().size();
         let max_window_size = egui::vec2(
             (screen_size.x - 48.0).max(320.0),
             (screen_size.y - 96.0).max(240.0),
@@ -248,13 +248,13 @@ impl NoteGraphDialog {
                     )
                 });
 
-                ui.allocate_ui_at_rect(canvas_rect, |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(canvas_rect), |ui| {
                     self.main_canvas(ui, ctx, app, canvas_rect.size())
                 });
 
                 if let Some((details_rect, details_width)) = details_rect.zip(details_width) {
                     persist_requested |= ui
-                        .allocate_ui_at_rect(details_rect, |ui| {
+                        .scope_builder(egui::UiBuilder::new().max_rect(details_rect), |ui| {
                             self.right_panel(ui, app, &notes, details_width)
                         })
                         .inner;
@@ -391,7 +391,7 @@ impl NoteGraphDialog {
             if self.graph_mode == GraphMode::Local {
                 ui.label("Depth");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut self.local_depth).clamp_range(1..=3))
+                    .add(egui::DragValue::new(&mut self.local_depth).range(1..=3))
                     .changed();
             }
 
@@ -484,7 +484,7 @@ impl NoteGraphDialog {
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut self.max_nodes)
-                        .clamp_range(20..=1000)
+                        .range(20..=1000)
                         .prefix("Max render "),
                 )
                 .changed();
@@ -492,7 +492,7 @@ impl NoteGraphDialog {
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut self.label_zoom_threshold)
-                        .clamp_range(0.2..=MAX_ZOOM)
+                        .range(0.2..=MAX_ZOOM)
                         .speed(0.01)
                         .prefix("Label zoom >= "),
                 )
@@ -500,21 +500,21 @@ impl NoteGraphDialog {
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut self.layout_iterations_per_frame)
-                        .clamp_range(1..=12)
+                        .range(1..=12)
                         .prefix("Iter/frame "),
                 )
                 .changed();
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut self.repulsion_strength)
-                        .clamp_range(100.0..=10_000.0)
+                        .range(100.0..=10_000.0)
                         .prefix("Repel "),
                 )
                 .changed();
             changed |= ui
                 .add(
                     egui::DragValue::new(&mut self.link_distance)
-                        .clamp_range(10.0..=300.0)
+                        .range(10.0..=300.0)
                         .prefix("Link dist "),
                 )
                 .changed();
@@ -579,15 +579,13 @@ impl NoteGraphDialog {
             .map(|node| (node.id.clone(), Pos2::new(node.screen[0], node.screen[1])))
             .collect();
 
-        if response.hovered() {
-            let scroll = ctx.input(|i| i.raw_scroll_delta.y);
-            if scroll.abs() > f32::EPSILON {
-                let zoom_delta = if scroll > 0.0 { 1.1 } else { 0.9 };
-                let pointer = ctx
-                    .input(|i| i.pointer.hover_pos())
-                    .unwrap_or(rect.center());
-                self.camera.zoom_about(pointer, zoom_delta, rect);
-            }
+        if response.hovered()
+            && let Some(zoom_delta) = ctx.input(|i| graph_wheel_zoom_delta(&i.raw.events))
+        {
+            let pointer = ctx
+                .input(|i| i.pointer.hover_pos())
+                .unwrap_or(rect.center());
+            self.camera.zoom_about(pointer, zoom_delta, rect);
         }
 
         if let Some(slug) = self.center_request.clone()
@@ -845,6 +843,18 @@ fn rank_search_results(query: &str, notes: &[Note]) -> Vec<SearchResult> {
     scored
 }
 
+fn graph_wheel_zoom_delta(events: &[egui::Event]) -> Option<f32> {
+    let scroll = events
+        .iter()
+        .filter_map(|event| match event {
+            egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+            _ => None,
+        })
+        .sum::<f32>();
+
+    (scroll.abs() > f32::EPSILON).then_some(if scroll > 0.0 { 1.1 } else { 0.9 })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,6 +920,32 @@ mod tests {
         let anchored_at_min = t.world_to_screen(anchor_world, rect);
         assert!((anchored_at_min.x - pointer.x).abs() < 1e-3);
         assert!((anchored_at_min.y - pointer.y).abs() < 1e-3);
+    }
+
+    #[test]
+    fn graph_zoom_uses_only_current_mouse_wheel_events() {
+        assert_eq!(
+            graph_wheel_zoom_delta(&[egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 40.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            }]),
+            Some(1.1)
+        );
+        assert_eq!(
+            graph_wheel_zoom_delta(&[egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: egui::vec2(0.0, -1.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::default(),
+            }]),
+            Some(0.9)
+        );
+        assert_eq!(
+            graph_wheel_zoom_delta(&[egui::Event::PointerMoved(Pos2::ZERO)]),
+            None
+        );
     }
 
     #[test]

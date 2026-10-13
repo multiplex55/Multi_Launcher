@@ -62,15 +62,17 @@ fn note_panel_max_height_tracks_available_screen_height() {
     };
     let mut panel = NotePanel::from_note(note);
 
-    ctx.begin_frame(egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1000.0, 1000.0),
-        )),
-        ..Default::default()
-    });
-    panel.ui(&ctx, &mut app);
-    let _ = ctx.end_frame();
+    let output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 1000.0),
+            )),
+            ..Default::default()
+        },
+        |ui| panel.ui(ui.ctx(), &mut app),
+    );
+    output.drop_without_applying_deltas();
 
     let rect = ctx
         .memory(|m| m.area_rect(egui::Id::new(("note_panel_window", String::new()))))

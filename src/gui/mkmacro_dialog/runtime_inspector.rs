@@ -517,7 +517,7 @@ fn render_variables(
     builtins_open: &mut bool,
 ) {
     egui::ScrollArea::vertical()
-        .id_source("runtime_inspector_variables")
+        .id_salt("runtime_inspector_variables")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             let mut has_visible = false;
@@ -574,7 +574,7 @@ fn render_body(
     builtins_open: &mut bool,
 ) {
     egui::ScrollArea::vertical()
-        .id_source("runtime_inspector_body")
+        .id_salt("runtime_inspector_body")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {

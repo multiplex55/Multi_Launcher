@@ -610,7 +610,11 @@ impl DataRecoveryDialog {
             }
             if ui.button("Copy diagnostics").clicked() {
                 let diagnostics = self.safe_diagnostics_text();
-                ui.output_mut(|output| output.copied_text = diagnostics);
+                ui.output_mut(|output| {
+                    output
+                        .commands
+                        .push(egui::OutputCommand::CopyText(diagnostics));
+                });
             }
         });
         ui.separator();

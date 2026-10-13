@@ -208,8 +208,7 @@ impl TodoDialog {
                                 .horizontal(|ui| {
                                     (
                                         ui.add(
-                                            egui::DragValue::new(&mut self.priority)
-                                                .clamp_range(0..=255),
+                                            egui::DragValue::new(&mut self.priority).range(0..=255),
                                         ),
                                         ui.button("Add"),
                                     )
@@ -275,7 +274,7 @@ impl TodoDialog {
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut entry.priority)
-                                                .clamp_range(0..=255),
+                                                .range(0..=255),
                                         )
                                         .changed()
                                     {
@@ -320,7 +319,7 @@ impl TodoDialog {
                                                     ),
                                                 );
                                                 save_now = true;
-                                                ui.close_menu();
+                                                ui.close();
                                             }
                                         }
                                     });
@@ -434,7 +433,7 @@ mod tests {
         dlg.text = "task".into();
         dlg.filter = "something".into();
 
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Enter,
                 physical_key: None,
@@ -445,7 +444,7 @@ mod tests {
             ..Default::default()
         });
         dlg.ui(&ctx, &mut app);
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
 
         assert_eq!(dlg.entries.len(), 1);
         assert_eq!(dlg.entries[0].text, "task");
@@ -462,7 +461,7 @@ mod tests {
         dlg.text = "tagged".into();
         dlg.tags = "a, b".into();
 
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Enter,
                 physical_key: None,
@@ -473,7 +472,7 @@ mod tests {
             ..Default::default()
         });
         dlg.ui(&ctx, &mut app);
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
 
         assert_eq!(dlg.entries.len(), 1);
         assert_eq!(dlg.entries[0].text, "tagged");

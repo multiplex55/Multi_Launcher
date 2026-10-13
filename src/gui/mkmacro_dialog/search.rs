@@ -63,9 +63,8 @@ pub(super) fn shortcuts(ctx: &egui::Context, d: &mut MkMacroDialog) {
     if d.selected_macro().is_none()
         || d.action_editor.draft.is_some()
         || super::step_table::other_modal_open(d)
-        || ctx.is_using_pointer()
-        || ctx.memory(|m| m.any_popup_open())
-        || ctx.is_context_menu_open()
+        || ctx.egui_is_using_pointer()
+        || egui::Popup::is_any_open(ctx)
     {
         return;
     }
@@ -255,7 +254,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         ui.colored_label(egui::Color32::RED, error);
                     }
                     egui::ScrollArea::vertical()
-                        .id_source("mkmacro_replace_preview")
+                        .id_salt("mkmacro_replace_preview")
                         .max_height(320.0)
                         .show(ui, |ui| {
                             for (index, edit) in preview.plan.edits.iter().enumerate() {
@@ -376,7 +375,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     ui.weak("Enter text to find matching steps.");
                 }
                 egui::ScrollArea::vertical()
-                    .id_source("mkmacro_search_results")
+                    .id_salt("mkmacro_search_results")
                     .max_height(320.0)
                     .show_rows(ui, 24.0, matches.len(), |ui, range| {
                         for index in range {

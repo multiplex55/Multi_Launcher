@@ -39,7 +39,7 @@ impl FileSearchDialogState {
             let any_text = search_submit || focused == Some(Self::refinement_field_id());
             (any_text, search_submit)
         });
-        let menu_or_combo_active = ctx.wants_keyboard_input() && !text_field_focused;
+        let menu_or_combo_active = ctx.egui_wants_keyboard_input() && !text_field_focused;
 
         if modifiers.ctrl && ctx.input(|i| i.key_pressed(egui::Key::F)) {
             self.focus_search_field();
@@ -86,7 +86,7 @@ impl FileSearchDialogState {
 
         if modifiers.ctrl
             && ctx.input(|i| i.key_pressed(egui::Key::C))
-            && !(text_field_focused && ctx.wants_keyboard_input())
+            && !(text_field_focused && ctx.egui_wants_keyboard_input())
         {
             if modifiers.shift {
                 self.copy_selected_matching_line();

@@ -66,7 +66,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             state.last_show_all = state.show_all;
         }
         eframe::egui::ScrollArea::vertical()
-            .id_source("mkmacro_outline")
+            .id_salt("mkmacro_outline")
             .show_rows(ui, 24.0, state.visible.len(), |ui, range| {
                 for index in range {
                     let row = &rows[state.visible[index]];

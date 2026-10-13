@@ -82,7 +82,7 @@ impl TodoFocusWidget {
             ui.horizontal(|ui| {
                 ui.label("Min priority");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.min_priority).clamp_range(0..=255))
+                    .add(egui::DragValue::new(&mut cfg.min_priority).range(0..=255))
                     .changed();
             });
             ui.horizontal(|ui| {

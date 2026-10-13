@@ -3584,9 +3584,8 @@ mod tests {
         // Retain and deliver the actual worker-produced event through the same
         // queue the ROOT render consumes; do not synthesize a capacity proof.
         app.event_tx.send(event).unwrap();
-        ctx.run(eframe::egui::RawInput::default(), |root| {
-            app.render_root_frame(root, None);
-        })
+        app.run_root_frame_for_test(ctx, eframe::egui::RawInput::default(), false)
+            .0
     }
 
     fn assert_capacity_refresh_has_no_action_or_visibility_effects(
@@ -4091,9 +4090,9 @@ mod tests {
                 &completed,
                 &app.cached_universal_action_catalog_snapshot()
             ));
-            let output = ctx.run(eframe::egui::RawInput::default(), |root| {
-                app.render_root_frame(root, None);
-            });
+            let output = app
+                .run_root_frame_for_test(&ctx, eframe::egui::RawInput::default(), false)
+                .0;
             assert!(
                 !output
                     .viewport_output

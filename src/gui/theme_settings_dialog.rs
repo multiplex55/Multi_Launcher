@@ -144,6 +144,8 @@ pub fn ui(
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(app.toast_duration as f64),
+
+                                    style: Default::default(),
                                 });
                             }
                         }
@@ -155,6 +157,8 @@ pub fn ui(
                                     kind: ToastKind::Error,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(app.toast_duration as f64),
+
+                                    style: Default::default(),
                                 });
                             }
                         }
@@ -172,6 +176,8 @@ pub fn ui(
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(app.toast_duration as f64),
+
+                                    style: Default::default(),
                                 });
                             }
                             *open = false;
@@ -184,6 +190,8 @@ pub fn ui(
                                     kind: ToastKind::Error,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(app.toast_duration as f64),
+
+                                    style: Default::default(),
                                 });
                             }
                         }
@@ -341,7 +349,7 @@ fn reset_semantic_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
 
 fn preview(ui: &mut egui::Ui, scheme: &ColorScheme) {
     ui.heading("Live preview");
-    egui::Frame::none()
+    egui::Frame::NONE
         .fill(to_egui(scheme.window_fill))
         .stroke(egui::Stroke::new(
             1.0_f32,
@@ -396,6 +404,7 @@ fn swatch(ui: &mut egui::Ui, label: &str, fill: ThemeColor, stroke: ThemeColor) 
         4.0,
         to_egui(fill),
         egui::Stroke::new(1.0_f32, to_egui(stroke)),
+        egui::StrokeKind::Middle,
     );
     ui.painter().text(
         rect.center(),

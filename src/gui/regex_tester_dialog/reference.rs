@@ -24,19 +24,19 @@ impl ReferenceState {
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<ReferenceAction> {
         let mut action = None;
         egui::ScrollArea::vertical()
-            .id_source("regex_reference_scroll")
+            .id_salt("regex_reference_scroll")
             .auto_shrink([false, false])
             .max_height(ui.available_height().max(1.0))
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
-                ui.style_mut().wrap = Some(true);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .id_source("regex_reference_search")
+                        .id_salt("regex_reference_search")
                         .hint_text("Search reference")
                         .desired_width(ui.available_width()),
                 );
-                egui::ComboBox::from_id_source("regex_reference_category")
+                egui::ComboBox::from_id_salt("regex_reference_category")
                     .width(ui.available_width().min(180.0))
                     .selected_text(
                         self.category

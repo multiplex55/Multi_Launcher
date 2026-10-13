@@ -457,7 +457,7 @@ impl Plugin for StopwatchPlugin {
             ui.label("Refresh (s)");
             ui.add(
                 egui::DragValue::new(&mut cfg.refresh_rate)
-                    .clamp_range(0.0..=5.0)
+                    .range(0.0..=5.0)
                     .speed(0.1),
             );
         });

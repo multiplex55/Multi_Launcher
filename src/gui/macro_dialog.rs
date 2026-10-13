@@ -168,7 +168,7 @@ impl MacroDialog {
                         ui.add(
                             egui::DragValue::new(&mut self.auto_delay_secs)
                                 .speed(0.1)
-                                .clamp_range(0.0..=60.0)
+                                .range(0.0..=60.0)
                                 .suffix("s"),
                         );
                     }
@@ -189,7 +189,7 @@ impl MacroDialog {
                             ui.add(
                                 egui::DragValue::new(&mut secs)
                                     .speed(0.1)
-                                    .clamp_range(0.0..=60.0)
+                                    .range(0.0..=60.0)
                                     .suffix("s"),
                             );
                             self.steps[i].delay_ms = (secs * 1000.0) as u64;
@@ -238,7 +238,7 @@ impl MacroDialog {
                         .chain(std::iter::once("app")),
                 );
                 egui::ScrollArea::vertical()
-                    .id_source("macro_plugin_list")
+                    .id_salt("macro_plugin_list")
                     .max_height(100.0)
                     .show(ui, |ui| {
                         for name in plugin_names {
@@ -264,7 +264,7 @@ impl MacroDialog {
                 if self.add_plugin == "app" {
                     let filter = self.add_filter.trim().to_lowercase();
                     egui::ScrollArea::vertical()
-                        .id_source("macro_app_list")
+                        .id_salt("macro_app_list")
                         .max_height(100.0)
                         .show(ui, |ui| {
                             for act in app.actions.iter() {
@@ -303,7 +303,7 @@ impl MacroDialog {
                         plugin.commands()
                     };
                     egui::ScrollArea::vertical()
-                        .id_source("macro_action_list")
+                        .id_salt("macro_action_list")
                         .max_height(100.0)
                         .show(ui, |ui| {
                             for act in actions.drain(..) {
@@ -399,7 +399,7 @@ impl MacroDialog {
             } else {
                 let mut remove: Option<usize> = None;
                 egui::ScrollArea::vertical()
-                    .id_source("macro_entry_list")
+                    .id_salt("macro_entry_list")
                     .max_height(200.0)
                     .show(ui, |ui| {
                         for idx in 0..self.entries.len() {

@@ -192,13 +192,13 @@ pub(super) fn show(
         ui.label("Timeout");
         ui.add(
             egui::DragValue::new(&mut payload.wait.timeout_ms)
-                .clamp_range(1..=86_400_000)
+                .range(1..=86_400_000)
                 .suffix(" ms"),
         );
         ui.label("Polling interval");
         ui.add(
             egui::DragValue::new(&mut payload.wait.poll_interval_ms)
-                .clamp_range(1..=86_400_000)
+                .range(1..=86_400_000)
                 .suffix(" ms"),
         );
     });

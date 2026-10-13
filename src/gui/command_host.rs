@@ -1193,6 +1193,7 @@ impl LauncherApp {
                     kind,
                     options: ToastOptions::default()
                         .duration_in_seconds(self.toast_duration as f64),
+                    style: Default::default(),
                 });
             }
         }

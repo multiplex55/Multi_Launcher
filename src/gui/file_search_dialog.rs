@@ -1074,8 +1074,7 @@ impl FileSearchDialogState {
         ui.horizontal(|ui| {
             ui.label("Search");
             let search_response = ui.add(
-                egui::TextEdit::singleline(&mut self.search_text)
-                    .id_source(Self::search_field_id()),
+                egui::TextEdit::singleline(&mut self.search_text).id_salt(Self::search_field_id()),
             );
             if self.consume_search_focus_request() {
                 search_response.request_focus();
@@ -1123,7 +1122,7 @@ impl FileSearchDialogState {
                             ui.label("Root");
                             let root_response = ui.add(
                                 egui::TextEdit::singleline(root)
-                                    .id_source((Self::root_field_id(), idx)),
+                                    .id_salt((Self::root_field_id(), idx)),
                             );
                             if focus_root_idx == Some(idx) {
                                 root_response.request_focus();
@@ -1191,11 +1190,11 @@ impl FileSearchDialogState {
                         Ok(payload) => self.copy_text_payload("copy visible results", payload),
                         Err(err) => self.warning_error_message = Some(err),
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Save visible results as TSV…").clicked() {
                     self.export_visible_results_to_file();
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui
                     .add_enabled(
@@ -1206,14 +1205,14 @@ impl FileSearchDialogState {
                     && let Some(payload) = self.copy_selected_payload()
                 {
                     self.copy_text_payload("copy selected", payload);
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Copy visible full paths").clicked() {
                     match self.copy_visible_full_paths_payload() {
                         Ok(payload) => self.copy_text_payload("copy visible full paths", payload),
                         Err(err) => self.warning_error_message = Some(err),
                     }
-                    ui.close_menu();
+                    ui.close();
                 }
             });
         });
@@ -1222,7 +1221,7 @@ impl FileSearchDialogState {
             let mut refinement = self.refinement_text.clone();
             let response = ui.add(
                 egui::TextEdit::singleline(&mut refinement)
-                    .id_source(Self::refinement_field_id())
+                    .id_salt(Self::refinement_field_id())
                     .hint_text("Filter current results"),
             );
             if response.changed() {
@@ -1276,7 +1275,7 @@ impl FileSearchDialogState {
         ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
             ui.push_id(Self::result_list_id(), |ui| {
                 egui::ScrollArea::both()
-                    .id_source(results_scroll_id_source(self.selected_mode))
+                    .id_salt(results_scroll_id_source(self.selected_mode))
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.selected_mode {
                         FileSearchMode::Filename => self.filename_results(ui, coordinator),
@@ -1356,7 +1355,7 @@ impl FileSearchDialogState {
                 if ui.button("Reset to defaults").clicked() {
                     results::reset_filename_columns_to_defaults(&mut self.ui_preferences);
                     dirty = true;
-                    ui.close_menu();
+                    ui.close();
                 }
                 if dirty {
                     self.ui_preferences_dirty = true;
@@ -1467,8 +1466,8 @@ impl FileSearchDialogState {
                             row.col(|ui| {
                                 ui.push_id((result_row_id_source(row_id.search_id, &row_id), *column), |ui| {
                                     let response = match column {
-                                        crate::file_search::settings::FileSearchColumn::Name => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job_for_ui(ui, &display_filename, &filename_match_ranges, is_selected))),
-                                        crate::file_search::settings::FileSearchColumn::Directory => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job_for_ui(ui, &parent_directory_display, &path_match_ranges, is_selected))),
+                                        crate::file_search::settings::FileSearchColumn::Name => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job_for_ui(ui, &display_filename, &filename_match_ranges, is_selected).into())),
+                                        crate::file_search::settings::FileSearchColumn::Directory => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job_for_ui(ui, &parent_directory_display, &path_match_ranges, is_selected).into())),
                                         crate::file_search::settings::FileSearchColumn::Kind => results::non_wrapping_selectable_label(ui, is_selected, format!("{kind:?}")),
                                         crate::file_search::settings::FileSearchColumn::MatchQuality => results::non_wrapping_selectable_label(ui, is_selected, results::format_match_quality(match_quality)),
                                         crate::file_search::settings::FileSearchColumn::Size => results::non_wrapping_selectable_label(ui, is_selected, size.map(results::format_size).unwrap_or_else(|| "—".to_owned())),
@@ -1589,7 +1588,7 @@ impl FileSearchDialogState {
         if ui.button("Show all matches in this file").clicked() {
             self.start_file_content_search(path, coordinator);
             ui.ctx().request_repaint();
-            ui.close_menu();
+            ui.close();
         }
         self.result_context_menu(ui, path, false, Some(content_match), coordinator);
     }
@@ -1816,23 +1815,23 @@ impl FileSearchDialogState {
                     },
                 )
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Preview").clicked() {
             self.request_preview(path, first_match.as_ref());
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Open file or directory").clicked() {
             self.run_result_action("open", || {
                 execute_explorer_action(resolve_explorer_action(path)?)
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Reveal in Explorer").clicked() {
             self.run_result_action("reveal", || {
                 execute_explorer_action(resolve_explorer_action(path)?)
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Open containing directory").clicked() {
             self.run_result_action("open containing directory", || {
@@ -1841,14 +1840,14 @@ impl FileSearchDialogState {
                 })?;
                 open_path(&dir)
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Copy full path").clicked() {
             self.run_result_action("copy full path", || {
                 clipboard::set_text(&path.display().to_string())?;
                 Ok(())
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Copy filename").clicked() {
             self.run_result_action("copy filename", || {
@@ -1857,7 +1856,7 @@ impl FileSearchDialogState {
                 clipboard::set_text(&name)?;
                 Ok(())
             });
-            ui.close_menu();
+            ui.close();
         }
         if let Some(content_match) = first_match.as_ref()
             && ui.button("Copy matching line").clicked()
@@ -1867,7 +1866,7 @@ impl FileSearchDialogState {
                 clipboard::set_text(&line)?;
                 Ok(())
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Open terminal in containing directory").clicked() {
             let settings = self.settings.clone();
@@ -1877,7 +1876,7 @@ impl FileSearchDialogState {
                 })?;
                 open_configured_terminal_in_directory(&settings, &dir)
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui
             .button("Start filename search beneath this directory")
@@ -1885,7 +1884,7 @@ impl FileSearchDialogState {
         {
             self.start_nested_search(path, is_directory, FileSearchMode::Filename, coordinator);
             ui.ctx().request_repaint();
-            ui.close_menu();
+            ui.close();
         }
         if ui
             .button("Start content search beneath this directory")
@@ -1893,7 +1892,7 @@ impl FileSearchDialogState {
         {
             self.start_nested_search(path, is_directory, FileSearchMode::Content, coordinator);
             ui.ctx().request_repaint();
-            ui.close_menu();
+            ui.close();
         }
     }
 
@@ -2349,7 +2348,7 @@ mod tests {
         };
         let mut coordinator = SearchCoordinator::new();
 
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Escape,
                 physical_key: None,
@@ -2362,7 +2361,7 @@ mod tests {
         state.ui(&ctx, &mut coordinator);
         let consumed_by_later_launcher_code =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
 
         assert!(!consumed_by_later_launcher_code);
         assert!(!state.open);
@@ -3725,7 +3724,7 @@ mod tests {
         let selected_before = state.selected_result().cloned();
         let mut coordinator = SearchCoordinator::new();
 
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![egui::Event::Key {
                 key: egui::Key::Enter,
                 physical_key: None,
@@ -3736,7 +3735,7 @@ mod tests {
             ..Default::default()
         });
         state.ui(&ctx, &mut coordinator);
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
 
         assert_eq!(state.selected_result().cloned(), selected_before);
         assert_eq!(coordinator.diagnostics().started, 0);

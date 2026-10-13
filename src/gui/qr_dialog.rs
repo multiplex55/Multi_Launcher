@@ -217,7 +217,7 @@ impl QrDialogState {
                     egui::CentralPanel::default().show(child, |ui| self.body(ui));
                 } else {
                     // Test contexts embed viewports; keep the fallback within its parent.
-                    let size = child.input(|input| input.screen_rect().size());
+                    let size = child.input(|input| input.content_rect().size());
                     let available = (size - egui::vec2(24.0, 48.0)).max(egui::vec2(1.0, 1.0));
                     let mut open = self.open;
                     egui::Window::new("QR Generator")
@@ -242,7 +242,7 @@ impl QrDialogState {
     fn body(&mut self, ui: &mut egui::Ui) {
         let mut close = false;
         egui::ScrollArea::vertical()
-            .id_source("qr_contents")
+            .id_salt("qr_contents")
             .show(ui, |ui| {
                     ui.label("Text or URL");
                     let response = ui.add(
@@ -275,11 +275,11 @@ impl QrDialogState {
                     ui.separator();
                     let mut selected = self.error_correction;
                     let advanced = egui::CollapsingHeader::new("Advanced")
-                        .id_source("qr_advanced")
+                        .id_salt("qr_advanced")
                         .open(Some(self.advanced_open))
                         .show(ui, |ui| {
                             ui.label("Higher error correction improves recovery from damage, but reduces payload capacity.");
-                            egui::ComboBox::from_id_source("qr_error_correction")
+                            egui::ComboBox::from_id_salt("qr_error_correction")
                                 .selected_text(selected.label())
                                 .show_ui(ui, |ui| {
                                     for level in [QrErrorCorrection::Low, QrErrorCorrection::Medium,
@@ -531,7 +531,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = QrDialogState::default();
         state.open(Some("exact source"));
-        let _ = ctx.run(egui::RawInput::default(), |ctx| state.show(ctx));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| state.show(ctx));
         assert!(!state.focus_source);
         state.feedback = Some(Ok("old".into()));
         let mut input = egui::RawInput::default();
@@ -542,7 +542,7 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run(input, |ctx| state.show(ctx));
+        let _ = ctx.run_ui(input, |ctx| state.show(ctx));
         assert!(!state.open);
         assert!(state.feedback.is_none() && state.texture.is_none() && state.raster.is_none());
         assert_eq!(state.source, "exact source");

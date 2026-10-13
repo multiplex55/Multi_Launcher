@@ -406,11 +406,12 @@ struct NotesGeometryKey {
     entries_generation: u64,
     metadata_generation: u64,
     projection_generation: u64,
+    font_revision: u64,
     viewport_width: u32,
     pixels_per_point: u32,
     title_font: egui::FontId,
     small_font: egui::FontId,
-    wrap: Option<bool>,
+    wrap_mode: Option<egui::TextWrapMode>,
     spacing_x: u32,
     spacing_y: u32,
     interact_width: u32,
@@ -438,7 +439,6 @@ struct NotesGeometry {
     rows: Vec<NoteRowGeometry>,
     row_by_identity: std::collections::HashMap<String, usize>,
     content_size: egui::Vec2,
-    font_atlas: std::sync::Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>,
     #[cfg(test)]
     measured_rows: usize,
     #[cfg(test)]
@@ -450,12 +450,8 @@ struct NotesGeometry {
 }
 
 impl NotesGeometry {
-    fn matches(
-        &self,
-        key: &NotesGeometryKey,
-        font_atlas: &std::sync::Arc<egui::mutex::Mutex<egui::epaint::TextureAtlas>>,
-    ) -> bool {
-        self.key == *key && std::sync::Arc::ptr_eq(&self.font_atlas, font_atlas)
+    fn matches(&self, key: &NotesGeometryKey) -> bool {
+        self.key == *key
     }
 
     fn anchor_at(&self, offset_y: f32) -> Option<(&str, f32)> {
@@ -488,6 +484,7 @@ fn geometry_key(
     entries_generation: u64,
     metadata_generation: u64,
     projection_generation: u64,
+    font_revision: u64,
     viewport_width: f32,
     pixels_per_point: f32,
     style: &egui::Style,
@@ -497,6 +494,7 @@ fn geometry_key(
         entries_generation,
         metadata_generation,
         projection_generation,
+        font_revision,
         viewport_width: viewport_width.to_bits(),
         pixels_per_point: pixels_per_point.to_bits(),
         title_font: style.override_text_style.as_ref().map_or_else(
@@ -504,7 +502,7 @@ fn geometry_key(
             |text_style| text_style.resolve(style),
         ),
         small_font: egui::TextStyle::Small.resolve(style),
-        wrap: style.wrap,
+        wrap_mode: style.wrap_mode,
         spacing_x: spacing.item_spacing.x.to_bits(),
         spacing_y: spacing.item_spacing.y.to_bits(),
         interact_width: spacing.interact_size.x.to_bits(),
@@ -523,8 +521,14 @@ fn galley_size(
     text.into_galley_impl(
         ctx,
         style,
-        wrap,
-        width,
+        egui::text::TextWrapping::from_wrap_mode_and_width(
+            if wrap {
+                egui::TextWrapMode::Wrap
+            } else {
+                egui::TextWrapMode::Extend
+            },
+            width,
+        ),
         egui::FontSelection::Default,
         valign,
     )
@@ -544,19 +548,21 @@ fn measure_notes_geometry(
 ) -> NotesGeometry {
     #[cfg(test)]
     let started = std::time::Instant::now();
-    let font_atlas = ctx.fonts(|fonts| fonts.texture_atlas());
     let key = geometry_key(
         entries_generation,
         metadata_generation,
         projection_generation,
+        super::font_revision::active_revision(ctx),
         viewport_width,
         ctx.pixels_per_point(),
         style,
     );
     let spacing_x = style.spacing.item_spacing.x;
     let spacing_y = style.spacing.item_spacing.y;
-    let header_wrap = style.wrap.unwrap_or(false);
-    let preview_wrap = style.wrap.unwrap_or(true);
+    let header_wrap =
+        style.wrap_mode.unwrap_or(egui::TextWrapMode::Extend) == egui::TextWrapMode::Wrap;
+    let preview_wrap =
+        style.wrap_mode.unwrap_or(egui::TextWrapMode::Wrap) == egui::TextWrapMode::Wrap;
     let mut prefix_width = viewport_width.max(0.0);
     let mut top = 0.0;
     let mut content_height = 0.0;
@@ -671,7 +677,6 @@ fn measure_notes_geometry(
         } else {
             egui::vec2(prefix_width, content_height)
         },
-        font_atlas,
         #[cfg(test)]
         measured_rows: filtered_indices.len(),
         #[cfg(test)]
@@ -820,6 +825,8 @@ pub struct NotesDialog {
     last_rendered_indices: Vec<usize>,
     #[cfg(test)]
     last_rendered_row_rects: Vec<(usize, RenderedNoteRowRects)>,
+    #[cfg(test)]
+    last_rendered_header_ids: Vec<(String, egui::Id)>,
     #[cfg(test)]
     test_note_snapshot_calls: u64,
     #[cfg(test)]
@@ -1321,15 +1328,15 @@ impl NotesDialog {
             self.entries_generation,
             self.metadata_generation,
             self.projection_generation,
+            super::font_revision::active_revision(ctx),
             viewport_width,
             ctx.pixels_per_point(),
             style,
         );
-        let font_atlas = ctx.fonts(|fonts| fonts.texture_atlas());
         if self
             .notes_geometry
             .as_ref()
-            .is_some_and(|geometry| geometry.matches(&key, &font_atlas))
+            .is_some_and(|geometry| geometry.matches(&key))
         {
             return None;
         }
@@ -1422,7 +1429,7 @@ impl NotesDialog {
         if let Some(owner) = self.menu_owner.take()
             && owner.response.context_menu_opened()
         {
-            owner.response.context_menu(|ui| ui.close_menu());
+            owner.response.context_menu(|ui| ui.close());
         }
     }
 
@@ -1525,6 +1532,8 @@ impl NotesDialog {
         #[cfg(test)]
         self.last_rendered_row_rects.clear();
         #[cfg(test)]
+        self.last_rendered_header_ids.clear();
+        #[cfg(test)]
         {
             self.test_menu_edit_rect = None;
             self.test_menu_remove_rect = None;
@@ -1562,7 +1571,7 @@ impl NotesDialog {
                                 .show(ui);
                             let resp = output.response.clone();
                             let caret_char_idx =
-                                output.cursor_range.map(|range| range.primary.ccursor.index);
+                                output.cursor_range.map(|range| range.primary.index.0);
 
                             let mut insert_timestamp = false;
                             let mut insert_idx = None;
@@ -1570,7 +1579,7 @@ impl NotesDialog {
                                 if ui.button("Insert timestamp").clicked() {
                                     insert_timestamp = true;
                                     insert_idx = caret_char_idx;
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             });
 
@@ -1750,17 +1759,31 @@ impl NotesDialog {
                                     egui::vec2(row_geometry.width_after, 6.0),
                                 );
                                 let mut open_menu_response = None;
-                                let _allocated_row = ui.push_id(("quick-notes-row", identity), |ui| {
-                                    ui.allocate_ui_at_rect(row_rect, |ui| {
+                                #[cfg(test)]
+                                let mut row_header_response_id = None;
+                                let row_id = ui.id().with(("quick-notes-row", identity));
+                                let _allocated_row = ui.scope_builder(
+                                    egui::UiBuilder::new().id(row_id).max_rect(row_rect),
+                                    |ui| {
                                         ui.vertical(|ui| {
                                             let preview = row.preview.as_str();
                                             let header = ui.horizontal(|ui| {
                                                 let title = ui.strong(&row.display_title);
                                                 let meta = ui.small(&row.meta);
-                                                (title.rect, meta.rect)
+                                                (title, meta)
                                             });
-                                            let header_response = header.response;
-                                            let (title_rect, meta_rect) = header.inner;
+                                            let (title_response, meta_response) = header.inner;
+                                            let title_rect = title_response.rect;
+                                            let meta_rect = meta_response.rect;
+                                            let header_response = header
+                                                .response
+                                                .interact(egui::Sense::click())
+                                                .union(title_response)
+                                                .union(meta_response);
+                                            #[cfg(test)]
+                                            {
+                                                row_header_response_id = Some(header_response.id);
+                                            }
                                             let response = header_response.clone().on_hover_ui(|ui| {
                                                 if preview.is_empty() {
                                                     ui.label(&entry.content);
@@ -1777,7 +1800,7 @@ impl NotesDialog {
                                             response.clone().context_menu(|ui| {
                                                     if ui.button("Open").clicked() {
                                                         app.open_note_panel(&entry.slug, None);
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     let edit_button = ui.button("Edit");
                                                     #[cfg(test)]
@@ -1788,7 +1811,7 @@ impl NotesDialog {
                                                     if edit_button.clicked() {
                                                         self.edit_idx = Some(idx_copy);
                                                         self.text = entry.content.clone();
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     if ui.button("Open externally").clicked() {
                                                         if let Err(e) = open::that(&entry.path) {
@@ -1799,7 +1822,7 @@ impl NotesDialog {
                                                                 ),
                                                             );
                                                         }
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     if ui.button("Copy link").clicked() {
                                                         let link = format!("[[{}]]", entry.slug);
@@ -1811,7 +1834,7 @@ impl NotesDialog {
                                                                 format!("Failed to copy note link: {e}"),
                                                             );
                                                         }
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     if ui.button("Copy slug").clicked() {
                                                         if let Err(e) = crate::actions::clipboard::set_text(&entry.slug) {
@@ -1820,13 +1843,13 @@ impl NotesDialog {
                                                                 format!("Failed to copy note slug: {e}"),
                                                             );
                                                         }
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     if app.note_settings.aliases_enabled
                                                         && ui.button("Manage aliases").clicked()
                                                     {
                                                         app.open_note_panel(&entry.slug, None);
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     if app.note_settings.templates_enabled
                                                         && ui.button("Create note from template").clicked()
@@ -1836,12 +1859,12 @@ impl NotesDialog {
                                                             None,
                                                             ActivationSource::Click,
                                                         );
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     ui.menu_button("Meta", |ui| {
                                                         if ui.button("Wrap links in note").clicked() {
                                                             wrap_links_slug = Some(entry.slug.clone());
-                                                            ui.close_menu();
+                                                            ui.close();
                                                         }
                                                     });
                                                     let remove_button = ui.button("Remove Note");
@@ -1866,7 +1889,7 @@ impl NotesDialog {
                                                                 refresh_entries = true;
                                                             }
                                                         }
-                                                        ui.close_menu();
+                                                        ui.close();
                                                     }
                                                     ui.separator();
                                                     ui.label("Link to todo");
@@ -1889,7 +1912,7 @@ impl NotesDialog {
                                                                     suffix: format!("\n@todo:{todo_id}"),
                                                                 });
                                                             }
-                                                            ui.close_menu();
+                                                            ui.close();
                                                         }
                                                     }
                                             });
@@ -1903,10 +1926,10 @@ impl NotesDialog {
                                                 preview_rect,
                                             )
                                         })
-                                    })
-                                });
+                                    },
+                                );
                                 #[cfg(test)]
-                                let actual_row = _allocated_row.inner.inner;
+                                let actual_row = _allocated_row.inner;
                                 #[cfg(test)]
                                 let actual_outer_rect = actual_row.response.rect;
                                 #[cfg(test)]
@@ -1918,7 +1941,7 @@ impl NotesDialog {
                                 ) = actual_row.inner;
                                 let _separator_response = ui
                                     .push_id(("quick-notes-separator", identity), |ui| {
-                                        ui.allocate_ui_at_rect(separator_rect, |ui| ui.separator())
+                                        ui.scope_builder(egui::UiBuilder::new().max_rect(separator_rect), |ui| ui.separator())
                                     })
                                     .inner;
                                 #[cfg(test)]
@@ -1949,6 +1972,12 @@ impl NotesDialog {
                                         });
                                     }
                                     self.last_rendered_indices.push(idx);
+                                    self.last_rendered_header_ids
+                                        .push((
+                                            identity.to_owned(),
+                                            row_header_response_id
+                                                .expect("the note row built a header response"),
+                                        ));
                                     self.last_rendered_row_rects.push((
                                         idx,
                                         RenderedNoteRowRects {
@@ -2141,7 +2170,7 @@ mod tests {
         let metadata = super::build_row_metadata(entries, false, false).unwrap();
         let all_indices = (0..entries.len()).collect::<Vec<_>>();
         let mut result = None;
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -2149,13 +2178,14 @@ mod tests {
                 )),
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |root_ui| {
+                let frame_context = root_ui.ctx().clone();
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     let output = egui::ScrollArea::both().max_height(520.0).show_viewport(
                         ui,
                         |ui, viewport| {
                             let layout = eager_notes_rows(
-                                ctx,
+                                &frame_context,
                                 ui,
                                 entries,
                                 &metadata,
@@ -2176,6 +2206,7 @@ mod tests {
                 });
             },
         );
+        output.drop_without_applying_deltas();
         result.expect("the eager geometry oracle runs its central panel")
     }
 
@@ -2192,25 +2223,26 @@ mod tests {
             .expect("synthetic note metadata builds in the isolated fixture");
         let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, viewport_size);
         let content_rect = viewport;
-        ctx.set_style(style.clone());
+        ctx.set_style_of(ctx.theme(), style.clone());
         let layer = egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("track-c-notes-eager-oracle"),
         );
         let mut result = None;
-        let _ = ctx.run(
+        let _ = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(viewport),
                 ..Default::default()
             },
-            |ctx| {
+            |root_ui| {
                 let mut ui = egui::Ui::new(
-                    ctx.clone(),
-                    layer,
+                    root_ui.ctx().clone(),
                     egui::Id::new("track-c-notes-eager-ui"),
-                    content_rect,
-                    viewport,
+                    egui::UiBuilder::new()
+                        .layer_id(layer)
+                        .max_rect(content_rect),
                 );
+                ui.set_clip_rect(viewport);
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.set_style(style.clone());
                     let layout = eager_notes_rows(
@@ -2394,7 +2426,7 @@ mod tests {
             assert_ne!(geometry_width, wide_geometry_width.unwrap());
             assert!(dialog.test_geometry_rebuilds > wide_rebuilds.unwrap());
         }
-        let style = ctx.style().as_ref().clone();
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
         let oracle_ctx = egui::Context::default();
         let eager = eager_notes_geometry_for_projection(
             &oracle_ctx,
@@ -3045,7 +3077,7 @@ mod tests {
                                     "screen_960x180"
                                 },
                                 scale_milli: 1_000,
-                                font_state: "warm_egui_font_atlas",
+                                font_state: "active_font_revision",
                                 settings: track_c_notes_settings_label(scenario),
                                 cold_type,
                                 mode,
@@ -3132,7 +3164,7 @@ mod tests {
                         item_count: *count,
                         viewport: "screen_300x640_transition_960x640",
                         scale_milli: 1_000,
-                        font_state: "warm_egui_font_atlas",
+                        font_state: "active_font_revision",
                         settings: track_c_notes_settings_label("horizontal_empty"),
                         cold_type,
                         mode,
@@ -3159,7 +3191,7 @@ mod tests {
         width: f32,
         height: f32,
     ) -> egui::FullOutput {
-        ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -3231,9 +3263,9 @@ mod tests {
         assert!((geometry.content_size.y - geometry.estimated_content_size.y).abs() < 0.2);
 
         let wrapped_ctx = egui::Context::default();
-        let mut style = (*wrapped_ctx.style()).clone();
-        style.wrap = Some(true);
-        wrapped_ctx.set_style(style);
+        let mut style = (*wrapped_ctx.style_of(wrapped_ctx.theme())).clone();
+        style.wrap_mode = Some(egui::TextWrapMode::Wrap);
+        wrapped_ctx.set_style_of(wrapped_ctx.theme(), style);
         let wrapped = eager_notes_geometry(&wrapped_ctx, &entries, 280.0);
         assert!(wrapped.rows[1].outer.height() > geometry.rows[1].outer.height());
         assert!(
@@ -3340,8 +3372,9 @@ mod tests {
             assert!((actual.header.width() - row.header_width).abs() < 0.5);
             match (actual.preview, row.preview_height) {
                 (Some(preview), Some(height)) => {
-                    let expected_preview_top =
-                        expected_top + row.header_height + ctx.style().spacing.item_spacing.y;
+                    let expected_preview_top = expected_top
+                        + row.header_height
+                        + ctx.style_of(ctx.theme()).spacing.item_spacing.y;
                     assert!((preview.min.y - expected_preview_top).abs() < 0.5);
                     assert!((preview.height() - height).abs() < 0.5);
                 }
@@ -3475,7 +3508,7 @@ mod tests {
             2.56,
         );
         assert!(
-            ctx.is_context_menu_open(),
+            egui::Popup::is_any_open(&ctx),
             "sparse original row opens its real menu"
         );
         let edit_rect = dialog.test_menu_edit_rect.expect("Edit button is rendered");
@@ -3540,22 +3573,22 @@ mod tests {
         assert!(dialog.metadata_generation > prior_metadata_generation);
         assert!(dialog.test_geometry_rebuilds > prior_geometry_rebuilds);
 
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
         style.override_font_id = Some(egui::FontId::new(18.0, egui::FontFamily::Proportional));
         style.override_text_style = Some(egui::TextStyle::Heading);
-        ctx.set_style(style.clone());
+        ctx.set_style_of(ctx.theme(), style.clone());
         render_notes_frame(&ctx, &mut dialog, &mut app, 2.80);
         let font_style_rebuilds = dialog.test_geometry_rebuilds;
         style.override_text_style = Some(egui::TextStyle::Monospace);
-        ctx.set_style(style.clone());
+        ctx.set_style_of(ctx.theme(), style.clone());
         render_notes_frame(&ctx, &mut dialog, &mut app, 2.82);
         assert!(
             dialog.test_geometry_rebuilds > font_style_rebuilds,
             "effective title text style invalidates geometry even with override_font_id"
         );
         let wrap_rebuilds = dialog.test_geometry_rebuilds;
-        style.wrap = Some(true);
-        ctx.set_style(style);
+        style.wrap_mode = Some(egui::TextWrapMode::Wrap);
+        ctx.set_style_of(ctx.theme(), style);
         render_notes_frame(&ctx, &mut dialog, &mut app, 2.84);
         assert!(dialog.test_geometry_rebuilds > wrap_rebuilds);
         let row = dialog
@@ -3633,10 +3666,10 @@ mod tests {
         let without_beta_metadata = super::build_row_metadata(&without_beta, false, false).unwrap();
         let without_beta_indices = vec![0, 1, 2];
         let mut geometries = None;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             let old = super::measure_notes_geometry(
                 ctx,
-                &ctx.style(),
+                &ctx.style_of(ctx.theme()),
                 320.0,
                 &original,
                 &metadata,
@@ -3647,7 +3680,7 @@ mod tests {
             );
             let new = super::measure_notes_geometry(
                 ctx,
-                &ctx.style(),
+                &ctx.style_of(ctx.theme()),
                 320.0,
                 &inserted,
                 &inserted_metadata,
@@ -3658,7 +3691,7 @@ mod tests {
             );
             let replacement = super::measure_notes_geometry(
                 ctx,
-                &ctx.style(),
+                &ctx.style_of(ctx.theme()),
                 320.0,
                 &without_beta,
                 &without_beta_metadata,
@@ -3705,9 +3738,16 @@ mod tests {
         for frame in 0..5 {
             render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
         }
+        let original_owner_header_id = rendered_note_header_id(&dialog, "popup-000");
+        assert_ne!(
+            original_owner_header_id,
+            rendered_note_header_id(&dialog, "popup-001"),
+            "distinct note identities have distinct header widget IDs"
+        );
 
         let row_rects = rendered_note_rect(&dialog, 0);
         let header_rect = row_rects.header;
+        let title_pointer = row_rects.title.center();
         let header_pointer = header_gap_point(&row_rects);
         assert!(
             header_rect.contains(header_pointer)
@@ -3717,13 +3757,52 @@ mod tests {
             "first popup owner gap is visible: header={header_rect:?}, pointer={header_pointer:?}, inner={:?}",
             dialog.test_scroll_area_inner_rect
         );
+        assert!(row_rects.title.contains(title_pointer));
+        click_notes_at(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            title_pointer,
+            egui::PointerButton::Secondary,
+            1.08,
+        );
+        assert!(
+            dialog
+                .menu_owner
+                .as_ref()
+                .is_some_and(|owner| owner.response.context_menu_opened()),
+            "a real secondary click on the title text opens the row-owned context menu"
+        );
+        assert_eq!(
+            dialog.menu_owner.as_ref().unwrap().response.id,
+            original_owner_header_id
+        );
+        render_notes_frame_with_events(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            1.12,
+            960.0,
+            640.0,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            !egui::Popup::is_any_open(&ctx),
+            "Escape closes the title-owned context menu before testing header padding"
+        );
         click_notes_at(
             &ctx,
             &mut dialog,
             &mut app,
             header_pointer,
             egui::PointerButton::Secondary,
-            1.1,
+            1.2,
         );
         assert!(
             dialog
@@ -3734,7 +3813,7 @@ mod tests {
             dialog.test_scroll_area_inner_rect,
             dialog.last_rendered_indices
         );
-        assert!(ctx.is_context_menu_open());
+        assert!(egui::Popup::is_any_open(&ctx));
         assert_eq!(
             dialog
                 .menu_owner
@@ -3742,12 +3821,22 @@ mod tests {
                 .map(|owner| owner.identity.as_str()),
             Some("popup-000")
         );
+        assert_eq!(
+            dialog.menu_owner.as_ref().unwrap().response.id,
+            original_owner_header_id,
+            "the menu response has the row's stable header ID"
+        );
 
         let far_row_top = dialog.notes_geometry.as_ref().unwrap().rows[30].top;
         set_notes_scroll_offset(&ctx, &dialog, egui::vec2(0.0, far_row_top));
-        render_notes_frame(&ctx, &mut dialog, &mut app, 1.14);
-        assert!(ctx.is_context_menu_open());
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.24);
+        assert!(egui::Popup::is_any_open(&ctx));
         assert_eq!(dialog.menu_owner.as_ref().unwrap().original_index, 0);
+        assert_eq!(
+            rendered_note_header_id(&dialog, "popup-000"),
+            original_owner_header_id,
+            "scrolling keeps the offscreen owner's header ID"
+        );
         assert!(dialog.last_rendered_indices.contains(&0));
         assert!(dialog.last_rendered_indices.len() < 32);
 
@@ -3755,20 +3844,25 @@ mod tests {
         inserted.insert(0, note("Before owner", "popup-before", "body"));
         let inserted_cache = crate::plugins::note::publish_note_cache_for_test(inserted.clone());
         for frame in 0..4 {
-            render_notes_frame(&ctx, &mut dialog, &mut app, 1.16 + frame as f64 / 60.0);
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.26 + frame as f64 / 60.0);
         }
-        assert!(ctx.is_context_menu_open());
+        assert!(egui::Popup::is_any_open(&ctx));
         assert_eq!(dialog.menu_owner.as_ref().unwrap().identity, "popup-000");
         assert_eq!(dialog.menu_owner.as_ref().unwrap().original_index, 1);
+        assert_eq!(
+            rendered_note_header_id(&dialog, "popup-000"),
+            original_owner_header_id,
+            "inserting a preceding note does not retarget the popup widget ID"
+        );
         assert!(dialog.last_rendered_indices.contains(&1));
         assert!(dialog.last_rendered_indices.len() < 32);
 
         inserted.remove(1);
         let removed_cache = crate::plugins::note::publish_note_cache_for_test(inserted);
-        render_notes_frame(&ctx, &mut dialog, &mut app, 1.24);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.34);
         assert!(dialog.menu_owner.is_none());
         assert!(
-            !ctx.is_context_menu_open(),
+            !egui::Popup::is_any_open(&ctx),
             "removed owner closes its own menu"
         );
 
@@ -3838,7 +3932,7 @@ mod tests {
         height: f32,
         events: Vec<egui::Event>,
     ) {
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -3849,7 +3943,8 @@ mod tests {
                 ..Default::default()
             },
             |ctx| dialog.ui(ctx, app),
-        );
+        )
+        .drop_without_applying_deltas();
     }
 
     fn set_notes_scroll_offset(ctx: &egui::Context, dialog: &NotesDialog, offset: egui::Vec2) {
@@ -3867,6 +3962,14 @@ mod tests {
             .iter()
             .find_map(|(index, rects)| (*index == original_index).then_some(*rects))
             .expect("requested original note index was built")
+    }
+
+    fn rendered_note_header_id(dialog: &NotesDialog, identity: &str) -> egui::Id {
+        dialog
+            .last_rendered_header_ids
+            .iter()
+            .find_map(|(rendered_identity, id)| (rendered_identity == identity).then_some(*id))
+            .expect("requested note header was built")
     }
 
     fn header_gap_point(row: &RenderedNoteRowRects) -> egui::Pos2 {
@@ -4129,7 +4232,7 @@ mod tests {
                             .borrow_mut()
                             .take()
                             .expect("setup creates deterministic raw input");
-                        context.run(input, |ctx| dialog.ui(ctx, &mut app))
+                        context.run_ui(input, |ctx| dialog.ui(ctx, &mut app))
                     },
                 );
                 let warm_rebuild_count = dialog.test_geometry_rebuilds - warm_rebuilds_before;
@@ -4953,10 +5056,10 @@ mod tests {
         }
         track_c2f_signature_string(&mut signature, &format!("{:?}", geometry.key.title_font));
         track_c2f_signature_string(&mut signature, &format!("{:?}", geometry.key.small_font));
-        match geometry.key.wrap {
+        match geometry.key.wrap_mode {
             Some(value) => {
                 signature.number(1);
-                signature.number(value as u64);
+                track_c2f_signature_string(&mut signature, &format!("{value:?}"));
             }
             None => signature.number(0),
         }
@@ -5042,7 +5145,7 @@ mod tests {
         WarmRepeat,
         EarlyWideUnicode,
         Width960To300,
-        AtlasReplacement,
+        FontRevisionReplacement,
     }
 
     impl TrackC2FRecipe {
@@ -5056,7 +5159,7 @@ mod tests {
                 Self::WarmRepeat => "warm_repeat",
                 Self::EarlyWideUnicode => "early_wide_unicode",
                 Self::Width960To300 => "width_960_to_300",
-                Self::AtlasReplacement => "atlas_replacement",
+                Self::FontRevisionReplacement => "font_revision_replacement",
             }
         }
 
@@ -5400,7 +5503,7 @@ mod tests {
             track_c2f_reference_metadata(&expected_notes, expected_backlinks, initial_tasks);
         let expected_indices =
             track_c2f_reference_indices(&expected_notes, recipe.measured_query());
-        let style = ctx.style().as_ref().clone();
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
         let oracle_ctx = egui::Context::default();
         let eager = eager_notes_geometry_for_projection(
             &oracle_ctx,
@@ -5471,7 +5574,7 @@ mod tests {
             | TrackC2FRecipe::WarmRepeat
             | TrackC2FRecipe::EarlyWideUnicode
             | TrackC2FRecipe::Width960To300
-            | TrackC2FRecipe::AtlasReplacement => {}
+            | TrackC2FRecipe::FontRevisionReplacement => {}
         }
         run_track_c_notes_frame(
             &state.ctx,
@@ -5805,7 +5908,7 @@ mod tests {
                 | TrackC2FRecipe::GeometryCold
                 | TrackC2FRecipe::EarlyWideUnicode
                 | TrackC2FRecipe::Width960To300
-                | TrackC2FRecipe::AtlasReplacement => 1,
+                | TrackC2FRecipe::FontRevisionReplacement => 1,
                 _ => 0,
             }
         );
@@ -6349,16 +6452,16 @@ mod tests {
         let mut atlas_state = track_c2f_prepare_state(
             workspace.root(),
             &fixture.values,
-            TrackC2FRecipe::AtlasReplacement,
+            TrackC2FRecipe::FontRevisionReplacement,
             640.0,
         );
-        let old_atlas = atlas_state
+        let old_font_revision = atlas_state
             .dialog
             .notes_geometry
             .as_ref()
             .expect("setup settled the old geometry")
-            .font_atlas
-            .clone();
+            .key
+            .font_revision;
         let old_geometry_key = atlas_state
             .dialog
             .notes_geometry
@@ -6375,11 +6478,15 @@ mod tests {
         definitions
             .font_data
             .insert("C2F-unused-atlas-rejection".to_owned(), duplicate);
-        atlas_state.ctx.set_fonts(definitions.clone());
+        crate::gui::font_revision::install(&atlas_state.ctx, definitions.clone());
 
         let oracle_ctx = egui::Context::default();
-        oracle_ctx.set_fonts(definitions);
-        let style = atlas_state.ctx.style().as_ref().clone();
+        crate::gui::font_revision::install(&oracle_ctx, definitions);
+        let style = atlas_state
+            .ctx
+            .style_of(atlas_state.ctx.theme())
+            .as_ref()
+            .clone();
         atlas_state.eager = eager_notes_geometry_for_projection(
             &oracle_ctx,
             &atlas_state.expected_notes,
@@ -6392,21 +6499,16 @@ mod tests {
         let atlas_sample = track_c2f_sample(&mut atlas_state, 99);
         assert_eq!(atlas_sample.observation.geometry_rebuilds, 1);
         assert_eq!(atlas_sample.observation.geometry_rows_measured, 100);
-        let replacement_atlas = atlas_state.ctx.fonts(|fonts| fonts.texture_atlas());
-        assert!(
-            !std::sync::Arc::ptr_eq(&old_atlas, &replacement_atlas),
-            "egui applies the queued font definitions during the measured frame"
-        );
         let installed_geometry = atlas_state
             .dialog
             .notes_geometry
             .as_ref()
-            .expect("geometry was rebuilt against the replacement atlas");
-        assert_eq!(installed_geometry.key, old_geometry_key);
-        assert!(std::sync::Arc::ptr_eq(
-            &installed_geometry.font_atlas,
-            &replacement_atlas
-        ));
+            .expect("geometry was rebuilt against the active font revision");
+        assert_ne!(installed_geometry.key.font_revision, old_font_revision);
+        let mut expected_geometry_key = old_geometry_key;
+        expected_geometry_key.font_revision =
+            crate::gui::font_revision::active_revision(&atlas_state.ctx);
+        assert_eq!(installed_geometry.key, expected_geometry_key);
         drop(atlas_state);
     }
 

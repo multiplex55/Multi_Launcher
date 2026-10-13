@@ -214,7 +214,7 @@ impl MultiManagerDialog {
                         if self.rename.workspace_id == id {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.rename.value)
-                                    .id_source(("mm_workspace_rename", id)),
+                                    .id_salt(("mm_workspace_rename", id)),
                             )
                             .changed();
                             if ui.button("Apply").clicked() {
@@ -345,7 +345,7 @@ impl MultiManagerDialog {
                     ui.label("unbound");
                 }
             }
-            egui::ComboBox::from_id_source(("mm_virtual_desktop", id))
+            egui::ComboBox::from_id_salt(("mm_virtual_desktop", id))
                 .selected_text("Bind / rebind…")
                 .show_ui(ui, |ui| {
                     let VirtualDesktopSnapshotState::Ready(desktops) = &self.virtual_desktops
@@ -406,7 +406,7 @@ impl MultiManagerDialog {
             ui.checkbox(&mut self.hotkey_editor.win, "Win");
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.hotkey_editor.key)
-                    .id_source(("mm_workspace_hotkey_key", id)),
+                    .id_salt(("mm_workspace_hotkey_key", id)),
             );
             if self.hotkey_editor_needs_focus {
                 response.request_focus();
@@ -458,7 +458,7 @@ impl MultiManagerDialog {
                 ui.label(format!("Window {}", index + 1));
                 let mut alias = win.alias.clone();
                 if ui
-                    .add(egui::TextEdit::singleline(&mut alias).id_source((
+                    .add(egui::TextEdit::singleline(&mut alias).id_salt((
                         "mm_window_alias",
                         id,
                         index,
@@ -741,7 +741,7 @@ impl MultiManagerSettingsDialog {
                 changed |= ui
                     .add(
                         egui::DragValue::new(&mut s.hotkey_poll_ms)
-                            .clamp_range(10..=5000)
+                            .range(10..=5000)
                             .prefix("Hotkey poll interval ")
                             .suffix(" ms"),
                     )
@@ -847,7 +847,7 @@ fn send_all(app: &mut LauncherApp, home: bool) {
 }
 fn rect_ui(
     ui: &mut egui::Ui,
-    id_source: impl std::hash::Hash,
+    id_source: impl std::hash::Hash + std::fmt::Debug,
     label: &str,
     rect: Option<MmRect>,
     mut set: impl FnMut(MmRect) -> Option<()>,
@@ -865,10 +865,10 @@ fn rect_ui(
             changed |= ui.add(egui::DragValue::new(&mut r.x)).changed();
             changed |= ui.add(egui::DragValue::new(&mut r.y)).changed();
             changed |= ui
-                .add(egui::DragValue::new(&mut r.w).clamp_range(1..=10000))
+                .add(egui::DragValue::new(&mut r.w).range(1..=10000))
                 .changed();
             changed |= ui
-                .add(egui::DragValue::new(&mut r.h).clamp_range(1..=10000))
+                .add(egui::DragValue::new(&mut r.h).range(1..=10000))
                 .changed();
             if changed {
                 let _ = set(r);

@@ -228,7 +228,7 @@ mod tests {
 
     fn capture(key: egui::Key, modifiers: egui::Modifiers) -> CapturedChord {
         let ctx = egui::Context::default();
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![egui::Event::Key {
                 key,
                 physical_key: None,

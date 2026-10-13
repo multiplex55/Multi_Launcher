@@ -140,7 +140,7 @@ pub(super) struct NoteCloseRenderFrame {
 
 impl NoteCloseRenderFrame {
     pub(super) fn new(ctx: &eframe::egui::Context) -> Self {
-        let size = ctx.input(|input| input.screen_rect().size());
+        let size = ctx.input(|input| input.content_rect().size());
         let scale = ctx.pixels_per_point();
         let dimension = |logical: f32| {
             let pixels = (f64::from(logical) * f64::from(scale)).round();
@@ -233,7 +233,7 @@ pub(super) fn observe_note_discard_response(
     let client = NoteCloseRenderFrame::new(ui.ctx()).client_size?;
     let outward_clip = rect(
         ui.clip_rect()
-            .intersect(ui.ctx().input(|input| input.screen_rect())),
+            .intersect(ui.ctx().input(|input| input.content_rect())),
     )?;
     let clip = [
         outward_clip[0].max(0),
@@ -250,7 +250,7 @@ pub(super) fn observe_note_discard_response(
         fully_visible: ui.clip_rect().contains_rect(response.rect)
             && ui
                 .ctx()
-                .input(|input| input.screen_rect())
+                .input(|input| input.content_rect())
                 .contains_rect(response.rect),
         bounds,
         clip,

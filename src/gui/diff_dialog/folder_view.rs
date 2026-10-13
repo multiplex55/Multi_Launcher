@@ -502,7 +502,7 @@ pub(super) fn mutation_menu(
             .clicked()
         {
             *action = FolderViewAction::RequestMutation(kind);
-            ui.close_menu();
+            ui.close();
         }
     }
     ui.separator();
@@ -515,7 +515,7 @@ pub(super) fn mutation_menu(
                 .map(|p| exclude_exact(p))
                 .collect::<Vec<_>>(),
         );
-        ui.close_menu();
+        ui.close();
     }
     let extensions: Vec<_> = state
         .selected_paths
@@ -530,7 +530,7 @@ pub(super) fn mutation_menu(
         .clicked()
     {
         append_excludes(state, extensions);
-        ui.close_menu();
+        ui.close();
     }
     let folders: Vec<_> = state
         .selected_paths
@@ -552,11 +552,11 @@ pub(super) fn mutation_menu(
         .clicked()
     {
         append_excludes(state, folders);
-        ui.close_menu();
+        ui.close();
     }
     if ui.button("Edit filters…").clicked() {
         super::folder_rules_dialog::open(state);
-        ui.close_menu();
+        ui.close();
     }
 }
 

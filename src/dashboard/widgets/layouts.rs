@@ -715,7 +715,7 @@ impl Widget for LayoutsWidget {
             ui.horizontal(|ui| {
                 ui.label("Active layout");
                 let mut selected = self.active_layout_name.clone().unwrap_or_default();
-                egui::ComboBox::from_id_source("active_layout_combo")
+                egui::ComboBox::from_id_salt("active_layout_combo")
                     .selected_text(selected.clone())
                     .show_ui(ui, |ui| {
                         for name in &layout_names {
@@ -852,7 +852,7 @@ impl Widget for LayoutsWidget {
                                     format!("Dry run layout {}", layout.name),
                                     format!("layout:load:{}|dry_run", layout.name),
                                 ));
-                                ui.close_menu();
+                                ui.close();
                             }
                             let layouts_path = layouts_config_path();
                             let layouts_exists = self.cache.data.config_exists;
@@ -870,19 +870,19 @@ impl Widget for LayoutsWidget {
                                     ),
                                     "layout:edit".to_string(),
                                 ));
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("Rename").clicked() {
                                 self.rename_target = Some(layout.name.clone());
                                 self.rename_value = layout.name.clone();
-                                ui.close_menu();
+                                ui.close();
                             }
                             if ui.button("Delete").clicked() {
                                 selected = Some(Self::action(
                                     format!("Remove layout {}", layout.name),
                                     format!("layout:rm:{}", layout.name),
                                 ));
-                                ui.close_menu();
+                                ui.close();
                             }
                         });
 

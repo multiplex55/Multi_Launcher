@@ -256,6 +256,7 @@ mod c2e_grid_cell_loop_observer {
 struct RootListGeometryKey {
     result_generation: u64,
     result_count: usize,
+    font_revision: u64,
     width_bits: u32,
     pixels_per_point_bits: u32,
     button_font: egui::FontId,
@@ -304,7 +305,6 @@ pub(super) struct RootListGeometryCache {
     popup_owner: Option<(u64, usize)>,
     popup_response: Option<egui::Response>,
     pending_popup_cleanup: Option<egui::Response>,
-    font_atlas: Option<Arc<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
     #[cfg(test)]
     rebuild_count: u64,
     #[cfg(test)]
@@ -352,7 +352,6 @@ impl Default for RootListGeometryCache {
             popup_owner: None,
             popup_response: None,
             pending_popup_cleanup: None,
-            font_atlas: None,
             #[cfg(test)]
             rebuild_count: 0,
             #[cfg(test)]
@@ -435,7 +434,7 @@ impl RootListGeometryCache {
         if let Some(response) = self.pending_popup_cleanup.take()
             && response.context_menu_opened()
         {
-            let _ = response.context_menu(|ui| ui.close_menu());
+            let _ = response.context_menu(|ui| ui.close());
         }
     }
 
@@ -464,14 +463,14 @@ impl RootListGeometryCache {
             .as_ref()
             .unwrap_or(&egui::TextStyle::Button);
         let button_font = effective_text_style.resolve(ui.style());
-        let font_atlas = ui.fonts(|fonts| fonts.texture_atlas());
         let key = RootListGeometryKey {
             result_generation: self.result_generation,
             result_count: results.len(),
+            font_revision: super::font_revision::active_revision(ui.ctx()),
             width_bits: ui.available_width().to_bits(),
             pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
             button_font,
-            wrap: ui.wrap_text(),
+            wrap: ui.wrap_mode() == egui::TextWrapMode::Wrap,
             button_padding_x_bits: spacing.button_padding.x.to_bits(),
             button_padding_y_bits: spacing.button_padding.y.to_bits(),
             interaction_height_bits: spacing.interact_size.y.to_bits(),
@@ -484,12 +483,7 @@ impl RootListGeometryCache {
             grid_spacing_x_bits: 0,
             grid_spacing_y_bits: 0,
         };
-        if self.key.as_ref() == Some(&key)
-            && self
-                .font_atlas
-                .as_ref()
-                .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
-        {
+        if self.key.as_ref() == Some(&key) {
             return false;
         }
 
@@ -527,8 +521,14 @@ impl RootListGeometryCache {
             let galley = egui::WidgetText::from(text).into_galley_impl(
                 ui.ctx(),
                 ui.style(),
-                wrap,
-                (content_width - 2.0 * padding.x).max(0.0),
+                egui::text::TextWrapping::from_wrap_mode_and_width(
+                    if wrap {
+                        egui::TextWrapMode::Wrap
+                    } else {
+                        egui::TextWrapMode::Extend
+                    },
+                    (content_width - 2.0 * padding.x).max(0.0),
+                ),
                 egui::FontSelection::Style(egui::TextStyle::Button),
                 egui::Align::Center,
             );
@@ -562,7 +562,6 @@ impl RootListGeometryCache {
         self.grid_visual_row_bottoms.clear();
         self.grid_visual_max_end_tree.clear();
         self.key = Some(key);
-        self.font_atlas = Some(font_atlas);
         track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
@@ -590,11 +589,12 @@ impl RootListGeometryCache {
             .as_ref()
             .unwrap_or(&egui::TextStyle::Button);
         let button_font = effective_text_style.resolve(ui.style());
-        let wrap = ui.style().wrap.unwrap_or(false);
-        let font_atlas = ui.fonts(|fonts| fonts.texture_atlas());
+        let wrap =
+            ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Extend) == egui::TextWrapMode::Wrap;
         let key = RootListGeometryKey {
             result_generation: self.result_generation,
             result_count: results.len(),
+            font_revision: super::font_revision::active_revision(ui.ctx()),
             width_bits: width.to_bits(),
             pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
             button_font,
@@ -611,12 +611,7 @@ impl RootListGeometryCache {
             grid_spacing_x_bits: grid_spacing_x.to_bits(),
             grid_spacing_y_bits: grid_spacing_y.to_bits(),
         };
-        if self.key.as_ref() == Some(&key)
-            && self
-                .font_atlas
-                .as_ref()
-                .is_some_and(|cached| Arc::ptr_eq(cached, &font_atlas))
-        {
+        if self.key.as_ref() == Some(&key) {
             return false;
         }
 
@@ -645,8 +640,14 @@ impl RootListGeometryCache {
             let galley = egui::WidgetText::from(text).into_galley_impl(
                 ui.ctx(),
                 ui.style(),
-                wrap,
-                (nominal_width - 2.0 * padding.x).max(0.0),
+                egui::text::TextWrapping::from_wrap_mode_and_width(
+                    if wrap {
+                        egui::TextWrapMode::Wrap
+                    } else {
+                        egui::TextWrapMode::Extend
+                    },
+                    (nominal_width - 2.0 * padding.x).max(0.0),
+                ),
                 egui::FontSelection::Style(egui::TextStyle::Button),
                 egui::Align::Center,
             );
@@ -760,7 +761,6 @@ impl RootListGeometryCache {
             visual_bottom
         };
         self.key = Some(key);
-        self.font_atlas = Some(font_atlas);
         track_c_timer.finish(crate::performance::track_c::Outcome::Completed);
         #[cfg(test)]
         {
@@ -853,6 +853,12 @@ impl RootListGeometryCache {
             .map(|(_, index)| index)
     }
 
+    fn owned_context_menu_is_open(&self) -> bool {
+        self.popup_response
+            .as_ref()
+            .is_some_and(egui::Response::context_menu_opened)
+    }
+
     fn row_widget_id(&self, parent: egui::Id, index: usize) -> egui::Id {
         parent.with(("launcher-root-list-row", self.result_generation, index))
     }
@@ -899,13 +905,17 @@ fn root_grid_cell_response(
     );
     let mut cell_ui = egui::Ui::new(
         ui.ctx().clone(),
-        ui.layer_id(),
         geometry.row_widget_id(ui.id(), index),
-        row_rect,
-        ui.clip_rect(),
+        egui::UiBuilder::new()
+            .layer_id(ui.layer_id())
+            .max_rect(row_rect)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
+    cell_ui.set_clip_rect(ui.clip_rect());
     cell_ui.set_style(ui.style().clone());
-    cell_ui.set_enabled(ui.is_enabled());
+    if !ui.is_enabled() {
+        cell_ui.disable();
+    }
     let text = format!("{}\n{}", action.label, action.desc);
     cell_ui
         .with_layout(
@@ -913,7 +923,7 @@ fn root_grid_cell_response(
             |cell_ui| {
                 cell_ui.add_sized(
                     [geometry.grid_nominal_width, 44.0],
-                    egui::SelectableLabel::new(selected, text),
+                    egui::Button::selectable(selected, text),
                 )
             },
         )
@@ -972,7 +982,7 @@ struct D08ResponseObservations {
 
 #[cfg(test)]
 pub(crate) fn begin_d08_response_observation(context: &egui::Context) {
-    let frame_nr = context.frame_nr();
+    let frame_nr = context.cumulative_frame_nr();
     context.data_mut(|data| {
         data.insert_temp(
             egui::Id::new("d08-response-observations"),
@@ -991,7 +1001,7 @@ pub(crate) fn observe_d08_response(
     control: D08Control,
     response: &egui::Response,
 ) {
-    let frame_nr = context.frame_nr();
+    let frame_nr = context.cumulative_frame_nr();
     context.data_mut(|data| {
         let key = egui::Id::new("d08-response-observations");
         let Some(mut observations) = data.get_temp::<D08ResponseObservations>(key) else {
@@ -1028,7 +1038,7 @@ pub(crate) fn d08_response_enabled(
     assert!(!observations.overflow, "D08 observation must stay bounded");
     assert_eq!(
         observations.frame_nr.checked_add(1),
-        Some(context.frame_nr())
+        Some(context.cumulative_frame_nr())
     );
     let responses = observations
         .responses
@@ -1333,7 +1343,7 @@ fn render_universal_context_menu(
                     source_query: source_query.trim().to_owned(),
                     trace_identity,
                 });
-                ui.close_menu();
+                ui.close();
             }
         } else {
             ui.add_enabled(false, egui::Button::new("Save live query"))
@@ -1375,7 +1385,7 @@ fn add_radial_action_choice(
         return;
     };
     *selected = Some(choice);
-    ui.close_menu();
+    ui.close();
 }
 
 fn radial_add_unavailable_reason(
@@ -1850,7 +1860,7 @@ impl LauncherApp {
                 match choice {
                     ContextMenuChoice::Execute(action) => {
                         defer_universal_context_action(deferred, action);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ContextMenuChoice::AddToRadial {
                         binding,
@@ -1864,7 +1874,7 @@ impl LauncherApp {
                             source_query,
                             trace_identity,
                         });
-                        ui.close_menu();
+                        ui.close();
                     }
                 }
             }
@@ -2221,6 +2231,8 @@ impl LauncherApp {
                 text: message.into(),
                 kind: ToastKind::Warning,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+
+                style: Default::default(),
             });
         }
         if let Some(pending) = self.pending_query.take() {
@@ -2259,6 +2271,8 @@ impl LauncherApp {
                         kind: ToastKind::Info,
                         options: ToastOptions::default()
                             .duration_in_seconds(self.toast_duration as f64),
+
+                        style: Default::default(),
                     },
                 );
             }
@@ -2272,6 +2286,8 @@ impl LauncherApp {
                         kind: ToastKind::Info,
                         options: ToastOptions::default()
                             .duration_in_seconds(self.toast_duration as f64),
+
+                        style: Default::default(),
                     },
                 );
             }
@@ -2625,9 +2641,6 @@ impl LauncherApp {
         let source_state_before_frame = frame_logic.source_state_before_frame.clone();
         let mut snippet_prompt_owns_input = frame_logic.snippet_prompt_owns_input;
         let just_became_visible = frame_logic.just_became_visible;
-        let visibility_request = frame_logic.visibility_request;
-        let visibility_invocation_id = frame_logic.visibility_invocation_id;
-        let should_be_visible = frame_logic.should_be_visible;
         let mut painted_root_generation = None;
         let mut painted_query_results = false;
 
@@ -3225,7 +3238,7 @@ impl LauncherApp {
                                 let total_height = self.root_list_geometry.total_height;
                                 let content_width = self.root_list_geometry.content_width;
 
-                                if !ui.ctx().is_context_menu_open() {
+                                if !self.root_list_geometry.owned_context_menu_is_open() {
                                     self.root_list_geometry.clear_popup_owner();
                                 }
                                 if let Some(selected) =
@@ -3354,7 +3367,7 @@ impl LauncherApp {
                                 let content_width = self.root_list_geometry.content_width;
                                 let content_origin = ui.max_rect().min;
 
-                                if !ui.ctx().is_context_menu_open() {
+                                if !self.root_list_geometry.owned_context_menu_is_open() {
                                     self.root_list_geometry.clear_popup_owner();
                                 }
                                 if let Some(selected) = self
@@ -3414,40 +3427,55 @@ impl LauncherApp {
                                         self.root_list_geometry.row_widget_id(ui.id(), idx);
                                     let mut row_ui = egui::Ui::new(
                                         ui.ctx().clone(),
-                                        ui.layer_id(),
                                         row_widget_id,
-                                        row_rect,
-                                        ui.clip_rect(),
+                                        egui::UiBuilder::new()
+                                            .layer_id(ui.layer_id())
+                                            .max_rect(row_rect)
+                                            .layout(egui::Layout::centered_and_justified(
+                                                ui.layout().main_dir(),
+                                            )),
                                     );
+                                    row_ui.set_clip_rect(ui.clip_rect());
                                     row_ui.set_style(ui.style().clone());
-                                    row_ui.set_enabled(ui.is_enabled());
+                                    if !ui.is_enabled() {
+                                        row_ui.disable();
+                                    }
                                     let resp = row_ui
                                         .with_layout(
                                             egui::Layout::centered_and_justified(
                                                 ui.layout().main_dir(),
                                             ),
                                             |row_ui| {
-                                                row_ui.add(egui::SelectableLabel::new(
+                                                #[cfg(test)]
+                                                let expected_response_id = row_ui.next_auto_id();
+                                                let response = row_ui.add(egui::Button::selectable(
                                                     self.selected == Some(idx),
                                                     text,
-                                                ))
+                                                ));
+                                                #[cfg(test)]
+                                                assert_eq!(
+                                                    response.id, expected_response_id,
+                                                    "the selectable button keeps the child UI's next automatic ID"
+                                                );
+                                                response
                                             },
                                         )
                                         .inner;
                                     #[cfg(test)]
                                     {
-                                        // Ui::new scopes the row by generation and absolute
-                                        // index; with_layout creates one child UI before the
-                                        // SelectableLabel allocates its response ID.
-                                        let row_auto_id_source =
-                                            row_widget_id.with("auto").value();
-                                        let label_auto_id_source = egui::Id::new(row_auto_id_source)
-                                            .with("child")
-                                            .value();
+                                        // Keep the row's parent scope tied to the result
+                                        // generation and absolute index. egui's child-UI auto
+                                        // ID derivation is an implementation detail of the
+                                        // layout API, so the response is checked where its ID
+                                        // is allocated above.
                                         assert_eq!(
-                                            resp.id,
-                                            egui::Id::new(label_auto_id_source),
-                                            "painted response ID retains its absolute generation/row scope"
+                                            row_widget_id,
+                                            ui.id().with((
+                                                "launcher-root-list-row",
+                                                self.root_list_geometry.result_generation,
+                                                idx,
+                                            )),
+                                            "painted row keeps its absolute generation/index scope"
                                         );
                                     }
                                     #[cfg(test)]
@@ -3750,6 +3778,8 @@ impl LauncherApp {
                         kind: ToastKind::Info,
                         options: ToastOptions::default()
                             .duration_in_seconds(self.toast_duration as f64),
+
+                        style: Default::default(),
                     },
                 );
             }
@@ -3885,6 +3915,8 @@ impl LauncherApp {
                         kind: ToastKind::Success,
                         options: ToastOptions::default()
                             .duration_in_seconds(self.toast_duration as f64),
+
+                        style: Default::default(),
                     });
                 }
             }
@@ -4281,21 +4313,35 @@ impl eframe::App for LauncherApp {
 impl LauncherApp {
     /// Runs the same lifecycle owners as native eframe and finalizes only after
     /// egui has selected its retained pass.
-    fn run_root_frame_for_test(
+    pub(super) fn run_root_frame_for_test(
         &mut self,
         ctx: &egui::Context,
         input: egui::RawInput,
         force_discard_first_pass: bool,
     ) -> (egui::FullOutput, usize) {
+        self.run_root_frame_for_test_with(ctx, input, force_discard_first_pass, |app, ui| {
+            app.render_root_ui(ui);
+        })
+    }
+
+    pub(super) fn run_root_frame_for_test_with(
+        &mut self,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        force_discard_first_pass: bool,
+        mut render_pass: impl FnMut(&mut Self, &mut egui::Ui),
+    ) -> (egui::FullOutput, usize) {
         let mut frame = eframe::Frame::_new_kittest();
         let mut passes = 0;
-        let output = ctx.run_ui(input, |ui| {
-            self.begin_root_frame_logic(ui.ctx(), &mut frame);
-            self.render_root_ui(ui);
-            if force_discard_first_pass && passes == 0 {
-                ui.ctx().request_discard("forced M1-B lifecycle test pass");
-            }
-            passes += 1;
+        let output = with_immediate_viewport_renderer(ctx, || {
+            ctx.run_ui(input, |ui| {
+                self.begin_root_frame_logic(ui.ctx(), &mut frame);
+                render_pass(self, ui);
+                if force_discard_first_pass && passes == 0 {
+                    ui.ctx().request_discard("forced M1-B lifecycle test pass");
+                }
+                passes += 1;
+            })
         });
         self.finish_ui_frame_receipt();
         (output, passes)
@@ -4307,12 +4353,84 @@ impl LauncherApp {
         &mut self,
         ctx: &egui::Context,
         input: egui::RawInput,
-    ) -> egui::FullOutput {
+    ) -> egui::LogicOutput {
         let mut frame = eframe::Frame::_new_kittest();
-        ctx.begin_pass(input);
-        self.run_hidden_logic_tick(ctx, &mut frame);
-        ctx.end_pass()
+        ctx.run_logic(&input, |ctx| self.run_hidden_logic_tick(ctx, &mut frame))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static IMMEDIATE_VIEWPORT_RENDERER_INSTALLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn with_immediate_viewport_renderer<R>(ctx: &egui::Context, run: impl FnOnce() -> R) -> R {
+    struct EmbedViewportsGuard {
+        ctx: egui::Context,
+        previous: bool,
+    }
+
+    impl Drop for EmbedViewportsGuard {
+        fn drop(&mut self) {
+            self.ctx.set_embed_viewports(self.previous);
+        }
+    }
+
+    // egui exposes this renderer as thread-local registration with no public
+    // clear operation. The Rust test harness gives each test its own worker
+    // thread, so install this stateless renderer once for that test thread.
+    // A test needing different viewport semantics must run its whole fixture on
+    // a fresh thread; replacing the renderer from an active immediate callback
+    // would conflict with egui's immutable TLS borrow.
+    IMMEDIATE_VIEWPORT_RENDERER_INSTALLED.with(|installed| {
+        if installed.replace(true) {
+            return;
+        }
+        egui::Context::set_immediate_viewport_renderer(|ctx, mut viewport| {
+            let viewport_id = viewport.ids.this;
+            let parent_id = viewport.ids.parent;
+            let screen_rect = egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                viewport
+                    .builder
+                    .inner_size
+                    .unwrap_or_else(|| ctx.content_rect().size()),
+            );
+            let mut viewports = ctx.input(|input| input.raw.viewports.clone());
+            viewports.insert(
+                viewport_id,
+                egui::ViewportInfo {
+                    parent: Some(parent_id),
+                    title: viewport.builder.title.clone(),
+                    inner_rect: Some(screen_rect),
+                    ..Default::default()
+                },
+            );
+            let input = egui::RawInput {
+                viewport_id,
+                viewports,
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                assert_eq!(ui.ctx().viewport_id(), viewport_id);
+                assert_eq!(ui.ctx().parent_viewport_id(), parent_id);
+                (viewport.viewport_ui_cb)(ui);
+            });
+            output.drop_without_applying_deltas();
+            assert_eq!(ctx.viewport_id(), parent_id);
+        });
+    });
+
+    let guard = EmbedViewportsGuard {
+        ctx: ctx.clone(),
+        previous: ctx.embed_viewports(),
+    };
+    ctx.set_embed_viewports(false);
+    let result = run();
+    drop(guard);
+    result
 }
 
 impl LauncherApp {
@@ -4912,6 +5030,30 @@ mod tests {
 
     static MACRO_ACTIVATION_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
+    fn test_child_ui(
+        parent: &egui::Ui,
+        layer: egui::LayerId,
+        id: egui::Id,
+        max_rect: egui::Rect,
+        clip_rect: egui::Rect,
+    ) -> egui::Ui {
+        let mut ui = egui::Ui::new(
+            parent.ctx().clone(),
+            id,
+            egui::UiBuilder::new().layer_id(layer).max_rect(max_rect),
+        );
+        ui.set_clip_rect(clip_rect);
+        ui
+    }
+
+    fn test_root_ui(context: &egui::Context, id: egui::Id) -> egui::Ui {
+        egui::Ui::new(
+            context.clone(),
+            id,
+            egui::UiBuilder::new().max_rect(context.content_rect()),
+        )
+    }
+
     #[test]
     fn generic_result_tooltips_hide_snippet_bodies_and_keep_clipboard_actions() {
         let snippet = Action {
@@ -5181,7 +5323,7 @@ mod tests {
             layout.available_widths.push(available_width);
             let response = ui.add_sized(
                 [available_width, 0.0],
-                egui::SelectableLabel::new(false, text),
+                egui::Button::selectable(false, text),
             );
             layout.bounds = layout.bounds.union(response.rect);
             layout.rows.push(response.rect);
@@ -5204,14 +5346,14 @@ mod tests {
             egui::Id::new("track-c-root-list-eager-oracle"),
         );
         let mut layout = None;
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(outer),
                 ..Default::default()
             },
             |ctx| {
-                let mut ui = egui::Ui::new(
-                    ctx.clone(),
+                let mut ui = test_child_ui(
+                    ctx,
                     layer,
                     egui::Id::new("track-c-root-list-eager-ui"),
                     outer,
@@ -5231,6 +5373,7 @@ mod tests {
                 });
             },
         );
+        output.drop_without_applying_deltas();
         (outer, layout.expect("Track C eager list composition ran"))
     }
 
@@ -5332,9 +5475,9 @@ mod tests {
         for (case_index, (width, wrap, scale, heading_override)) in cases.into_iter().enumerate() {
             let ctx = egui::Context::default();
             if heading_override {
-                let mut style = (*ctx.style()).clone();
+                let mut style = (*ctx.style_of(ctx.theme())).clone();
                 style.override_text_style = Some(egui::TextStyle::Heading);
-                ctx.set_style(style);
+                ctx.set_style_of(ctx.theme(), style);
             }
             let outer =
                 egui::Rect::from_min_size(egui::pos2(31.0, 17.0), egui::vec2(width, 1_400.0));
@@ -5353,9 +5496,9 @@ mod tests {
             let mut virtual_rows = Vec::new();
             let mut eager_layout = None;
 
-            let _ = ctx.run(input, |ctx| {
-                let mut eager = egui::Ui::new(
-                    ctx.clone(),
+            let output = ctx.run_ui(input, |ctx| {
+                let mut eager = test_child_ui(
+                    ctx,
                     layer,
                     egui::Id::new("root-list-eager-oracle"),
                     outer,
@@ -5363,7 +5506,11 @@ mod tests {
                 );
                 eager.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     let mut style = ui.style().as_ref().clone();
-                    style.wrap = Some(wrap);
+                    style.wrap_mode = Some(if wrap {
+                        egui::TextWrapMode::Wrap
+                    } else {
+                        egui::TextWrapMode::Extend
+                    });
                     ui.set_style(style);
                     scale_ui(ui, scale, |ui| {
                         eager_layout = Some(eager_root_list_selectable_labels(
@@ -5372,8 +5519,8 @@ mod tests {
                     });
                 });
 
-                let mut measured = egui::Ui::new(
-                    ctx.clone(),
+                let mut measured = test_child_ui(
+                    ctx,
                     layer,
                     egui::Id::new("root-list-geometry-cache"),
                     outer,
@@ -5381,7 +5528,11 @@ mod tests {
                 );
                 measured.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     let mut style = ui.style().as_ref().clone();
-                    style.wrap = Some(wrap);
+                    style.wrap_mode = Some(if wrap {
+                        egui::TextWrapMode::Wrap
+                    } else {
+                        egui::TextWrapMode::Extend
+                    });
                     ui.set_style(style);
                     scale_ui(ui, scale, |ui| {
                         cache.ensure(ui, &actions, &aliases, false, false);
@@ -5391,8 +5542,8 @@ mod tests {
                                     + egui::vec2(cache.row_x_offsets[index], cache.row_tops[index]),
                                 egui::vec2(cache.row_widths[index], cache.row_heights[index]),
                             );
-                            let mut row_ui = egui::Ui::new(
-                                ctx.clone(),
+                            let mut row_ui = test_child_ui(
+                                ctx,
                                 layer,
                                 cache.row_widget_id(ui.id(), index),
                                 row_rect,
@@ -5403,7 +5554,7 @@ mod tests {
                             let response = row_ui
                                 .with_layout(
                                     egui::Layout::centered_and_justified(ui.layout().main_dir()),
-                                    |row_ui| row_ui.add(egui::SelectableLabel::new(false, text)),
+                                    |row_ui| row_ui.add(egui::Button::selectable(false, text)),
                                 )
                                 .inner;
                             virtual_rows.push(response.rect);
@@ -5411,6 +5562,7 @@ mod tests {
                     });
                 });
             });
+            output.drop_without_applying_deltas();
 
             let eager_layout = eager_layout.expect("the eager selectable-label oracle ran");
             let eager_rows = &eager_layout.rows;
@@ -5505,7 +5657,7 @@ mod tests {
                     cell_cursors.push(ui.cursor().min);
                     let response = ui.add_sized(
                         [nominal_width, 44.0],
-                        egui::SelectableLabel::new(
+                        egui::Button::selectable(
                             false,
                             format!("{}\n{}", action.label, action.desc),
                         ),
@@ -5534,14 +5686,14 @@ mod tests {
         scale: f32,
     ) -> (egui::Rect, EagerRootGridLayout) {
         let outer = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1_000_000.0));
-        ctx.set_style(style.clone());
+        ctx.set_style_of(ctx.theme(), style.clone());
         let layer = egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("track-c-root-grid-eager-oracle"),
         );
         let mut layout = None;
         for frame in 0..4 {
-            let _ = ctx.run(
+            let output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -5551,8 +5703,8 @@ mod tests {
                     ..Default::default()
                 },
                 |ctx| {
-                    let mut ui = egui::Ui::new(
-                        ctx.clone(),
+                    let mut ui = test_child_ui(
+                        ctx,
                         layer,
                         egui::Id::new("track-c-root-grid-eager-ui"),
                         outer,
@@ -5566,6 +5718,7 @@ mod tests {
                     });
                 },
             );
+            output.drop_without_applying_deltas();
         }
         (outer, layout.expect("Track C eager grid composition ran"))
     }
@@ -5745,14 +5898,14 @@ mod tests {
         {
             let ctx = egui::Context::default();
             if heading || interaction_width.is_some() {
-                let mut style = (*ctx.style()).clone();
+                let mut style = (*ctx.style_of(ctx.theme())).clone();
                 if heading {
                     style.override_text_style = Some(egui::TextStyle::Heading);
                 }
                 if let Some(interaction_width) = interaction_width {
                     style.spacing.interact_size.x = interaction_width;
                 }
-                ctx.set_style(style);
+                ctx.set_style_of(ctx.theme(), style);
             }
             let actions = (0..count)
                 .map(|index| Action {
@@ -5799,9 +5952,9 @@ mod tests {
                     time: Some(1.0 + frame as f64 / 60.0),
                     ..Default::default()
                 };
-                let _ = ctx.run(input, |ctx| {
-                    let mut eager = egui::Ui::new(
-                        ctx.clone(),
+                let output = ctx.run_ui(input, |ctx| {
+                    let mut eager = test_child_ui(
+                        ctx,
                         layer,
                         egui::Id::new("root-grid-eager-oracle"),
                         outer,
@@ -5810,7 +5963,11 @@ mod tests {
                     eager.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         if let Some(wrap) = wrap {
                             let mut style = ui.style().as_ref().clone();
-                            style.wrap = Some(wrap);
+                            style.wrap_mode = Some(if wrap {
+                                egui::TextWrapMode::Wrap
+                            } else {
+                                egui::TextWrapMode::Extend
+                            });
                             ui.set_style(style);
                         }
                         scale_ui(ui, scale, |ui| {
@@ -5822,8 +5979,8 @@ mod tests {
                         });
                     });
 
-                    let mut measured = egui::Ui::new(
-                        ctx.clone(),
+                    let mut measured = test_child_ui(
+                        ctx,
                         layer,
                         egui::Id::new("root-grid-geometry-cache"),
                         outer,
@@ -5832,7 +5989,11 @@ mod tests {
                     measured.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         if let Some(wrap) = wrap {
                             let mut style = ui.style().as_ref().clone();
-                            style.wrap = Some(wrap);
+                            style.wrap_mode = Some(if wrap {
+                                egui::TextWrapMode::Wrap
+                            } else {
+                                egui::TextWrapMode::Extend
+                            });
                             ui.set_style(style);
                         }
                         scale_ui(ui, scale, |ui| {
@@ -5849,6 +6010,7 @@ mod tests {
                         });
                     });
                 });
+                output.drop_without_applying_deltas();
             }
 
             assert_eq!(eager_cells.len(), actions.len());
@@ -5993,9 +6155,9 @@ mod tests {
             time: Some(1.0),
             ..Default::default()
         };
-        let _ = ctx.run(input, |ctx| {
-            let mut ui = egui::Ui::new(
-                ctx.clone(),
+        let output = ctx.run_ui(input, |ctx| {
+            let mut ui = test_child_ui(
+                ctx,
                 layer,
                 egui::Id::new("root-grid-tall-cell-cache"),
                 outer,
@@ -6005,6 +6167,7 @@ mod tests {
                 cache.ensure_grid(ui, &actions, 3);
             });
         });
+        output.drop_without_applying_deltas();
 
         let row_height = cache.row_heights[0];
         let viewport_top = row_height * 1.25;
@@ -6114,7 +6277,32 @@ mod tests {
             events,
             ..Default::default()
         };
-        ctx.run(input, |ctx| app.render_root_frame(ctx, None))
+        app.run_root_frame_for_test(ctx, input, false).0
+    }
+
+    fn assert_retained_immediate_viewport(ctx: &egui::Context, viewport_id: egui::ViewportId) {
+        let (parent_id, input_id, immediate, root_ui_min_rect) =
+            ctx.viewport_for(viewport_id, |viewport| {
+                (
+                    viewport
+                        .input
+                        .raw
+                        .viewports
+                        .get(&viewport_id)
+                        .and_then(|info| info.parent),
+                    viewport.input.raw.viewport_id,
+                    viewport.viewport_ui_cb.is_none(),
+                    viewport.prev_pass.root_ui_min_rect,
+                )
+            });
+        assert!(
+            immediate,
+            "egui retained an immediate viewport registration"
+        );
+        assert_eq!(parent_id, Some(egui::ViewportId::ROOT));
+        assert_eq!(input_id, viewport_id);
+        assert!(root_ui_min_rect.is_some(), "child root UI was retained");
+        assert_eq!(ctx.viewport_id(), egui::ViewportId::ROOT);
     }
 
     fn arm_track_c_frame_sample(app: &mut LauncherApp, invocation_id: u64) -> u64 {
@@ -6136,19 +6324,65 @@ mod tests {
     }
 
     #[test]
+    fn app_setup_registers_font_revision_before_a_discarded_first_pass() {
+        let ctx = egui::Context::default();
+        let (workspace, _app) = root_list_test_app(&ctx, Vec::new());
+        let mut definitions = egui::FontDefinitions::default();
+        definitions
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .expect("default proportional family exists")
+            .push("Ubuntu-Light".into());
+        let mut passes = 0;
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            if passes == 0 {
+                assert_eq!(crate::gui::font_revision::active_revision(ui.ctx()), 0);
+                crate::gui::font_revision::install(ui.ctx(), definitions.clone());
+                ui.ctx()
+                    .request_discard("font revision lifecycle regression");
+            } else {
+                assert_eq!(crate::gui::font_revision::active_revision(ui.ctx()), 1);
+            }
+            passes += 1;
+        });
+        output.drop_without_applying_deltas();
+
+        assert!(passes >= 2, "the in-pass install forced a subsequent pass");
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 1);
+        drop(_app);
+        drop(workspace);
+    }
+
+    #[test]
     fn forced_discard_dispatches_the_root_action_and_history_once() {
         let ctx = egui::Context::default();
         let action = Action {
-            label: "Help".into(),
-            desc: "Open help".into(),
-            action: "help:show".into(),
+            label: "Edit Radial Menus".into(),
+            desc: "Open the radial editor".into(),
+            action: "radial edit".into(),
             args: None,
         };
         let (workspace, mut app) = root_list_test_app(&ctx, vec![action]);
         app.visible_flag.store(true, Ordering::SeqCst);
         app.last_visible = true;
         app.test_skip_history_persistence = true;
-        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_input")));
+
+        let (setup_output, _) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            false,
+        );
+        setup_output.drop_without_applying_deltas();
+        let query_id = egui::Id::new("query_input");
+        ctx.memory_mut(|memory| memory.request_focus(query_id));
+        assert!(ctx.memory(|memory| memory.has_focus(query_id)));
 
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -6163,9 +6397,16 @@ mod tests {
         output.drop_without_applying_deltas();
 
         assert!(passes >= 2, "the integration test adapter forced a discard");
-        assert!(app.help_window.open);
-        assert_eq!(app.usage.get("help:show"), Some(&1));
-        assert_eq!(app.test_recorded_history_queries.len(), 1);
+        assert!(
+            app.panel_states.radial_editor,
+            "activation trace={:?}, selection={:?}, query focus={}, enter={}",
+            app.test_activation_trace,
+            app.selected,
+            ctx.memory(|memory| memory.has_focus(query_id)),
+            ctx.input(|input| input.key_pressed(egui::Key::Enter))
+        );
+        assert_eq!(app.usage.get("radial edit"), Some(&1));
+        assert_eq!(app.test_recorded_history_queries, ["root list fixture"]);
         assert_eq!(app.test_activation_trace.len(), 1);
         assert!(app.root_frame_logic.is_none());
         drop(app);
@@ -6178,6 +6419,15 @@ mod tests {
 
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let constructor_output = ctx.run_logic(&egui::RawInput::default(), |_| {});
+        assert!(
+            constructor_output
+                .viewport_commands
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|commands| commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::OuterPosition(_))))
+        );
         app.visible_flag.store(false, Ordering::SeqCst);
         app.last_visible = false;
         app.window_size = (777, 555);
@@ -6231,6 +6481,7 @@ mod tests {
                 | egui::ViewportCommand::OuterPosition(_)
                 | egui::ViewportCommand::InnerSize(_)
         )));
+        assert_retained_immediate_viewport(&ctx, child);
         assert!(!app.visible_flag.load(Ordering::SeqCst));
         assert!(!app.last_visible);
         assert_eq!(app.window_size, (777, 555));
@@ -6257,8 +6508,7 @@ mod tests {
 
         // The hidden runtime tick installs the same repaint callback used by
         // production before the worker publishes its request.
-        app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default())
-            .drop_without_applying_deltas();
+        drop(app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default()));
         assert!(!app.needs_viewport_bootstrap());
 
         let (wake_tx, wake_rx) = std::sync::mpsc::channel();
@@ -6267,6 +6517,13 @@ mod tests {
                 let _ = wake_tx.send(());
             }
         });
+        // Consume any repaint queued before the callback was installed. Egui
+        // coalesces requests at the same delay, so a prior zero-delay request
+        // would otherwise hide the worker's wake from this test observer.
+        for _ in 0..2 {
+            drop(ctx.run_logic(&egui::RawInput::default(), |_| {}));
+            while wake_rx.try_recv().is_ok() {}
+        }
         let worker_broker = Arc::clone(&broker);
         let worker = thread::spawn(move || {
             let result = PromptBackend::prompt(
@@ -6288,8 +6545,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("worker prompt wakes the hidden root");
         for _ in 0..8 {
-            let output = ctx.run(egui::RawInput::default(), |_| {});
-            output.drop_without_applying_deltas();
+            drop(ctx.run_logic(&egui::RawInput::default(), |_| {}));
             if !ctx.has_requested_repaint() {
                 break;
             }
@@ -6298,8 +6554,10 @@ mod tests {
 
         let output = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
         assert!(app.needs_viewport_bootstrap());
-        assert!(ctx.requested_repaint_last_pass_for(&egui::ViewportId::ROOT));
-        output.drop_without_applying_deltas();
+        wake_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("acquiring the hidden prompt schedules another root pass");
+        drop(output);
 
         let (output, _) = app.run_root_frame_for_test(
             &ctx,
@@ -6317,6 +6575,7 @@ mod tests {
                 .viewport_output
                 .contains_key(&egui::ViewportId::from_hash_of("mkmacro_prompt"))
         );
+        assert_retained_immediate_viewport(&ctx, egui::ViewportId::from_hash_of("mkmacro_prompt"));
         assert!(!app.needs_viewport_bootstrap());
         assert!(!app.visible_flag.load(Ordering::SeqCst));
         output.drop_without_applying_deltas();
@@ -6330,6 +6589,15 @@ mod tests {
     fn hidden_parameter_notice_bootstraps_child_without_root_activation() {
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let constructor_output = ctx.run_logic(&egui::RawInput::default(), |_| {});
+        assert!(
+            constructor_output
+                .viewport_commands
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|commands| commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::OuterPosition(_))))
+        );
         app.visible_flag.store(false, Ordering::SeqCst);
         app.last_visible = false;
         app.window_size = (777, 555);
@@ -6356,6 +6624,7 @@ mod tests {
         );
         let child = egui::ViewportId::from_hash_of("mkmacro_invocation_parameters");
         assert!(output.viewport_output.contains_key(&child));
+        assert_retained_immediate_viewport(&ctx, child);
         assert!(root_commands(&output).iter().all(|command| !matches!(
             command,
             egui::ViewportCommand::Focus
@@ -6380,10 +6649,20 @@ mod tests {
         app.window_size = (777, 555);
         app.query = "before hidden request".into();
         app.pending_query = Some("first hidden request".into());
-        let dropped = egui::DroppedFile {
-            path: Some(workspace.root().join("must-not-open.txt")),
-            ..Default::default()
-        };
+        #[derive(Debug)]
+        struct TestDroppedFile(std::path::PathBuf);
+
+        impl egui::DroppedFile for TestDroppedFile {
+            fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+
+            fn bytes(&self) -> Result<Vec<u8>, String> {
+                Ok(Vec::new())
+            }
+        }
+
+        let dropped = Arc::new(TestDroppedFile(workspace.root().join("must-not-open.txt")));
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -6405,8 +6684,7 @@ mod tests {
             ..Default::default()
         };
 
-        app.run_hidden_logic_tick_for_test(&ctx, input.clone())
-            .drop_without_applying_deltas();
+        drop(app.run_hidden_logic_tick_for_test(&ctx, input.clone()));
         assert_eq!(app.query, "first hidden request");
         assert!(app.pending_query.is_none());
         assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -6416,8 +6694,7 @@ mod tests {
         assert!(app.pending_ui_frame_receipt.is_none());
 
         app.pending_query = Some("second hidden request".into());
-        app.run_hidden_logic_tick_for_test(&ctx, input)
-            .drop_without_applying_deltas();
+        drop(app.run_hidden_logic_tick_for_test(&ctx, input));
         assert_eq!(app.query, "second hidden request");
         assert!(app.pending_query.is_none());
         assert!(!app.show_editor);
@@ -6477,6 +6754,7 @@ mod tests {
             Some("Radial submenu placement"),
             "the immediate child must be registered again in the retained pass"
         );
+        assert_retained_immediate_viewport(&ctx, super::super::radial_placement_viewport_id());
         output.drop_without_applying_deltas();
         drop(app);
         drop(workspace);
@@ -6486,6 +6764,15 @@ mod tests {
     fn hidden_root_ui_registers_independent_screen_draw_toolbar() {
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        let constructor_output = ctx.run_logic(&egui::RawInput::default(), |_| {});
+        assert!(
+            constructor_output
+                .viewport_commands
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|commands| commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::OuterPosition(_))))
+        );
         app.visible_flag.store(false, Ordering::SeqCst);
         app.last_visible = false;
         app.screen_draw_controller.open_toolbar();
@@ -6505,6 +6792,7 @@ mod tests {
         let toolbar = super::super::screen_draw_toolbar::viewport_id();
         assert!(passes >= 2, "the test adapter forced a discarded UI pass");
         assert!(output.viewport_output.contains_key(&toolbar));
+        assert_retained_immediate_viewport(&ctx, toolbar);
         assert!(app.screen_draw_toolbar.was_open);
         assert!(!app.needs_viewport_bootstrap());
         assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -6541,8 +6829,7 @@ mod tests {
             app.visible_flag.store(false, Ordering::SeqCst);
             app.last_visible = false;
             if logic_only {
-                app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default())
-                    .drop_without_applying_deltas();
+                drop(app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default()));
             } else {
                 let (output, _) = app.run_root_frame_for_test(
                     &ctx,
@@ -6639,7 +6926,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
         for frame in 0..9 {
-            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
         }
         app.dashboard_data_cache.wait_for_refresh();
         let before = app.root_list_geometry.test_observation();
@@ -6652,8 +6940,8 @@ mod tests {
         let expected_visible_ids = app.test_root_rendered_row_ids.clone();
         assert!(!expected_visible_ids.is_empty());
         let oracle_ctx = egui::Context::default();
-        let oracle_style = ctx.style().as_ref().clone();
-        oracle_ctx.set_style(oracle_style.clone());
+        let oracle_style = ctx.style_of(ctx.theme()).as_ref().clone();
+        oracle_ctx.set_style_of(oracle_ctx.theme(), oracle_style.clone());
         let (eager_outer, eager) = track_c_eager_root_list_layout(
             &oracle_ctx,
             actions,
@@ -6907,7 +7195,7 @@ mod tests {
         FirstRowWidthExpansionNoWrap,
         FullPathsToggle,
         WrapChange,
-        FontAtlasReplacement,
+        FontRevisionReplacement,
         PixelsPerPointChange,
         ViewportWidthChange,
         WarmRepeat,
@@ -6923,7 +7211,7 @@ mod tests {
             Self::FirstRowWidthExpansionNoWrap,
             Self::FullPathsToggle,
             Self::WrapChange,
-            Self::FontAtlasReplacement,
+            Self::FontRevisionReplacement,
             Self::PixelsPerPointChange,
             Self::ViewportWidthChange,
             Self::WarmRepeat,
@@ -6939,7 +7227,7 @@ mod tests {
                 Self::FirstRowWidthExpansionNoWrap => "first_row_width_expansion_no_wrap",
                 Self::FullPathsToggle => "full_paths_toggle",
                 Self::WrapChange => "wrap_change",
-                Self::FontAtlasReplacement => "font_atlas_replacement",
+                Self::FontRevisionReplacement => "font_revision_replacement",
                 Self::PixelsPerPointChange => "pixels_per_point_change",
                 Self::ViewportWidthChange => "viewport_width_change",
                 Self::WarmRepeat => "warm_repeat",
@@ -7143,9 +7431,7 @@ mod tests {
         new_screen_width: f32,
         screen_height: f32,
         old_key: Option<RootListGeometryKey>,
-        // A non-owning receipt keeps the old atlas eligible for destruction
-        // inside the measured transition instead of extending its lifetime.
-        old_atlas: Option<std::sync::Weak<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
+        old_font_revision: Option<u64>,
         old_geometry: RootListGeometryObservation,
         old_result_generation: u64,
         old_capacity_bytes: u64,
@@ -7235,7 +7521,7 @@ mod tests {
 
         let default_font_definitions = egui::FontDefinitions::default();
         let ctx = egui::Context::default();
-        ctx.set_fonts(default_font_definitions.clone());
+        crate::gui::font_revision::install(&ctx, default_font_definitions.clone());
         let mut app = root_list_app_at(&ctx, old_actions.clone(), root);
         // Keep the synthetic fixture independent from constructor-time host
         // aliases and bookmarks. The selected recipe installs only its own
@@ -7248,28 +7534,34 @@ mod tests {
         app.enabled_capabilities = Some(HashMap::new());
         app.enabled_plugins = Some(std::collections::HashSet::new());
 
-        let mut old_style = ctx.style().as_ref().clone();
-        let default_wrap = old_style.wrap.unwrap_or(true);
+        let mut old_style = ctx.style_of(ctx.theme()).as_ref().clone();
+        let default_wrap =
+            old_style.wrap_mode.unwrap_or(egui::TextWrapMode::Wrap) == egui::TextWrapMode::Wrap;
         assert!(default_wrap, "C2-D default root list wrapping is enabled");
         let old_wrap = recipe.old_wrap(default_wrap);
-        old_style.wrap = Some(old_wrap);
+        old_style.wrap_mode = Some(if old_wrap {
+            egui::TextWrapMode::Wrap
+        } else {
+            egui::TextWrapMode::Extend
+        });
         if recipe == TrackC2DRecipe::FirstRowWidthExpansionNoWrap
             || recipe == TrackC2DRecipe::WrapChange
         {
-            ctx.set_style(old_style);
+            ctx.set_style_of(ctx.theme(), old_style);
         }
         ctx.set_pixels_per_point(recipe.old_pixels_per_point());
 
         if !recipe.first_open() {
             for frame in 0..9 {
-                let _ = run_root_list_frame(
+                run_root_list_frame(
                     &ctx,
                     &mut app,
                     frame,
                     recipe.old_screen_width(),
                     640.0,
                     Vec::new(),
-                );
+                )
+                .drop_without_applying_deltas();
             }
             app.dashboard_data_cache.wait_for_refresh();
         }
@@ -7287,13 +7579,8 @@ mod tests {
             assert_eq!(old_geometry.measured_rows, source_actions.len() as u64);
         }
         let old_key = app.root_list_geometry.key.clone();
-        // Keep only an identity receipt: a strong Arc here would move old-atlas
-        // destruction out of the timed environment transition.
-        let old_atlas = app
-            .root_list_geometry
-            .font_atlas
-            .as_ref()
-            .map(Arc::downgrade);
+        // Record only the currently active font revision for this transition.
+        let old_font_revision = old_key.as_ref().map(|key| key.font_revision);
         let old_capacity_bytes = track_c2d_geometry_capacity_bytes(&app.root_list_geometry);
         let (
             old_first_response_width,
@@ -7319,8 +7606,12 @@ mod tests {
         let new_wrap = recipe.new_wrap(old_wrap);
         let new_full_paths = recipe.new_full_paths();
         let new_style = if recipe == TrackC2DRecipe::WrapChange {
-            let mut style = ctx.style().as_ref().clone();
-            style.wrap = Some(new_wrap);
+            let mut style = ctx.style_of(ctx.theme()).as_ref().clone();
+            style.wrap_mode = Some(if new_wrap {
+                egui::TextWrapMode::Wrap
+            } else {
+                egui::TextWrapMode::Extend
+            });
             Some(style)
         } else {
             None
@@ -7328,7 +7619,7 @@ mod tests {
         let new_capabilities: Option<HashMap<String, Vec<String>>> = (recipe
             == TrackC2DRecipe::FullPathsToggle)
             .then(|| HashMap::from([("folders".into(), vec!["show_full_path".into()])]));
-        let new_font_definitions = if recipe == TrackC2DRecipe::FontAtlasReplacement {
+        let new_font_definitions = if recipe == TrackC2DRecipe::FontRevisionReplacement {
             let mut definitions = default_font_definitions.clone();
             let duplicate = definitions
                 .font_data
@@ -7401,7 +7692,7 @@ mod tests {
             new_screen_width,
             screen_height,
             old_key,
-            old_atlas,
+            old_font_revision,
             old_geometry,
             old_result_generation,
             old_capacity_bytes,
@@ -7443,10 +7734,10 @@ mod tests {
             );
         }
         if let Some(style) = state.new_style.take() {
-            state.ctx.set_style(style);
+            state.ctx.set_style_of(state.ctx.theme(), style);
         }
         if let Some(definitions) = state.new_font_definitions.take() {
-            state.ctx.set_fonts(definitions);
+            crate::gui::font_revision::install(&state.ctx, definitions);
         }
         if state.recipe == TrackC2DRecipe::PixelsPerPointChange {
             state
@@ -7594,7 +7885,12 @@ mod tests {
             .is_some_and(|capabilities| capabilities.iter().any(|cap| cap == "show_full_path"));
         assert_eq!(actual_full_paths, state.new_full_paths);
         assert_eq!(
-            state.ctx.style().wrap.unwrap_or(true),
+            state
+                .ctx
+                .style_of(state.ctx.theme())
+                .wrap_mode
+                .unwrap_or(egui::TextWrapMode::Wrap)
+                == egui::TextWrapMode::Wrap,
             state.new_wrap,
             "the measured context has the requested effective wrapping policy"
         );
@@ -7603,12 +7899,12 @@ mod tests {
             .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
             .expect("actual root-list frame records available width");
         assert!(available_width.is_finite() && available_width > 0.0);
-        let style = state.ctx.style().as_ref().clone();
+        let style = state.ctx.style_of(state.ctx.theme()).as_ref().clone();
         let ppp = state.ctx.pixels_per_point();
         assert!((ppp - state.recipe.new_pixels_per_point()).abs() <= f32::EPSILON);
         let oracle_ctx = egui::Context::default();
-        oracle_ctx.set_fonts(state.expected_font_definitions.clone());
-        oracle_ctx.set_style(style.clone());
+        crate::gui::font_revision::install(&oracle_ctx, state.expected_font_definitions.clone());
+        oracle_ctx.set_style_of(oracle_ctx.theme(), style.clone());
         oracle_ctx.set_pixels_per_point(ppp);
         let (outer, eager) = track_c_eager_root_list_layout(
             &oracle_ctx,
@@ -7769,11 +8065,7 @@ mod tests {
             );
         }
         let key_changed = old_key != new_key;
-        let atlas_changed = match (state.old_atlas.as_ref(), cache.font_atlas.as_ref()) {
-            (Some(old), Some(new)) => !std::sync::Weak::ptr_eq(old, &Arc::downgrade(new)),
-            (None, Some(_)) | (Some(_), None) => true,
-            (None, None) => false,
-        };
+        let font_revision_changed = state.old_font_revision != new_key.map(|key| key.font_revision);
         let old_generation = state.old_result_generation;
         let new_generation = cache.result_generation;
         if state.recipe.installs_new_results() {
@@ -7784,19 +8076,22 @@ mod tests {
         match state.recipe {
             TrackC2DRecipe::FreshContextFirstOpen => {
                 assert!(key_changed, "first open changes None into an accepted key");
-                assert!(atlas_changed, "first open installs the initial font atlas");
+                assert!(
+                    font_revision_changed,
+                    "first open activates the installed font revision"
+                );
             }
             TrackC2DRecipe::WarmRepeat => {
-                assert!(!key_changed && !atlas_changed);
+                assert!(!key_changed && !font_revision_changed);
             }
-            TrackC2DRecipe::FontAtlasReplacement => {
+            TrackC2DRecipe::FontRevisionReplacement => {
                 assert!(
-                    !key_changed,
-                    "unused font data leaves the geometry key intact"
+                    key_changed,
+                    "an installed font definition changes the geometry key revision"
                 );
                 assert!(
-                    atlas_changed,
-                    "egui actually replaces the retained font atlas"
+                    font_revision_changed,
+                    "the requested font revision becomes active"
                 );
             }
             TrackC2DRecipe::PixelsPerPointChange => {
@@ -7850,9 +8145,9 @@ mod tests {
             old_key.is_some() as u64,
             new_key.is_some() as u64,
             key_changed as u64,
-            state.old_atlas.is_some() as u64,
-            cache.font_atlas.is_some() as u64,
-            atlas_changed as u64,
+            state.old_font_revision.unwrap_or(0),
+            new_key.map_or(0, |key| key.font_revision),
+            font_revision_changed as u64,
             old_key.map_or(0, |key| u64::from(key.width_bits)),
             new_key.map_or(0, |key| u64::from(key.width_bits)),
             old_key.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
@@ -8117,7 +8412,8 @@ mod tests {
         app.recompute_query_results_layout();
         assert!(app.resolved_grid_layout);
         for frame in 0..9 {
-            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
         }
         app.dashboard_data_cache.wait_for_refresh();
         let warm = app.root_list_geometry.test_observation();
@@ -8132,7 +8428,7 @@ mod tests {
         assert!(available_width.is_finite() && available_width > 0.0);
         let expected_visible_ids = app.test_root_rendered_row_ids.clone();
         assert!(!expected_visible_ids.is_empty());
-        let style = ctx.style().as_ref().clone();
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
         let oracle_ctx = egui::Context::default();
         let (eager_outer, eager) = track_c_eager_root_grid_layout(
             &oracle_ctx,
@@ -8500,14 +8796,8 @@ mod tests {
                 );
                 let frame = state.frame_index;
                 state.frame_index += 1;
-                let _ = run_root_list_frame(
-                    &state.ctx,
-                    &mut state.app,
-                    frame,
-                    960.0,
-                    640.0,
-                    Vec::new(),
-                );
+                run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
+                    .drop_without_applying_deltas();
                 let _ = track_c_validate_root_grid_state(&state);
                 drop(state);
             }
@@ -8574,7 +8864,7 @@ mod tests {
                             item_count: *count,
                             viewport: "960x640",
                             scale_milli: 1_000,
-                            font_state: "warm_egui_font_atlas",
+                            font_state: "active_font_revision",
                             settings: match columns {
                                 1 => "grid_cols_1_default_style",
                                 2 => "grid_cols_2_default_style",
@@ -8864,7 +9154,7 @@ mod tests {
         expected_search_state: TrackC2EGridSearchState,
         generation_before: u64,
         old_key: Option<RootListGeometryKey>,
-        old_atlas: Option<Arc<egui::epaint::mutex::Mutex<egui::epaint::TextureAtlas>>>,
+        old_font_revision: Option<u64>,
         storage_before: c2e_grid_cell_loop_observer::StorageGroups,
         old_grid_column_widths: Vec<f32>,
         old_grid_column_x_offsets: Vec<f32>,
@@ -8889,10 +9179,10 @@ mod tests {
         fixture: TrackC2EGridFixture,
     ) -> TrackC2EGridState {
         let ctx = egui::Context::default();
-        ctx.set_fonts(egui::FontDefinitions::default());
-        let mut initial_style = ctx.style().as_ref().clone();
-        initial_style.wrap = Some(false);
-        ctx.set_style(initial_style);
+        crate::gui::font_revision::install(&ctx, egui::FontDefinitions::default());
+        let mut initial_style = ctx.style_of(ctx.theme()).as_ref().clone();
+        initial_style.wrap_mode = Some(egui::TextWrapMode::Extend);
+        ctx.set_style_of(ctx.theme(), initial_style);
         let TrackC2EGridFixture {
             recipe,
             count,
@@ -8965,7 +9255,8 @@ mod tests {
 
         let mut frame_index = 0;
         for _ in 0..9 {
-            let _ = run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new());
+            run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
             frame_index += 1;
         }
         app.dashboard_data_cache.wait_for_refresh();
@@ -9014,16 +9305,17 @@ mod tests {
                 .expect("settled grid has ScrollArea state");
             scroll.offset.y = row_top + row_height + 8.0;
             scroll.store(&ctx, scroll_id);
-            let _ = run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new());
+            run_root_list_frame(&ctx, &mut app, frame_index, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
             frame_index += 1;
             app.dashboard_data_cache.wait_for_refresh();
         }
 
         let expected_visible_ids = app.test_root_rendered_row_ids.clone();
-        let style = ctx.style().as_ref().clone();
-        assert_eq!(style.wrap, Some(false));
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
+        assert_eq!(style.wrap_mode, Some(egui::TextWrapMode::Extend));
         let oracle_ctx = egui::Context::default();
-        oracle_ctx.set_fonts(egui::FontDefinitions::default());
+        crate::gui::font_revision::install(&oracle_ctx, egui::FontDefinitions::default());
         let (outer, eager) = track_c_eager_root_grid_layout(
             &oracle_ctx,
             &new_actions,
@@ -9039,7 +9331,7 @@ mod tests {
         assert_eq!(app.bookmark_aliases_lc.len(), 0);
         let generation_before = app.root_list_geometry.result_generation;
         let old_key = app.root_list_geometry.key.clone();
-        let old_atlas = app.root_list_geometry.font_atlas.clone();
+        let old_font_revision = old_key.as_ref().map(|key| key.font_revision);
         let old_grid_column_widths = app.root_list_geometry.grid_column_widths.clone();
         let old_grid_column_x_offsets = app.root_list_geometry.grid_column_x_offsets.clone();
         let late_column_zero = matches!(
@@ -9076,7 +9368,7 @@ mod tests {
             expected_search_state: search_state,
             generation_before,
             old_key,
-            old_atlas,
+            old_font_revision,
             storage_before,
             old_grid_column_widths,
             old_grid_column_x_offsets,
@@ -9255,7 +9547,7 @@ mod tests {
     fn track_c2e_transition_receipts(
         state: &TrackC2EGridState,
         generation_after: u64,
-        atlas_same: bool,
+        font_revision_same: bool,
     ) -> Vec<u64> {
         let key = state
             .app
@@ -9281,7 +9573,7 @@ mod tests {
             track_c2e_signature_string(&mut signature, &format!("{:?}", key.button_font));
             signature.finish()
         };
-        let new_spacing = state.ctx.style();
+        let new_spacing = state.ctx.style_of(state.ctx.theme());
         let spacing = &new_spacing.spacing;
         vec![
             state.generation_before,
@@ -9314,7 +9606,7 @@ mod tests {
             u64::from(spacing.item_spacing.y.to_bits()),
             u64::from(key.grid_spacing_x_bits),
             u64::from(key.grid_spacing_y_bits),
-            atlas_same as u64,
+            font_revision_same as u64,
             u64::from(960.0_f32.to_bits()),
             u64::from(640.0_f32.to_bits()),
             u64::from(viewport.min.x.to_bits()),
@@ -9335,7 +9627,7 @@ mod tests {
             u64::from(state.app.root_list_geometry.total_height.to_bits()),
             state.app.root_list_geometry.row_tops.len() as u64,
             state.app.root_list_geometry.grid_visual_max_end_tree.len() as u64,
-            state.app.root_list_geometry.font_atlas.is_some() as u64,
+            crate::gui::font_revision::active_revision(&state.ctx),
             state.app.test_root_rendered_row_ids.len() as u64,
         ]
     }
@@ -9592,13 +9884,12 @@ mod tests {
         assert!(cache.row_widths.capacity() == 0);
         assert!(cache.row_response_widths.capacity() == 0);
 
-        let atlas_same = matches!(
-            (state.old_atlas.as_ref(), cache.font_atlas.as_ref()),
-            (Some(old), Some(new)) if Arc::ptr_eq(old, new)
-        );
+        let font_revision_same = state
+            .old_font_revision
+            .is_some_and(|old| old == key.font_revision);
         assert!(
-            atlas_same,
-            "all measured recipes retain the actual warm font atlas"
+            font_revision_same,
+            "all measured grid recipes retain the active font revision"
         );
         let action_id =
             crate::performance::track_c_workloads::action_fixture_identity(&state.expected_actions);
@@ -9637,7 +9928,7 @@ mod tests {
         revisions.extend(track_c2e_transition_receipts(
             state,
             generation_after,
-            atlas_same,
+            font_revision_same,
         ));
         let painted_cells = rows.len() as u64;
         let mut work_counters = vec![
@@ -9892,7 +10183,7 @@ mod tests {
         let (
             generation_before,
             old_key,
-            old_atlas,
+            old_font_revision,
             storage_before,
             old_grid_column_widths,
             old_grid_column_x_offsets,
@@ -9904,7 +10195,10 @@ mod tests {
             (
                 app.root_list_geometry.result_generation,
                 app.root_list_geometry.key.clone(),
-                app.root_list_geometry.font_atlas.clone(),
+                app.root_list_geometry
+                    .key
+                    .as_ref()
+                    .map(|key| key.font_revision),
                 c2e_grid_cell_loop_observer::StorageGroups::from_cache(&app.root_list_geometry),
                 app.root_list_geometry.grid_column_widths.clone(),
                 app.root_list_geometry.grid_column_x_offsets.clone(),
@@ -9915,7 +10209,7 @@ mod tests {
         };
         state.generation_before = generation_before;
         state.old_key = old_key;
-        state.old_atlas = old_atlas;
+        state.old_font_revision = old_font_revision;
         state.storage_before = storage_before;
         state.old_grid_column_widths = old_grid_column_widths;
         state.old_grid_column_x_offsets = old_grid_column_x_offsets;
@@ -9972,11 +10266,9 @@ mod tests {
             .clone()
             .expect("settled args-only grid has an exact key");
         let old_generation = state.generation_before;
-        let old_atlas = state
-            .old_atlas
-            .as_ref()
-            .expect("settled grid retains its actual font atlas")
-            .clone();
+        let old_font_revision = state
+            .old_font_revision
+            .expect("settled grid has an active font revision");
         let mut definitions = egui::FontDefinitions::default();
         let duplicate = definitions
             .font_data
@@ -9986,11 +10278,11 @@ mod tests {
         definitions
             .font_data
             .insert("TrackC2E-unused-atlas-rejection".into(), duplicate);
-        state.ctx.set_fonts(definitions.clone());
+        crate::gui::font_revision::install(&state.ctx, definitions.clone());
 
         let oracle_ctx = egui::Context::default();
-        oracle_ctx.set_fonts(definitions);
-        oracle_ctx.set_style(state.style.clone());
+        crate::gui::font_revision::install(&oracle_ctx, definitions);
+        oracle_ctx.set_style_of(oracle_ctx.theme(), state.style.clone());
         let (outer, eager) = track_c_eager_root_grid_layout(
             &oracle_ctx,
             &state.expected_actions,
@@ -10020,14 +10312,25 @@ mod tests {
         let app = &state.app;
         let cache = &app.root_list_geometry;
         let after = cache.test_observation();
-        assert_eq!(cache.key.as_ref(), Some(&old_key));
+        let new_key = cache
+            .key
+            .as_ref()
+            .expect("grid cache retains its key after font activation");
+        assert_eq!(
+            new_key.font_revision,
+            crate::gui::font_revision::active_revision(&state.ctx)
+        );
+        assert_ne!(new_key.font_revision, old_font_revision);
+        let mut expected_key = old_key.clone();
+        expected_key.font_revision = new_key.font_revision;
+        assert_eq!(new_key, &expected_key);
         assert_eq!(cache.result_generation, old_generation);
         assert_eq!(
             after
                 .rebuild_count
                 .saturating_sub(state.geometry_before.rebuild_count),
             1,
-            "an actual atlas change rejects the otherwise unchanged key"
+            "an activated font revision rejects the otherwise unchanged geometry key"
         );
         assert_eq!(
             after
@@ -10037,11 +10340,6 @@ mod tests {
         );
         assert_eq!(atlas_frame.observation.calls, 1);
         assert_eq!(atlas_frame.observation.cells, state.count as u64);
-        let current_atlas = cache
-            .font_atlas
-            .as_ref()
-            .expect("grid cache records the replacement font atlas");
-        assert!(!Arc::ptr_eq(&old_atlas, current_atlas));
         assert_eq!(app.results, state.expected_actions);
         assert_eq!(app.actions.as_ref(), &state.expected_actions);
         assert_eq!(track_c2e_search_state(app), state.expected_search_state);
@@ -10197,7 +10495,8 @@ mod tests {
         app.selected = None;
         focus_launcher_query(&ctx, &mut app);
         for frame in 0..9 {
-            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
         }
         app.dashboard_data_cache.wait_for_refresh();
         assert!(
@@ -10229,7 +10528,7 @@ mod tests {
         assert!(app.last_search_result_catalog_versions_stable);
         assert!(app.last_results_valid);
 
-        let style = ctx.style().as_ref().clone();
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
         let oracle_ctx = egui::Context::default();
         let (eager_outer, eager) = track_c_eager_root_list_layout(
             &oracle_ctx,
@@ -10577,7 +10876,8 @@ mod tests {
         );
 
         // The first pending frame owns its cold geometry rebuild as query work.
-        let _ = run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         assert!(app.track_c_query_observer.has_pending());
         assert_eq!(
             app.track_c_query_observer.snapshot().geometry[GeometryCause::Query as usize].rebuilds,
@@ -10586,16 +10886,18 @@ mod tests {
 
         // The same still-pending intent must not relabel later, independent
         // display and navigation rebuilds as query work.
-        let _ = run_root_list_frame(&ctx, &mut app, 1, 480.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, 1, 480.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         assert!(app.track_c_query_observer.has_pending());
-        let _ = run_root_list_frame(
+        run_root_list_frame(
             &ctx,
             &mut app,
             2,
             520.0,
             640.0,
             vec![key_press(egui::Key::ArrowDown, egui::Modifiers::NONE)],
-        );
+        )
+        .drop_without_applying_deltas();
 
         let geometry = app.track_c_query_observer.snapshot().geometry;
         assert_eq!(geometry[GeometryCause::Query as usize].rebuilds, 1);
@@ -11209,7 +11511,7 @@ mod tests {
                 .popup_owner()
                 .map_or(u64::MAX, |index| index as u64),
         );
-        signature.number(app.egui_ctx.is_context_menu_open() as u64);
+        signature.number(egui::Popup::is_any_open(&app.egui_ctx) as u64);
         signature.finish()
     }
 
@@ -11414,7 +11716,7 @@ mod tests {
             .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
             .expect("the current root frame records its actual row width");
         assert!(available_width.is_finite() && available_width > 0.0);
-        let style = state.ctx.style().as_ref().clone();
+        let style = state.ctx.style_of(state.ctx.theme()).as_ref().clone();
         let oracle_ctx = egui::Context::default();
         let (outer, eager) = track_c_eager_root_list_layout(
             &oracle_ctx,
@@ -11652,7 +11954,7 @@ mod tests {
         let actions_id =
             crate::performance::track_c_workloads::action_fixture_identity(&app.results);
         let payload_bytes = track_c2g_action_payload_bytes(&app.results);
-        let popup_open = state.ctx.is_context_menu_open();
+        let popup_open = egui::Popup::is_any_open(&state.ctx);
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(app.last_visible);
         let json = serde_json::json!({
@@ -11959,7 +12261,7 @@ mod tests {
                     ],
                 );
                 let clicked_id = state.ctx.interaction_snapshot(|snapshot| snapshot.clicked);
-                let menu_open = state.ctx.is_context_menu_open();
+                let menu_open = egui::Popup::is_any_open(&state.ctx);
                 let current_viewport = state.app.test_root_scroll_viewport_rect;
                 let popup_owner = state.app.root_list_geometry.popup_owner();
                 assert!(
@@ -12059,7 +12361,7 @@ mod tests {
                     ],
                 );
                 assert!(
-                    !state.ctx.is_context_menu_open(),
+                    !egui::Popup::is_any_open(&state.ctx),
                     "an outside click closes the result menu"
                 );
                 steps.push(track_c2g_step_json(8, "close_result_context_menu", close));
@@ -12520,7 +12822,8 @@ mod tests {
         // Set up settled fonts, dashboard state, and actual root-list geometry
         // before any measured owner invocation.
         for frame in 0..9 {
-            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
         }
         app.dashboard_data_cache.wait_for_refresh();
         assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
@@ -12558,9 +12861,9 @@ mod tests {
             .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
             .expect("the actual root UI records its available row width");
         assert!(available_width.is_finite() && available_width > 0.0);
-        let style = ctx.style().as_ref().clone();
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
         let oracle_ctx = egui::Context::default();
-        oracle_ctx.set_style(style.clone());
+        oracle_ctx.set_style_of(oracle_ctx.theme(), style.clone());
         let (eager_outer, eager) = track_c_eager_root_list_layout(
             &oracle_ctx,
             &expected_actions,
@@ -13031,7 +13334,7 @@ mod tests {
             crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
         };
         eprintln!(
-            "C2C_REUSE_RESULT schema=1 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=warm_egui_font_atlas settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=scoped_installation_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
+            "C2C_REUSE_RESULT schema=1 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=active_font_revision settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=scoped_installation_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
             samples.len(),
             case.key(),
             numeric(0),
@@ -13320,7 +13623,8 @@ mod tests {
         app.handle_query_text_changed();
 
         let mut frame = 0;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.dashboard_data_cache.wait_for_refresh();
         let row_zero = app
@@ -13338,7 +13642,8 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ];
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed)
+            .drop_without_applying_deltas();
         frame += 1;
         let released = vec![
             egui::Event::PointerMoved(pointer),
@@ -13349,18 +13654,20 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ];
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released)
+            .drop_without_applying_deltas();
         frame += 1;
-        assert!(ctx.is_context_menu_open());
+        assert!(egui::Popup::is_any_open(&ctx));
         assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
 
         let scroll_id = app.test_root_scroll_area_id.unwrap();
         let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
         scroll_state.offset.y = app.root_list_geometry.row_tops[25];
         scroll_state.store(&ctx, scroll_id);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
-        assert!(ctx.is_context_menu_open());
+        assert!(egui::Popup::is_any_open(&ctx));
         assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
         let viewport = app
             .test_root_scroll_viewport_rect
@@ -13379,17 +13686,18 @@ mod tests {
         app.last_results_valid = false;
         app.search();
         assert!(
-            ctx.is_context_menu_open(),
+            egui::Popup::is_any_open(&ctx),
             "equal refresh queues, not closes, the popup"
         );
         assert_eq!(
             app.root_list_geometry.result_generation_for_test(),
             result_generation
         );
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         assert!(
-            !ctx.is_context_menu_open(),
+            !egui::Popup::is_any_open(&ctx),
             "the next frame applies queued cleanup"
         );
         assert_eq!(app.root_list_geometry.popup_owner(), None);
@@ -13402,7 +13710,8 @@ mod tests {
             app.root_list_geometry.result_generation_for_test(),
             result_generation
         );
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         let geometry_after = app.root_list_geometry.test_observation();
         assert_eq!(
             geometry_after.rebuild_count,
@@ -13490,7 +13799,7 @@ mod tests {
                     item_count: *count,
                     viewport: "960x640",
                     scale_milli: 1_000,
-                    font_state: "warm_egui_font_atlas",
+                    font_state: "active_font_revision",
                     settings: "app_prefix_exact_match_default_list",
                     cold_type: "fresh_query_geometry_cold_warm_fonts",
                     mode,
@@ -13615,7 +13924,8 @@ mod tests {
         for _ in 0..30 {
             let frame = *next_frame;
             *next_frame += 1;
-            let _ = run_root_list_frame(ctx, app, frame, 960.0, 640.0, Vec::new());
+            run_root_list_frame(ctx, app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
         }
         assert_eq!(app.selected, Some(selected));
     }
@@ -13624,9 +13934,12 @@ mod tests {
     fn root_list_viewport_builds_bounded_rows_with_absolute_ids_and_selection() {
         let ctx = egui::Context::default();
         let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         let mut frame = 0;
 
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.dashboard_data_cache.wait_for_refresh();
         assert!(app.test_root_rendered_rows.is_empty());
@@ -13634,7 +13947,8 @@ mod tests {
         app.actions = Arc::new(vec![root_list_action(0)]);
         app.results = (*app.actions).clone();
         app.invalidate_root_list_results();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         assert_eq!(app.test_root_rendered_rows.len(), 1);
         assert_eq!(app.test_root_rendered_rows[0].0, 0);
@@ -13696,14 +14010,18 @@ mod tests {
         let mut actions = (0..32).map(root_list_action).collect::<Vec<_>>();
         actions[0].action = "folder:root-list-alias".into();
         let (workspace, mut app) = root_list_test_app(&ctx, actions);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         let mut frame = 0;
 
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.dashboard_data_cache.wait_for_refresh();
         let mut rebuilds = app.root_list_geometry.test_observation().rebuild_count;
         assert_eq!(rebuilds, 1);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         assert_eq!(
             app.root_list_geometry.test_observation().rebuild_count,
@@ -13717,31 +14035,36 @@ mod tests {
                 rebuilds
             );
         };
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
         app.list_scale = 1.2;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
         style.override_text_style = Some(egui::TextStyle::Heading);
-        ctx.set_style(style);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        ctx.set_style_of(ctx.theme(), style);
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
-        let mut style = (*ctx.style()).clone();
-        style.wrap = Some(false);
-        ctx.set_style(style);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.wrap_mode = Some(egui::TextWrapMode::Extend);
+        ctx.set_style_of(ctx.theme(), style);
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
         ctx.set_pixels_per_point(1.25);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
@@ -13750,7 +14073,8 @@ mod tests {
             Some("Fixture folder".into()),
         );
         app.invalidate_root_list_display_geometry();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
@@ -13758,26 +14082,30 @@ mod tests {
             "folders".into(),
             vec!["show_full_path".into()],
         )]));
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
         let prior_id = app.test_root_rendered_row_ids[0].1;
         app.results[0].label = "Same-length replacement action label".into();
         app.invalidate_root_list_results();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
         assert_ne!(app.test_root_rendered_row_ids[0].1, prior_id);
 
         app.query_results_layout.enabled = true;
         app.recompute_query_results_layout();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.query_results_layout.enabled = false;
         app.recompute_query_results_layout();
         let prior_rebuilds = app.root_list_geometry.test_observation().rebuild_count;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         assert_eq!(
             app.root_list_geometry.test_observation().rebuild_count,
             prior_rebuilds + 1,
@@ -13792,8 +14120,11 @@ mod tests {
         let ctx = egui::Context::default();
         let results = (0..120).map(root_list_action).collect::<Vec<_>>();
         let (workspace, mut app) = root_list_test_app(&ctx, results);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         let mut frame = 0;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.dashboard_data_cache.wait_for_refresh();
         let row_zero = app
@@ -13811,7 +14142,8 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ];
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed)
+            .drop_without_applying_deltas();
         frame += 1;
         let released = vec![
             egui::Event::PointerMoved(pointer),
@@ -13822,10 +14154,11 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ];
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released)
+            .drop_without_applying_deltas();
         frame += 1;
         assert!(
-            ctx.is_context_menu_open(),
+            egui::Popup::is_any_open(&ctx),
             "the secondary click opened a menu"
         );
         assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
@@ -13839,10 +14172,11 @@ mod tests {
         scroll_state.offset.y = app.root_list_geometry.row_tops[80];
         scroll_state.store(&ctx, scroll_id);
 
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
-        assert!(ctx.is_context_menu_open());
+        assert!(egui::Popup::is_any_open(&ctx));
         assert!(
             app.test_root_rendered_rows
                 .iter()
@@ -13867,10 +14201,11 @@ mod tests {
         app.results = replacement.clone();
         app.actions = Arc::new(replacement);
         app.invalidate_root_list_results();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         assert_eq!(app.root_list_geometry.popup_owner(), None);
         assert!(
-            !ctx.is_context_menu_open(),
+            !egui::Popup::is_any_open(&ctx),
             "the obsolete root popup is closed"
         );
         assert!(
@@ -13920,7 +14255,8 @@ mod tests {
         app.visible_flag.store(true, Ordering::SeqCst);
 
         let mut frame = 0;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.dashboard_data_cache.wait_for_refresh();
         assert!(app.test_root_rendered_rows.is_empty());
@@ -13936,7 +14272,8 @@ mod tests {
         app.actions = Arc::new(vec![single.clone()]);
         app.results = vec![single];
         app.invalidate_root_list_results();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         assert_eq!(
             app.test_root_rendered_rows,
@@ -14017,7 +14354,8 @@ mod tests {
             state.offset.y = if target == 0 { 0.0 } else { max_scroll };
             state.store(&ctx, scroll_id);
             for _ in 0..30 {
-                let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+                run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                    .drop_without_applying_deltas();
                 frame += 1;
             }
             let target_rect = app
@@ -14039,14 +14377,15 @@ mod tests {
                 scroll_state.offset.y,
                 app.root_list_geometry.total_height,
             );
-            let _ = run_root_list_frame(
+            run_root_list_frame(
                 &ctx,
                 &mut app,
                 frame,
                 960.0,
                 640.0,
                 vec![egui::Event::PointerMoved(pointer)],
-            );
+            )
+            .drop_without_applying_deltas();
             frame += 1;
             let pressed = vec![egui::Event::PointerButton {
                 pos: pointer,
@@ -14054,7 +14393,8 @@ mod tests {
                 pressed: true,
                 modifiers: egui::Modifiers::NONE,
             }];
-            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed)
+                .drop_without_applying_deltas();
             frame += 1;
             let released = vec![egui::Event::PointerButton {
                 pos: pointer,
@@ -14062,7 +14402,8 @@ mod tests {
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
             }];
-            let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released)
+                .drop_without_applying_deltas();
             frame += 1;
             assert_eq!(
                 app.selected,
@@ -14098,17 +14439,21 @@ mod tests {
         let ctx = egui::Context::default();
         let (workspace, mut app) =
             root_list_test_app(&ctx, (0..48).map(root_list_action).collect::<Vec<_>>());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         app.query_results_layout.enabled = true;
         app.query_results_layout.cols = 3;
         app.query_results_layout.respect_plugin_capability = false;
         app.recompute_query_results_layout();
         let mut frame = 0;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.dashboard_data_cache.wait_for_refresh();
         let mut rebuilds = app.root_list_geometry.test_observation().rebuild_count;
         assert!(rebuilds > 0);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         assert_eq!(
             app.root_list_geometry.test_observation().rebuild_count,
@@ -14124,53 +14469,62 @@ mod tests {
         };
         app.query_results_layout.cols = 4;
         app.recompute_query_results_layout();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
         app.list_scale = 1.15;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
-        let mut style = (*ctx.style()).clone();
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
         style.override_text_style = Some(egui::TextStyle::Heading);
-        ctx.set_style(style);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        ctx.set_style_of(ctx.theme(), style);
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
-        let mut style = (*ctx.style()).clone();
-        style.wrap = Some(true);
-        ctx.set_style(style);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.wrap_mode = Some(egui::TextWrapMode::Wrap);
+        ctx.set_style_of(ctx.theme(), style);
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
         ctx.set_pixels_per_point(1.25);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
         app.results[0].label.push_str(" replacement");
         app.actions = Arc::new(app.results.clone());
         app.invalidate_root_list_results();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
 
         app.query_results_layout.enabled = false;
         app.recompute_query_results_layout();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
         app.query_results_layout.enabled = true;
         app.recompute_query_results_layout();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         expect_rebuild(&app);
 
         let mut visuals = egui::Visuals::dark();
@@ -14192,15 +14546,19 @@ mod tests {
         let ctx = egui::Context::default();
         let results = (0..120).map(root_list_action).collect::<Vec<_>>();
         let (workspace, mut app) = root_list_test_app(&ctx, results);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         app.query_results_layout.enabled = true;
         app.query_results_layout.cols = 3;
         app.query_results_layout.respect_plugin_capability = false;
         app.recompute_query_results_layout();
         let mut frame = 0;
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         app.dashboard_data_cache.wait_for_refresh();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         let row_zero = app
             .test_root_rendered_row_rects
@@ -14217,7 +14575,8 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ];
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, pressed)
+            .drop_without_applying_deltas();
         frame += 1;
         let released = vec![
             egui::Event::PointerMoved(pointer),
@@ -14228,9 +14587,10 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             },
         ];
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, released)
+            .drop_without_applying_deltas();
         frame += 1;
-        assert!(ctx.is_context_menu_open());
+        assert!(egui::Popup::is_any_open(&ctx));
         assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
         let old_row_id = app
             .test_root_rendered_row_ids
@@ -14242,10 +14602,11 @@ mod tests {
         let mut scroll_state = egui::scroll_area::State::load(&ctx, scroll_id).unwrap();
         scroll_state.offset.y = app.root_list_geometry.row_tops[25];
         scroll_state.store(&ctx, scroll_id);
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         frame += 1;
         assert_eq!(app.root_list_geometry.popup_owner(), Some(0));
-        assert!(ctx.is_context_menu_open());
+        assert!(egui::Popup::is_any_open(&ctx));
         for index in 0..3 {
             assert!(
                 app.test_root_rendered_rows
@@ -14273,10 +14634,11 @@ mod tests {
         app.results = replacement.clone();
         app.actions = Arc::new(replacement);
         app.invalidate_root_list_results();
-        let _ = run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
         assert_eq!(app.root_list_geometry.popup_owner(), None);
         assert!(
-            !ctx.is_context_menu_open(),
+            !egui::Popup::is_any_open(&ctx),
             "the old row menu closes on replacement"
         );
         assert!(
@@ -14357,7 +14719,9 @@ mod tests {
                         time: Some(1.0 + frame as f64 / 60.0),
                         ..Default::default()
                     };
-                    let _ = context.run(input, |ctx| app.render_root_frame(ctx, None));
+                    app.run_root_frame_for_test(&context, input, false)
+                        .0
+                        .drop_without_applying_deltas();
                     if selection_index == 0 && settle_frame == 0 {
                         app.dashboard_data_cache.wait_for_refresh();
                     }
@@ -14415,7 +14779,9 @@ mod tests {
                             time: Some(1.0 + frame as f64 / 60.0),
                             ..Default::default()
                         };
-                        let _ = context.run(input, |ctx| app.render_root_frame(ctx, None));
+                        app.run_root_frame_for_test(&context, input, false)
+                            .0
+                            .drop_without_applying_deltas();
                     }
                     assert_eq!(app.selected, Some(selected));
                     assert_eq!(app.results[selected].action, expected_ids[selected]);
@@ -14466,7 +14832,9 @@ mod tests {
                         time: Some(1.0 + frame as f64 / 60.0),
                         ..Default::default()
                     };
-                    let _ = context.run(input, |ctx| app.render_root_frame(ctx, None));
+                    app.run_root_frame_for_test(&context, input, false)
+                        .0
+                        .drop_without_applying_deltas();
                 }
                 let geometry_before = app.root_list_geometry.test_observation();
 
@@ -14490,7 +14858,7 @@ mod tests {
                             .borrow_mut()
                             .take()
                             .expect("setup creates deterministic raw input");
-                        context.run(input, |ctx| app.render_root_frame(ctx, None))
+                        app.run_root_frame_for_test(&context, input, false).0
                     },
                 );
                 let metrics = workloads::metrics_for(&[Metric::LauncherRowsBuilt]);
@@ -15007,7 +15375,7 @@ mod tests {
         assert_eq!(app.visibility_revision.current(), 114);
         assert_eq!(app.visibility_revision.invocation_id(), Some(124));
 
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         app.poll_screen_draw_capture(&ctx);
         assert!(matches!(
             app.screen_draw_controller.state(),
@@ -15094,7 +15462,7 @@ mod tests {
         );
         assert_eq!(app.visibility_revision.current(), 115);
         app.show_screen_draw_toolbar(&ctx);
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
 
         assert!(app.screen_draw_toolbar.was_open);
         assert!(observer.restored_rects().is_empty());
@@ -15273,9 +15641,9 @@ mod tests {
             );
             assert_eq!(observer.current_rect(), parked);
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.close_screen_draw_session().unwrap();
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
 
             let commands = &output
                 .viewport_output
@@ -15344,9 +15712,9 @@ mod tests {
                 },
             );
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.request_new_screen_draw_capture().unwrap();
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
             let commands = &output
                 .viewport_output
                 .get(&egui::ViewportId::ROOT)
@@ -15410,9 +15778,9 @@ mod tests {
             );
             assert_eq!(observer.current_rect(), parked);
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.close_screen_draw_session().unwrap();
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
 
             let commands = &output
                 .viewport_output
@@ -15475,9 +15843,9 @@ mod tests {
                 },
             );
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.request_new_screen_draw_capture().unwrap();
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
             let commands = &output
                 .viewport_output
                 .get(&egui::ViewportId::ROOT)
@@ -15513,8 +15881,8 @@ mod tests {
             let ctx = egui::Context::default();
             let mut app = new_app(&ctx);
             install_owned_root_for_test(&mut app);
-            ctx.begin_frame(egui::RawInput::default());
-            let _ = ctx.end_frame();
+            ctx.begin_pass(egui::RawInput::default());
+            ctx.end_pass().drop_without_applying_deltas();
             app.static_location_enabled = true;
             app.static_pos = Some((900, 700));
             app.static_size = Some((800, 600));
@@ -15534,13 +15902,13 @@ mod tests {
             );
             app.screen_draw_launcher_parking = Some(transaction);
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.restore_screen_draw_launcher_exact(
                 crate::screen_draw::ScreenDrawRestoreCause::SessionClose,
                 None,
             )
             .unwrap();
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
 
             assert_eq!(observer.restored_rects(), [original]);
             assert!(app.screen_draw_launcher_parking.is_none());
@@ -15593,8 +15961,8 @@ mod tests {
                 .outer_rect = Some(moved);
             input
         };
-        ctx.begin_frame(input_at_moved_root());
-        let _ = ctx.end_frame();
+        ctx.begin_pass(input_at_moved_root());
+        ctx.end_pass().drop_without_applying_deltas();
         assert!(!app.mkmacro_dialog.open);
 
         app.activate_action(
@@ -15613,9 +15981,8 @@ mod tests {
         let restore_revision = app.visibility_revision.current();
         let (restored, queued) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.run(input_at_moved_root(), |root| {
-                    app.render_root_frame(root, None)
-                })
+                app.run_root_frame_for_test(&ctx, input_at_moved_root(), false)
+                    .0
             });
         let commands = &restored.viewport_output[&egui::ViewportId::ROOT].commands;
         #[cfg(windows)]
@@ -15641,9 +16008,9 @@ mod tests {
         assert_eq!(app.visibility_revision.current(), restore_revision);
 
         app.request_launcher_state(Some(false), Some(false));
-        let hidden = ctx.run(input_at_moved_root(), |root| {
-            app.render_root_frame(root, None)
-        });
+        let hidden = app
+            .run_root_frame_for_test(&ctx, input_at_moved_root(), false)
+            .0;
         assert!(!app.last_visible);
         assert!(hidden.viewport_output[&egui::ViewportId::ROOT].commands.iter().any(|command| matches!(
             command, egui::ViewportCommand::OuterPosition(position) if *position == egui::pos2(app.offscreen_pos.0, app.offscreen_pos.1)
@@ -15651,9 +16018,8 @@ mod tests {
         app.request_launcher_state(Some(true), Some(false));
         let show_revision = app.visibility_revision.current();
         let (shown, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.run(input_at_moved_root(), |root| {
-                app.render_root_frame(root, None)
-            })
+            app.run_root_frame_for_test(&ctx, input_at_moved_root(), false)
+                .0
         });
         #[cfg(windows)]
         {
@@ -15693,12 +16059,12 @@ mod tests {
         observer.fail_next_restore();
         let revision = app.visibility_revision.current();
 
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         let result = app.restore_screen_draw_launcher_exact(
             crate::screen_draw::ScreenDrawRestoreCause::SessionClose,
             None,
         );
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
 
         assert!(result.is_err());
         assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -15753,13 +16119,13 @@ mod tests {
             });
         });
 
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         app.restore_screen_draw_launcher_exact(
             crate::screen_draw::ScreenDrawRestoreCause::SessionClose,
             None,
         )
         .unwrap();
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
 
         assert_eq!(observer.restored_rects(), [original]);
         assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -15793,13 +16159,13 @@ mod tests {
                 );
             });
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.restore_screen_draw_launcher_exact(
                 crate::screen_draw::ScreenDrawRestoreCause::SessionClose,
                 None,
             )
             .unwrap();
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
 
             assert!(app.visible_flag.load(Ordering::SeqCst));
             let (revision, (focus_intent, invocation_id)) = app.visibility_revision.inspect(|| {
@@ -15849,13 +16215,13 @@ mod tests {
                 show_revision.request(|| show_visible.store(true, Ordering::SeqCst));
             });
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.restore_screen_draw_launcher_exact(
                 crate::screen_draw::ScreenDrawRestoreCause::SessionClose,
                 None,
             )
             .unwrap();
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
 
             assert!(app.visible_flag.load(Ordering::SeqCst));
             assert!(
@@ -15890,12 +16256,12 @@ mod tests {
                 hide_revision.request(|| hide_visible.store(false, Ordering::SeqCst));
             });
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             let result = app.restore_screen_draw_launcher_exact(
                 crate::screen_draw::ScreenDrawRestoreCause::SessionClose,
                 None,
             );
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
 
             assert!(result.is_err());
             assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -16106,9 +16472,8 @@ mod tests {
             }
             let (output, queued) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.run(egui::RawInput::default(), |root| {
-                        app.render_root_frame(root, None)
-                    })
+                    app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                        .0
                 });
             assert_eq!(queued, [(request_revision, 42)]);
             assert_root_activation_requests(&output, &queued);
@@ -16125,9 +16490,8 @@ mod tests {
             );
             let (next, queued) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.run(egui::RawInput::default(), |root| {
-                        app.render_root_frame(root, None)
-                    })
+                    app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                        .0
                 });
             assert!(queued.is_empty());
             assert_root_activation_requests(&next, &queued);
@@ -16139,31 +16503,27 @@ mod tests {
     fn actual_startup_defers_activation_until_native_identity_and_newer_hide_invalidates_it() {
         for hide_before_attachment in [false, true] {
             let ctx = egui::Context::default();
-            let mut created = None;
+            let mut app = LauncherApp::new(
+                &ctx,
+                Arc::new(Vec::new()),
+                0,
+                PluginManager::new(),
+                "actions.json".into(),
+                "settings.json".into(),
+                Settings::default(),
+                None,
+                None,
+                None,
+                None,
+                Arc::new(AtomicBool::new(true)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(AtomicBool::new(false)),
+            );
             let (initial, queued) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.run(egui::RawInput::default(), |root| {
-                        let mut app = LauncherApp::new(
-                            root,
-                            Arc::new(Vec::new()),
-                            0,
-                            PluginManager::new(),
-                            "actions.json".into(),
-                            "settings.json".into(),
-                            Settings::default(),
-                            None,
-                            None,
-                            None,
-                            None,
-                            Arc::new(AtomicBool::new(true)),
-                            Arc::new(AtomicBool::new(false)),
-                            Arc::new(AtomicBool::new(false)),
-                        );
-                        app.render_root_frame(root, None);
-                        created = Some(app);
-                    })
+                    app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                        .0
                 });
-            let mut app = created.unwrap();
             assert!(queued.is_empty());
             assert_root_activation_requests(&initial, &queued);
             assert_eq!(app.root_window_bridge.identity().0, 0);
@@ -16175,9 +16535,8 @@ mod tests {
             let revision = app.visibility_revision.current();
             let (qualified, queued) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.run(egui::RawInput::default(), |root| {
-                        app.render_root_frame(root, None)
-                    })
+                    app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                        .0
                 });
             assert_eq!(
                 queued,
@@ -16230,9 +16589,9 @@ mod tests {
         assert_eq!(queued_visibility, Some(true));
         let initial_revision = app.visibility_revision.current();
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            let output = ctx.run(egui::RawInput::default(), |root| {
-                app.render_root_frame(root, None)
-            });
+            let output = app
+                .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                .0;
             *contexts.lock().unwrap() = Some(RootViewportCtx::with_window_bridge(
                 &ctx,
                 app.root_window_bridge.clone(),
@@ -16252,9 +16611,8 @@ mod tests {
                 &app.visibility_revision,
                 |_| {},
             );
-            ctx.run(egui::RawInput::default(), |root| {
-                app.render_root_frame(root, None)
-            });
+            app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                .0;
             output
         });
         assert_eq!(queued, [(initial_revision, 42)]);
@@ -16280,9 +16638,8 @@ mod tests {
                 None,
                 (900.0, 650.0),
             );
-            ctx.run(egui::RawInput::default(), |root| {
-                app.render_root_frame(root, None)
-            });
+            app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                .0;
             assert!(!app.last_visible);
             let mut batch = VisibilityToggleBatch::default();
             batch.record_toggle_ordered_with_invocation(
@@ -16303,9 +16660,8 @@ mod tests {
                 None,
                 (900.0, 650.0),
             );
-            ctx.run(egui::RawInput::default(), |root| {
-                app.render_root_frame(root, None)
-            })
+            app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                .0
         });
         assert_eq!(queued, [(initial_revision + 2, 42)]);
         assert_root_activation_requests(&shown, &queued);
@@ -16328,9 +16684,8 @@ mod tests {
             },
         );
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.run(egui::RawInput::default(), |root| {
-                app.render_root_frame(root, None)
-            })
+            app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                .0
         });
         assert!(queued.is_empty());
         let events = acceptance_trace::take_root_activation_test_events();
@@ -16459,10 +16814,10 @@ mod tests {
         );
         let revision = app.visibility_revision.current();
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.run(egui::RawInput::default(), |root| {
+            app.run_root_frame_for_test_with(&ctx, egui::RawInput::default(), false, |app, root| {
                 for _ in 0..3 {
                     app.event_tx
-                        .send(WatchEvent::ScreenDrawRecover(first))
+                        .send(WatchEvent::ScreenDrawRecover(first.clone()))
                         .unwrap();
                 }
                 app.process_watch_events();
@@ -16470,8 +16825,9 @@ mod tests {
                     commands.try_iter().collect::<Vec<_>>().as_slice(),
                     [crate::screen_draw::NativeSessionCommand::Ghost]
                 ));
-                app.render_root_frame(root, None);
+                app.render_root_ui(root);
             })
+            .0
         });
         assert_eq!(queued, [(revision + 1, 42)]);
         assert_root_activation_requests(&output, &queued);
@@ -16517,16 +16873,17 @@ mod tests {
             .unwrap();
         assert_ne!(first.id(), second.id());
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.run(egui::RawInput::default(), |root| {
-                for intent in [second, first, second] {
+            app.run_root_frame_for_test_with(&ctx, egui::RawInput::default(), false, |app, root| {
+                for intent in [second.clone(), first.clone(), second.clone()] {
                     app.event_tx
                         .send(WatchEvent::ScreenDrawRecover(intent))
                         .unwrap();
                 }
                 app.process_watch_events();
                 assert!(commands.try_recv().is_err());
-                app.render_root_frame(root, None);
+                app.render_root_ui(root);
             })
+            .0
         });
         assert_eq!(queued, [(revision + 2, 42)]);
         assert_root_activation_requests(&output, &queued);
@@ -16567,14 +16924,14 @@ mod tests {
         acceptance_trace::take_screen_draw_restore_test_events();
 
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             for _ in 0..2 {
                 app.event_tx
                     .send(WatchEvent::ScreenDrawRecover(intent))
                     .unwrap();
             }
             app.process_watch_events();
-            ctx.end_frame()
+            ctx.end_pass()
         });
         assert_eq!(app.root_window_bridge.identity(), qualified);
         assert_eq!(bridge_clone.identity(), qualified);
@@ -16630,13 +16987,13 @@ mod tests {
         let undelivered = minted_notice
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
             .unwrap();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         let close_revision = app.visibility_revision.current();
         let (_, closed) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
             app.close_screen_draw_session().unwrap()
         });
         assert_eq!(closed, [(close_revision + 1, 42)]);
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
         let b = app.screen_draw_controller.request_start().unwrap();
         assert_ne!(a, b);
         app.screen_draw_controller.launcher_parked(b).unwrap();
@@ -16674,12 +17031,12 @@ mod tests {
         assert!(queued.recovery.is_none());
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 app.event_tx
                     .send(WatchEvent::ScreenDrawRecover(undelivered))
                     .unwrap();
                 app.process_watch_events();
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(
             app.screen_draw_controller.state(),
@@ -16704,14 +17061,14 @@ mod tests {
             .unwrap();
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 for _ in 0..2 {
                     app.event_tx
                         .send(WatchEvent::ScreenDrawRecover(fresh))
                         .unwrap();
                 }
                 app.process_watch_events();
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(
             app.screen_draw_controller.state(),
@@ -16749,7 +17106,7 @@ mod tests {
         app.root_window_bridge
             .qualify_simulated_wake_for_test()
             .unwrap();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         let initial_revision = app.visibility_revision.current();
         let (_, initial_scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
@@ -16760,7 +17117,7 @@ mod tests {
                 .unwrap();
             });
         assert_eq!(initial_scheduled, [(initial_revision + 1, 42)]);
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
         let b = app.screen_draw_controller.state().generation().unwrap();
         assert_ne!(a, b);
         assert!(app.screen_draw_recovery_bridge.is_active());
@@ -16783,12 +17140,12 @@ mod tests {
         assert_eq!(restored, [original]);
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 app.event_tx
                     .send(WatchEvent::ScreenDrawRecover(old))
                     .unwrap();
                 app.process_watch_events();
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(app.screen_draw_controller.state(), &state);
         assert_eq!(observer.current_rect(), original);
@@ -16800,12 +17157,12 @@ mod tests {
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
             .unwrap();
         let (_, scheduled) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.event_tx
                 .send(WatchEvent::ScreenDrawRecover(fresh))
                 .unwrap();
             app.process_watch_events();
-            ctx.end_frame()
+            ctx.end_pass()
         });
         assert_eq!(
             app.screen_draw_controller.state(),
@@ -16825,7 +17182,7 @@ mod tests {
         app.root_window_bridge
             .qualify_simulated_wake_for_test()
             .unwrap();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         let first = hook_recovery_notice(&app.screen_draw_recovery_bridge)
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
             .unwrap();
@@ -16846,7 +17203,7 @@ mod tests {
         };
         observer.set_current_rect(moved);
         app.resume_screen_draw().unwrap();
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
         let _ = commands.try_iter().collect::<Vec<_>>();
         let capture = Arc::clone(
             app.screen_draw_controller
@@ -16859,12 +17216,12 @@ mod tests {
         let restored = observer.restored_rects();
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 app.event_tx
                     .send(WatchEvent::ScreenDrawRecover(old))
                     .unwrap();
                 app.process_watch_events();
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(
             app.screen_draw_controller.state(),
@@ -16888,9 +17245,9 @@ mod tests {
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
             .unwrap();
         let (_, scheduled) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.recover_screen_draw(fresh);
-            ctx.end_frame()
+            ctx.end_pass()
         });
         assert_eq!(scheduled, [(revision + 1, 42)]);
         assert_eq!(observer.current_rect(), moved);
@@ -16939,7 +17296,7 @@ mod tests {
                 .unwrap();
             let generation = app.screen_draw_controller.state().generation();
             for _ in 0..2 {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 ScreenDrawCommandHost::execute_screen_draw_command(
                     &mut app,
                     ScreenDrawCommand::OpenToolbar,
@@ -16947,11 +17304,11 @@ mod tests {
                 .unwrap();
                 assert!(app.screen_draw_controller.toolbar_open());
                 app.request_launcher_visibility(false);
-                let _ = ctx.end_frame();
+                ctx.end_pass().drop_without_applying_deltas();
                 let revision = app.visibility_revision.current();
                 let (output, scheduled) =
                     crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                        ctx.begin_frame(egui::RawInput::default());
+                        ctx.begin_pass(egui::RawInput::default());
                         ScreenDrawCommandHost::execute_screen_draw_command(
                             &mut app,
                             ScreenDrawCommand::Close,
@@ -16962,7 +17319,7 @@ mod tests {
                             ScreenDrawCommand::Close,
                         )
                         .unwrap();
-                        ctx.end_frame()
+                        ctx.end_pass()
                     });
                 assert_eq!(app.visibility_revision.current(), revision + 1);
                 assert_eq!(scheduled, [(revision + 1, 42)]);
@@ -16995,13 +17352,13 @@ mod tests {
             let hidden_revision = app.visibility_revision.current();
             let (output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.begin_frame(egui::RawInput::default());
+                    ctx.begin_pass(egui::RawInput::default());
                     ScreenDrawCommandHost::execute_screen_draw_command(
                         &mut app,
                         ScreenDrawCommand::Close,
                     )
                     .unwrap();
-                    ctx.end_frame()
+                    ctx.end_pass()
                 });
             assert_eq!(app.visibility_revision.current(), hidden_revision);
             assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -17065,10 +17422,10 @@ mod tests {
                     .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
                     .unwrap()
             });
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
             app.process_watch_events();
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
             let b = app.screen_draw_controller.state().generation().unwrap();
             assert_ne!(a, b);
             assert_eq!(
@@ -17093,7 +17450,7 @@ mod tests {
             let revision = app.visibility_revision.current();
             let (output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.begin_frame(egui::RawInput::default());
+                    ctx.begin_pass(egui::RawInput::default());
                     for _ in 0..2 {
                         app.event_tx
                             .send(WatchEvent::ScreenDrawRecover(intent))
@@ -17101,7 +17458,7 @@ mod tests {
                     }
                     app.process_watch_events();
                     app.poll_screen_draw_capture(&ctx);
-                    ctx.end_frame()
+                    ctx.end_pass()
                 });
             assert_eq!(
                 app.screen_draw_controller.state(),
@@ -17148,7 +17505,7 @@ mod tests {
             let initial_revision = app.visibility_revision.current();
             let (_, initial_scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.begin_frame(egui::RawInput::default());
+                    ctx.begin_pass(egui::RawInput::default());
                     let first = hook_recovery_notice(&app.screen_draw_recovery_bridge)
                         .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
                         .unwrap();
@@ -17156,7 +17513,7 @@ mod tests {
                     if finish {
                         app.screen_draw_controller.finish().unwrap();
                     }
-                    ctx.end_frame()
+                    ctx.end_pass()
                 });
             assert_eq!(initial_scheduled, [(initial_revision + 1, 42)]);
             let mut queued = hook_recovery_notice(&app.screen_draw_recovery_bridge);
@@ -17175,9 +17532,8 @@ mod tests {
             app.root_window_bridge.request_presentation_reconcile();
             let (output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.run(screen_draw_root_reconcile_input(), |root| {
-                        app.render_root_frame(root, None)
-                    })
+                    app.run_root_frame_for_test(&ctx, screen_draw_root_reconcile_input(), false)
+                        .0
                 });
             let epoch = app.screen_draw_recovery_bridge.activity_epoch();
             assert!(epoch > old.activity_epoch());
@@ -17215,9 +17571,8 @@ mod tests {
             app.root_window_bridge.request_presentation_reconcile();
             let (_, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.run(screen_draw_root_reconcile_input(), |root| {
-                        app.render_root_frame(root, None)
-                    })
+                    app.run_root_frame_for_test(&ctx, screen_draw_root_reconcile_input(), false)
+                        .0
                 });
             assert_eq!(
                 app.screen_draw_recovery_bridge.activity_epoch(),
@@ -17244,12 +17599,12 @@ mod tests {
             );
             let (output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.begin_frame(egui::RawInput::default());
+                    ctx.begin_pass(egui::RawInput::default());
                     app.event_tx
                         .send(WatchEvent::ScreenDrawRecover(old))
                         .unwrap();
                     app.process_watch_events();
-                    ctx.end_frame()
+                    ctx.end_pass()
                 });
             assert_eq!(app.screen_draw_controller.state(), &state);
             assert_eq!(app.visibility_revision.current(), hidden_revision);
@@ -17284,7 +17639,7 @@ mod tests {
                 .unwrap();
             let (output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                    ctx.begin_frame(egui::RawInput::default());
+                    ctx.begin_pass(egui::RawInput::default());
                     app.event_tx
                         .send(WatchEvent::ScreenDrawRecover(fresh))
                         .unwrap();
@@ -17292,7 +17647,7 @@ mod tests {
                         .send(WatchEvent::ScreenDrawRecover(fresh))
                         .unwrap();
                     app.process_watch_events();
-                    ctx.end_frame()
+                    ctx.end_pass()
                 });
             assert_eq!(app.screen_draw_controller.state(), &state);
             assert_eq!(app.visibility_revision.current(), hidden_revision + 1);
@@ -17327,12 +17682,12 @@ mod tests {
         let initial_revision = app.visibility_revision.current();
         let (_, initial_scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 let first = hook_recovery_notice(&app.screen_draw_recovery_bridge)
                     .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
                     .unwrap();
                 app.recover_screen_draw(first);
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(initial_scheduled, [(initial_revision + 1, 42)]);
         let old = hook_recovery_notice(&app.screen_draw_recovery_bridge)
@@ -17345,9 +17700,8 @@ mod tests {
         app.root_window_bridge.request_presentation_reconcile();
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.run(screen_draw_root_reconcile_input(), |root| {
-                    app.render_root_frame(root, None)
-                })
+                app.run_root_frame_for_test(&ctx, screen_draw_root_reconcile_input(), false)
+                    .0
             });
         assert!(app.screen_draw_recovery_bridge.activity_epoch() > old.activity_epoch());
         assert_eq!(
@@ -17380,12 +17734,12 @@ mod tests {
         let restored = observer.restored_rects();
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 app.event_tx
                     .send(WatchEvent::ScreenDrawRecover(old))
                     .unwrap();
                 app.process_watch_events();
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(app.screen_draw_controller.state(), &state);
         assert_eq!(app.visibility_revision.current(), revision);
@@ -17397,9 +17751,9 @@ mod tests {
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
             .unwrap();
         let (_, scheduled) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.recover_screen_draw(fresh);
-            ctx.end_frame()
+            ctx.end_pass()
         });
         assert_eq!(scheduled, [(revision + 1, 42)]);
         assert_eq!(app.visibility_revision.current(), revision + 1);
@@ -17426,13 +17780,13 @@ mod tests {
                     }
                     let (observer, original) = install_recovery_parking(&mut app, generation);
 
-                    ctx.begin_frame(egui::RawInput::default());
+                    ctx.begin_pass(egui::RawInput::default());
                     let intent = app
                         .screen_draw_recovery_bridge
                         .admit(recovery, None)
                         .unwrap();
                     app.recover_screen_draw(intent);
-                    let _ = ctx.end_frame();
+                    ctx.end_pass().drop_without_applying_deltas();
 
                     assert_eq!(
                         app.screen_draw_controller.state(),
@@ -17466,7 +17820,7 @@ mod tests {
                 .unwrap();
             let (observer, original) = install_recovery_parking(&mut app, generation);
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             let intent = app
                 .screen_draw_recovery_bridge
                 .admit(
@@ -17475,7 +17829,7 @@ mod tests {
                 )
                 .unwrap();
             app.recover_screen_draw(intent);
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
 
             assert_eq!(
                 app.screen_draw_controller.state(),
@@ -17610,7 +17964,7 @@ mod tests {
             let replacement = app.screen_draw_controller.request_new_capture().unwrap();
             let (observer, original) = install_recovery_parking(&mut app, replacement);
 
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             let intent = app
                 .screen_draw_recovery_bridge
                 .admit(
@@ -17619,7 +17973,7 @@ mod tests {
                 )
                 .unwrap();
             app.recover_screen_draw(intent);
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
 
             assert_eq!(
                 app.screen_draw_controller.state(),
@@ -17672,7 +18026,7 @@ mod tests {
         acceptance_trace::take_screen_draw_restore_test_events();
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 app.event_tx
                     .send(WatchEvent::ScreenDrawEmergency(intent))
                     .unwrap();
@@ -17680,11 +18034,10 @@ mod tests {
                     .send(WatchEvent::ScreenDrawEmergency(intent))
                     .unwrap();
                 app.process_watch_events();
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(app.visibility_revision.current(), revision + 1);
         assert_eq!(scheduled, [(revision + 1, 42)]);
-        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
         assert_root_activation_requests(&output, &scheduled);
         let events = acceptance_trace::take_screen_draw_restore_test_events();
         let decisions = events
@@ -17767,14 +18120,14 @@ mod tests {
         let revision = app.visibility_revision.current();
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
-                ctx.begin_frame(egui::RawInput::default());
+                ctx.begin_pass(egui::RawInput::default());
                 for intent in [first, first, second, second, first] {
                     app.event_tx
                         .send(WatchEvent::ScreenDrawRecover(intent))
                         .unwrap();
                     app.process_watch_events();
                 }
-                ctx.end_frame()
+                ctx.end_pass()
             });
         assert_eq!(app.visibility_revision.current(), revision + 2);
         assert_eq!(scheduled, [(revision + 1, 42), (revision + 2, 42)]);
@@ -17804,14 +18157,14 @@ mod tests {
                 )
                 .unwrap();
             let revision = app.visibility_revision.current();
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.recover_screen_draw(intent);
             assert_eq!(app.visibility_revision.current(), revision);
             assert!(!app.visible_flag.load(Ordering::SeqCst));
             assert!(observer.restored_rects().is_empty());
             app.recover_screen_draw(intent);
             app.recover_screen_draw(intent);
-            let output = ctx.end_frame();
+            let output = ctx.end_pass();
             assert_eq!(app.visibility_revision.current(), revision + 1);
             assert_eq!(observer.restored_rects(), [original]);
             #[cfg(not(windows))]
@@ -17859,7 +18212,7 @@ mod tests {
         let revision = app.visibility_revision.current();
         acceptance_trace::take_screen_draw_restore_test_events();
         let (_, scheduled) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.recover_screen_draw(intent);
             assert_eq!(app.visibility_revision.current(), revision + 1);
             assert_eq!(app.root_window_bridge.identity(), mismatched_wake_identity);
@@ -17888,7 +18241,7 @@ mod tests {
                     .take_simulated_wake_observations_for_test()
                     .is_empty()
             );
-            ctx.end_frame()
+            ctx.end_pass()
         });
         assert_eq!(app.visibility_revision.current(), revision + 2);
         assert_eq!(
@@ -17927,7 +18280,7 @@ mod tests {
         let revision = app.visibility_revision.current();
         acceptance_trace::take_screen_draw_restore_test_events();
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.run(egui::RawInput::default(), |_| {
+            ctx.run_ui(egui::RawInput::default(), |_| {
                 app.recover_screen_draw(intent)
             })
         });
@@ -17940,7 +18293,7 @@ mod tests {
                 if *intent_id == intent.id())));
         install_owned_root_for_test(&mut app);
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.run(egui::RawInput::default(), |_| {
+            ctx.run_ui(egui::RawInput::default(), |_| {
                 app.recover_screen_draw(intent);
                 app.recover_screen_draw(intent);
             })
@@ -17980,7 +18333,7 @@ mod tests {
                     None,
                 )
                 .unwrap();
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.recover_screen_draw(intent);
             app.request_launcher_visibility(false);
             let hidden_revision = app.visibility_revision.current();
@@ -17991,7 +18344,7 @@ mod tests {
             let next = app.screen_draw_controller.request_start().unwrap();
             assert_ne!(generation, next);
             app.recover_screen_draw(intent);
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
             assert_eq!(
                 app.screen_draw_controller.state(),
                 &crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { generation: next }
@@ -18025,7 +18378,7 @@ mod tests {
                 revision.request(|| visible.store(false, Ordering::SeqCst));
             });
             acceptance_trace::take_screen_draw_restore_test_events();
-            ctx.begin_frame(egui::RawInput::default());
+            ctx.begin_pass(egui::RawInput::default());
             app.recover_screen_draw(first);
             let after_hide = app.visibility_revision.current();
             assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -18046,7 +18399,7 @@ mod tests {
                 )
                 .unwrap();
             app.recover_screen_draw(fresh);
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
             assert_eq!(app.visibility_revision.current(), after_hide + 1);
             assert_eq!(observer.restored_rects(), [original, original]);
             assert_eq!(observer.current_rect(), original);
@@ -18285,8 +18638,8 @@ mod tests {
             for capturing in [false, true] {
                 let ctx = egui::Context::default();
                 let mut app = new_app(&ctx);
-                ctx.begin_frame(egui::RawInput::default());
-                let _ = ctx.end_frame();
+                ctx.begin_pass(egui::RawInput::default());
+                ctx.end_pass().drop_without_applying_deltas();
                 assert!(app.start_or_focus_screen_draw().unwrap());
                 let generation = app.screen_draw_controller.state().generation().unwrap();
                 assert!(!app.start_or_focus_screen_draw().unwrap());
@@ -18298,12 +18651,12 @@ mod tests {
                 }
                 let (observer, original) = install_recovery_parking(&mut app, generation);
 
-                ctx.begin_frame(egui::RawInput {
+                ctx.begin_pass(egui::RawInput {
                     events: vec![key_press(egui::Key::Escape, egui::Modifiers::NONE)],
                     ..Default::default()
                 });
                 app.cancel_screen_draw_startup_on_escape(&ctx);
-                let output = ctx.end_frame();
+                let output = ctx.end_pass();
 
                 assert_eq!(
                     app.screen_draw_controller.state(),
@@ -18336,8 +18689,8 @@ mod tests {
     fn typed_parking_effect_synchronizes_visibility_without_configured_hide() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        ctx.begin_frame(egui::RawInput::default());
-        let _ = ctx.end_frame();
+        ctx.begin_pass(egui::RawInput::default());
+        ctx.end_pass().drop_without_applying_deltas();
         let generation = app.screen_draw_controller.request_start().unwrap();
         let original = crate::launcher_parking::LauncherWindowRect {
             left: 25,
@@ -18355,7 +18708,7 @@ mod tests {
         app.last_visible = true;
         app.restore_flag.store(true, Ordering::SeqCst);
 
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         app.apply_screen_draw_capture_poll(
             &ctx,
             crate::screen_draw::ScreenDrawCapturePoll {
@@ -18366,7 +18719,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
 
         assert!(!app.visible_flag.load(Ordering::SeqCst));
         assert!(!app.last_visible);
@@ -18489,9 +18842,9 @@ mod tests {
         app: &mut LauncherApp,
         events: Vec<egui::Event>,
     ) {
-        let _ = ctx.run(prompt_raw_input(events), |ctx| {
-            app.render_root_frame(ctx, None);
-        });
+        app.run_root_frame_for_test(ctx, prompt_raw_input(events), false)
+            .0
+            .drop_without_applying_deltas();
     }
 
     fn render_prompt_test_frame_at_size(
@@ -18500,17 +18853,18 @@ mod tests {
         events: Vec<egui::Event>,
         size: egui::Vec2,
     ) {
-        let _ = ctx.run(
+        app.run_root_frame_for_test(
+            ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 focused: true,
                 events,
                 ..Default::default()
             },
-            |ctx| {
-                app.render_root_frame(ctx, None);
-            },
-        );
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
     }
 
     #[test]
@@ -18551,13 +18905,17 @@ mod tests {
         app.snippet_prompt_dialog.set_value("name", "Ada".into());
 
         let mut tab_fell_through = true;
-        let _ = ctx.run(
+        app.run_root_frame_for_test_with(
+            &ctx,
             prompt_raw_input(vec![key_press(egui::Key::Tab, egui::Modifiers::NONE)]),
-            |ctx| {
-                app.render_root_frame(ctx, None);
-                tab_fell_through = ctx.input(|input| input.key_pressed(egui::Key::Tab));
+            false,
+            |app, ui| {
+                app.render_root_ui(ui);
+                tab_fell_through = ui.ctx().input(|input| input.key_pressed(egui::Key::Tab));
             },
-        );
+        )
+        .0
+        .drop_without_applying_deltas();
         let message_id = egui::Id::new(("snippet_prompt_field", generation, "message"));
         assert!(!tab_fell_through);
         assert!(ctx.memory(|memory| memory.has_focus(message_id)));
@@ -18604,7 +18962,7 @@ mod tests {
 
         let mut copied = Vec::new();
         let mut submit_result = None;
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             prompt_raw_input(vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)]),
             |ctx| {
                 assert!(app.route_snippet_prompt_keyboard_with(ctx, |app| {
@@ -18619,6 +18977,7 @@ mod tests {
                 assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
             },
         );
+        output.drop_without_applying_deltas();
         assert_eq!(copied, ["Hello Ada\n"]);
         assert!(submit_result.unwrap().is_ok());
         assert!(app.snippet_prompt_dialog.session().is_none());
@@ -18632,7 +18991,7 @@ mod tests {
             .unwrap();
         preview_app.focus_panel(super::super::Panel::SnippetPromptDialog);
         let mut submissions = 0;
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             prompt_raw_input(vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)]),
             |ctx| {
                 assert!(preview_app.route_snippet_prompt_keyboard_with(ctx, |_| {
@@ -18641,6 +19000,7 @@ mod tests {
                 assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
             },
         );
+        output.drop_without_applying_deltas();
         assert_eq!(submissions, 0);
         assert!(preview_app.snippet_prompt_dialog.is_open());
         assert!(preview_app.snippet_prompt_dialog.is_preview_only());
@@ -18738,15 +19098,18 @@ mod tests {
         // egui animates scroll_to_me over 100–300 ms. Advance the deterministic
         // test clock by one second so the final focused field reaches its target.
         let settled_time = ctx.input(|input| input.time + 1.0);
-        let _ = ctx.run(
+        app.run_root_frame_for_test(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen_size)),
                 focused: true,
                 time: Some(settled_time),
                 ..Default::default()
             },
-            |ctx| app.render_root_frame(ctx, None),
-        );
+            false,
+        )
+        .0
+        .drop_without_applying_deltas();
         let layout = app.snippet_prompt_dialog.last_layout.as_ref().unwrap();
         assert!(
             layout.body_scroll_offset.y > 0.0,
@@ -18781,12 +19144,13 @@ mod tests {
 
     fn focus_launcher_query(ctx: &egui::Context, app: &mut LauncherApp) {
         let query_id = egui::Id::new("query_input");
-        ctx.begin_frame(egui::RawInput::default());
-        egui::CentralPanel::default().show(ctx, |ui| {
+        ctx.begin_pass(egui::RawInput::default());
+        let mut root_ui = test_root_ui(ctx, egui::Id::new("focus-launcher-query-root"));
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             ui.add(egui::TextEdit::singleline(&mut app.query).id(query_id))
                 .request_focus();
         });
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
         assert!(ctx.memory(|memory| memory.has_focus(query_id)));
     }
 
@@ -18808,9 +19172,9 @@ mod tests {
         app.focus_query = false;
         app.follow_mouse = false;
         focus_launcher_query(ctx, app);
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None)
-        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
     }
 
     #[test]
@@ -18860,9 +19224,9 @@ mod tests {
             app.note_panels.extend([fixture, foreign]);
             app.update_panel_stack();
             for _ in 0..4 {
-                let _ = ctx.run(actual_query_input(true), |root| {
-                    app.render_root_frame(root, None)
-                });
+                app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                    .0
+                    .drop_without_applying_deltas();
             }
             let query = app.query.clone();
             let history = app.query_history.acceptance_digest();
@@ -18882,9 +19246,9 @@ mod tests {
                 serde_json::to_vec(&request).unwrap(),
             )
             .unwrap();
-            let output = ctx.run(actual_query_input(true), |root| {
-                app.render_root_frame(root, None)
-            });
+            let output = app
+                .run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0;
             let bytes =
                 std::fs::read(format!("{}.note-close.response.json", base.display())).unwrap();
             assert!(bytes.len() <= 64 * 1024);
@@ -18912,7 +19276,7 @@ mod tests {
                     .nodes
                     .iter()
                     .any(|(_, node)| node.role() == egui::accesskit::Role::Button
-                        && node.name() == Some("Discard Changes"))
+                        && node.label() == Some("Discard Changes"))
             );
             assert_eq!(app.note_panels.len(), 2);
             assert!(!app.note_panels[0].has_unsaved_changes());
@@ -18967,9 +19331,9 @@ mod tests {
         app.note_panels.push(fixture);
         app.update_panel_stack();
         for _ in 0..4 {
-            let _ = ctx.run(actual_query_input(true), |root| {
-                app.render_root_frame(root, None)
-            });
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
         }
         let before = app.note_panels[0].note_close_observation();
         let query = app.query.clone();
@@ -18992,9 +19356,9 @@ mod tests {
                 serde_json::to_vec(&request).unwrap(),
             )
             .unwrap();
-            let output = ctx.run(actual_query_input(true), |root| {
-                app.render_root_frame(root, None)
-            });
+            let output = app
+                .run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0;
             let response: NoteCloseObservationResponse = serde_json::from_slice(
                 &std::fs::read(format!("{}.note-close.response.json", base.display())).unwrap(),
             )
@@ -19024,7 +19388,7 @@ mod tests {
                 .find(|(id, _)| *id == egui::accesskit::NodeId(widget.widget_id))
                 .unwrap();
             assert_eq!(node.role(), egui::accesskit::Role::Button);
-            assert_eq!(node.name(), Some("Discard Changes"));
+            assert_eq!(node.label(), Some("Discard Changes"));
             let bounds = node.bounds().unwrap();
             assert_eq!(
                 widget.bounds,
@@ -19080,9 +19444,10 @@ mod tests {
             app.update_panel_stack();
             let mut output = None;
             for _ in 0..4 {
-                output = Some(ctx.run(actual_query_input(true), |root| {
-                    app.render_root_frame(root, None)
-                }));
+                output = Some(
+                    app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0,
+                );
             }
             let editor = ctx
                 .memory(|memory| memory.focused())
@@ -19107,12 +19472,15 @@ mod tests {
             focus_input.events.push(egui::Event::AccessKitActionRequest(
                 egui::accesskit::ActionRequest {
                     action: egui::accesskit::Action::Focus,
-                    target: editor_node,
+                    target_tree: egui::accesskit::TreeId::ROOT,
+                    target_node: editor_node,
                     data: None,
                 },
             ));
             assert!(!ctx.memory(|memory| memory.has_focus(editor)));
-            let _ = ctx.run(focus_input, |root| app.render_root_frame(root, None));
+            app.run_root_frame_for_test(&ctx, focus_input, false)
+                .0
+                .drop_without_applying_deltas();
             assert!(ctx.memory(|memory| memory.has_focus(editor)));
             assert_eq!(app.note_panels.len(), 1);
             let mut escape = actual_query_input(true);
@@ -19125,7 +19493,7 @@ mod tests {
                     modifiers: egui::Modifiers::NONE,
                 });
             }
-            let mut output = ctx.run(escape, |root| app.render_root_frame(root, None));
+            let mut output = app.run_root_frame_for_test(&ctx, escape, false).0;
             if dirty {
                 assert_eq!(
                     app.note_panels.len(),
@@ -19134,9 +19502,9 @@ mod tests {
                 );
                 assert!(app.note_panels[0].has_unsaved_changes());
                 for _ in 0..3 {
-                    output = ctx.run(actual_query_input(true), |root| {
-                        app.render_root_frame(root, None)
-                    });
+                    output = app
+                        .run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                        .0;
                 }
                 let discard_point = |output: &egui::FullOutput| {
                     let update = output.platform_output.accesskit_update.as_ref().unwrap();
@@ -19145,7 +19513,7 @@ mod tests {
                         .iter()
                         .filter(|(_, node)| {
                             node.role() == egui::accesskit::Role::Button
-                                && node.name() == Some("Discard Changes")
+                                && node.label() == Some("Discard Changes")
                         })
                         .collect::<Vec<_>>();
                     assert_eq!(matches.len(), 1);
@@ -19159,7 +19527,7 @@ mod tests {
                 let point = discard_point(&output);
                 let mut input = actual_query_input(true);
                 input.events.push(egui::Event::PointerMoved(point));
-                output = ctx.run(input, |root| app.render_root_frame(root, None));
+                output = app.run_root_frame_for_test(&ctx, input, false).0;
                 for pressed in [true, false] {
                     let point = discard_point(&output);
                     let mut input = actual_query_input(true);
@@ -19169,12 +19537,12 @@ mod tests {
                         pressed,
                         modifiers: egui::Modifiers::NONE,
                     });
-                    output = ctx.run(input, |root| app.render_root_frame(root, None));
+                    output = app.run_root_frame_for_test(&ctx, input, false).0;
                 }
             }
-            let _ = ctx.run(actual_query_input(true), |root| {
-                app.render_root_frame(root, None)
-            });
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
             assert!(app.note_panels.is_empty());
             assert!(!app.is_panel_open(Panel::NotePanel));
             assert!(app.visible_flag.load(Ordering::SeqCst));
@@ -19202,8 +19570,8 @@ mod tests {
             .cursor
             .char_range()
             .unwrap();
-        assert_eq!(range.primary.index, query.chars().count());
-        assert_eq!(range.secondary.index, query.chars().count());
+        assert_eq!(range.primary.index.0, query.chars().count());
+        assert_eq!(range.secondary.index.0, query.chars().count());
     }
 
     #[test]
@@ -19216,9 +19584,9 @@ mod tests {
             set_query_cursor(&ctx, 0, query.chars().count().min(1));
             app.move_cursor_end = true;
             let revision = app.visibility_revision.current();
-            let output = ctx.run(actual_query_input(true), |root| {
-                app.render_root_frame(root, None)
-            });
+            let output = app
+                .run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0;
             assert!(!app.move_cursor_end);
             assert_query_cursor_end(&ctx, query);
             assert_eq!(app.query, query);
@@ -19231,9 +19599,9 @@ mod tests {
             );
             // A consumed request must not override the user's next selection.
             set_query_cursor(&ctx, 0, 0);
-            let _ = ctx.run(actual_query_input(true), |root| {
-                app.render_root_frame(root, None)
-            });
+            app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+                .0
+                .drop_without_applying_deltas();
             assert_eq!(
                 egui::TextEdit::load_state(&ctx, egui::Id::new("query_input"))
                     .unwrap()
@@ -19241,7 +19609,8 @@ mod tests {
                     .char_range()
                     .unwrap()
                     .primary
-                    .index,
+                    .index
+                    .0,
                 0
             );
         }
@@ -19257,9 +19626,9 @@ mod tests {
         prepare_actual_query_frame(&ctx, &mut app);
         set_query_cursor(&ctx, 0, 0);
         app.move_cursor_end = true;
-        let _ = ctx.run(actual_query_input(false), |root| {
-            app.render_root_frame(root, None)
-        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(false), false)
+            .0
+            .drop_without_applying_deltas();
         assert!(app.move_cursor_end);
         assert_eq!(
             egui::TextEdit::load_state(&ctx, egui::Id::new("query_input"))
@@ -19268,22 +19637,23 @@ mod tests {
                 .char_range()
                 .unwrap()
                 .primary
-                .index,
+                .index
+                .0,
             0
         );
         app.results = two_results();
         app.invalidate_root_list_results();
         assert!(app.open_action_sheet_for_index(0));
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None)
-        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         assert!(app.action_sheet.is_open());
         assert!(app.move_cursor_end);
         app.close_action_sheet();
         focus_launcher_query(&ctx, &mut app);
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None)
-        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         assert!(!app.move_cursor_end);
         assert_query_cursor_end(&ctx, &app.query);
     }
@@ -19295,36 +19665,40 @@ mod tests {
         app.query = "draft".into();
         prepare_actual_query_frame(&ctx, &mut app);
         set_query_cursor(&ctx, 1, 1);
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None);
+        app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, root| {
+            app.render_root_ui(root);
             app.navigate_query_history_with(QueryHistoryDirection::Older, || {
                 vec!["recalled \u{03b2}".into()]
             });
-        });
+        })
+        .0
+        .drop_without_applying_deltas();
         assert_eq!(app.query, "recalled \u{03b2}");
         assert!(app.move_cursor_end && app.focus_query);
         assert_eq!(app.selected, None);
         assert_eq!(app.autocomplete_index, 0);
         assert_eq!(app.last_search_query, app.query);
         assert!(app.last_results_valid);
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None)
-        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         assert_query_cursor_end(&ctx, &app.query);
         assert!(!app.move_cursor_end);
         app.query_autocomplete = true;
         app.suggestions = vec!["completed \u{1f642}".into()];
         app.autocomplete_index = 0;
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None);
+        app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, root| {
+            app.render_root_ui(root);
             assert!(app.accept_suggestion(true));
-        });
+        })
+        .0
+        .drop_without_applying_deltas();
         assert_eq!(app.query, "completed \u{1f642}");
         assert!(app.move_cursor_end);
         assert_eq!(app.last_search_query, app.query);
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None)
-        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         assert_query_cursor_end(&ctx, &app.query);
         assert!(!app.move_cursor_end);
     }
@@ -19345,8 +19719,8 @@ mod tests {
             source: ActivationSource::Enter,
         };
         let revision = app.visibility_revision.current();
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None);
+        app.run_root_frame_for_test_with(&ctx, actual_query_input(true), false, |app, root| {
+            app.render_root_ui(root);
             app.apply_command_outcome(
                 crate::commands::CommandOutcome {
                     query: crate::commands::QueryPolicy::Set("completion \u{03b2}\u{1f642}".into()),
@@ -19356,14 +19730,16 @@ mod tests {
                 },
                 &invocation,
             );
-        });
+        })
+        .0
+        .drop_without_applying_deltas();
         assert_eq!(app.query, "completion \u{03b2}\u{1f642}");
         assert!(app.move_cursor_end && app.focus_query);
         assert_eq!(app.visibility_revision.current(), revision);
         assert!(app.test_recorded_history_queries.is_empty());
-        let _ = ctx.run(actual_query_input(true), |root| {
-            app.render_root_frame(root, None)
-        });
+        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+            .0
+            .drop_without_applying_deltas();
         assert_query_cursor_end(&ctx, &app.query);
         assert!(!app.move_cursor_end);
         assert_eq!(app.visibility_revision.current(), revision);
@@ -19394,7 +19770,8 @@ mod tests {
     ) -> (bool, Vec<LauncherNumpadNavigation>) {
         let mut focused = false;
         let mut routed = Vec::new();
-        egui::CentralPanel::default().show(ctx, |ui| {
+        let mut root_ui = test_root_ui(ctx, egui::Id::new("numpad-query-routing-root"));
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             let input_id = egui::Id::new("numpad_routing_query_input");
             let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
             routed = ui.ctx().input_mut(|input| {
@@ -19444,11 +19821,11 @@ mod tests {
             calls: Cell::new(0),
         };
 
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, true, &probe);
         assert!(focused);
         assert!(routed.is_empty());
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
 
         let input_id = egui::Id::new("numpad_routing_query_input");
         ctx.data_mut(|data| {
@@ -19461,7 +19838,7 @@ mod tests {
                 )));
         });
 
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![
                 key_press(key, egui::Modifiers::NONE),
                 egui::Event::Text(digit.into()),
@@ -19470,7 +19847,7 @@ mod tests {
         });
         let (focused, routed) = render_query_text_edit_frame(&ctx, &mut app, false, &probe);
         assert!(focused);
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
         (app, routed, probe.calls.get())
     }
 
@@ -19553,7 +19930,7 @@ mod tests {
     #[test]
     fn numpad_routing_leaves_query_history_shortcuts_available() {
         let ctx = egui::Context::default();
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
             ..Default::default()
         });
@@ -19572,27 +19949,29 @@ mod tests {
             ctx.input_mut(|input| LauncherApp::consume_query_history_shortcut(true, input)),
             Some(QueryHistoryDirection::Older)
         );
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
     fn query_history_shortcuts_use_event_modifiers_and_require_exact_ctrl_only_focus() {
-        let route = |query_has_focus, frame_modifiers, events| {
-            let ctx = egui::Context::default();
-            ctx.begin_frame(egui::RawInput {
-                modifiers: frame_modifiers,
-                events,
-                ..Default::default()
-            });
-            let direction = ctx.input_mut(|input| {
-                LauncherApp::consume_query_history_shortcut(query_has_focus, input)
-            });
-            let arrows_remain = ctx.input(|input| {
-                input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowDown)
-            });
-            let _ = ctx.end_frame();
-            (direction, arrows_remain)
-        };
+        let route =
+            |query_has_focus: bool, frame_modifiers: egui::Modifiers, events: Vec<egui::Event>| {
+                let ctx = egui::Context::default();
+                let mut events = events;
+                events.push(egui::Event::ModifiersChanged(frame_modifiers));
+                ctx.begin_pass(egui::RawInput {
+                    events,
+                    ..Default::default()
+                });
+                let direction = ctx.input_mut(|input| {
+                    LauncherApp::consume_query_history_shortcut(query_has_focus, input)
+                });
+                let arrows_remain = ctx.input(|input| {
+                    input.key_pressed(egui::Key::ArrowUp) || input.key_pressed(egui::Key::ArrowDown)
+                });
+                ctx.end_pass().drop_without_applying_deltas();
+                (direction, arrows_remain)
+            };
 
         assert_eq!(
             route(
@@ -19670,7 +20049,7 @@ mod tests {
     #[test]
     fn consumed_query_history_arrow_cannot_reach_result_navigation() {
         let ctx = egui::Context::default();
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![key_press(egui::Key::ArrowUp, egui::Modifiers::CTRL)],
             ..Default::default()
         });
@@ -19687,7 +20066,7 @@ mod tests {
         }
 
         assert_eq!(app.selected, Some(1));
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -20234,7 +20613,8 @@ mod tests {
         // repaint is already pending, another `request_repaint` is coalesced and
         // does not invoke the integration callback.
         for _ in 0..8 {
-            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
             if !ctx.has_requested_repaint() {
                 break;
             }
@@ -20357,7 +20737,7 @@ mod tests {
         );
         let frame = |events: Vec<egui::Event>| {
             let mut choice = None;
-            let output = context.run(
+            let output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -20387,7 +20767,7 @@ mod tests {
                 .iter()
                 .find(|(_, node)| {
                     node.role() == egui::accesskit::Role::Button
-                        && node.name().is_some_and(|name| name.starts_with(prefix))
+                        && node.label().is_some_and(|name| name.starts_with(prefix))
                 })
                 .unwrap();
             let b = node.bounds().unwrap();
@@ -20682,7 +21062,7 @@ mod tests {
         }];
         focus_launcher_query(&ctx, &mut app);
 
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![
                 key_press(egui::Key::Enter, egui::Modifiers::CTRL),
                 key_press(egui::Key::Tab, egui::Modifiers::NONE),
@@ -20697,9 +21077,9 @@ mod tests {
         assert!(app.test_activation_trace.is_empty());
         assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
         assert!(ctx.input(|input| input.key_pressed(egui::Key::Tab)));
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
 
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)],
             ..Default::default()
         });
@@ -20710,7 +21090,7 @@ mod tests {
         assert!(app.action_sheet.is_open());
         assert!(app.test_activation_trace.is_empty());
         assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -20728,7 +21108,7 @@ mod tests {
                 args: None,
             }];
             focus_launcher_query(&ctx, &mut app);
-            ctx.begin_frame(egui::RawInput {
+            ctx.begin_pass(egui::RawInput {
                 events: vec![key_press(egui::Key::Enter, modifiers)],
                 ..Default::default()
             });
@@ -20738,7 +21118,7 @@ mod tests {
             );
             assert!(!app.action_sheet.is_open());
             assert!(ctx.input(|input| input.key_pressed(egui::Key::Enter)));
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
         }
     }
 
@@ -21570,7 +21950,7 @@ mod tests {
                 ))
             })
             .expect("the actual first frame records its content viewport and origin");
-        let style = ctx.style().as_ref().clone();
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
         let (outer, eager) = track_c_eager_root_list_layout(
             &ctx,
             &expected,

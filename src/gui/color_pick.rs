@@ -474,7 +474,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         // Observe picker effects independently of constructor mouse placement.
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
         app.last_visible = true;
         app.visibility_revision
             .request_with_focus_intent(RootFocusIntent::PreserveForeground, || {});
@@ -713,9 +713,9 @@ mod tests {
         observer.set_current_rect(original()); // Simulates stale external ROOT restore.
         app.root_window_bridge.request_presentation_reconcile();
         let ctx = app.egui_ctx.clone();
-        let output = ctx.run(egui::RawInput::default(), |root| {
-            app.render_root_frame(root, None)
-        });
+        let output = app
+            .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+            .0;
         assert!(app.color_pick_owns_root());
         assert!(!cleaned.load(Ordering::Acquire));
         assert_eq!(observer.current_rect(), parked);
@@ -749,11 +749,11 @@ mod tests {
         tx.send(ColorPickOutcome::Picked(RgbColor::new(1, 2, 3)))
             .unwrap();
         let ctx = app.egui_ctx.clone();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         let (_, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
             wait(&mut app, |app| !app.color_pick_owns_root());
         });
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
         assert_eq!(queued, [(app.visibility_revision.current(), 42)]);
         assert_eq!(observer.current_rect(), original());
         assert!(

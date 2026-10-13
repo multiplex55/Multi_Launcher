@@ -38,7 +38,7 @@ fn frame(
     size: egui::Vec2,
     events: Vec<egui::Event>,
 ) {
-    let output = ctx.run(
+    let output = ctx.run_ui(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             events,

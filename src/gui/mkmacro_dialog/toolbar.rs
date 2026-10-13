@@ -164,7 +164,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                         {
                             let result = editor_operations::clipboard(dialog, command);
                             report(dialog, result);
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
                     ui.separator();
@@ -181,7 +181,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                             .clicked()
                         {
                             super::search::open(dialog, mode);
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
                     ui.checkbox(&mut dialog.navigation.outline.open, "Show Outline");
@@ -600,7 +600,9 @@ fn recorder_control_conflict(dialog: &MkMacroDialog) -> Option<String> {
 }
 
 fn show_record_options(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog, active: bool) {
-    ui.set_enabled(!active);
+    if active {
+        ui.disable();
+    }
     let before = dialog.draft.settings.recorder.clone();
     let pause_capturing = dialog.pause_record_hotkey_capture;
     let marker_capturing = dialog.marker_record_hotkey_capture;

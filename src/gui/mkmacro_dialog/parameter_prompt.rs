@@ -109,7 +109,7 @@ impl ParameterPromptUi {
                     child.send_viewport_cmd(egui::ViewportCommand::Focus);
                     self.first_frame = false;
                 }
-                egui::TopBottomPanel::bottom("invocation_actions").show(child, |ui| {
+                egui::Panel::bottom("invocation_actions").show(child, |ui| {
                     ui.horizontal(|ui| {
                         if self.pending.is_some() {
                             submit = ui

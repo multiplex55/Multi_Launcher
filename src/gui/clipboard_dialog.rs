@@ -102,11 +102,11 @@ impl ClipboardDialog {
                                         if ui.button("Edit Entry").clicked() {
                                             self.edit_idx = Some(idx_copy);
                                             self.text = self.entries[idx_copy].clone();
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                         if ui.button("Remove Entry").clicked() {
                                             remove = Some(idx_copy);
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                     });
                                     if ui.button("Edit").clicked() {

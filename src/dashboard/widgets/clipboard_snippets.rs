@@ -118,13 +118,13 @@ impl ClipboardSnippetsWidget {
                 ui.horizontal(|ui| {
                     ui.label("Clipboard items");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.clipboard_count).clamp_range(1..=50))
+                        .add(egui::DragValue::new(&mut cfg.clipboard_count).range(1..=50))
                         .changed();
                 });
                 ui.horizontal(|ui| {
                     ui.label("Snippets");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.snippet_count).clamp_range(0..=50))
+                        .add(egui::DragValue::new(&mut cfg.snippet_count).range(0..=50))
                         .changed();
                 });
                 changed |= ui
@@ -174,7 +174,7 @@ impl Widget for ClipboardSnippetsWidget {
                 ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 6.0;
             let scroll_id = ui.id().with("clipboard_snippets_scroll");
             egui::ScrollArea::both()
-                .id_source(scroll_id)
+                .id_salt(scroll_id)
                 .auto_shrink([false; 2])
                 .show_rows(ui, row_height, rows, |ui, range| {
                     for idx in range {

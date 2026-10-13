@@ -39,7 +39,7 @@ pub fn search_match_ui(ui: &mut egui::Ui, search: &mut MkOcrSearchSpec) {
     };
     ui.horizontal(|ui| {
         ui.label("Occurrence");
-        ui.add(egui::DragValue::new(&mut nth).clamp_range(1..=u32::MAX));
+        ui.add(egui::DragValue::new(&mut nth).range(1..=u32::MAX));
     });
     search.occurrence = if nth == 1 {
         MkOcrOccurrence::First
@@ -182,6 +182,7 @@ pub fn preview_ui(
                 to_screen_rect(bounds),
                 0.0,
                 egui::Stroke::new(1.0_f32, egui::Color32::YELLOW),
+                egui::StrokeKind::Middle,
             );
         }
         for word in &line.words {
@@ -189,6 +190,7 @@ pub fn preview_ui(
                 to_screen_rect(word.bounds),
                 0.0,
                 egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(80, 190, 255)),
+                egui::StrokeKind::Middle,
             );
         }
     }
@@ -201,6 +203,7 @@ pub fn preview_ui(
             to_screen_rect(selected.bounds),
             0.0,
             egui::Stroke::new(3.0_f32, egui::Color32::GREEN),
+            egui::StrokeKind::Middle,
         );
     }
     ui.label(format!(

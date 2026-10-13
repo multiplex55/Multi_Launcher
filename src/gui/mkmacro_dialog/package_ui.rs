@@ -55,7 +55,7 @@ pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
             .clicked()
         {
             export_selected(dialog);
-            ui.close_menu();
+            ui.close();
         }
         if ui
             .add_enabled(
@@ -67,11 +67,11 @@ pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
             dialog.package_ui.modal = Some(PackageModal::ExportLibrary {
                 roots: selected.into_iter().collect(),
             });
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Import Library…").clicked() {
             begin_import(dialog);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui
@@ -84,16 +84,16 @@ pub(super) fn show_toolbar_menu(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
                     description: macro_.description.clone(),
                 });
             }
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("New from Template…").clicked() {
             open_templates(dialog);
-            ui.close_menu();
+            ui.close();
         }
         ui.separator();
         if ui.button("MkMacro Help").clicked() {
             dialog.package_ui.modal = Some(PackageModal::Help);
-            ui.close_menu();
+            ui.close();
         }
     });
 }

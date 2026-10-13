@@ -7,7 +7,7 @@ pub(super) fn navigation(
     layer: egui::LayerId,
     independent: bool,
 ) -> Option<bool> {
-    if ctx.memory(|memory| memory.any_popup_open()) || ctx.is_context_menu_open() {
+    if egui::Popup::is_any_open(ctx) {
         return None;
     }
     let widget_owned = ctx
@@ -60,7 +60,7 @@ mod tests {
                 modifiers,
             });
         }
-        let _ = ctx.run(input, |ctx| {
+        let _ = ctx.run_ui(input, |ctx| {
             let layer = egui::LayerId::background();
             assert_eq!(navigation(ctx, layer, false), None);
             assert_eq!(navigation(ctx, layer, true), Some(false));

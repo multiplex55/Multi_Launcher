@@ -61,7 +61,7 @@ fn trace_viewport_class(class: egui::ViewportClass) -> ViewportClass {
         egui::ViewportClass::Root => ViewportClass::Root,
         egui::ViewportClass::Deferred => ViewportClass::Deferred,
         egui::ViewportClass::Immediate => ViewportClass::Immediate,
-        egui::ViewportClass::Embedded => ViewportClass::Embedded,
+        egui::ViewportClass::EmbeddedWindow => ViewportClass::Embedded,
     }
 }
 
@@ -367,7 +367,7 @@ fn trace_designer_authoring_control_scoped_rect(
         clicked,
         correlation.session_id,
         correlation.generation,
-        ui.ctx().frame_nr(),
+        ui.ctx().cumulative_frame_nr(),
         scope,
     );
 }
@@ -433,7 +433,7 @@ fn designer_scroll_viewport_measurement<R>(
     let measured = DesignerAuthoringScrollViewport {
         owner,
         scroll_id: scroll.id.value(),
-        frame_nr: ui.ctx().frame_nr(),
+        frame_nr: ui.ctx().cumulative_frame_nr(),
         session_id: correlation.session_id,
         generation: correlation.generation,
         input_bounds: [
@@ -1524,7 +1524,7 @@ pub(super) fn show_radial_diagnostics<'a>(
     ui: &mut egui::Ui,
     diagnostics: impl IntoIterator<Item = &'a crate::radial::diagnostics::RadialDiagnostic>,
     show_expected_layout: bool,
-    id_salt: impl std::hash::Hash,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
 ) {
     let model = radial_diagnostic_display_model(diagnostics.into_iter().cloned());
     if !model.actionable.is_empty() || model.omitted.is_some_and(|omitted| omitted.actionable > 0) {
@@ -1532,7 +1532,7 @@ pub(super) fn show_radial_diagnostics<'a>(
             "Actionable radial diagnostics ({} shown)",
             model.actionable.len()
         ))
-        .id_source(("radial-actionable-diagnostics", &id_salt))
+        .id_salt(("radial-actionable-diagnostics", &id_salt))
         .default_open(false)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -1569,7 +1569,7 @@ pub(super) fn show_radial_diagnostics<'a>(
             model.expected_layout.len(),
             expected_omitted,
         ))
-        .id_source(("radial-expected-layout-diagnostics", &id_salt))
+        .id_salt(("radial-expected-layout-diagnostics", &id_salt))
         .default_open(false)
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -2667,7 +2667,7 @@ impl RadialEditorState {
                 return;
             };
             let correlation = trace_correlation(editor.session.as_ref());
-            let close_requested = class != egui::ViewportClass::Embedded
+            let close_requested = class != egui::ViewportClass::EmbeddedWindow
                 && child.input(|input| input.viewport().close_requested());
             // Retained deferred callbacks can execute every frame.  Trace
             // only interaction/focus/close edges so the bounded diagnostic
@@ -2692,7 +2692,7 @@ impl RadialEditorState {
                 editor.viewport_close_pending = false;
                 return;
             }
-            if class == egui::ViewportClass::Embedded {
+            if class == egui::ViewportClass::EmbeddedWindow {
                 // Embedded callbacks are not an authoring surface.  Keep the
                 // state alive for the caller to close/reopen, but never render
                 // the authoritative editor into the root viewport.
@@ -4096,13 +4096,14 @@ impl RadialEditorState {
 
     fn viewport_ui(
         &mut self,
-        ctx: &egui::Context,
+        ui: &mut egui::Ui,
         frame: &DesignerFrameContext,
         viewport_class: egui::ViewportClass,
     ) {
-        if viewport_class == egui::ViewportClass::Embedded {
+        if viewport_class == egui::ViewportClass::EmbeddedWindow {
             return;
         }
+        let ctx = ui.ctx().clone();
         // Eframe initializes native AccessKit on the root viewport only. The
         // deferred Designer still needs to publish its semantic widget tree.
         ctx.enable_accesskit();
@@ -4265,7 +4266,7 @@ impl RadialEditorState {
                 )
             }
             None => {
-                egui::CentralPanel::default().show(ctx, |ui| ui.spinner());
+                egui::CentralPanel::default().show(ui, |ui| ui.spinner());
                 return;
             }
         };
@@ -4384,7 +4385,7 @@ impl RadialEditorState {
                         // compact viewport sizes.
                         show_designer_scroll_area(
                             ui,
-                            egui::ScrollArea::vertical().id_source("radial-designer-resources"),
+                            egui::ScrollArea::vertical().id_salt("radial-designer-resources"),
                             DesignerAuthoringScrollOwner::Resources,
                             trace_viewport_class(viewport_class),
                             trace_correlation(self.session.as_ref()),
@@ -4504,7 +4505,7 @@ impl RadialEditorState {
                                         show_designer_scroll_area(
                                             ui,
                                             egui::ScrollArea::vertical()
-                                                .id_source("radial-designer-inspector"),
+                                                .id_salt("radial-designer-inspector"),
                                             DesignerAuthoringScrollOwner::Inspector,
                                             trace_viewport_class(viewport_class),
                                             trace_correlation(self.session.as_ref()),
@@ -4527,14 +4528,14 @@ impl RadialEditorState {
         // `show_deferred` handles the embedded class with a bounded status
         // message before this body can be reached.  The authoritative editor
         // is therefore rendered only by the independent native viewport.
-        if viewport_class != egui::ViewportClass::Embedded {
-            egui::CentralPanel::default().show(ctx, designer_body);
+        if viewport_class != egui::ViewportClass::EmbeddedWindow {
+            egui::CentralPanel::default().show(ui, designer_body);
         }
         if self.preferences.expanded_sections != expanded_sections_before {
             self.mark_preferences_changed();
         }
-        self.properties_popup_ui(ctx, frame);
-        self.radial_add_to_menu_ui(ctx);
+        self.properties_popup_ui(&ctx, frame);
+        self.radial_add_to_menu_ui(&ctx);
         if self.preferences.zoom != self.preview_zoom
             || self.preferences.pan != (self.canvas_pan.x, self.canvas_pan.y)
         {
@@ -4547,8 +4548,8 @@ impl RadialEditorState {
         {
             self.apply_post_render();
         }
-        self.prompts(ctx);
-        self.keyboard_shortcuts(ctx);
+        self.prompts(&ctx);
+        self.keyboard_shortcuts(&ctx);
         self.trace_designer_submission();
         if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
             let size = (rect.width(), rect.height());
@@ -4560,7 +4561,7 @@ impl RadialEditorState {
                 }
             }
         }
-        if viewport_class != egui::ViewportClass::Embedded {
+        if viewport_class != egui::ViewportClass::EmbeddedWindow {
             if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
                 let position = (rect.min.x, rect.min.y);
                 let scale_factor = ctx.pixels_per_point();
@@ -5410,7 +5411,7 @@ impl RadialEditorState {
                         egui::DragValue::new(&mut self.tree_width)
                             .prefix("Tree ")
                             .suffix(" px")
-                            .clamp_range(120.0..=420.0),
+                            .range(120.0..=420.0),
                     );
                     if response.changed() {
                         self.mark_preferences_changed();
@@ -5421,7 +5422,7 @@ impl RadialEditorState {
                         egui::DragValue::new(&mut self.inspector_width)
                             .prefix("Inspector ")
                             .suffix(" px")
-                            .clamp_range(220.0..=560.0),
+                            .range(220.0..=560.0),
                     );
                     if response.changed() {
                         self.mark_preferences_changed();
@@ -5433,7 +5434,7 @@ impl RadialEditorState {
                     .clicked()
                 {
                     self.reset_designer_layout();
-                    ui.close_menu();
+                    ui.close();
                 }
             });
             ui.small("Direct Design gestures edit the draft only");
@@ -5633,7 +5634,7 @@ impl RadialEditorState {
         // TextEdit owns Ctrl+A, Shift selection, and platform text undo. The
         // document history shortcuts are only active when no text widget has
         // claimed keyboard focus.
-        if ctx.wants_keyboard_input() {
+        if ctx.egui_wants_keyboard_input() {
             return;
         }
         let (redo, undo, save) = ctx.input_mut(|input| {
@@ -5661,7 +5662,7 @@ impl RadialEditorState {
     fn preview_controls(&mut self, ui: &mut egui::Ui, show_expected_layout_diagnostics: bool) {
         ui.horizontal_wrapped(|ui| {
             ui.label("Preview");
-            egui::ComboBox::from_id_source("radial-preview-preset")
+            egui::ComboBox::from_id_salt("radial-preview-preset")
                 .selected_text(format!("{:?}", self.preview_preset))
                 .show_ui(ui, |ui| {
                     for preset in [
@@ -5874,7 +5875,7 @@ impl RadialEditorState {
             match skin_editor::rows(&session.draft, &scope) {
                 Ok(rows) => {
                     egui::ScrollArea::vertical()
-                        .id_source("radial-style-fields")
+                        .id_salt("radial-style-fields")
                         .max_height(240.0)
                         .show(ui, |ui| {
                             for (style_index, row) in rows.into_iter().enumerate() {
@@ -6395,7 +6396,7 @@ impl RadialEditorState {
                         let response = ui.add(
                             egui::DragValue::new(requested)
                                 .prefix("Slots ")
-                                .clamp_range(0..=crate::radial::model::limits::MAX_CELLS_PER_RING),
+                                .range(0..=crate::radial::model::limits::MAX_CELLS_PER_RING),
                         );
                         trace_designer_authoring_control(
                             ui,
@@ -6939,7 +6940,7 @@ impl RadialEditorState {
             ui.small(format!("{} authored results", hits.len()));
             show_designer_scroll_area(
                 ui,
-                egui::ScrollArea::vertical().id_source("radial-designer-search-results"),
+                egui::ScrollArea::vertical().id_salt("radial-designer-search-results"),
                 DesignerAuthoringScrollOwner::MenuTree,
                 viewport,
                 trace_correlation(Some(session)),
@@ -7000,6 +7001,7 @@ impl RadialEditorState {
                         response.widget_info(|| {
                             egui::WidgetInfo::selected(
                                 egui::WidgetType::SelectableLabel,
+                                ui.is_enabled(),
                                 selected,
                                 format!("{} · {}", hit.label, hit.context),
                             )
@@ -7052,7 +7054,7 @@ impl RadialEditorState {
                         // force it open.
                         .unwrap_or(false);
                     let header = egui::CollapsingHeader::new(&menu.name)
-                    .id_source((
+                    .id_salt((
                         self.tree_widget_epoch,
                         menu::widget_key("menu", menu.id.as_str(), "tree"),
                     ))
@@ -7142,6 +7144,7 @@ impl RadialEditorState {
                                                     response.widget_info(|| {
                                                         egui::WidgetInfo::selected(
                                                             egui::WidgetType::SelectableLabel,
+                                                            ui.is_enabled(),
                                                             selected,
                                                             accessible_name.clone(),
                                                         )
@@ -7403,7 +7406,7 @@ impl RadialEditorState {
             .find(|menu| menu.id == menu_id)
             .map(|menu| menu.skin_id.clone());
         if let Some(mut selected_skin) = current_skin {
-            let default_skin = egui::ComboBox::from_id_source(menu::widget_key(
+            let default_skin = egui::ComboBox::from_id_salt(menu::widget_key(
                 "menu",
                 menu_id.as_str(),
                 "default-skin",
@@ -7787,7 +7790,7 @@ impl RadialEditorState {
             ui.separator();
             ui.label("One style field");
             let selected_field_key = self.bulk_style_field.clone();
-            egui::ComboBox::from_id_source("radial-bulk-style-field")
+            egui::ComboBox::from_id_salt("radial-bulk-style-field")
                 .selected_text(&selected_field_key)
                 .show_ui(ui, |ui| {
                     for (section, field, _) in &fields {
@@ -8891,7 +8894,7 @@ impl RadialEditorState {
                 } else {
                     let selected_menu_label = selected_menu.map_or("Choose a menu", |menu| menu.name.as_str());
                     let menu_selector = ui.horizontal(|ui| {
-                        let combo = egui::ComboBox::from_id_source("radial-add-menu-selector")
+                        let combo = egui::ComboBox::from_id_salt("radial-add-menu-selector")
                             .selected_text(selected_menu_label)
                             .show_ui(ui, |ui| {
                             for menu in &menus {
@@ -8964,7 +8967,7 @@ impl RadialEditorState {
                         ring.id.as_str()
                     });
                     let ring_selector = ui.horizontal(|ui| {
-                        let combo = egui::ComboBox::from_id_source("radial-add-ring-selector")
+                        let combo = egui::ComboBox::from_id_salt("radial-add-ring-selector")
                             .selected_text(ring_label)
                             .show_ui(ui, |ui| {
                             if let Some(menu) = selected_menu {
@@ -9043,7 +9046,7 @@ impl RadialEditorState {
                         |cell| format!("{} · {}", cell.label, cell_content_kind(&cell.content)),
                     );
                     let cell_selector = ui.horizontal(|ui| {
-                        let combo = egui::ComboBox::from_id_source("radial-add-cell-selector")
+                        let combo = egui::ComboBox::from_id_salt("radial-add-cell-selector")
                             .selected_text(cell_label)
                             .show_ui(ui, |ui| {
                             if let Some(ring) = selected_ring {
@@ -10093,7 +10096,12 @@ fn style_value_widget(
             let mut value = payload.as_bool().unwrap_or(false);
             let response = ui.checkbox(&mut value, "");
             response.widget_info(|| {
-                egui::WidgetInfo::selected(egui::WidgetType::Checkbox, value, accessible_name)
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Checkbox,
+                    ui.is_enabled(),
+                    value,
+                    accessible_name,
+                )
             });
             if let Some((target, viewport, index, correlation)) = trace {
                 trace_designer_authoring_control(
@@ -10120,9 +10128,13 @@ fn style_value_widget(
             };
             response.widget_info(|| {
                 if kind == StyleControlKind::Opacity {
-                    egui::WidgetInfo::slider(f64::from(value), accessible_name)
+                    egui::WidgetInfo::slider(ui.is_enabled(), f64::from(value), accessible_name)
                 } else {
-                    egui::WidgetInfo::labeled(egui::WidgetType::DragValue, accessible_name)
+                    egui::WidgetInfo::labeled(
+                        egui::WidgetType::DragValue,
+                        ui.is_enabled(),
+                        accessible_name,
+                    )
                 }
             });
             (response.changed() || response.drag_stopped() || response.lost_focus())
@@ -10156,6 +10168,7 @@ fn style_value_widget(
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::ColorButton,
+                    ui.is_enabled(),
                     format!(
                         "{accessible_name}: rgba({}, {}, {}, {})",
                         red, green, blue, alpha
@@ -10185,12 +10198,14 @@ fn style_value_widget(
             x_response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::DragValue,
+                    ui.is_enabled(),
                     format!("{accessible_name} x"),
                 )
             });
             y_response.widget_info(|| {
                 egui::WidgetInfo::labeled(
                     egui::WidgetType::DragValue,
+                    ui.is_enabled(),
                     format!("{accessible_name} y"),
                 )
             });
@@ -10222,7 +10237,7 @@ fn style_value_widget(
             };
             let mut value = payload.as_str().unwrap_or(choices[0].1).to_owned();
             let before = value.clone();
-            let combo = egui::ComboBox::from_id_source(ui.next_auto_id())
+            let combo = egui::ComboBox::from_id_salt(ui.next_auto_id())
                 .selected_text(
                     choices
                         .iter()
@@ -10235,7 +10250,11 @@ fn style_value_widget(
                     }
                 });
             combo.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, accessible_name)
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::ComboBox,
+                    ui.is_enabled(),
+                    accessible_name,
+                )
             });
             (value != before).then(|| (serde_json::json!(value), EditPhase::Atomic))
         }
@@ -10244,7 +10263,7 @@ fn style_value_widget(
                 *text_input = payload.as_str().unwrap_or_default().to_owned();
             }
             let before = text_input.clone();
-            let combo = egui::ComboBox::from_id_source(ui.next_auto_id())
+            let combo = egui::ComboBox::from_id_salt(ui.next_auto_id())
                 .selected_text(if text_input.is_empty() {
                     "System fallback"
                 } else {
@@ -10257,12 +10276,17 @@ fn style_value_widget(
                     }
                 });
             combo.response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, accessible_name)
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::ComboBox,
+                    ui.is_enabled(),
+                    accessible_name,
+                )
             });
             let combo_changed = *text_input != before;
             let response = ui.text_edit_singleline(text_input);
             response.widget_info(|| {
-                let mut info = egui::WidgetInfo::text_edit("", text_input.as_str());
+                let mut info =
+                    egui::WidgetInfo::text_edit(ui.is_enabled(), "", text_input.as_str(), "");
                 info.label = Some(accessible_name.into());
                 info
             });
@@ -10283,7 +10307,8 @@ fn style_value_widget(
             }
             let response = ui.text_edit_singleline(text_input);
             response.widget_info(|| {
-                let mut info = egui::WidgetInfo::text_edit("", text_input.as_str());
+                let mut info =
+                    egui::WidgetInfo::text_edit(ui.is_enabled(), "", text_input.as_str(), "");
                 info.label = Some(accessible_name.into());
                 info
             });
@@ -10307,7 +10332,8 @@ fn style_value_widget(
                 .text_edit_singleline(text_input)
                 .on_hover_text("Search-path file name or icon resource path");
             path_response.widget_info(|| {
-                let mut info = egui::WidgetInfo::text_edit("", text_input.as_str());
+                let mut info =
+                    egui::WidgetInfo::text_edit(ui.is_enabled(), "", text_input.as_str(), "");
                 info.label = Some(accessible_name.into());
                 info
             });
@@ -10328,6 +10354,7 @@ fn style_value_widget(
                 index_response.widget_info(|| {
                     egui::WidgetInfo::labeled(
                         egui::WidgetType::DragValue,
+                        ui.is_enabled(),
                         format!("{accessible_name} resource index"),
                     )
                 });
@@ -10354,7 +10381,7 @@ fn persisted_section(
 ) -> bool {
     let open = expanded_sections.get(key).copied().unwrap_or(false);
     let response = egui::CollapsingHeader::new(label)
-        .id_source(("radial-designer-section", key))
+        .id_salt(("radial-designer-section", key))
         .default_open(open)
         .open(Some(open))
         .show(ui, body);
@@ -10400,7 +10427,7 @@ fn menu_behavior_controls(
         let response = ui.add(
             egui::DragValue::new(dwell)
                 .prefix("Dwell ms ")
-                .clamp_range(1..=10_000),
+                .range(1..=10_000),
         );
         continuous = continuous_widget_edit(&response, "hover_dwell_ms");
     }
@@ -10677,7 +10704,7 @@ fn cell_content_controls(
                     let response = ui.add(
                         egui::DragValue::new(max_items)
                             .prefix("Maximum ")
-                            .clamp_range(1..=100),
+                            .range(1..=100),
                     );
                     continuous = continuous_widget_edit(&response, "dynamic.max_items");
                 }
@@ -10692,7 +10719,7 @@ fn cell_content_controls(
                     let maximum_response = ui.add(
                         egui::DragValue::new(max_items)
                             .prefix("Maximum ")
-                            .clamp_range(1..=100),
+                            .range(1..=100),
                     );
                     set_first_edit(
                         &mut continuous,
@@ -11667,42 +11694,50 @@ mod tests {
         let context = driver.context;
         let frame_context = driver.frame;
         let mut editor = driver.editor;
-        let frame = |editor: &mut RadialEditorState, time, events, modifiers| {
+        let frame = |editor: &mut RadialEditorState,
+                     time: f64,
+                     events: Vec<egui::Event>,
+                     modifiers: egui::Modifiers| {
             let client_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(520.0, 380.0));
+            let mut events = events;
+            events.push(egui::Event::ModifiersChanged(modifiers));
             let mut input = egui::RawInput {
                 screen_rect: Some(client_rect),
                 time: Some(time),
                 events,
-                modifiers,
                 ..Default::default()
             };
             let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
             viewport.inner_rect = Some(client_rect);
             viewport.native_pixels_per_point = Some(1.0);
-            context.run(input, |ctx| {
+            context.run_ui(input, |ctx| {
                 editor.viewport_ui(ctx, &frame_context, egui::ViewportClass::Deferred);
             })
         };
         let output = frame(&mut editor, 0.0, Vec::new(), egui::Modifiers::default());
         let point = accesskit_value_bounds(&output, egui::accesskit::Role::TextInput, "").center();
-        let _ = frame(
+        output.drop_without_applying_deltas();
+        frame(
             &mut editor,
             0.01,
             vec![egui::Event::PointerMoved(point)],
             egui::Modifiers::default(),
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut editor,
             0.02,
             vec![pointer_button_event(point, true)],
             egui::Modifiers::default(),
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut editor,
             0.03,
             vec![pointer_button_event(point, false)],
             egui::Modifiers::default(),
-        );
+        )
+        .drop_without_applying_deltas();
         let field_id = context
             .memory(|memory| memory.focused())
             .expect("actual TreeSearch has focus");
@@ -11724,16 +11759,18 @@ mod tests {
             );
         };
         scope(&editor, false);
-        let _ = frame(
+        frame(
             &mut editor,
             0.1,
             vec![egui::Event::Text("starter".into())],
             egui::Modifiers::default(),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(editor.tree_filter, "starter");
         scope(&editor, true);
         let replacement_time = if settle_starter {
-            let _ = frame(&mut editor, 1.2, Vec::new(), egui::Modifiers::default());
+            frame(&mut editor, 1.2, Vec::new(), egui::Modifiers::default())
+                .drop_without_applying_deltas();
             assert_eq!(editor.tree_filter, "starter");
             scope(&editor, false);
             1.3
@@ -11745,7 +11782,7 @@ mod tests {
             command: true,
             ..Default::default()
         };
-        let _ = frame(
+        frame(
             &mut editor,
             replacement_time,
             vec![
@@ -11753,16 +11790,18 @@ mod tests {
                 key_event(egui::Key::A, control, false),
             ],
             control,
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut editor,
             replacement_time + 0.05,
             vec![egui::Event::Text("replacement authored label".into())],
             egui::Modifiers::default(),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(editor.tree_filter, "replacement authored label");
         scope(&editor, true);
-        let _ = frame(
+        frame(
             &mut editor,
             replacement_time + 0.1,
             vec![
@@ -11770,7 +11809,8 @@ mod tests {
                 key_event(egui::Key::Z, control, false),
             ],
             control,
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(
             editor.tree_filter,
             if settle_starter { "starter" } else { "" }
@@ -11885,39 +11925,41 @@ mod tests {
         let rendered_header_id = std::cell::Cell::new(None);
         let render_tree = |editor: &mut RadialEditorState| {
             let is_open = std::cell::Cell::new(false);
-            let _ = context.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(720.0, 640.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        let header_id = ui.make_persistent_id(egui::Id::new((
-                            editor.tree_widget_epoch,
-                            menu::widget_key("menu", menu_id.as_str(), "tree"),
-                        )));
-                        let default_open = editor
-                            .preferences
-                            .expanded_sections
-                            .get(&format!("menu:{menu_id}"))
-                            .copied()
-                            .unwrap_or(false);
-                        rendered_header_id.set(Some(header_id));
-                        editor.tree(ui, &defaults, ViewportClass::Deferred);
-                        is_open.set(
-                            egui::collapsing_header::CollapsingState::load_with_default_open(
-                                ctx,
-                                header_id,
-                                default_open,
-                            )
-                            .is_open(),
-                        );
-                    });
-                },
-            );
+            context
+                .run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(720.0, 640.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root_ui| {
+                        egui::CentralPanel::default().show(root_ui, |ui| {
+                            let header_id = ui.make_persistent_id(egui::Id::new((
+                                editor.tree_widget_epoch,
+                                menu::widget_key("menu", menu_id.as_str(), "tree"),
+                            )));
+                            let default_open = editor
+                                .preferences
+                                .expanded_sections
+                                .get(&format!("menu:{menu_id}"))
+                                .copied()
+                                .unwrap_or(false);
+                            rendered_header_id.set(Some(header_id));
+                            editor.tree(ui, &defaults, ViewportClass::Deferred);
+                            is_open.set(
+                                egui::collapsing_header::CollapsingState::load_with_default_open(
+                                    ui.ctx(),
+                                    header_id,
+                                    default_open,
+                                )
+                                .is_open(),
+                            );
+                        });
+                    },
+                )
+                .drop_without_applying_deltas();
             is_open.get()
         };
 
@@ -12032,9 +12074,15 @@ mod tests {
         let cancel =
             accesskit_named_bounds(&guarded, "Cancel change", egui::accesskit::Role::Button)
                 .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(cancel)]);
-        let _ = driver.frame(vec![pointer_button_event(cancel, true)]);
-        let _ = driver.frame(vec![pointer_button_event(cancel, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(cancel)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(cancel, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(cancel, false)])
+            .drop_without_applying_deltas();
 
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
@@ -12054,9 +12102,15 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(discard)]);
-        let _ = driver.frame(vec![pointer_button_event(discard, true)]);
-        let _ = driver.frame(vec![pointer_button_event(discard, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(discard)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(discard, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(discard, false)])
+            .drop_without_applying_deltas();
         assert_eq!(
             driver.editor.session.as_ref().unwrap().selection.as_ref(),
             Some(&destination)
@@ -12088,9 +12142,15 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(apply)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, false)])
+            .drop_without_applying_deltas();
         let session = driver.editor.session.as_ref().unwrap();
         assert_eq!(session.selection.as_ref(), Some(&destination));
         let StableSelection::Cell {
@@ -12133,9 +12193,15 @@ mod tests {
         );
         let popup_apply =
             accesskit_named_bounds(&typed, "Apply", egui::accesskit::Role::Button).center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(popup_apply)]);
-        let _ = driver.frame(vec![pointer_button_event(popup_apply, true)]);
-        let _ = driver.frame(vec![pointer_button_event(popup_apply, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(popup_apply)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(popup_apply, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(popup_apply, false)])
+            .drop_without_applying_deltas();
         assert_eq!(driver.editor.properties_popup.as_ref(), Some(&target));
         assert_eq!(
             driver
@@ -12162,8 +12228,12 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(apply)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, true)])
+            .drop_without_applying_deltas();
         let still_guarded = driver.frame(vec![pointer_button_event(apply, false)]);
         assert!(driver.editor.pending_scope_change.is_some());
         assert_eq!(
@@ -12236,9 +12306,15 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(apply)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, false)])
+            .drop_without_applying_deltas();
         let session = driver.editor.session.as_ref().unwrap();
         assert_ne!(session.selection.as_ref(), Some(&target));
         let StableSelection::Cell {
@@ -12304,8 +12380,12 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(apply)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, true)])
+            .drop_without_applying_deltas();
         let still_guarded = driver.frame(vec![pointer_button_event(apply, false)]);
         assert!(driver.editor.pending_scope_change.is_some());
         assert_eq!(
@@ -12357,9 +12437,15 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(apply)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, false)])
+            .drop_without_applying_deltas();
         let session = driver.editor.session.as_ref().unwrap();
         assert_ne!(session.selection.as_ref(), Some(&target));
         let StableSelection::Cell {
@@ -12416,7 +12502,7 @@ mod tests {
         let pin = test_pinned_binding();
         let search_query = "find help before pinning";
         seed_pinned_properties_draft(&mut driver, &target, pin.clone(), search_query);
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         assert_eq!(
             driver
                 .editor
@@ -12428,7 +12514,7 @@ mod tests {
             search_query
         );
         queue_navigation_to_screenshot_region(&mut driver);
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         assert!(
             driver.editor.pending_scope_change.is_none(),
             "a Pin's retained search text stays outside the dirty guard"
@@ -12476,8 +12562,12 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(apply)]);
-        let _ = driver.frame(vec![pointer_button_event(apply, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(apply)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(apply, true)])
+            .drop_without_applying_deltas();
         let still_guarded = driver.frame(vec![pointer_button_event(apply, false)]);
         assert!(driver.editor.pending_scope_change.is_some());
         assert_eq!(
@@ -12681,7 +12771,9 @@ mod tests {
                 "unsaved action text",
             );
         let mut driver = RetainedDesignerDriver::new(editor);
-        driver.context.style_mut(|style| style.animation_time = 0.0);
+        driver
+            .context
+            .style_mut_of(driver.context.theme(), |style| style.animation_time = 0.0);
         let mut time = 0.0;
         let mut frame = |driver: &mut RetainedDesignerDriver, events| {
             time += 1.0 / 60.0;
@@ -12689,11 +12781,12 @@ mod tests {
         };
 
         let initial = frame(&mut driver, Vec::new());
-        let skins = accesskit_named_bounds(&initial, "Skins", egui::accesskit::Role::ToggleButton);
+        let skins = accesskit_named_bounds(&initial, "Skins", egui::accesskit::Role::Button);
         let point = skins.center();
-        let _ = frame(&mut driver, vec![egui::Event::PointerMoved(point)]);
-        let _ = frame(&mut driver, vec![pointer_button_event(point, true)]);
-        let _ = frame(&mut driver, vec![pointer_button_event(point, false)]);
+        initial.drop_without_applying_deltas();
+        frame(&mut driver, vec![egui::Event::PointerMoved(point)]).drop_without_applying_deltas();
+        frame(&mut driver, vec![pointer_button_event(point, true)]).drop_without_applying_deltas();
+        frame(&mut driver, vec![pointer_button_event(point, false)]).drop_without_applying_deltas();
         assert!(driver.editor.show_resources);
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
         assert_eq!(
@@ -12717,19 +12810,22 @@ mod tests {
             "Advanced edit owner bounds={skin:?}"
         );
         let point = skin.center();
+        settled.drop_without_applying_deltas();
         let hovered = frame(&mut driver, vec![egui::Event::PointerMoved(point)]);
         assert_eq!(
             accesskit_named_bounds(&hovered, "Edit Modern Clean", egui::accesskit::Role::Button),
             skin,
             "retained edit row must stay under the pointer"
         );
+        hovered.drop_without_applying_deltas();
         let pressed = frame(&mut driver, vec![pointer_button_event(point, true)]);
         assert_eq!(
             accesskit_named_bounds(&pressed, "Edit Modern Clean", egui::accesskit::Role::Button),
             skin,
             "retained edit row must stay under the press"
         );
-        let _ = frame(&mut driver, vec![pointer_button_event(point, false)]);
+        pressed.drop_without_applying_deltas();
+        frame(&mut driver, vec![pointer_button_event(point, false)]).drop_without_applying_deltas();
         assert!(
             driver
                 .context
@@ -12747,8 +12843,9 @@ mod tests {
         let cancel =
             accesskit_named_bounds(&guarded, "Cancel change", egui::accesskit::Role::Button)
                 .center();
-        let _ = frame(&mut driver, vec![egui::Event::PointerMoved(cancel)]);
-        let _ = frame(&mut driver, vec![pointer_button_event(cancel, true)]);
+        guarded.drop_without_applying_deltas();
+        frame(&mut driver, vec![egui::Event::PointerMoved(cancel)]).drop_without_applying_deltas();
+        frame(&mut driver, vec![pointer_button_event(cancel, true)]).drop_without_applying_deltas();
         let cancelled = frame(&mut driver, vec![pointer_button_event(cancel, false)]);
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(driver.editor.show_resources);
@@ -12762,15 +12859,15 @@ mod tests {
             Some(&target)
         );
         assert!(
-            accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::ToggleButton)
+            accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::Button)
                 .is_positive()
         );
 
         let menus =
-            accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::ToggleButton)
-                .center();
-        let _ = frame(&mut driver, vec![egui::Event::PointerMoved(menus)]);
-        let _ = frame(&mut driver, vec![pointer_button_event(menus, true)]);
+            accesskit_named_bounds(&cancelled, "Menus", egui::accesskit::Role::Button).center();
+        cancelled.drop_without_applying_deltas();
+        frame(&mut driver, vec![egui::Event::PointerMoved(menus)]).drop_without_applying_deltas();
+        frame(&mut driver, vec![pointer_button_event(menus, true)]).drop_without_applying_deltas();
         let back_in_menus = frame(&mut driver, vec![pointer_button_event(menus, false)]);
         assert!(!driver.editor.show_resources);
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
@@ -12779,6 +12876,7 @@ mod tests {
             accesskit_named_bounds(&back_in_menus, "Apply", egui::accesskit::Role::Button)
                 .is_positive()
         );
+        back_in_menus.drop_without_applying_deltas();
     }
 
     #[test]
@@ -12879,7 +12977,7 @@ mod tests {
 
         let guarded = request_properties(&mut driver);
         let _ = click_retained_button(&mut driver, &guarded, "Discard and continue");
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         let after = driver.editor.acceptance_observation().unwrap();
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(driver.editor.properties_popup, Some(target));
@@ -13119,7 +13217,7 @@ mod tests {
         let query = "preserve query while undo is pending";
         seed_inspector_query(&mut editor, &target, query);
         let mut driver = RetainedDesignerDriver::new(editor);
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         driver
             .editor
             .queue_editor_operation(DeferredEditorOperation::Undo);
@@ -13176,7 +13274,7 @@ mod tests {
         let query = "preserve query while redo is pending";
         seed_inspector_query(&mut editor, &target, query);
         let mut driver = RetainedDesignerDriver::new(editor);
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         driver
             .editor
             .queue_editor_operation(DeferredEditorOperation::Redo);
@@ -13405,7 +13503,7 @@ mod tests {
                 egui::pos2(241.0, -180.0),
                 client_size,
             ));
-            context.run(input, |ctx| {
+            context.run_ui(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let response = ui.text_edit_singleline(&mut value);
                     response_bounds.set(response.rect);
@@ -13478,7 +13576,7 @@ mod tests {
         let client = egui::Rect::from_min_size(egui::Pos2::ZERO, client_size);
         let mut snapshots = Vec::new();
         let ctx = egui::Context::default();
-        ctx.style_mut(|style| style.animation_time = 0.0);
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
         // ScrollArea learns its content overflow on the first rendered frame.
         for (offset, observe) in [(0.0, false), (0.0, true), (120.0, true)] {
             let mut input = egui::RawInput {
@@ -13491,16 +13589,17 @@ mod tests {
                 egui::pos2(241.0, -180.0),
                 client_size,
             ));
-            ctx.begin_frame(input);
-            egui::TopBottomPanel::top("pane-clip-toolbar")
-                .exact_height(64.0)
-                .show(&ctx, |ui| {
-                    ui.label("Designer toolbar");
-                });
-            egui::SidePanel::right("pane-clip-inspector")
-                .exact_width(200.0)
-                .show(&ctx, |ui| {
-                    egui::ScrollArea::vertical()
+            let output =
+                ctx.run_ui(input, |ui| {
+                    egui::Panel::top("pane-clip-toolbar")
+                        .exact_size(64.0)
+                        .show(ui, |ui| {
+                            ui.label("Designer toolbar");
+                        });
+                    egui::Panel::right("pane-clip-inspector")
+                        .exact_size(200.0)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
                         .max_height(150.0)
                         .auto_shrink([false, false])
                         .vertical_scroll_offset(offset)
@@ -13534,8 +13633,9 @@ mod tests {
                             }
                             ui.add_space(400.0);
                         });
+                        });
                 });
-            let _ = ctx.end_frame();
+            output.drop_without_applying_deltas();
         }
         assert_eq!(
             snapshots[0].1, snapshots[1].1,
@@ -13564,18 +13664,18 @@ mod tests {
         let path = editor.visited_path.current().cloned();
         let context = egui::Context::default();
         context.enable_accesskit();
-        context.style_mut(|style| style.animation_time = 0.0);
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
         let client_size = egui::vec2(900.0, 650.0);
         let mut frame = |offset| {
             let mut clip = None;
-            let output = context.run(
+            let output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, client_size)),
                     ..Default::default()
                 },
                 |ctx| {
-                    egui::TopBottomPanel::top("retained-resources-toolbar")
-                        .exact_height(107.0)
+                    egui::Panel::top("retained-resources-toolbar")
+                        .exact_size(107.0)
                         .show(ctx, |ui| {
                             ui.label("Designer toolbar");
                         });
@@ -13583,7 +13683,7 @@ mod tests {
                         // Mount the actual Resources UI under its production
                         // vertical scroll owner; no substitute controls.
                         egui::ScrollArea::vertical()
-                            .id_source("radial-designer-resources")
+                            .id_salt("radial-designer-resources")
                             .max_height(400.0)
                             .vertical_scroll_offset(offset)
                             .show(ui, |ui| {
@@ -13653,7 +13753,7 @@ mod tests {
         let first_name = session.draft.menus[0].name.clone();
         let context = egui::Context::default();
         context.enable_accesskit();
-        context.style_mut(|style| style.animation_time = 0.0);
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
         let mut scroll_id = None;
         let mut frame = |offset: Option<f32>| {
             if let Some(offset) = offset {
@@ -13662,7 +13762,7 @@ mod tests {
                 state.offset.y = offset;
                 state.store(&context, id);
             }
-            let output = context.run(
+            let output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -13734,7 +13834,9 @@ mod tests {
         client_size: egui::Vec2,
         control_bounds: impl Fn(&egui::FullOutput) -> egui::Rect,
     ) {
-        driver.context.style_mut(|style| style.animation_time = 0.0);
+        driver
+            .context
+            .style_mut_of(driver.context.theme(), |style| style.animation_time = 0.0);
         let session = driver.editor.session.as_ref().unwrap();
         let before = (
             session.draft.clone(),
@@ -13766,12 +13868,14 @@ mod tests {
             );
             (output, measured)
         };
-        let _ = frame(&mut driver, Vec::new());
+        let (first_output, _) = frame(&mut driver, Vec::new());
+        first_output.drop_without_applying_deltas();
         let (initial, measured) = frame(&mut driver, Vec::new());
         // viewport_ui establishes the selected menu's navigation before input.
         assert_eq!(driver.editor.visited_path.current(), Some(&expected_menu));
         let path = driver.editor.visited_path.clone();
         let initial_bounds = control_bounds(&initial);
+        initial.drop_without_applying_deltas();
         let margin = egui::pos2(
             initial_bounds.center().x,
             measured.input_bounds[3] as f32 + 1.0,
@@ -13789,7 +13893,12 @@ mod tests {
             let events = if index == 0 {
                 vec![
                     egui::Event::PointerMoved(margin),
-                    egui::Event::Scroll(egui::vec2(0.0, -50.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -50.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
                 ]
             } else {
                 Vec::new()
@@ -13798,11 +13907,12 @@ mod tests {
             assert!(current.frame_nr > last_frame);
             assert_eq!(current.scroll_id, measured.scroll_id);
             assert_eq!(current.input_bounds, measured.input_bounds);
+            let current_bounds = control_bounds(&output);
             assert_eq!(
-                control_bounds(&output),
-                initial_bounds,
+                current_bounds, initial_bounds,
                 "wheel input in the real paint-only margin cannot scroll {owner:?}"
             );
+            output.drop_without_applying_deltas();
             last_frame = current.frame_nr;
         }
         let interior = egui::pos2(
@@ -13814,7 +13924,12 @@ mod tests {
             let events = if index == 0 {
                 vec![
                     egui::Event::PointerMoved(interior),
-                    egui::Event::Scroll(egui::vec2(0.0, -50.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -50.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
                 ]
             } else {
                 Vec::new()
@@ -13824,6 +13939,7 @@ mod tests {
             assert_eq!(current.scroll_id, measured.scroll_id);
             assert_eq!(current.paint_clip_bounds, measured.paint_clip_bounds);
             final_bounds = control_bounds(&output);
+            output.drop_without_applying_deltas();
             last_frame = current.frame_nr;
         }
         assert!(
@@ -13873,7 +13989,7 @@ mod tests {
                     .nodes
                     .iter()
                     .filter(|(_, node)| {
-                        node.role() == egui::accesskit::Role::Button && node.name() == Some("+")
+                        node.role() == egui::accesskit::Role::Button && node.label() == Some("+")
                     })
                     .nth(1)
                     .expect("actual SimpleScale plus button follows the Opacity step buttons")
@@ -13951,62 +14067,68 @@ mod tests {
             context.set_pixels_per_point(if fractional { 1.5 } else { 1.0 });
             let client_size = egui::vec2(520.0, 380.0);
             let mut measured = None;
-            let _ = context.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, client_size)),
-                    viewports: [(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportInfo {
-                            inner_rect: Some(egui::Rect::from_min_size(
-                                egui::pos2(-640.0, 120.0),
-                                client_size,
-                            )),
-                            native_pixels_per_point: Some(if fractional { 1.5 } else { 1.0 }),
-                            ..Default::default()
-                        },
-                    )]
-                    .into_iter()
-                    .collect(),
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        let mut paint_clip = egui::Rect::NOTHING;
-                        let output = egui::ScrollArea::vertical().show(ui, |ui| {
-                            paint_clip = ui.clip_rect();
-                            ui.allocate_exact_size(content_size, egui::Sense::hover());
-                        });
-                        let receipt = designer_scroll_viewport_measurement(
-                            ui,
-                            &output,
-                            paint_clip,
-                            DesignerAuthoringScrollOwner::Resources,
-                            Correlation {
-                                session_id: 7,
-                                generation: 9,
+            context
+                .run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, client_size)),
+                        viewports: [(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportInfo {
+                                inner_rect: Some(egui::Rect::from_min_size(
+                                    egui::pos2(-640.0, 120.0),
+                                    client_size,
+                                )),
+                                native_pixels_per_point: Some(if fractional { 1.5 } else { 1.0 }),
                                 ..Default::default()
                             },
-                        )
-                        .unwrap();
-                        let scale = ui.ctx().pixels_per_point();
-                        assert!(receipt.input_bounds[0] as f32 >= output.inner_rect.left() * scale);
-                        assert!(receipt.input_bounds[1] as f32 >= output.inner_rect.top() * scale);
-                        assert!(
-                            receipt.input_bounds[2] as f32
-                                <= (output.inner_rect.left() + output.content_size.x)
-                                    .min(output.inner_rect.right())
-                                    * scale
-                        );
-                        assert!(
-                            receipt.input_bounds[3] as f32
-                                <= (output.inner_rect.top() + output.content_size.y)
-                                    .min(output.inner_rect.bottom())
-                                    * scale
-                        );
-                        measured = Some(receipt);
-                    });
-                },
-            );
+                        )]
+                        .into_iter()
+                        .collect(),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            let mut paint_clip = egui::Rect::NOTHING;
+                            let output = egui::ScrollArea::vertical().show(ui, |ui| {
+                                paint_clip = ui.clip_rect();
+                                ui.allocate_exact_size(content_size, egui::Sense::hover());
+                            });
+                            let receipt = designer_scroll_viewport_measurement(
+                                ui,
+                                &output,
+                                paint_clip,
+                                DesignerAuthoringScrollOwner::Resources,
+                                Correlation {
+                                    session_id: 7,
+                                    generation: 9,
+                                    ..Default::default()
+                                },
+                            )
+                            .unwrap();
+                            let scale = ui.ctx().pixels_per_point();
+                            assert!(
+                                receipt.input_bounds[0] as f32 >= output.inner_rect.left() * scale
+                            );
+                            assert!(
+                                receipt.input_bounds[1] as f32 >= output.inner_rect.top() * scale
+                            );
+                            assert!(
+                                receipt.input_bounds[2] as f32
+                                    <= (output.inner_rect.left() + output.content_size.x)
+                                        .min(output.inner_rect.right())
+                                        * scale
+                            );
+                            assert!(
+                                receipt.input_bounds[3] as f32
+                                    <= (output.inner_rect.top() + output.content_size.y)
+                                        .min(output.inner_rect.bottom())
+                                        * scale
+                            );
+                            measured = Some(receipt);
+                        });
+                    },
+                )
+                .drop_without_applying_deltas();
             assert!(measured.unwrap().is_valid());
         }
     }
@@ -14026,43 +14148,44 @@ mod tests {
                 .get_mut(&egui::ViewportId::ROOT)
                 .unwrap()
                 .inner_rect = Some(viewport);
-            ctx.begin_frame(input);
             let mut observed = None;
-            egui::SidePanel::left("search-results-test")
-                .exact_width(180.0)
-                .show(&ctx, |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_source("radial-designer-search-results")
-                        .show(ui, |ui| {
-                            if clipped {
-                                ui.set_clip_rect(egui::Rect::from_min_size(
-                                    ui.min_rect().min,
-                                    egui::vec2(ui.available_width(), 16.0),
-                                ));
-                            }
-                            let galley = egui::WidgetText::from(text).into_galley(
-                                ui,
-                                None,
-                                ui.available_width() - 2.0 * ui.spacing().button_padding.x,
-                                egui::TextStyle::Button,
-                            );
-                            assert!(
-                                galley.rows.len() > 1,
-                                "the actual search layout wraps the long result"
-                            );
-                            let galley = if elided {
-                                let mut job = galley.job.as_ref().clone();
-                                job.wrap.max_rows = 1;
-                                ui.fonts(|fonts| fonts.layout_job(job))
-                            } else {
-                                galley
-                            };
-                            let response =
-                                ui.selectable_label(false, std::sync::Arc::clone(&galley));
-                            observed = designer_rendered_text(ui, &response, &galley);
-                        });
-                });
-            let _ = ctx.end_frame();
+            let output = ctx.run_ui(input, |ui| {
+                egui::Panel::left("search-results-test")
+                    .exact_size(180.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("radial-designer-search-results")
+                            .show(ui, |ui| {
+                                if clipped {
+                                    ui.set_clip_rect(egui::Rect::from_min_size(
+                                        ui.min_rect().min,
+                                        egui::vec2(ui.available_width(), 16.0),
+                                    ));
+                                }
+                                let galley = egui::WidgetText::from(text).into_galley(
+                                    ui,
+                                    None,
+                                    ui.available_width() - 2.0 * ui.spacing().button_padding.x,
+                                    egui::TextStyle::Button,
+                                );
+                                assert!(
+                                    galley.rows.len() > 1,
+                                    "the actual search layout wraps the long result"
+                                );
+                                let galley = if elided {
+                                    let mut job = galley.job.as_ref().clone();
+                                    job.wrap.max_rows = 1;
+                                    ui.fonts_mut(|fonts| fonts.layout_job(job))
+                                } else {
+                                    galley
+                                };
+                                let response =
+                                    ui.selectable_label(false, std::sync::Arc::clone(&galley));
+                                observed = designer_rendered_text(ui, &response, &galley);
+                            });
+                    });
+            });
+            output.drop_without_applying_deltas();
             let observation = observed.expect("painted text owner observation");
             assert_eq!(
                 observation.digest,
@@ -14240,20 +14363,22 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = context.run(input, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
-                let binding = crate::radial::model::ActionBinding::LauncherQuery {
-                    query: "fixture query".into(),
-                    mode: crate::radial::model::QueryRunMode::OpenLauncher,
-                };
-                let _ = editor.inspector_action_editor.show(
-                    ui,
-                    scope.clone(),
-                    Some(&binding),
-                    &InvocationContext::empty(0),
-                );
-            });
-        });
+        context
+            .run_ui(input, |context| {
+                egui::CentralPanel::default().show(context, |ui| {
+                    let binding = crate::radial::model::ActionBinding::LauncherQuery {
+                        query: "fixture query".into(),
+                        mode: crate::radial::model::QueryRunMode::OpenLauncher,
+                    };
+                    let _ = editor.inspector_action_editor.show(
+                        ui,
+                        scope.clone(),
+                        Some(&binding),
+                        &InvocationContext::empty(0),
+                    );
+                });
+            })
+            .drop_without_applying_deltas();
         assert!(
             editor
                 .acceptance_observation()
@@ -14527,7 +14652,7 @@ mod tests {
                     ..Default::default()
                 },
             );
-            context.run(input, |ctx| editor.radial_add_to_menu_ui(ctx))
+            context.run_ui(input, |ctx| editor.radial_add_to_menu_ui(ctx))
         }
 
         fn widget_bounds(
@@ -14602,7 +14727,7 @@ mod tests {
         context.enable_accesskit();
         context.set_pixels_per_point(1.0);
         acceptance_trace::reset_radial_insertion_control_test_state();
-        let _initial = frame(&context, &mut editor, Vec::new());
+        frame(&context, &mut editor, Vec::new()).drop_without_applying_deltas();
         let trace_events = acceptance_trace::take_radial_insertion_control_test_events();
         let widget_events = trace_events
             .iter()
@@ -14676,23 +14801,26 @@ mod tests {
             "selector",
             first_cell_digest,
         );
-        let _ = frame(
+        frame(
             &context,
             &mut editor,
             vec![egui::Event::PointerMoved(cell_combo.center())],
-        );
+        )
+        .drop_without_applying_deltas();
         let _ = acceptance_trace::take_radial_insertion_control_test_events();
-        let _ = frame(
+        frame(
             &context,
             &mut editor,
             vec![pointer_button_event(cell_combo.center(), true)],
-        );
+        )
+        .drop_without_applying_deltas();
         let _ = acceptance_trace::take_radial_insertion_control_test_events();
         let _popup = frame(
             &context,
             &mut editor,
             vec![pointer_button_event(cell_combo.center(), false)],
         );
+        _popup.drop_without_applying_deltas();
         let popup_events = acceptance_trace::take_radial_insertion_control_test_events();
         let second_option = widget_bounds(
             &popup_events,
@@ -14700,21 +14828,24 @@ mod tests {
             "option",
             second_cell_digest,
         );
-        let _ = frame(
+        frame(
             &context,
             &mut editor,
             vec![egui::Event::PointerMoved(second_option.center())],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &context,
             &mut editor,
             vec![pointer_button_event(second_option.center(), true)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &context,
             &mut editor,
             vec![pointer_button_event(second_option.center(), false)],
-        );
+        )
+        .drop_without_applying_deltas();
 
         assert_eq!(editor.radial_add_cell, Some(second.id.clone()));
         assert!(!editor.radial_add_replace_confirmed);
@@ -14780,18 +14911,19 @@ mod tests {
             events: Vec<egui::Event>,
             modifiers: egui::Modifiers,
         ) -> egui::FullOutput {
+            let mut events = events;
+            events.push(egui::Event::ModifiersChanged(modifiers));
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
                     egui::vec2(1000.0, 720.0),
                 )),
                 events,
-                modifiers,
                 ..Default::default()
             };
             let frame = &self.frame;
             let editor = &mut self.editor;
-            self.context.run(input, |ctx| {
+            self.context.run_ui(input, |ctx| {
                 editor.viewport_ui(ctx, frame, egui::ViewportClass::Deferred);
             })
         }
@@ -14814,7 +14946,7 @@ mod tests {
             viewport.native_pixels_per_point = Some(1.0);
             let frame = &self.frame;
             let editor = &mut self.editor;
-            self.context.run(input, |ctx| {
+            self.context.run_ui(input, |ctx| {
                 editor.viewport_ui(ctx, frame, egui::ViewportClass::Deferred);
             })
         }
@@ -14834,12 +14966,12 @@ mod tests {
         let names = update
             .nodes
             .iter()
-            .filter_map(|(_, node)| node.name())
+            .filter_map(|(_, node)| node.label())
             .collect::<Vec<_>>();
         let result = update
             .nodes
             .iter()
-            .find(|(_, node)| node.name().is_some_and(|name| name.contains(query)))
+            .find(|(_, node)| node.label().is_some_and(|name| name.contains(query)))
             .map(|(_, node)| node.bounds().expect("search result bounds"))
             .map(|bounds| {
                 egui::Rect::from_min_max(
@@ -14849,8 +14981,12 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("missing {query:?} search result: {names:?}"));
         let point = result.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
-        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(point)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(point, true)])
+            .drop_without_applying_deltas();
         driver.frame(vec![pointer_button_event(point, false)])
     }
 
@@ -14867,7 +15003,7 @@ mod tests {
         let (_, node) = update
             .nodes
             .iter()
-            .find(|(_, node)| node.role() == role && node.name() == Some(name))
+            .find(|(_, node)| node.role() == role && node.label() == Some(name))
             .unwrap_or_else(|| panic!("missing {role:?} named {name:?} in AccessKit tree"));
         let bounds = node.bounds().expect("semantic control bounds");
         egui::Rect::from_min_max(
@@ -14936,7 +15072,7 @@ mod tests {
         let (_, node) = update
             .nodes
             .iter()
-            .find(|(_, node)| node.name() == Some(name))
+            .find(|(_, node)| node.label() == Some(name))
             .unwrap_or_else(|| panic!("missing control named {name:?} in AccessKit tree"));
         let bounds = node.bounds().expect("semantic control bounds");
         egui::Rect::from_min_max(
@@ -14959,7 +15095,7 @@ mod tests {
             .nodes
             .iter()
             .find(|(_, node)| {
-                node.role() == role && node.name().is_some_and(|name| name.contains(fragment))
+                node.role() == role && node.label().is_some_and(|name| name.contains(fragment))
             })
             .unwrap_or_else(|| panic!("missing {role:?} name containing {fragment:?}"));
         let bounds = node.bounds().expect("semantic control bounds");
@@ -14975,8 +15111,12 @@ mod tests {
         name: &str,
     ) -> egui::FullOutput {
         let point = accesskit_named_bounds(output, name, egui::accesskit::Role::Button).center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
-        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(point)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(point, true)])
+            .drop_without_applying_deltas();
         driver.frame(vec![pointer_button_event(point, false)])
     }
 
@@ -14986,8 +15126,12 @@ mod tests {
         name: &str,
     ) -> egui::FullOutput {
         let point = accesskit_any_named_bounds(output, name).center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
-        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(point)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(point, true)])
+            .drop_without_applying_deltas();
         driver.frame(vec![pointer_button_event(point, false)])
     }
 
@@ -15007,23 +15151,35 @@ mod tests {
         point: egui::Pos2,
         replacement: &str,
     ) -> egui::FullOutput {
-        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
-        let _ = driver.frame(vec![pointer_button_event(point, true)]);
-        let _ = driver.frame(vec![pointer_button_event(point, false)]);
-        let _ = driver.frame(vec![key_event(
-            egui::Key::Home,
-            egui::Modifiers::default(),
-            true,
-        )]);
-        let _ = driver.frame(vec![key_event(
-            egui::Key::End,
-            egui::Modifiers {
-                shift: true,
-                ..Default::default()
-            },
-            true,
-        )]);
-        let _ = driver.frame(vec![egui::Event::Text(replacement.into())]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(point)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(point, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(point, false)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![key_event(
+                egui::Key::Home,
+                egui::Modifiers::default(),
+                true,
+            )])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![key_event(
+                egui::Key::End,
+                egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                true,
+            )])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![egui::Event::Text(replacement.into())])
+            .drop_without_applying_deltas();
         driver.frame(Vec::new())
     }
 
@@ -15141,7 +15297,7 @@ mod tests {
             generation
         );
         let _ = click_retained_button(driver, &controls, apply_name);
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         let session = driver.editor.session.as_mut().unwrap();
         assert_eq!(*session.draft, *expected);
         assert_eq!(session.generation.0, generation.0 + 1);
@@ -15173,8 +15329,8 @@ mod tests {
                     .nodes
                     .iter()
                     .any(|(_, node)| {
-                        node.name() == Some("text.bold")
-                            && node.checked() == Some(egui::accesskit::Checked::True)
+                        node.label() == Some("text.bold")
+                            && node.toggled() == Some(egui::accesskit::Toggled::True)
                     })
             );
             assert_eq!(
@@ -15204,14 +15360,16 @@ mod tests {
         let point = accesskit_any_named_bounds(&first, "text.font_size").center();
         let _ = replace_retained_text_at(&mut driver, point, "38.5");
         // Commit the local DragValue text edit before checking retained frames.
-        let _ = driver.frame(vec![key_event(
-            egui::Key::Enter,
-            egui::Modifiers::default(),
-            true,
-        )]);
+        driver
+            .frame(vec![key_event(
+                egui::Key::Enter,
+                egui::Modifiers::default(),
+                true,
+            )])
+            .drop_without_applying_deltas();
         let staged = skin_editor::with_payload(serde_json::json!(38.5));
         for _ in 0..3 {
-            let _ = driver.frame(Vec::new());
+            driver.frame(Vec::new()).drop_without_applying_deltas();
             assert_eq!(driver.editor.bulk_style_staged_value, Some(staged.clone()));
         }
         let mut expected = before.clone();
@@ -15536,7 +15694,7 @@ mod tests {
                 "Tree Search remains in its left pane"
             );
             let inspector_heading =
-                accesskit_named_bounds(&output, "Inspector", egui::accesskit::Role::StaticText);
+                accesskit_named_bounds(&output, "Inspector", egui::accesskit::Role::Label);
             let scroll_origin = egui::pos2(
                 inspector_heading.center().x,
                 inspector_heading.bottom() + 20.0,
@@ -15548,7 +15706,12 @@ mod tests {
                 } else {
                     vec![
                         egui::Event::PointerMoved(scroll_origin),
-                        egui::Event::Scroll(egui::vec2(0.0, -40.0)),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, -40.0),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        },
                     ]
                 };
                 let _ = acceptance_trace::take_action_editor_control_test_events();
@@ -15709,7 +15872,7 @@ mod tests {
         assert!(!driver.editor.action_editor_request_is_current(&identity));
         let prompt = driver.frame(Vec::new());
         let _ = click_retained_button(&mut driver, &prompt, "Keep editing");
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         assert!(driver.editor.open);
         assert!(!driver.editor.close_prompt);
         assert_eq!(
@@ -15760,7 +15923,7 @@ mod tests {
 
         driver.editor.open_test_snapshot();
         driver.editor.session.as_mut().unwrap().select(Some(target));
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         let reopened = driver.editor.acceptance_observation().unwrap();
         assert!(reopened.open);
         assert!(!reopened.properties_dirty && !reopened.draft_dirty);
@@ -15850,7 +16013,7 @@ mod tests {
         let shared = Arc::clone(&app.radial_editor);
         let viewport_id = radial_designer_viewport_id();
         let root_frame = || {
-            ctx.run(egui::RawInput::default(), |root| {
+            ctx.run_ui(egui::RawInput::default(), |root| {
                 RadialEditorState::show_deferred(&shared, root, &app);
             })
         };
@@ -15920,7 +16083,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let drained = ctx.run(child_input, |child| callback(child));
+        let drained = ctx.run_ui(child_input, |child| callback(child));
         {
             let editor = shared.lock().unwrap();
             assert!(!editor.open);
@@ -16023,8 +16186,12 @@ mod tests {
         role: egui::accesskit::Role,
     ) -> egui::FullOutput {
         let point = accesskit_named_bounds_containing(output, fragment, role).center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(point)]);
-        let _ = driver.frame(vec![pointer_button_event(point, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(point)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(point, true)])
+            .drop_without_applying_deltas();
         driver.frame(vec![pointer_button_event(point, false)])
     }
 
@@ -16694,7 +16861,7 @@ mod tests {
                 .expect("Designer exposes its feedback")
                 .nodes
                 .iter()
-                .any(|(_, node)| node.name().is_some_and(
+                .any(|(_, node)| node.label().is_some_and(
                     |name| name.contains("Error: Action assignment failed: RequestPending")
                 ))
         );
@@ -16740,7 +16907,7 @@ mod tests {
     fn headless_accesskit_tree_exposes_style_control_roles_names_and_state() {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let mut scratch = String::new();
                 let inherited_color = skin_editor::with_payload(serde_json::json!({
@@ -16779,13 +16946,13 @@ mod tests {
         assert!(update.nodes.iter().any(|(_, node)| {
             node.role() == egui::accesskit::Role::ColorWell
                 && node
-                    .name()
+                    .label()
                     .is_some_and(|name| name.contains("text.color: rgba(12, 34, 56, 78)"))
         }));
         assert!(update.nodes.iter().any(|(_, node)| {
             node.role() == egui::accesskit::Role::CheckBox
-                && node.name() == Some("text.visible")
-                && node.checked() == Some(egui::accesskit::Checked::False)
+                && node.label() == Some("text.visible")
+                && node.toggled() == Some(egui::accesskit::Toggled::False)
         }));
     }
 
@@ -16835,7 +17002,7 @@ mod tests {
                 .expect("initial AccessKit tree")
                 .nodes
                 .iter()
-                .any(|(_, node)| node.name().is_some_and(
+                .any(|(_, node)| node.label().is_some_and(
                     |name| name.contains("Loading the authoritative radial configuration")
                 ))
         );
@@ -16845,9 +17012,15 @@ mod tests {
             let session = driver.editor.session.as_ref().expect("authoring session");
             (session.draft.menus.len(), session.generation)
         };
-        let _ = driver.frame(vec![egui::Event::PointerMoved(pending_click)]);
-        let _ = driver.frame(vec![pointer_button_event(pending_click, true)]);
-        let _ = driver.frame(vec![pointer_button_event(pending_click, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(pending_click)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(pending_click, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(pending_click, false)])
+            .drop_without_applying_deltas();
         let session = driver.editor.session.as_ref().expect("authoring session");
         assert!(session.is_initial_snapshot_pending());
         assert_eq!(session.draft.menus.len(), pending_menu_count);
@@ -16878,9 +17051,15 @@ mod tests {
         let add_menu = accesskit_named_bounds(&enabled, "New Menu", egui::accesskit::Role::Button);
         let click_at = add_menu.center();
 
-        let _ = driver.frame(vec![egui::Event::PointerMoved(click_at)]);
-        let _ = driver.frame(vec![pointer_button_event(click_at, true)]);
-        let _ = driver.frame(vec![pointer_button_event(click_at, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(click_at)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(click_at, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(click_at, false)])
+            .drop_without_applying_deltas();
         let session = driver.editor.session.as_ref().expect("authoring session");
         assert_eq!(session.draft.menus.len(), menus_before + 1);
         assert!(session.is_dirty());
@@ -16907,22 +17086,32 @@ mod tests {
 
         assert!(!driver.editor.tree_visible);
         let tree_button =
-            accesskit_named_bounds(&after_click, "Tree", egui::accesskit::Role::ToggleButton);
+            accesskit_named_bounds(&after_click, "Tree", egui::accesskit::Role::Button);
         let tree_click = tree_button.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(tree_click)]);
-        let _ = driver.frame(vec![pointer_button_event(tree_click, true)]);
-        let _ = driver.frame(vec![pointer_button_event(tree_click, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(tree_click)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(tree_click, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(tree_click, false)])
+            .drop_without_applying_deltas();
         assert!(driver.editor.tree_visible);
 
         let after_tree_click = driver.frame(Vec::new());
         let inspector_button = accesskit_named_bounds(
             &after_tree_click,
             "Inspector",
-            egui::accesskit::Role::ToggleButton,
+            egui::accesskit::Role::Button,
         );
         let inspector_click = inspector_button.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(inspector_click)]);
-        let _ = driver.frame(vec![pointer_button_event(inspector_click, true)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(inspector_click)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(inspector_click, true)])
+            .drop_without_applying_deltas();
         let inspector_toggled = driver.frame(vec![pointer_button_event(inspector_click, false)]);
         assert!(driver.editor.inspector_visible);
         let menu_name = accesskit_value_bounds(
@@ -16931,31 +17120,41 @@ mod tests {
             "New menu",
         );
         let menu_name_click = menu_name.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(menu_name_click)]);
-        let _ = driver.frame(vec![pointer_button_event(menu_name_click, true)]);
-        let _ = driver.frame(vec![pointer_button_event(menu_name_click, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(menu_name_click)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(menu_name_click, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(menu_name_click, false)])
+            .drop_without_applying_deltas();
 
         let before_tab = driver.context.memory(|memory| memory.focused());
         assert!(
             before_tab.is_some(),
             "clicking the semantic menu-name TextInput gives it egui focus"
         );
-        let _ = driver.frame(vec![key_event(
-            egui::Key::Tab,
-            egui::Modifiers::default(),
-            true,
-        )]);
+        driver
+            .frame(vec![key_event(
+                egui::Key::Tab,
+                egui::Modifiers::default(),
+                true,
+            )])
+            .drop_without_applying_deltas();
         let after_tab_press = driver.context.memory(|memory| memory.focused());
         assert!(
             after_tab_press.is_some(),
             "Tab keeps an eligible control focused"
         );
         assert_ne!(after_tab_press, before_tab, "Tab moves egui keyboard focus");
-        let _ = driver.frame(vec![key_event(
-            egui::Key::Tab,
-            egui::Modifiers::default(),
-            false,
-        )]);
+        driver
+            .frame(vec![key_event(
+                egui::Key::Tab,
+                egui::Modifiers::default(),
+                false,
+            )])
+            .drop_without_applying_deltas();
     }
 
     #[test]
@@ -16978,7 +17177,7 @@ mod tests {
             .insert(format!("menu:{menu_id}"), true);
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        let output = ctx.run(egui::RawInput::default(), |ctx| {
+        let output = ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 editor.tree(
                     ui,
@@ -16992,8 +17191,7 @@ mod tests {
             .accesskit_update
             .expect("AccessKit tree update");
         assert!(update.nodes.iter().any(|(_, node)| {
-            node.role() == egui::accesskit::Role::ToggleButton
-                && node.name() == Some(expected.as_str())
+            node.role() == egui::accesskit::Role::Button && node.label() == Some(expected.as_str())
         }));
     }
 
@@ -17044,7 +17242,7 @@ mod tests {
         editor.inspector_visible = false;
         editor.tree_filter = "selection-match".into();
         let mut driver = RetainedDesignerDriver::new(editor);
-        let _ = driver.frame(Vec::new());
+        driver.frame(Vec::new()).drop_without_applying_deltas();
         let output = driver.frame(Vec::new());
         let update = output.platform_output.accesskit_update.as_ref().unwrap();
         for (label, expected) in labels.into_iter().zip([true, true, false]) {
@@ -17052,8 +17250,8 @@ mod tests {
                 .nodes
                 .iter()
                 .filter(|(_, node)| {
-                    node.role() == egui::accesskit::Role::ToggleButton
-                        && node.name().is_some_and(|name| name.contains(label))
+                    node.role() == egui::accesskit::Role::Button
+                        && node.label().is_some_and(|name| name.contains(label))
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
@@ -17062,11 +17260,11 @@ mod tests {
                 "one semantic filtered result for {label}"
             );
             assert_eq!(
-                matching[0].1.checked(),
+                matching[0].1.toggled(),
                 Some(if expected {
-                    egui::accesskit::Checked::True
+                    egui::accesskit::Toggled::True
                 } else {
-                    egui::accesskit::Checked::False
+                    egui::accesskit::Toggled::False
                 }),
                 "membership for {label}"
             );
@@ -17101,21 +17299,27 @@ mod tests {
 
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        ctx.begin_frame(egui::RawInput::default());
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        ctx.begin_pass(egui::RawInput::default());
+        let mut root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("resource-notice-accesskit-root"),
+            egui::UiBuilder::new().max_rect(ctx.content_rect()),
+        );
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             for notice in &notices {
                 show_resource_notice(ui, notice);
             }
         });
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
         let update = output
             .platform_output
             .accesskit_update
+            .as_ref()
             .expect("AccessKit tree update");
         let names = update
             .nodes
             .iter()
-            .filter_map(|(_, node)| node.name())
+            .filter_map(|(_, node)| node.label())
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| *name == "Info: Exported package"));
         assert!(
@@ -17129,6 +17333,7 @@ mod tests {
                 .any(|name| name.starts_with("Warning: External path"))
         );
         assert!(names.iter().any(|name| *name == "Error: Decode failed"));
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -17168,8 +17373,11 @@ mod tests {
             modifiers,
         };
         let ctx = egui::Context::default();
-        ctx.begin_frame(egui::RawInput {
-            events: vec![key(egui::Modifiers::CTRL)],
+        ctx.begin_pass(egui::RawInput {
+            events: vec![
+                key(egui::Modifiers::CTRL),
+                egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
+            ],
             ..Default::default()
         });
         editor.keyboard_shortcuts(&ctx);
@@ -17187,10 +17395,13 @@ mod tests {
             original
         );
         assert!(!ctx.input(|input| input.key_pressed(egui::Key::Z)));
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
 
-        ctx.begin_frame(egui::RawInput {
-            events: vec![key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT)],
+        ctx.begin_pass(egui::RawInput {
+            events: vec![
+                key(egui::Modifiers::CTRL | egui::Modifiers::SHIFT),
+                egui::Event::ModifiersChanged(egui::Modifiers::CTRL | egui::Modifiers::SHIFT),
+            ],
             ..Default::default()
         });
         editor.keyboard_shortcuts(&ctx);
@@ -17207,7 +17418,7 @@ mod tests {
             editor.session.as_ref().unwrap().draft.menus[0].name,
             "Keyboard edit"
         );
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -17245,45 +17456,68 @@ mod tests {
         let initial = driver.frame(Vec::new());
         let search = accesskit_value_bounds(&initial, egui::accesskit::Role::TextInput, "no-match");
         let click = search.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(click)]);
-        let _ = driver.frame(vec![pointer_button_event(click, true)]);
-        let _ = driver.frame(vec![pointer_button_event(click, false)]);
+        initial.drop_without_applying_deltas();
+        driver
+            .frame(vec![egui::Event::PointerMoved(click)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(click, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(click, false)])
+            .drop_without_applying_deltas();
         let control = egui::Modifiers::CTRL.plus(egui::Modifiers::COMMAND);
-        let _ = driver.frame_with_modifiers(vec![key_event(egui::Key::A, control, true)], control);
-        let _ = driver.frame_with_modifiers(vec![key_event(egui::Key::A, control, false)], control);
-        let _ = driver.frame(vec![egui::Event::Text("starter".into())]);
+        driver
+            .frame_with_modifiers(vec![key_event(egui::Key::A, control, true)], control)
+            .drop_without_applying_deltas();
+        driver
+            .frame_with_modifiers(vec![key_event(egui::Key::A, control, false)], control)
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![egui::Event::Text("starter".into())])
+            .drop_without_applying_deltas();
         assert_eq!(driver.editor.tree_filter, "starter");
 
         // Shift+Left selects the last character inside the focused TextEdit;
         // typing replaces it without changing the authored selection.
-        let _ = driver.frame_with_modifiers(
-            vec![key_event(
-                egui::Key::ArrowLeft,
+        driver
+            .frame_with_modifiers(
+                vec![key_event(
+                    egui::Key::ArrowLeft,
+                    egui::Modifiers::SHIFT,
+                    true,
+                )],
                 egui::Modifiers::SHIFT,
-                true,
-            )],
-            egui::Modifiers::SHIFT,
-        );
-        let _ = driver.frame_with_modifiers(
-            vec![key_event(
-                egui::Key::ArrowLeft,
+            )
+            .drop_without_applying_deltas();
+        driver
+            .frame_with_modifiers(
+                vec![key_event(
+                    egui::Key::ArrowLeft,
+                    egui::Modifiers::SHIFT,
+                    false,
+                )],
                 egui::Modifiers::SHIFT,
-                false,
-            )],
-            egui::Modifiers::SHIFT,
-        );
-        let _ = driver.frame(vec![egui::Event::Text("x".into())]);
+            )
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![egui::Event::Text("x".into())])
+            .drop_without_applying_deltas();
         assert_eq!(driver.editor.tree_filter, "startex");
 
         // Text undo is local to the filter even though the document has an
         // older dirty edit that a Designer-level Ctrl+Z could otherwise undo.
-        let _ = driver.frame_with_modifiers(vec![key_event(egui::Key::Z, control, true)], control);
+        driver
+            .frame_with_modifiers(vec![key_event(egui::Key::Z, control, true)], control)
+            .drop_without_applying_deltas();
         assert_eq!(driver.editor.tree_filter, "no-match");
-        let _ = driver.frame(vec![key_event(
-            egui::Key::Escape,
-            egui::Modifiers::default(),
-            true,
-        )]);
+        driver
+            .frame(vec![key_event(
+                egui::Key::Escape,
+                egui::Modifiers::default(),
+                true,
+            )])
+            .drop_without_applying_deltas();
 
         let session = driver.editor.session.as_ref().expect("authoring session");
         assert!(driver.editor.open, "Escape clears the local filter first");
@@ -17366,9 +17600,15 @@ mod tests {
             egui::accesskit::Role::Button,
         );
         let click = button.center();
-        let _ = driver.frame(vec![egui::Event::PointerMoved(click)]);
-        let _ = driver.frame(vec![pointer_button_event(click, true)]);
-        let _ = driver.frame(vec![pointer_button_event(click, false)]);
+        driver
+            .frame(vec![egui::Event::PointerMoved(click)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(click, true)])
+            .drop_without_applying_deltas();
+        driver
+            .frame(vec![pointer_button_event(click, false)])
+            .drop_without_applying_deltas();
 
         let session = driver.editor.session.as_ref().expect("authoring session");
         assert!(driver.editor.projected_selection.is_none());

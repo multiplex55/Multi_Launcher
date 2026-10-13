@@ -29,11 +29,11 @@ pub(super) struct SearchRow {
 }
 
 impl SearchRow {
-    pub fn selectable(
+    pub fn selectable<'a>(
         &self,
         ui: &eframe::egui::Ui,
         selected: bool,
-    ) -> eframe::egui::SelectableLabel {
+    ) -> eframe::egui::Button<'a> {
         let mut text = eframe::egui::text::LayoutJob::simple(
             self.caption.clone(),
             eframe::egui::TextStyle::Button.resolve(ui.style()),
@@ -42,7 +42,7 @@ impl SearchRow {
         );
         text.wrap.max_rows = 1;
         text.wrap.break_anywhere = true;
-        eframe::egui::SelectableLabel::new(selected, text)
+        eframe::egui::Button::selectable(selected, text)
     }
 
     pub fn hover(&self, ui: &mut eframe::egui::Ui) {

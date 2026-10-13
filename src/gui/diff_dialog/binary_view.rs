@@ -48,7 +48,7 @@ pub fn show(
         model.visible_byte_offset =
             offset / model.bytes_per_row as u64 * model.bytes_per_row as u64;
     }
-    let mut scroll = egui::ScrollArea::vertical().id_source((workspace, view, "binary_scroll"));
+    let mut scroll = egui::ScrollArea::vertical().id_salt((workspace, view, "binary_scroll"));
     if pending.is_some() {
         scroll = scroll.vertical_scroll_offset(
             (model.visible_byte_offset / model.bytes_per_row as u64) as f32 * row_height,

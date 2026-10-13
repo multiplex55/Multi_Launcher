@@ -158,7 +158,7 @@ impl JsonUtilityDialogState {
                 }
                 let editor_size = ui.available_size();
                 egui::ScrollArea::both()
-                    .id_source("json_utility_editor_scroll")
+                    .id_salt("json_utility_editor_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let response = ui.add_sized(

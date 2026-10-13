@@ -95,7 +95,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
                             super::rules_dialog::RulesDialogState::new(&model.rules),
                         )
                     });
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("First").clicked() {
                     model.navigate(NavigationDirection::First);
@@ -148,7 +148,7 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
         ui.horizontal(|ui| {
             ui.label("Find:");
             let changed = ui.text_edit_singleline(&mut model.find_query).changed();
-            egui::ComboBox::from_id_source((view, "find-scope"))
+            egui::ComboBox::from_id_salt((view, "find-scope"))
                 .selected_text(format!("{:?}", model.find_scope))
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut model.find_scope, FindScope::Both, "Both panes");
@@ -368,7 +368,7 @@ fn prepare_row_measurements(
                     width,
                 );
                 job.wrap.max_width = width;
-                ui.fonts(|fonts| fonts.layout_job(job).size().y)
+                ui.ctx().fonts_mut(|fonts| fonts.layout_job(job).size().y)
             };
             measure(DiffSide::Left, left_width).max(measure(DiffSide::Right, right_width))
         })
@@ -382,7 +382,11 @@ fn prepare_row_measurements(
 /// a scroll canvas, but its viewport and paint clip remain exactly `size`.
 fn exact_pane<R>(ui: &mut egui::Ui, size: egui::Vec2, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-    let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::Min));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
     child.set_clip_rect(ui.clip_rect().intersect(rect));
     add(&mut child)
 }
@@ -491,7 +495,7 @@ fn render_pane_contents(
         egui::ScrollArea::both()
     }
     .auto_shrink([false, false])
-    .id_source((workspace, view, side, axis_id))
+    .id_salt((workspace, view, side, axis_id))
     .vertical_scroll_offset(stored_y);
     if !wrapped {
         scroll = scroll.horizontal_scroll_offset(stored_x);
@@ -531,7 +535,7 @@ fn render_pane_contents(
                 (DiffRowKind::Deleted, _) => Color32::from_rgb(80, 35, 35),
                 (DiffRowKind::Modified, _) => Color32::from_rgb(65, 55, 25),
             };
-            let frame = egui::Frame::none().fill(if current { bg.gamma_multiply(1.5) } else { bg });
+            let frame = egui::Frame::NONE.fill(if current { bg.gamma_multiply(1.5) } else { bg });
             frame.show(ui, |ui| {
                 ui.set_min_height(if wrapped {
                     measured_heights
@@ -647,7 +651,11 @@ fn render_pane_contents(
                                 job.wrap.max_width = ui.available_width().max(1.0);
                             }
                             let response = ui
-                                .add(egui::Label::new(job).wrap(wrapped))
+                                .add(egui::Label::new(job).wrap_mode(if wrapped {
+                                    egui::TextWrapMode::Wrap
+                                } else {
+                                    egui::TextWrapMode::Extend
+                                }))
                                 .on_hover_text(format!("{semantic} line"));
                             if model.manual_alignments.iter().any(|a| match side {
                                 DiffSide::Left => a.left_line == n,
@@ -664,11 +672,11 @@ fn render_pane_contents(
                                             DiffSide::Left => (DiffSide::Left, n),
                                             DiffSide::Right => (DiffSide::Right, n),
                                         });
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 } else if ui.button("Align With…").clicked() {
                                     model.pending_alignment = Some((side, n));
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                                 if let Some(anchor) =
                                     model
@@ -682,7 +690,7 @@ fn render_pane_contents(
                                     && ui.button("Remove alignment").clicked()
                                 {
                                     remove_anchor = Some(anchor);
-                                    ui.close_menu();
+                                    ui.close();
                                 }
                             });
                         });
@@ -724,7 +732,7 @@ fn render_pane_contents(
     let directly_interacting = (pane_response.hovered() || pane_response.has_focus())
         && ui.input(|input| {
             input.pointer.any_down()
-                || input.raw_scroll_delta != egui::Vec2::ZERO
+                || input.smooth_scroll_delta != egui::Vec2::ZERO
                 || input.events.iter().any(|event| {
                     matches!(
                         event,
@@ -794,7 +802,7 @@ fn text_details(ui: &mut egui::Ui, model: &mut TextViewModel, height: f32) {
         ui.strong("Text Details");
         ui.add(
             egui::DragValue::new(&mut model.text_details_height)
-                .clamp_range(72.0..=400.0)
+                .range(72.0..=400.0)
                 .suffix(" px"),
         );
     });
@@ -823,7 +831,7 @@ fn text_details(ui: &mut egui::Ui, model: &mut TextViewModel, height: f32) {
                         .show(column, |ui| {
                             ui.add(
                                 egui::Label::new(RichText::new(value(side)).monospace())
-                                    .wrap(false),
+                                    .wrap_mode(egui::TextWrapMode::Extend),
                             );
                         });
                 }
@@ -1015,14 +1023,14 @@ mod tests {
         input.screen_rect = Some(screen);
         let measured = Rc::new(RefCell::new(None));
         let captured = measured.clone();
-        let _ = context.run(input, |ctx| {
+        let _ = context.run_ui(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.allocate_ui(egui::vec2(300.0, 200.0), |ui| {
                     let json = format!(r#"{{"payload":"{}"}}"#, "x".repeat(100_000));
                     let output = egui::ScrollArea::both()
-                        .id_source(("long-line-regression", "left", "xy"))
+                        .id_salt(("long-line-regression", "left", "xy"))
                         .show(ui, |ui| {
-                            ui.add(egui::Label::new(json).wrap(false));
+                            ui.add(egui::Label::new(json).wrap_mode(egui::TextWrapMode::Extend));
                         });
                     *captured.borrow_mut() = Some((output.inner_rect, output.content_size));
                 });

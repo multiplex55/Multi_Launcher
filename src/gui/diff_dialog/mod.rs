@@ -78,7 +78,11 @@ fn allocate_viewport<R>(
     // The parent owns only this fixed allocation. Descendants can grow their
     // scroll extents, but cannot feed a larger minimum back into the Window.
     let response = ui.allocate_rect(viewport.rect, egui::Sense::hover());
-    let mut child = ui.child_ui(viewport.rect, egui::Layout::top_down(egui::Align::Min));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(viewport.rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
     child.set_clip_rect(ui.clip_rect().intersect(viewport.rect));
     let inner = render(&mut child);
     egui::InnerResponse { inner, response }
@@ -456,7 +460,7 @@ impl DiffDialogState {
             return;
         }
         let mut open = self.open;
-        let screen = ctx.input(|i| i.screen_rect());
+        let screen = ctx.input(|i| i.content_rect());
         let (initial_size, initial_position) = crate::diff::model::validated_window_geometry(
             &self.persistence,
             [screen.left(), screen.top(), screen.right(), screen.bottom()],
@@ -545,7 +549,7 @@ impl DiffDialogState {
                                         .clicked()
                                     {
                                         self.swap_sides();
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                     let files = matches!(
                                         self.workspace.current_view.view,
@@ -556,14 +560,14 @@ impl DiffDialogState {
                                         .clicked()
                                     {
                                         self.reload_files();
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                     if ui
                                         .add_enabled(files, egui::Button::new("Recompare"))
                                         .clicked()
                                     {
                                         self.recompare();
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                     let folder = matches!(
                                         self.workspace.current_view.view,
@@ -575,7 +579,7 @@ impl DiffDialogState {
                                         .clicked()
                                     {
                                         self.refresh_folder();
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 });
                             },
@@ -1422,11 +1426,11 @@ fn picker_menu(
     ui.menu_button("Browse ▾", |ui| {
         if ui.button("Select File…").clicked() {
             workspace.assign_selected_path(side, rfd::FileDialog::new().pick_file());
-            ui.close_menu();
+            ui.close();
         }
         if ui.button("Select Folder…").clicked() {
             workspace.assign_selected_path(side, rfd::FileDialog::new().pick_folder());
-            ui.close_menu();
+            ui.close();
         }
     });
 }
@@ -1535,7 +1539,7 @@ mod tests {
             assert!((restored_size[1] - 650.0).abs() <= tolerance);
 
             let mut observation = None;
-            let _ = ctx.run(
+            let _ = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_max(
                         egui::pos2(screen[0], screen[1]),
@@ -2064,7 +2068,7 @@ mod tests {
             requested_size + egui::vec2(200.0, 200.0),
         ));
         for input in [input.clone(), input] {
-            let _ = ctx.run(input, |ctx| {
+            let _ = ctx.run_ui(input, |ctx| {
                 let response = egui::Window::new("Diff production layout regression")
                     .id(egui::Id::new(("diff-production-layout", id)))
                     .collapsible(false)

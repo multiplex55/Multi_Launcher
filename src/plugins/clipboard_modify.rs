@@ -104,16 +104,12 @@ impl Plugin for ClipboardModifyPlugin {
         );
         ui.horizontal(|ui| {
             ui.label("Dialog size");
-            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_width).clamp_range(320.0..=2400.0));
-            ui.add(
-                eframe::egui::DragValue::new(&mut cfg.dialog_height).clamp_range(240.0..=1600.0),
-            );
+            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_width).range(320.0..=2400.0));
+            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_height).range(240.0..=1600.0));
         });
         ui.horizontal(|ui| {
             ui.label("Navigation width");
-            ui.add(
-                eframe::egui::DragValue::new(&mut cfg.navigation_width).clamp_range(80.0..=500.0),
-            );
+            ui.add(eframe::egui::DragValue::new(&mut cfg.navigation_width).range(80.0..=500.0));
         });
         ui.horizontal(|ui| {
             ui.label("Source/preview split");

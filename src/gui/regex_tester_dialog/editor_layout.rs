@@ -28,13 +28,14 @@ mod tests {
         assert!(job.sections.is_empty());
         assert_eq!(job.wrap.max_rows, 0);
         let ctx = egui::Context::default();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            let galley = ctx.fonts(|fonts| fonts.layout_job(job));
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job.clone()));
             assert!(galley.elided);
             assert!(galley.rows.is_empty());
             assert_eq!(galley.num_vertices, 0);
             assert_eq!(galley.job.text, text);
         });
+        output.drop_without_applying_deltas();
         assert!(oversized_job("é🦀", 6).is_none());
     }
 }
@@ -54,5 +55,5 @@ pub(super) fn plain(
             LayoutJob::simple(text.to_owned(), font, ui.visuals().text_color(), width)
         }
     });
-    ui.fonts(|fonts| fonts.layout_job(job))
+    ui.ctx().fonts_mut(|fonts| fonts.layout_job(job))
 }

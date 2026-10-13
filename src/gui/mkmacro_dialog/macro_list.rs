@@ -273,7 +273,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                 ] {
                                     if ui.button(label).clicked() {
                                         command = Some(action);
-                                        ui.close_menu();
+                                        ui.close();
                                     }
                                 }
                             });
@@ -295,7 +295,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                     response.context_menu(|ui| {
                                         if ui.button("Duplicate").clicked() {
                                             command = Some(Command::DuplicateMacro(m.id));
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                         ui.menu_button("Move to Folder", |ui| {
                                             let destinations = d
@@ -316,17 +316,17 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                                 {
                                                     command =
                                                         Some(Command::MoveMacro(m.id, folder_id));
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                             }
                                         });
                                         if ui.button("Delete").clicked() {
                                             command = Some(Command::DeleteMacro(m.id));
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                         // A submenu command closes the parent context menu too.
                                         if command.is_some() {
-                                            ui.close_menu();
+                                            ui.close();
                                         }
                                     });
                                 });
@@ -527,7 +527,7 @@ mod tests {
             })
             .into_iter()
             .collect();
-        let _ = ctx.run(
+        let _ = ctx.run_ui(
             RawInput {
                 events,
                 ..Default::default()

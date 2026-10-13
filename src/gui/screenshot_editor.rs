@@ -212,7 +212,7 @@ pub fn render_markup_layers(base: &RgbaImage, layers: &[MarkupLayer]) -> RgbaIma
                     draw_text(
                         &mut img,
                         font,
-                        *tweak,
+                        tweak.clone(),
                         text.position,
                         &text.text,
                         text.color,
@@ -402,6 +402,8 @@ impl ScreenshotEditor {
                                         kind: ToastKind::Success,
                                         options: ToastOptions::default()
                                             .duration_in_seconds(app.toast_duration as f64),
+
+                                        style: Default::default(),
                                     });
                                 }
                             }
@@ -426,6 +428,8 @@ impl ScreenshotEditor {
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(app.toast_duration as f64),
+
+                                    style: Default::default(),
                                 });
                             }
 
@@ -690,7 +694,12 @@ impl ScreenshotEditor {
                 }
                 if let Some(rect) = self.crop_rect {
                     let draw = Rect::from_min_max(to_screen(rect.min), to_screen(rect.max));
-                    painter.rect_stroke(draw, 0.0, Stroke::new(1.0_f32, Color32::GREEN));
+                    painter.rect_stroke(
+                        draw,
+                        0.0,
+                        Stroke::new(1.0_f32, Color32::GREEN),
+                        egui::StrokeKind::Middle,
+                    );
                 }
                 for layer in self.history.layers() {
                     match layer {
@@ -707,7 +716,12 @@ impl ScreenshotEditor {
                                 to_screen(rect.rect.min),
                                 to_screen(rect.rect.max),
                             );
-                            painter.rect_stroke(draw, 0.0, Stroke::new(rect.thickness, rect.color));
+                            painter.rect_stroke(
+                                draw,
+                                0.0,
+                                Stroke::new(rect.thickness, rect.color),
+                                egui::StrokeKind::Middle,
+                            );
                         }
                         MarkupLayer::Arrow(arrow) => {
                             painter.line_segment(
@@ -765,6 +779,7 @@ impl ScreenshotEditor {
                                 draw,
                                 0.0,
                                 Stroke::new(self.thickness, self.current_color()),
+                                egui::StrokeKind::Middle,
                             );
                         }
                         MarkupTool::Highlight => {

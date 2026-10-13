@@ -257,7 +257,7 @@ impl ClipboardModifyDialogState {
         if !self.open {
             return;
         }
-        let viewport_max_size = clipboard_modify_usable_viewport_size(ctx.available_rect().size());
+        let viewport_max_size = clipboard_modify_usable_viewport_size(ctx.content_rect().size());
         self.persisted_window_size = clamp_clipboard_modify_size(
             self.persisted_window_size,
             clipboard_modify_min_size(),
@@ -306,13 +306,13 @@ impl ClipboardModifyDialogState {
             |ui| {
                 ui.set_max_height(tab_row_height);
                 egui::ScrollArea::horizontal()
-                    .id_source("clipboard_modify_tab_navigation")
+                    .id_salt("clipboard_modify_tab_navigation")
                     .auto_shrink([false, true])
                     .max_height(tab_row_height)
                     .show(ui, |ui| {
                         ui.set_max_height(tab_row_height);
                         ui.horizontal(|ui| {
-                            ui.style_mut().wrap = Some(false);
+                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                             for (section, label) in [
                                 (ClipboardModifyDialogSection::Modify, "Modify"),
                                 (ClipboardModifyDialogSection::Templates, "Templates"),
@@ -352,7 +352,7 @@ impl ClipboardModifyDialogState {
         store: Option<&ClipboardModifierStore>,
     ) {
         egui::ScrollArea::vertical()
-            .id_source(section_scroll_id(self.section))
+            .id_salt(section_scroll_id(self.section))
             .auto_shrink([false, false])
             .max_height(available_height.max(0.0))
             .show(ui, |ui| match self.section {
@@ -1357,7 +1357,7 @@ fn editable_multiline_ten_rows(
     ui.add_sized(
         size,
         egui::TextEdit::multiline(text)
-            .id_source(id)
+            .id_salt(id)
             .desired_rows(CLIPBOARD_MODIFY_MULTILINE_ROWS)
             .desired_width(f32::INFINITY),
     )
@@ -1367,7 +1367,7 @@ fn stage_argument_editor(ui: &mut egui::Ui, id: egui::Id, text: &mut String) -> 
     if text.contains('\n') {
         editable_multiline_ten_rows(ui, id, text)
     } else {
-        ui.add(egui::TextEdit::singleline(text).id_source(id))
+        ui.add(egui::TextEdit::singleline(text).id_salt(id))
     }
 }
 
@@ -1378,21 +1378,29 @@ fn readonly_multiline_preview(ui: &mut egui::Ui, id: egui::Id, text: &str, wrap:
         ui.set_max_size(size);
         if wrap {
             egui::ScrollArea::vertical()
-                .id_source(id.with("vertical_scroll"))
+                .id_salt(id.with("vertical_scroll"))
                 .auto_shrink([false, false])
                 .max_height(size.y)
                 .show(ui, |ui| {
                     ui.set_width(size.x);
-                    ui.add(egui::Label::new(text).selectable(true).wrap(true));
+                    ui.add(
+                        egui::Label::new(text)
+                            .selectable(true)
+                            .wrap_mode(egui::TextWrapMode::Wrap),
+                    );
                 });
         } else {
             egui::ScrollArea::both()
-                .id_source(id.with("both_scroll"))
+                .id_salt(id.with("both_scroll"))
                 .auto_shrink([false, false])
                 .max_height(size.y)
                 .show(ui, |ui| {
-                    ui.style_mut().wrap = Some(false);
-                    ui.add(egui::Label::new(text).selectable(true).wrap(false));
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    ui.add(
+                        egui::Label::new(text)
+                            .selectable(true)
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    );
                 });
         }
     });

@@ -210,7 +210,7 @@ impl PinnedQueryResultsWidget {
                 ui.horizontal(|ui| {
                     ui.label("Limit");
                     let resp = ui
-                        .add(egui::DragValue::new(&mut cfg.limit).clamp_range(1..=30))
+                        .add(egui::DragValue::new(&mut cfg.limit).range(1..=30))
                         .on_hover_text("Maximum number of actions to pin from the query results.");
                     changed |= resp.changed();
                 });

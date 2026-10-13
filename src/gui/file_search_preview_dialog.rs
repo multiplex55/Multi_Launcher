@@ -300,13 +300,17 @@ impl FileSearchPreviewDialogState {
                 }
                 if ui.button("Copy Full Path").clicked() {
                     ui.ctx().output_mut(|output| {
-                        output.copied_text = request.path.display().to_string()
+                        output.commands.push(egui::OutputCommand::CopyText(
+                            request.path.display().to_string(),
+                        ));
                     });
                     self.action_error_message = None;
                 }
                 if ui.button("Copy Matching Line").clicked() {
                     if let Some(line) = self.selected_match.as_ref().map(|m| m.line.clone()) {
-                        ui.ctx().output_mut(|output| output.copied_text = line);
+                        ui.ctx().output_mut(|output| {
+                            output.commands.push(egui::OutputCommand::CopyText(line));
+                        });
                         self.action_error_message = None;
                     } else {
                         self.action_error_message =
@@ -348,17 +352,17 @@ impl FileSearchPreviewDialogState {
         let row_count = preview.lines.len();
 
         egui::ScrollArea::both()
-            .id_source(preview_scroll_id_source(path))
+            .id_salt(preview_scroll_id_source(path))
             .auto_shrink([false, false])
             .show_rows(ui, PREVIEW_ROW_HEIGHT, row_count, |ui, row_range| {
-                ui.style_mut().wrap = Some(false);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for row_index in row_range {
                     let Some(line) = preview.lines.get(row_index) else {
                         continue;
                     };
                     let is_selected = Some(line.line_number) == selected_line;
                     let fill = is_selected.then(|| ui.visuals().selection.bg_fill);
-                    let inner = egui::Frame::none()
+                    let inner = egui::Frame::NONE
                         .fill(fill.unwrap_or(egui::Color32::TRANSPARENT))
                         .show(ui, |ui| {
                             ui.set_min_height(PREVIEW_ROW_HEIGHT);

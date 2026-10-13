@@ -2812,7 +2812,7 @@ fn variable_detail_text(descriptor: &VariableDescriptor) -> String {
 /// The predicate keeps this reusable for consumers accepting multiple types.
 pub(super) fn variable_picker_ui(
     ui: &mut egui::Ui,
-    id_source: impl std::hash::Hash,
+    id_source: impl std::hash::Hash + std::fmt::Debug,
     buffer: &mut String,
     catalog: &VariableCatalog,
     allowed: impl Fn(VariableValueType) -> bool,
@@ -2827,63 +2827,65 @@ pub(super) fn variable_picker_ui(
             .on_hover_text(RUNTIME_SCOPE_TOOLTIP);
         let response = ui.button("Suggestions ▾");
         if response.clicked() {
-            ui.memory_mut(|memory| memory.toggle_popup(popup_id));
+            egui::Popup::toggle_id(ui.ctx(), popup_id);
         }
         anchor = Some(response);
     });
     let anchor = anchor.expect("picker button is always rendered");
     let mut close = false;
     let mut chosen = None;
-    let popup_open = ui.memory(|memory| memory.is_popup_open(popup_id));
+    let popup_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
     if popup_open
-        && egui::popup::popup_below_widget(ui, popup_id, &anchor, |ui| {
-            ui.set_min_width(430.0);
-            if model.suggestions.is_empty() {
-                ui.weak("No compatible variables are available before this step.");
-                return;
-            }
-            let mut highlighted = ui
-                .data(|data| data.get_temp::<usize>(highlighted_id))
-                .unwrap_or(0)
-                .min(model.suggestions.len() - 1);
-            // Do not consume arrows while the editable field owns keyboard focus.
-            if !ui.ctx().wants_keyboard_input() {
-                if ui.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
-                    highlighted = (highlighted + 1).min(model.suggestions.len() - 1);
+        && egui::Popup::new(popup_id, ui.ctx().clone(), &anchor, anchor.layer_id)
+            .open_memory(None)
+            .show(|ui| {
+                ui.set_min_width(430.0);
+                if model.suggestions.is_empty() {
+                    ui.weak("No compatible variables are available before this step.");
+                    return;
                 }
-                if ui.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
-                    highlighted = highlighted.saturating_sub(1);
+                let mut highlighted = ui
+                    .data(|data| data.get_temp::<usize>(highlighted_id))
+                    .unwrap_or(0)
+                    .min(model.suggestions.len() - 1);
+                // Do not consume arrows while the editable field owns keyboard focus.
+                if !ui.ctx().egui_wants_keyboard_input() {
+                    if ui.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
+                        highlighted = (highlighted + 1).min(model.suggestions.len() - 1);
+                    }
+                    if ui.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+                        highlighted = highlighted.saturating_sub(1);
+                    }
                 }
-            }
-            if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
-                close = true;
-            } else if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                chosen = Some(highlighted);
-            }
-            for (index, descriptor) in model.suggestions.iter().enumerate() {
-                let warning = descriptor
-                    .warning_marker()
-                    .map_or(String::new(), |marker| format!("{marker} "));
-                let label = format!(
-                    "{warning}{} · {} · {}",
-                    descriptor.name,
-                    variable_type_label(descriptor.value_type),
-                    descriptor.source.caption()
-                );
-                let response = ui.selectable_label(index == highlighted, label);
-                response
-                    .clone()
-                    .on_hover_text(variable_detail_text(descriptor));
-                if response.hovered() {
-                    highlighted = index;
+                if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                    close = true;
+                } else if ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    chosen = Some(highlighted);
                 }
-                if response.clicked() {
-                    chosen = Some(index);
+                for (index, descriptor) in model.suggestions.iter().enumerate() {
+                    let warning = descriptor
+                        .warning_marker()
+                        .map_or(String::new(), |marker| format!("{marker} "));
+                    let label = format!(
+                        "{warning}{} · {} · {}",
+                        descriptor.name,
+                        variable_type_label(descriptor.value_type),
+                        descriptor.source.caption()
+                    );
+                    let response = ui.selectable_label(index == highlighted, label);
+                    response
+                        .clone()
+                        .on_hover_text(variable_detail_text(descriptor));
+                    if response.hovered() {
+                        highlighted = index;
+                    }
+                    if response.clicked() {
+                        chosen = Some(index);
+                    }
                 }
-            }
-            ui.data_mut(|data| data.insert_temp(highlighted_id, highlighted));
-        })
-        .is_none()
+                ui.data_mut(|data| data.insert_temp(highlighted_id, highlighted));
+            })
+            .is_none()
     {
         close = true;
     }
@@ -2892,7 +2894,7 @@ pub(super) fn variable_picker_ui(
         close = true;
     }
     if close {
-        ui.memory_mut(|memory| memory.close_popup());
+        egui::Popup::close_id(ui.ctx(), popup_id);
     }
 }
 
@@ -3267,12 +3269,12 @@ fn virtual_desktop_number_valid(action: &MkAction) -> bool {
 fn ocr_wait_ui(ui: &mut egui::Ui, wait: &mut MkWaitOptions) {
     ui.horizontal(|ui| {
         ui.label("Timeout (ms)");
-        ui.add(egui::DragValue::new(&mut wait.timeout_ms).clamp_range(0..=86_400_000));
+        ui.add(egui::DragValue::new(&mut wait.timeout_ms).range(0..=86_400_000));
     });
     ui.small("0 = wait forever");
     ui.horizontal(|ui| {
         ui.label("Poll (ms)");
-        ui.add(egui::DragValue::new(&mut wait.poll_interval_ms).clamp_range(100..=86_400_000));
+        ui.add(egui::DragValue::new(&mut wait.poll_interval_ms).range(100..=86_400_000));
     });
 }
 
@@ -3313,12 +3315,12 @@ fn key_picker_ui(
         return;
     }
     egui::CollapsingHeader::new("Key Picker")
-        .id_source("mkmacro_complete_key_picker")
+        .id_salt("mkmacro_complete_key_picker")
         .show(ui, |ui| {
             ui.text_edit_singleline(search);
             let query = search.trim().to_ascii_lowercase();
             egui::ScrollArea::vertical()
-                .id_source("mkmacro_key_inventory")
+                .id_salt("mkmacro_key_inventory")
                 .max_height(180.0)
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -3505,7 +3507,7 @@ fn action_ui(
             }
             ui.label("Description");
             ui.add(egui::TextEdit::multiline(&mut p.description).desired_rows(4));
-            egui::ComboBox::from_id_source(("notify_kind", draft_id, draft_generation))
+            egui::ComboBox::from_id_salt(("notify_kind", draft_id, draft_generation))
                 .selected_text(p.kind.label())
                 .show_ui(ui, |ui| {
                     for (kind, label) in [
@@ -3517,7 +3519,7 @@ fn action_ui(
                         ui.selectable_value(&mut p.kind, kind, label);
                     }
                 });
-            egui::ComboBox::from_id_source(("notify_duration", draft_id, draft_generation))
+            egui::ComboBox::from_id_salt(("notify_duration", draft_id, draft_generation))
                 .selected_text(match p.duration {
                     MkNotificationDuration::Short => "Short",
                     MkNotificationDuration::Long => "Long",
@@ -3539,7 +3541,7 @@ fn action_ui(
         }
         MkAction::PlaySound(p) => {
             ui.heading("Play Sound");
-            egui::ComboBox::from_id_source(("play_sound", draft_id, draft_generation))
+            egui::ComboBox::from_id_salt(("play_sound", draft_id, draft_generation))
                 .selected_text(&p.sound)
                 .show_ui(ui, |ui| {
                     for name in crate::sound::SOUND_NAMES
@@ -3592,7 +3594,7 @@ fn action_ui(
                 }
                 ui.add(
                     egui::DragValue::new(&mut p.duration_ms)
-                        .clamp_range(1..=86_400_000)
+                        .range(1..=86_400_000)
                         .suffix(" ms"),
                 );
             } else {
@@ -3683,29 +3685,21 @@ fn action_ui(
                 });
             ui.horizontal(|ui| {
                 ui.label("Click count");
-                ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(1..=1_000_000));
+                ui.add(egui::DragValue::new(&mut p.clicks).range(1..=1_000_000));
             });
         }
         MkAction::ClickWithinRegion(p) => {
             ui.label("Screen rectangle");
             ui.horizontal(|ui| {
                 ui.label("X");
-                ui.add(
-                    egui::DragValue::new(&mut p.rect.x).clamp_range(CLICK_REGION_COORDINATE_RANGE),
-                );
+                ui.add(egui::DragValue::new(&mut p.rect.x).range(CLICK_REGION_COORDINATE_RANGE));
                 ui.label("Y");
-                ui.add(
-                    egui::DragValue::new(&mut p.rect.y).clamp_range(CLICK_REGION_COORDINATE_RANGE),
-                );
+                ui.add(egui::DragValue::new(&mut p.rect.y).range(CLICK_REGION_COORDINATE_RANGE));
                 ui.label("Width");
-                ui.add(
-                    egui::DragValue::new(&mut p.rect.width)
-                        .clamp_range(CLICK_REGION_DIMENSION_RANGE),
-                );
+                ui.add(egui::DragValue::new(&mut p.rect.width).range(CLICK_REGION_DIMENSION_RANGE));
                 ui.label("Height");
                 ui.add(
-                    egui::DragValue::new(&mut p.rect.height)
-                        .clamp_range(CLICK_REGION_DIMENSION_RANGE),
+                    egui::DragValue::new(&mut p.rect.height).range(CLICK_REGION_DIMENSION_RANGE),
                 );
             });
             ui.horizontal(|ui| {
@@ -3734,13 +3728,12 @@ fn action_ui(
                 });
             ui.horizontal(|ui| {
                 ui.label("Click count");
-                ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(CLICK_REGION_CLICKS_RANGE));
+                ui.add(egui::DragValue::new(&mut p.clicks).range(CLICK_REGION_CLICKS_RANGE));
             });
             ui.horizontal(|ui| {
                 ui.label("Edge padding (px)");
                 ui.add(
-                    egui::DragValue::new(&mut p.edge_padding_px)
-                        .clamp_range(CLICK_REGION_PADDING_RANGE),
+                    egui::DragValue::new(&mut p.edge_padding_px).range(CLICK_REGION_PADDING_RANGE),
                 );
             });
         }
@@ -3793,7 +3786,7 @@ fn action_ui(
                 let before = notches;
                 ui.add(
                     egui::DragValue::new(&mut notches)
-                        .clamp_range(1..=(i32::MAX as u32 / WHEEL as u32))
+                        .range(1..=(i32::MAX as u32 / WHEEL as u32))
                         .prefix("Notches "),
                 );
                 if before != notches || *i32_delta == 0 {
@@ -3817,12 +3810,12 @@ fn action_ui(
             };
             ui.horizontal(|ui| {
                 ui.label(first_label);
-                ui.add(egui::DragValue::new(first_value).clamp_range(range.clone()));
+                ui.add(egui::DragValue::new(first_value).range(range.clone()));
             });
             if payload.mode == MkDelayMode::RandomRange {
                 ui.horizontal(|ui| {
                     ui.label("Maximum (ms)");
-                    ui.add(egui::DragValue::new(&mut payload.maximum_ms).clamp_range(range));
+                    ui.add(egui::DragValue::new(&mut payload.maximum_ms).range(range));
                 });
             }
         }
@@ -3870,15 +3863,12 @@ fn action_ui(
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label("Timeout (ms)");
-                        ui.add(egui::DragValue::new(&mut w.timeout_ms).clamp_range(0..=86_400_000));
+                        ui.add(egui::DragValue::new(&mut w.timeout_ms).range(0..=86_400_000));
                     });
                     ui.small("0 = wait forever");
                     ui.horizontal(|ui| {
                         ui.label("Poll (ms)");
-                        ui.add(
-                            egui::DragValue::new(&mut w.poll_interval_ms)
-                                .clamp_range(1..=86_400_000),
-                        );
+                        ui.add(egui::DragValue::new(&mut w.poll_interval_ms).range(1..=86_400_000));
                     });
                 });
             }
@@ -3923,13 +3913,9 @@ fn action_ui(
             if resizing {
                 ui.horizontal(|ui| {
                     ui.label("Width");
-                    ui.add(
-                        egui::DragValue::new(p.width.as_mut().unwrap()).clamp_range(1..=u32::MAX),
-                    );
+                    ui.add(egui::DragValue::new(p.width.as_mut().unwrap()).range(1..=u32::MAX));
                     ui.label("Height");
-                    ui.add(
-                        egui::DragValue::new(p.height.as_mut().unwrap()).clamp_range(1..=u32::MAX),
-                    );
+                    ui.add(egui::DragValue::new(p.height.as_mut().unwrap()).range(1..=u32::MAX));
                 });
             }
             if !moving && !resizing {
@@ -3952,7 +3938,7 @@ fn action_ui(
             clamp_virtual_desktop_number(desktop);
             ui.horizontal(|ui| {
                 ui.label(VIRTUAL_DESKTOP_NUMBER_LABEL);
-                ui.add(egui::DragValue::new(desktop).clamp_range(1..=u32::MAX));
+                ui.add(egui::DragValue::new(desktop).range(1..=u32::MAX));
             });
             ui.small(VIRTUAL_DESKTOP_NUMBERING_HELP);
             ui.small(VIRTUAL_DESKTOP_EXISTENCE_HELP);
@@ -3998,7 +3984,7 @@ fn action_ui(
         MkAction::RepeatStart { count } => {
             ui.horizontal(|ui| {
                 ui.label("Repeat count");
-                ui.add(egui::DragValue::new(count).clamp_range(1..=1_000_000));
+                ui.add(egui::DragValue::new(count).range(1..=1_000_000));
             });
         }
         MkAction::If(condition) | MkAction::WhileStart { condition } => {
@@ -4051,15 +4037,12 @@ fn action_ui(
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label("Timeout (ms)");
-                    ui.add(egui::DragValue::new(&mut wait.timeout_ms).clamp_range(0..=86_400_000));
+                    ui.add(egui::DragValue::new(&mut wait.timeout_ms).range(0..=86_400_000));
                 });
                 ui.small("0 = wait forever");
                 ui.horizontal(|ui| {
                     ui.label("Poll (ms)");
-                    ui.add(
-                        egui::DragValue::new(&mut wait.poll_interval_ms)
-                            .clamp_range(1..=86_400_000),
-                    );
+                    ui.add(egui::DragValue::new(&mut wait.poll_interval_ms).range(1..=86_400_000));
                 });
             });
         }
@@ -4114,7 +4097,7 @@ fn action_ui(
                 });
             ui.horizontal(|ui| {
                 ui.label("Clicks");
-                ui.add(egui::DragValue::new(&mut p.clicks).clamp_range(1..=1_000_000));
+                ui.add(egui::DragValue::new(&mut p.clicks).range(1..=1_000_000));
                 ui.label("X offset");
                 ui.add(egui::DragValue::new(&mut p.x_offset));
                 ui.label("Y offset");
@@ -4126,9 +4109,7 @@ fn action_ui(
             ui.heading("Wait for Visual Change");
             ui.horizontal(|ui| {
                 ui.label("Change threshold (%)");
-                ui.add(
-                    egui::DragValue::new(&mut p.change_threshold_percent).clamp_range(0.01..=100.0),
-                );
+                ui.add(egui::DragValue::new(&mut p.change_threshold_percent).range(0.01..=100.0));
             });
             ui.small("Changed-pixel percentage: a pixel counts when any RGBA channel exceeds the tolerance.");
             ui.horizontal(|ui| {
@@ -4142,21 +4123,19 @@ fn action_ui(
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.label("Timeout (ms)");
-                    ui.add(egui::DragValue::new(&mut p.timeout_ms).clamp_range(0..=86_400_000));
+                    ui.add(egui::DragValue::new(&mut p.timeout_ms).range(0..=86_400_000));
                 });
                 ui.small("0 = wait forever");
                 ui.horizontal(|ui| {
                     ui.label("Poll (ms)");
-                    ui.add(
-                        egui::DragValue::new(&mut p.poll_interval_ms).clamp_range(1..=86_400_000),
-                    );
+                    ui.add(egui::DragValue::new(&mut p.poll_interval_ms).range(1..=86_400_000));
                 });
             });
             ui.horizontal(|ui| {
                 ui.label("Consecutive changed frames");
                 ui.add(
                     egui::DragValue::new(p.consecutive_changed_frames.get_or_insert(2))
-                        .clamp_range(1..=1000),
+                        .range(1..=1000),
                 );
             });
         }
@@ -4266,9 +4245,7 @@ fn action_ui(
                 ui.label("Timeout (ms)");
                 ui.add(egui::DragValue::new(&mut p.wait.timeout_ms));
                 ui.label("Poll (ms)");
-                ui.add(
-                    egui::DragValue::new(&mut p.wait.poll_interval_ms).clamp_range(1..=86_400_000),
-                );
+                ui.add(egui::DragValue::new(&mut p.wait.poll_interval_ms).range(1..=86_400_000));
             });
             egui::ComboBox::from_label("If missing")
                 .selected_text(match p.not_found_policy {
@@ -4336,7 +4313,7 @@ fn action_ui(
             });
             ui.horizontal(|ui| {
                 ui.label("Tolerance");
-                ui.add(egui::DragValue::new(tolerance).clamp_range(0..=255));
+                ui.add(egui::DragValue::new(tolerance).range(0..=255));
             });
         }
         _ => {
@@ -5632,9 +5609,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             ui.heading("Step settings");
             ui.horizontal(|ui| {
                 ui.label("Repeat");
-                ui.add(egui::DragValue::new(&mut step.repeat).clamp_range(1..=1_000_000));
+                ui.add(egui::DragValue::new(&mut step.repeat).range(1..=1_000_000));
                 ui.label("Delay after (ms)");
-                ui.add(egui::DragValue::new(&mut step.delay_after_ms).clamp_range(0..=86_400_000));
+                ui.add(egui::DragValue::new(&mut step.delay_after_ms).range(0..=86_400_000));
             });
             egui::ComboBox::from_label("On error")
                 .selected_text(match step.on_error {
@@ -6929,7 +6906,7 @@ mod tests {
         ] {
             let ctx = egui::Context::default();
             let mut policy = policy;
-            let output = ctx.run(egui::RawInput::default(), |ctx| {
+            let output = ctx.run_ui(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ocr_not_found_policy_ui(ui, &mut policy);
                 });

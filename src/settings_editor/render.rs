@@ -219,7 +219,7 @@ impl SettingsEditor {
                 ui.label("Hold threshold (ms)");
                 ui.add(
                     egui::DragValue::new(&mut self.radial_hold_threshold_ms)
-                        .clamp_range(
+                        .range(
                             crate::radial::settings::MIN_HOLD_THRESHOLD_MS
                                 ..=crate::radial::settings::MAX_HOLD_THRESHOLD_MS,
                         )
@@ -253,7 +253,7 @@ impl SettingsEditor {
                 ui.label("Tooltip delay (ms)");
                 ui.add(
                     egui::DragValue::new(&mut self.radial_tooltip_delay_ms)
-                        .clamp_range(
+                        .range(
                             crate::radial::settings::MIN_TOOLTIP_DELAY_MS
                                 ..=crate::radial::settings::MAX_TOOLTIP_DELAY_MS,
                         )
@@ -516,7 +516,7 @@ impl SettingsEditor {
             ui.add_enabled_ui(!self.disable_timer_updates, |ui| {
                 ui.add(
                     egui::DragValue::new(&mut self.timer_refresh)
-                        .clamp_range(0.1..=60.0)
+                        .range(0.1..=60.0)
                         .speed(0.1),
                 );
             });
@@ -584,7 +584,7 @@ impl SettingsEditor {
             ui.label("Page jump");
             ui.add(
                 egui::DragValue::new(&mut self.page_jump)
-                    .clamp_range(1..=100)
+                    .range(1..=100)
                     .speed(1),
             );
         });
@@ -597,13 +597,13 @@ impl SettingsEditor {
                 ui.label("Grid rows");
                 ui.add(
                     egui::DragValue::new(&mut self.query_results_layout_rows)
-                        .clamp_range(1..=100)
+                        .range(1..=100)
                         .speed(1),
                 );
                 ui.label("Columns");
                 ui.add(
                     egui::DragValue::new(&mut self.query_results_layout_cols)
-                        .clamp_range(1..=100)
+                        .range(1..=100)
                         .speed(1),
                 );
             });
@@ -888,7 +888,7 @@ impl SettingsEditor {
                     ui.label("Max outline depth");
                     ui.add(
                         egui::DragValue::new(&mut self.note_max_outline_depth)
-                            .clamp_range(1..=6)
+                            .range(1..=6)
                             .speed(1),
                     );
                 });
@@ -909,19 +909,13 @@ impl SettingsEditor {
                 ui.checkbox(&mut self.note_show_details, "Show note details by default");
                 ui.horizontal(|ui| {
                     ui.label("Tag/link preview limit");
-                    ui.add(
-                        egui::DragValue::new(&mut self.note_more_limit).clamp_range(1..=usize::MAX),
-                    );
+                    ui.add(egui::DragValue::new(&mut self.note_more_limit).range(1..=usize::MAX));
                 });
                 ui.horizontal(|ui| {
                     ui.label("Note panel W");
-                    ui.add(
-                        egui::DragValue::new(&mut self.note_panel_w).clamp_range(200.0..=2000.0),
-                    );
+                    ui.add(egui::DragValue::new(&mut self.note_panel_w).range(200.0..=2000.0));
                     ui.label("H");
-                    ui.add(
-                        egui::DragValue::new(&mut self.note_panel_h).clamp_range(150.0..=1600.0),
-                    );
+                    ui.add(egui::DragValue::new(&mut self.note_panel_h).range(150.0..=1600.0));
                 });
                 let mut cfg = self
                     .plugin_settings

@@ -129,7 +129,7 @@ mod tests {
         let mut matcher = original.clone();
 
         let mut outcome = MatcherEditorOutcome::default();
-        let _ = egui::Context::default().run(egui::RawInput::default(), |ctx| {
+        let _ = egui::Context::default().run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 outcome = matcher_ui(ui, &mut matcher);
             });

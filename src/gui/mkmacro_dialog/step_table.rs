@@ -407,10 +407,10 @@ fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
         return false;
     }
     eframe::egui::CollapsingHeader::new(format!("Diagnostics ({})", diagnostics.len()))
-        .id_source("mkmacro_document_diagnostics")
+        .id_salt("mkmacro_document_diagnostics")
         .show(ui, |ui| {
             eframe::egui::ScrollArea::vertical()
-                .id_source("mkmacro_diagnostics_scroll")
+                .id_salt("mkmacro_diagnostics_scroll")
                 .max_height(150.0)
                 .show_rows(
                     ui,
@@ -438,7 +438,7 @@ fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
                             if ui
                                 .add(
                                     eframe::egui::Label::new(RichText::new(text).color(color))
-                                        .truncate(true)
+                                        .truncate()
                                         .sense(eframe::egui::Sense::click()),
                                 )
                                 .on_hover_text(format!(
@@ -659,10 +659,10 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         });
                     });
                     r.col(|ui| {
-                        changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).clamp_range(1..=1_000_000)).changed();
+                        changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).range(1..=1_000_000)).changed();
                     });
                     r.col(|ui| {
-                        changed |= ui.add(eframe::egui::DragValue::new(&mut s.delay_after_ms).clamp_range(0..=86_400_000)).changed();
+                        changed |= ui.add(eframe::egui::DragValue::new(&mut s.delay_after_ms).range(0..=86_400_000)).changed();
                     });
                     r.col(|ui| {
                         if let Some(state) = runtime.as_ref().and_then(|run| {
@@ -762,13 +762,13 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                     let result = editor_operations::finish_drag(d, anchor);
                     report_command(d, result);
                 } else if let Err(reason) = result {
-                    eframe::egui::show_tooltip_at_pointer(
-                        ui.ctx(),
+                    let _ = eframe::egui::Tooltip::always_open(
+                        ui.ctx().clone(),
+                        ui.layer_id(),
                         eframe::egui::Id::new("mkmacro_drop_error"),
-                        |ui| {
-                            ui.label(reason);
-                        },
-                    );
+                        eframe::egui::PopupAnchor::Pointer,
+                    )
+                    .show(|ui| ui.label(reason));
                 }
             } else if ui.input(|i| i.pointer.any_released()) {
                 d.editor_state.drag = None;
@@ -823,10 +823,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         }
         d.navigation.focus_table = false;
     }
-    let wants_keyboard_input = ui.ctx().wants_keyboard_input() && !focus_response.has_focus();
-    let pointer_in_use = ui.ctx().is_using_pointer();
-    let popup_open =
-        ui.ctx().memory(|memory| memory.any_popup_open()) || ui.ctx().is_context_menu_open();
+    let wants_keyboard_input = ui.ctx().egui_wants_keyboard_input() && !focus_response.has_focus();
+    let pointer_in_use = ui.ctx().egui_is_using_pointer();
+    let popup_open = eframe::egui::Popup::is_any_open(ui.ctx());
     let modal_open = table_modal_open(d);
     let table_owns_input = d.action_editor.draft.is_none()
         && !wants_keyboard_input
@@ -898,7 +897,7 @@ fn render_context_menu(
         };
         if response.clicked() {
             *out = Some(command);
-            ui.close_menu();
+            ui.close();
         }
     }
 }

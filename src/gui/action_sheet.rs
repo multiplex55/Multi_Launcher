@@ -279,10 +279,7 @@ pub(crate) fn render(
                         }
                         let response = ui.add_enabled(
                             action.is_available(),
-                            egui::SelectableLabel::new(
-                                state.selected_index == Some(position),
-                                label,
-                            ),
+                            egui::Button::selectable(state.selected_index == Some(position), label),
                         );
                         if response.hovered() && action.is_available() {
                             state.select_filtered_position(position);
@@ -424,13 +421,13 @@ mod tests {
     fn open_shortcut_requires_exact_ctrl_only_and_consumes_its_event() {
         let route = |modifiers| {
             let ctx = egui::Context::default();
-            ctx.begin_frame(egui::RawInput {
+            ctx.begin_pass(egui::RawInput {
                 events: vec![key_press(egui::Key::Enter, modifiers)],
                 ..Default::default()
             });
             let routed = ctx.input_mut(ActionSheetState::consume_open_shortcut);
             let enter_remains = ctx.input(|input| input.key_pressed(egui::Key::Enter));
-            let _ = ctx.end_frame();
+            let _ = ctx.end_pass();
             (routed, enter_remains)
         };
 
@@ -446,13 +443,13 @@ mod tests {
     #[test]
     fn open_sheet_consumes_ctrl_enter_without_executing() {
         let ctx = egui::Context::default();
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             events: vec![key_press(egui::Key::Enter, egui::Modifiers::CTRL)],
             ..Default::default()
         });
         assert_eq!(ctx.input_mut(ActionSheetState::consume_key), None);
         assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
     }
 
     #[test]

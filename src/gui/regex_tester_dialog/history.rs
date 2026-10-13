@@ -148,12 +148,12 @@ impl HistoryState {
     pub fn show(&self, ui: &mut egui::Ui, retryable: bool) -> Option<HistoryAction> {
         let mut action = None;
         egui::ScrollArea::vertical()
-            .id_source("regex_history_scroll")
+            .id_salt("regex_history_scroll")
             .auto_shrink([false, false])
             .max_height(ui.available_height().max(1.0))
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
-                ui.style_mut().wrap = Some(true);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 if let Some(diagnostic) = self.store.diagnostic() {
                     ui.colored_label(ui.visuals().error_fg_color, &diagnostic.message);
                 }

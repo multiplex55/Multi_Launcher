@@ -440,11 +440,7 @@ pub(crate) fn refresh_settings_ui(
     ui.horizontal(|ui| {
         ui.label("Refresh every");
         let resp = ui
-            .add(
-                egui::DragValue::new(seconds)
-                    .clamp_range(1.0..=300.0)
-                    .speed(0.5),
-            )
+            .add(egui::DragValue::new(seconds).range(1.0..=300.0).speed(0.5))
             .on_hover_text(tooltip);
         changed |= resp.changed();
         ui.label("seconds");
@@ -452,7 +448,7 @@ pub(crate) fn refresh_settings_ui(
     ui.horizontal(|ui| {
         ui.label("Refresh mode");
         let selected = refresh_mode.to_string();
-        egui::ComboBox::from_id_source(ui.id().with("refresh_mode"))
+        egui::ComboBox::from_id_salt(ui.id().with("refresh_mode"))
             .selected_text(selected)
             .show_ui(ui, |ui| {
                 changed |= ui
@@ -472,7 +468,7 @@ pub(crate) fn refresh_settings_ui(
             changed |= ui
                 .add(
                     egui::DragValue::new(throttle_secs)
-                        .clamp_range(1.0..=300.0)
+                        .range(1.0..=300.0)
                         .speed(0.5),
                 )
                 .changed();

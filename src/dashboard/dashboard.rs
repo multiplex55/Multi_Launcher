@@ -247,7 +247,11 @@ impl Dashboard {
         let col_width = available_size.x / grid_cols.max(1) as f32;
         let row_height = available_size.y / grid_rows.max(1) as f32;
         let (rect, _) = ui.allocate_exact_size(available_size, egui::Sense::hover());
-        let mut child = ui.child_ui(rect, egui::Layout::top_down(egui::Align::LEFT));
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::LEFT)),
+        );
 
         for slot in &mut self.runtime_slots {
             let normalized = &slot.slot;
@@ -266,19 +270,20 @@ impl Dashboard {
                 ),
             );
             let slot_clip = slot_rect.intersect(child.clip_rect());
-            let response = child.allocate_ui_at_rect(slot_rect, |slot_ui| {
-                slot_ui.set_clip_rect(slot_clip);
-                slot_ui.set_min_size(slot_rect.size());
-                Self::render_slot(
-                    slot,
-                    slot_rect,
-                    slot_clip,
-                    slot_ui,
-                    ctx,
-                    activation,
-                    &mut self.diagnostics,
-                )
-            });
+            let response =
+                child.scope_builder(egui::UiBuilder::new().max_rect(slot_rect), |slot_ui| {
+                    slot_ui.set_clip_rect(slot_clip);
+                    slot_ui.set_min_size(slot_rect.size());
+                    Self::render_slot(
+                        slot,
+                        slot_rect,
+                        slot_clip,
+                        slot_ui,
+                        ctx,
+                        activation,
+                        &mut self.diagnostics,
+                    )
+                });
             clicked = clicked.or(response.inner);
         }
 
@@ -388,7 +393,7 @@ impl Dashboard {
             slot.slot.col,
         ));
         let scroll_area = egui::ScrollArea::both()
-            .id_source(scroll_id)
+            .id_salt(scroll_id)
             .auto_shrink([false; 2])
             .max_height(body_height)
             .scroll_bar_visibility(visibility);
@@ -817,7 +822,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 180.0));
-            ui.allocate_ui_at_rect(rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 dashboard.ui(ui, &ctx, WidgetActivation::Click);
             });
         });
@@ -854,7 +859,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0));
-            ui.allocate_ui_at_rect(rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 dashboard.ui(ui, &ctx, WidgetActivation::Click);
             });
         });
@@ -891,7 +896,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
-            ui.allocate_ui_at_rect(rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 dashboard.ui(ui, &ctx, WidgetActivation::Click);
             });
         });
@@ -933,7 +938,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
-            ui.allocate_ui_at_rect(rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 dashboard.ui(ui, &ctx, WidgetActivation::Click);
             });
         });
@@ -971,7 +976,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(120.0, 80.0));
-            ui.allocate_ui_at_rect(rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 dashboard.ui(ui, &ctx, WidgetActivation::Click);
             });
         });
@@ -1016,7 +1021,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
-            ui.allocate_ui_at_rect(rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 dashboard.ui(ui, &ctx, WidgetActivation::Click);
             });
         });
@@ -1039,7 +1044,7 @@ mod tests {
 
         egui::__run_test_ui(|ui| {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 80.0));
-            ui.allocate_ui_at_rect(rect, |ui| {
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
                 dashboard.ui(ui, &ctx, WidgetActivation::Click);
             });
         });

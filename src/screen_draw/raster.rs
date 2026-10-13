@@ -189,7 +189,7 @@ fn render_kind(
                 software::draw_text(
                     output,
                     font,
-                    *tweak,
+                    tweak.clone(),
                     Point::new(
                         text.bounds.x as f32 - origin.x as f32,
                         text.bounds.y as f32 - origin.y as f32,

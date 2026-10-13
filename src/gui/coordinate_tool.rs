@@ -411,6 +411,8 @@ impl LauncherApp {
                             kind: crate::gui::ToastKind::Success,
                             options: crate::gui::ToastOptions::default()
                                 .duration_in_seconds(self.toast_duration as f64),
+
+                            style: Default::default(),
                         });
                     }
                 }
@@ -421,6 +423,8 @@ impl LauncherApp {
                             kind: crate::gui::ToastKind::Info,
                             options: crate::gui::ToastOptions::default()
                                 .duration_in_seconds(self.toast_duration as f64),
+
+                            style: Default::default(),
                         });
                     }
                 }

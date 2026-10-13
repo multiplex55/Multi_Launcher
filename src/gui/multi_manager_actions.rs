@@ -990,6 +990,8 @@ impl LauncherApp {
                 text: msg.into().into(),
                 kind: ToastKind::Success,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+
+                style: Default::default(),
             });
         }
     }
@@ -1000,6 +1002,8 @@ impl LauncherApp {
                 text: msg.into().into(),
                 kind: ToastKind::Warning,
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
+
+                style: Default::default(),
             });
         }
     }

@@ -156,7 +156,7 @@ impl ConvertPanel {
 
                 ui.label("Type");
                 let mut selected_category = self.category;
-                egui::ComboBox::from_id_source("convert_category")
+                egui::ComboBox::from_id_salt("convert_category")
                     .selected_text(self.category.label())
                     .show_ui(ui, |ui| {
                         for category in category_options() {

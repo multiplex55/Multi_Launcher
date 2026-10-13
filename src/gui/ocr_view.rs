@@ -128,7 +128,7 @@ impl OcrView {
                         }
                         let editor_size = ui.available_size();
                         egui::ScrollArea::both()
-                            .id_source(("screen_ocr_scroll", generation))
+                            .id_salt(("screen_ocr_scroll", generation))
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
                                 let response = ui.add_sized(
@@ -193,7 +193,7 @@ mod tests {
         let generation = generation();
         let mut output = String::new();
         for _ in 0..2 {
-            let frame = ctx.run(
+            let frame = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -269,14 +269,14 @@ mod tests {
         let mut view = OcrView::default();
         let mut state = OcrPresentation::Result("first\nsecond".into());
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_input")));
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             view.show(ctx, generation, &mut state);
         });
         assert!(
             !view.editor_focused,
             "focus stays pending during hidden sizing"
         );
-        let _ = ctx.run(
+        let _ = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -300,7 +300,7 @@ mod tests {
         );
         let other = egui::Id::new("other_control");
         ctx.memory_mut(|memory| memory.request_focus(other));
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             view.show(ctx, generation, &mut state);
         });
         assert!(!ctx.memory(|memory| memory.has_focus(editor_id(generation))));

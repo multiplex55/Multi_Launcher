@@ -224,7 +224,7 @@ fn trace_action_editor_scroll(
         crate::radial::acceptance_trace::ActionEditorScrollObservation {
             query_digest: crate::radial::acceptance_trace::private_trace_text_digest(query),
             scroll_id: output.id.with(1).value(),
-            frame_nr: ui.ctx().frame_nr(),
+            frame_nr: ui.ctx().cumulative_frame_nr(),
             offset_y_milli,
             velocity_y_milli,
             content_height_milli,
@@ -1398,7 +1398,7 @@ impl ActionBindingEditorState {
                                 let response = ui
                                     .add(
                                         egui::Button::new(&display_label)
-                                            .wrap(true)
+                                            .wrap_mode(egui::TextWrapMode::Wrap)
                                             .selected(selected),
                                     )
                                     .on_hover_text(
@@ -1523,7 +1523,7 @@ impl ActionBindingEditorState {
         }
 
         egui::CollapsingHeader::new("Contextual window actions")
-            .id_source(("contextual-action-browse", self.scope.as_ref()))
+            .id_salt(("contextual-action-browse", self.scope.as_ref()))
             .show(ui, |ui| {
                 if self.contextual_cache.as_ref().is_none_or(|(cached, _)| cached != invocation) {
                     let rows = crate::gui::universal_action_catalog::UniversalActionAuthoringCatalog::contextual_window_rows(invocation);
@@ -1536,7 +1536,7 @@ impl ActionBindingEditorState {
                     ui.vertical(|ui| {
                         let response = ui.add(
                             egui::Button::new(&display_label)
-                                .wrap(true)
+                                .wrap_mode(egui::TextWrapMode::Wrap)
                                 .selected(self.selected_binding.as_ref() == row.binding.as_ref()),
                         );
                         if response.clicked() {
@@ -2573,12 +2573,17 @@ mod tests {
             .get_mut(&egui::ViewportId::ROOT)
             .expect("root viewport is present in RawInput")
             .inner_rect = Some(egui::Rect::from_min_size(monitor_origin, client_size));
-        context.run(input, |context| {
+        context.run_ui(input, |context| {
             egui::CentralPanel::default().show(context, |ui| {
                 if let Some(clip_rect) = clip_rect {
                     ui.set_clip_rect(clip_rect);
                 }
-                let _ = state.show(ui, scope, Some(binding), &InvocationContext::empty(0));
+                let _ = state.show(
+                    ui,
+                    scope.clone(),
+                    Some(binding),
+                    &InvocationContext::empty(0),
+                );
             });
         })
     }
@@ -2600,11 +2605,16 @@ mod tests {
             .get_mut(&egui::ViewportId::ROOT)
             .expect("root viewport is present in RawInput")
             .inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, client_size));
-        context.run(input, |context| {
+        context.run_ui(input, |context| {
             egui::CentralPanel::default().show(context, |ui| {
                 let height = ui.available_height();
                 ui.allocate_ui(egui::vec2(panel_width, height), |ui| {
-                    let _ = state.show(ui, scope, Some(binding), &InvocationContext::empty(0));
+                    let _ = state.show(
+                        ui,
+                        scope.clone(),
+                        Some(binding),
+                        &InvocationContext::empty(0),
+                    );
                 });
             });
         })
@@ -2748,17 +2758,18 @@ mod tests {
         let mut outer_inner_height = 0.0;
         let mut outer_bar_rects = None;
         let mut intents = Vec::new();
-        let output = context.run(input, |context| {
-            egui::CentralPanel::default().show(context, |ui| {
+        let output = context.run_ui(input, |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 let panel_rect = ui.max_rect();
                 let inspector_width = 314.0_f32.min(client_size.x * 0.45);
                 let inspector_rect = egui::Rect::from_min_size(
                     egui::pos2(client_size.x - inspector_width, panel_rect.top() + 8.0),
                     egui::vec2(inspector_width, 560.0),
                 );
-                ui.allocate_ui_at_rect(inspector_rect, |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(inspector_rect), |ui| {
                     let outer = egui::ScrollArea::vertical()
-                        .id_source("radial-designer-inspector")
+                        .id_salt("radial-designer-inspector")
                         .max_height(560.0)
                         .auto_shrink([false; 2])
                         .show(ui, |ui| {
@@ -2771,7 +2782,7 @@ mod tests {
                             }
                             intents.extend(state.show(
                                 ui,
-                                scope,
+                                scope.clone(),
                                 Some(binding),
                                 &InvocationContext::empty(0),
                             ));
@@ -2782,7 +2793,7 @@ mod tests {
                     outer_offset_y = outer.state.offset.y;
                     outer_content_height = outer.content_size.y;
                     outer_inner_height = outer.inner_rect.height();
-                    outer_bar_rects = context
+                    outer_bar_rects = frame_context
                         .read_response(outer.id.with(1))
                         .map(|response| (response.rect, response.interact_rect));
                 });
@@ -2943,11 +2954,11 @@ mod tests {
             .expect("root viewport is present in RawInput")
             .inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
         let mut intents = Vec::new();
-        let output = context.run(input, |context| {
+        let output = context.run_ui(input, |context| {
             egui::CentralPanel::default().show(context, |ui| {
                 intents = state.show_with_action_catalog(
                     ui,
-                    editor_scope,
+                    editor_scope.clone(),
                     Some(binding),
                     &InvocationContext::empty(0),
                     Some(action_catalog),
@@ -3011,9 +3022,9 @@ mod tests {
             .expect("root viewport is present in RawInput")
             .inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
         let mut intents = Vec::new();
-        let output = context.run(input, |context| {
+        let output = context.run_ui(input, |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                state.assigned_binding_ui(ui, binding, presentation, &mut intents);
+                state.assigned_binding_ui(ui, binding, presentation.clone(), &mut intents);
             });
         });
         (output, intents)
@@ -3206,7 +3217,7 @@ mod tests {
                         .iter()
                         .find(|(_, node)| {
                             node.role() == egui::accesskit::Role::Button
-                                && node.name() == Some(name)
+                                && node.label() == Some(name)
                         })
                         .unwrap();
                     assert!(!d08_response_enabled(
@@ -3240,7 +3251,7 @@ mod tests {
                     .iter()
                     .find(|(_, node)| {
                         node.role() == egui::accesskit::Role::Button
-                            && node.name() == Some("Save query")
+                            && node.label() == Some("Save query")
                     })
                     .unwrap();
                 assert!(d08_response_enabled(
@@ -3800,7 +3811,7 @@ mod tests {
         editor: &mut RadialEditorState,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        context.run(
+        context.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -3823,7 +3834,7 @@ mod tests {
             .nodes
             .iter()
             .find(|(_, node)| {
-                node.role() == egui::accesskit::Role::Button && node.name() == Some(name)
+                node.role() == egui::accesskit::Role::Button && node.label() == Some(name)
             })
             .unwrap_or_else(|| panic!("missing close prompt button {name:?}"));
         let bounds = node.bounds().expect("button bounds");
@@ -4726,7 +4737,12 @@ mod tests {
                     &empty_action_catalog,
                     vec![
                         egui::Event::PointerMoved(scroll_origin),
-                        egui::Event::Scroll(egui::vec2(0.0, direction * 700.0)),
+                        egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta: egui::vec2(0.0, direction * 700.0),
+                            phase: egui::TouchPhase::Move,
+                            modifiers: egui::Modifiers::NONE,
+                        },
                     ],
                 );
                 assert!(intents.is_empty());

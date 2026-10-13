@@ -22,15 +22,15 @@ impl ExamplesState {
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<&'static RegexExample> {
         let mut load = None;
         egui::ScrollArea::vertical()
-            .id_source("regex_examples_scroll")
+            .id_salt("regex_examples_scroll")
             .auto_shrink([false, false])
             .max_height(ui.available_height().max(1.0))
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
-                ui.style_mut().wrap = Some(true);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.query)
-                        .id_source("regex_examples_search")
+                        .id_salt("regex_examples_search")
                         .hint_text("Search examples")
                         .desired_width(ui.available_width()),
                 );

@@ -405,6 +405,8 @@ impl LauncherApp {
                         kind: ToastKind::Info,
                         options: ToastOptions::default()
                             .duration_in_seconds(self.toast_duration as f64),
+
+                        style: Default::default(),
                     });
                 }
                 WatchEvent::RadialMigrationState {
@@ -582,6 +584,8 @@ impl LauncherApp {
                                     kind: ToastKind::Warning,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(self.toast_duration as f64),
+
+                                    style: Default::default(),
                                 },
                             );
                         }
@@ -597,6 +601,8 @@ impl LauncherApp {
                                     kind: ToastKind::Success,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(self.toast_duration as f64),
+
+                                    style: Default::default(),
                                 },
                             );
                         }
@@ -4686,14 +4692,14 @@ mod tests {
         // measured interval. The finite recipe deliberately keeps its original
         // queued envelopes for the measured first root frame.
         let setup_root_frames = if recipe == TrackC3CRecipe::Finite {
-            let setup_output = context.run(egui::RawInput::default(), |_| {});
+            let setup_output = context.run_ui(egui::RawInput::default(), |_| {});
             drop(setup_output);
             0
         } else {
-            let setup_output = context.run(track_c3c_raw_input(), |ctx| {
-                app.render_root_frame(ctx, None);
-            });
-            drop(setup_output);
+            let setup_output = app
+                .run_root_frame_for_test(&context, track_c3c_raw_input(), false)
+                .0;
+            setup_output.drop_without_applying_deltas();
             assert_eq!(app.rx.queued_depth(), Some(0));
             assert!(app.last_results_valid);
             assert!(!app.last_search_pending);
@@ -4888,10 +4894,10 @@ mod tests {
         observer.set_frame(frame as u64);
         let app = prepared.state.app_mut();
         let context = app.egui_ctx.clone();
-        let output = context.run(track_c3c_raw_input(), |ctx| {
-            app.render_root_frame(ctx, None);
-        });
-        drop(output);
+        let output = app
+            .run_root_frame_for_test(&context, track_c3c_raw_input(), false)
+            .0;
+        output.drop_without_applying_deltas();
         let elapsed_ns = track_c3c_elapsed_ns(frame_started);
         let owner_complete_ns = track_c3c_elapsed_ns(owner_started);
         let queue_depth_after = prepared.state.app().rx.queued_depth().unwrap_or(usize::MAX);
@@ -6512,21 +6518,21 @@ mod tests {
             crate::screen_draw::ScreenDrawState::AwaitingLauncherParking { .. }
         ));
 
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
         app.process_watch_events();
         app.show_screen_draw_toolbar(&ctx);
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
         assert_eq!(
             app.screen_draw_controller.state().generation(),
             Some(generation)
         );
         assert!(!app.screen_draw_controller.toolbar_open());
 
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
         app.process_watch_events();
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
         assert!(!app.screen_draw_toolbar.was_open);
         assert_eq!(app.screen_draw_toolbar.focus_request_count, 0);
     }

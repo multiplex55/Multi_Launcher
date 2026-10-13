@@ -96,7 +96,7 @@ fn show_field_definition_row(
         .add_sized(
             [130.0, ui.spacing().interact_size.y],
             egui::TextEdit::singleline(&mut field.label)
-                .id_source(("snippet_prompt_field_label", session, key))
+                .id_salt(("snippet_prompt_field_label", session, key))
                 .hint_text(key),
         )
         .changed();
@@ -104,7 +104,7 @@ fn show_field_definition_row(
         .add_sized(
             [170.0, 46.0],
             egui::TextEdit::multiline(&mut field.default_value)
-                .id_source(("snippet_prompt_field_default", session, key))
+                .id_salt(("snippet_prompt_field_default", session, key))
                 .desired_rows(2)
                 .hint_text("Default value"),
         )
@@ -114,7 +114,7 @@ fn show_field_definition_row(
         SnippetInputKind::SingleLine => "Single line",
         SnippetInputKind::Multiline => "Multiline",
     };
-    egui::ComboBox::from_id_source(("snippet_prompt_field_kind", session, key))
+    egui::ComboBox::from_id_salt(("snippet_prompt_field_kind", session, key))
         .selected_text(input_kind)
         .show_ui(ui, |ui| {
             changed |= ui
@@ -685,6 +685,8 @@ impl SnippetDialog {
                     text: message.into(),
                     kind: ToastKind::Success,
                     options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+
+                    style: Default::default(),
                 },
             );
         }
@@ -749,7 +751,7 @@ impl SnippetDialog {
                 // Resize follows content in egui. Bound both axes here so overflow
                 // scrolls inside the user's chosen size instead of enlarging it.
                 egui::ScrollArea::both()
-                    .id_source("snippet_dialog_contents")
+                    .id_salt("snippet_dialog_contents")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                 // Only controls set the minimum scrollable width, never the body.
@@ -807,19 +809,19 @@ impl SnippetDialog {
                         + ui.spacing().item_spacing.y;
                     let editor_height = (ui.available_height() - action_height).max(120.0);
                     let font_id = egui::TextStyle::Body.resolve(ui.style());
-                    let line_height = ui.fonts(|fonts| fonts.row_height(&font_id));
+                    let line_height = ui.ctx().fonts_mut(|fonts| fonts.row_height(&font_id));
                     let desired_rows =
                         (editor_height / line_height).floor().clamp(4.0, 48.0) as usize;
                     let mut body_changed = false;
                     if self.body_revealed {
                         egui::ScrollArea::both()
-                            .id_source("snippet_dialog_body")
+                            .id_salt("snippet_dialog_body")
                             .auto_shrink([false, false])
                             .max_height(editor_height)
                             .show(ui, |ui| {
                                 let response = ui.add(
                                     egui::TextEdit::multiline(&mut self.text)
-                                        .id_source(body_editor_id_source(
+                                        .id_salt(body_editor_id_source(
                                             self.body_edit_session,
                                         ))
                                         .desired_width(f32::INFINITY)
@@ -925,7 +927,7 @@ impl SnippetDialog {
                             * 2.0;
                         let list_height = (ui.available_height() - footer_height).max(100.0);
                         egui::ScrollArea::both()
-                            .id_source("snippet_dialog_list")
+                            .id_salt("snippet_dialog_list")
                             .auto_shrink([false, false])
                             .max_height(list_height)
                             .show(ui, |ui| {
@@ -967,7 +969,7 @@ impl SnippetDialog {
                                         layout_job.wrap.max_width = preview_width;
                                         layout_job.wrap.max_rows = 1;
                                         layout_job.wrap.break_anywhere = true;
-                                        let galley = ui.fonts(|fonts| fonts.layout_job(layout_job));
+                            let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(layout_job));
                                         let text_position = egui::pos2(
                                             preview_rect.left(),
                                             preview_rect.center().y - galley.size().y / 2.0,
@@ -1105,7 +1107,7 @@ mod tests {
         dialog: &mut SnippetDialog,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
-        ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1362,7 +1364,7 @@ mod tests {
     #[test]
     fn snippet_dialog_size_is_independent_of_contents_and_filter() {
         let ctx = egui::Context::default();
-        ctx.style_mut(|style| style.animation_time = 0.0);
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
         let mut dialog = SnippetDialog {
             open: true,
             entries: vec![snippet("short", "body")],
@@ -1419,7 +1421,7 @@ mod tests {
     #[test]
     fn snippet_dialog_user_resize_and_scrolling_preserve_window_bounds() {
         let ctx = egui::Context::default();
-        ctx.style_mut(|style| style.animation_time = 0.0);
+        ctx.style_mut_of(ctx.theme(), |style| style.animation_time = 0.0);
         let mut dialog = SnippetDialog {
             open: true,
             entries: (0..80)
@@ -1490,7 +1492,12 @@ mod tests {
             &mut dialog,
             vec![
                 egui::Event::PointerMoved(filter),
-                egui::Event::Scroll(egui::vec2(-100.0, 0.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(-100.0, 0.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
             ],
         );
         let after = dialog_frame(&ctx, &mut dialog, Vec::new());
@@ -1522,7 +1529,12 @@ mod tests {
             &mut dialog,
             vec![
                 egui::Event::PointerMoved(resized.center()),
-                egui::Event::Scroll(egui::vec2(0.0, -100.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -100.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
             ],
         );
         let after = dialog_frame(&ctx, &mut dialog, Vec::new());
@@ -1645,7 +1657,7 @@ mod tests {
             ctx: &egui::Context,
             dialog: &mut SnippetDialog,
         ) -> egui::FullOutput {
-            ctx.run(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -1783,11 +1795,11 @@ mod tests {
                 .get_mut(&egui::ViewportId::ROOT)
                 .expect("root viewport is present in RawInput")
                 .inner_rect = input.screen_rect;
-            context.run(input, |ctx| {
+            context.run_ui(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let response = ui.add(
                         egui::TextEdit::multiline(text)
-                            .id_source(body_editor_id_source(session))
+                            .id_salt(body_editor_id_source(session))
                             .desired_width(300.0)
                             .desired_rows(4),
                     );

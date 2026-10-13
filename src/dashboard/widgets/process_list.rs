@@ -70,7 +70,7 @@ impl ProcessesWidget {
             ui.horizontal(|ui| {
                 ui.label("Show up to");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.limit).clamp_range(1..=25))
+                    .add(egui::DragValue::new(&mut cfg.limit).range(1..=25))
                     .changed();
                 ui.label("processes");
             });
@@ -159,14 +159,17 @@ impl Widget for ProcessesWidget {
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
         let scroll_id = ui.id().with("process_list_scroll");
         egui::ScrollArea::both()
-            .id_source(scroll_id)
+            .id_salt(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, grouped.len(), |ui, range| {
                 for (desc, switch, kill) in &grouped[range] {
                     ui.horizontal(|ui| {
                         if let Some(action) = switch
                             && ui
-                                .add(egui::Button::new(&action.label).wrap(false))
+                                .add(
+                                    egui::Button::new(&action.label)
+                                        .wrap_mode(egui::TextWrapMode::Extend),
+                                )
                                 .clicked()
                         {
                             clicked = Some(action.clone());
@@ -176,7 +179,10 @@ impl Widget for ProcessesWidget {
                         {
                             clicked = Some(action.clone());
                         }
-                        ui.add(egui::Label::new(egui::RichText::new(desc).small()).wrap(false));
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(desc).small())
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
                     });
                 }
             });

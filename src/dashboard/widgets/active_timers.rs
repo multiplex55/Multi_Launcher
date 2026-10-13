@@ -49,7 +49,7 @@ impl ActiveTimersWidget {
             ui.horizontal(|ui| {
                 ui.label("Show up to");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=20))
+                    .add(egui::DragValue::new(&mut cfg.count).range(1..=20))
                     .changed();
                 ui.label("timers");
             });

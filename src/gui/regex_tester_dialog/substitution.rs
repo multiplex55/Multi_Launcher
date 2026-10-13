@@ -14,12 +14,12 @@ pub(super) fn preview(output: &str) -> &str {
 pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
     let mut changed = false;
     egui::ScrollArea::vertical()
-        .id_source("regex_substitution_scroll")
+        .id_salt("regex_substitution_scroll")
         .auto_shrink([false, false])
         .max_height(ui.available_height().max(1.0))
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width());
-            ui.style_mut().wrap = Some(true);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             let mut enabled = session.substitution_enabled();
             if ui
                 .checkbox(&mut enabled, "Enable substitution preview")
@@ -40,10 +40,10 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
                 );
             }
             let maximum_bytes = session.policy().replacement_bytes;
-            let mut layouter = |ui: &egui::Ui, text: &str, width: f32| {
+            let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32| {
                 super::editor_layout::plain(
                     ui,
-                    text,
+                    text.as_str(),
                     width,
                     maximum_bytes,
                     egui::TextStyle::Monospace.resolve(ui.style()),
@@ -106,13 +106,13 @@ pub(super) fn show(ui: &mut egui::Ui, session: &mut RegexSession) -> bool {
                     }
                     let mut borrowed = text;
                     egui::ScrollArea::both()
-                        .id_source("regex_substitution_result_scroll")
+                        .id_salt("regex_substitution_result_scroll")
                         .max_height(200.0)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.add(
                                 egui::TextEdit::multiline(&mut borrowed)
-                                    .id_source("regex_substitution_result")
+                                    .id_salt("regex_substitution_result")
                                     .font(egui::TextStyle::Monospace)
                                     .desired_width(ui.available_width())
                                     .desired_rows(5),

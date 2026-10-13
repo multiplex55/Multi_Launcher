@@ -82,7 +82,7 @@ impl RecentNotesWidget {
             ui.horizontal(|ui| {
                 ui.label("Show");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
+                    .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
                     .changed();
                 ui.label("notes");
             });
@@ -259,18 +259,23 @@ impl Widget for RecentNotesWidget {
 
         let scroll_id = ui.id().with("recent_notes_scroll");
         egui::ScrollArea::both()
-            .id_source(scroll_id)
+            .id_salt(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, self.cached.len(), |ui, range| {
                 for note in &self.cached[range] {
                     let (action, query_override) = self.build_cached_action(note);
                     let mut clicked_row = false;
                     ui.vertical(|ui| {
-                        clicked_row |= ui.add(egui::Button::new(&note.title).wrap(false)).clicked();
+                        clicked_row |= ui
+                            .add(
+                                egui::Button::new(&note.title)
+                                    .wrap_mode(egui::TextWrapMode::Extend),
+                            )
+                            .clicked();
                         if self.cfg.show_snippet {
                             ui.add(
                                 egui::Label::new(egui::RichText::new(&note.snippet).small())
-                                    .wrap(false),
+                                    .wrap_mode(egui::TextWrapMode::Extend),
                             );
                         }
                         if !note.tags.is_empty() {
@@ -279,7 +284,7 @@ impl Widget for RecentNotesWidget {
                                     egui::RichText::new(format!("#{}", note.tags.join(" #")))
                                         .small(),
                                 )
-                                .wrap(false),
+                                .wrap_mode(egui::TextWrapMode::Extend),
                             );
                         }
                         ui.add_space(4.0);

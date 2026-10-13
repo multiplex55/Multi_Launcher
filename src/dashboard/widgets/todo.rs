@@ -95,7 +95,7 @@ impl TodoWidget {
             ui.horizontal(|ui| {
                 ui.label("Show");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
+                    .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
                     .changed();
                 ui.label("todos");
             });
@@ -122,7 +122,7 @@ impl TodoWidget {
             ui.horizontal(|ui| {
                 ui.label("Min priority");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.min_priority).clamp_range(0..=255))
+                    .add(egui::DragValue::new(&mut cfg.min_priority).range(0..=255))
                     .changed();
             });
             egui::ComboBox::from_label("Sort by")
@@ -284,7 +284,7 @@ impl TodoWidget {
         let mut action = None;
         ui.vertical(|ui| {
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_source(ui.id().with("todo_filter_status"))
+                egui::ComboBox::from_id_salt(ui.id().with("todo_filter_status"))
                     .selected_text(match self.cfg.status {
                         TodoStatusFilter::All => "All",
                         TodoStatusFilter::Open => "Open",
@@ -297,7 +297,7 @@ impl TodoWidget {
                     });
                 ui.add(
                     egui::DragValue::new(&mut self.cfg.min_priority)
-                        .clamp_range(0..=255)
+                        .range(0..=255)
                         .prefix("p≥"),
                 );
                 let available_tags = Self::available_tags(todos);
@@ -306,7 +306,7 @@ impl TodoWidget {
                 } else {
                     format!("Tags: {}", self.cfg.filter_tags.join(","))
                 };
-                egui::ComboBox::from_id_source(ui.id().with("todo_filter_tags"))
+                egui::ComboBox::from_id_salt(ui.id().with("todo_filter_tags"))
                     .selected_text(selected)
                     .show_ui(ui, |ui| {
                         if ui.button("Clear tags").clicked() {
@@ -382,7 +382,7 @@ impl TodoWidget {
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 8.0;
         let scroll_id = ui.id().with("todo_list_scroll");
         egui::ScrollArea::both()
-            .id_source(scroll_id)
+            .id_salt(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, entries.len(), |ui, range| {
                 let min_row_width = ui.available_width().max(400.0);
@@ -407,12 +407,12 @@ impl TodoWidget {
                         } else {
                             egui::RichText::new(label)
                         };
-                        ui.add(egui::Label::new(text).wrap(false));
+                        ui.add(egui::Label::new(text).wrap_mode(egui::TextWrapMode::Extend));
                         if !entry.tags.is_empty() {
                             let tags = entry.tags.join(", ");
                             ui.add(
                                 egui::Label::new(egui::RichText::new(format!("#{tags}")).small())
-                                    .wrap(false),
+                                    .wrap_mode(egui::TextWrapMode::Extend),
                             );
                         }
                         if ui.small_button("Open").clicked() {

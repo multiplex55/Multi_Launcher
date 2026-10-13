@@ -14,11 +14,11 @@ pub(super) fn folder_menu(ui: &mut egui::Ui, state: &FolderCompareState) {
             ui.menu_button(label, |ui| {
                 if ui.button("Complete model").clicked() {
                     save_folder(state, format, extension, false);
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Current filter").clicked() {
                     save_folder(state, format, extension, true);
-                    ui.close_menu();
+                    ui.close();
                 }
             });
         }
@@ -84,7 +84,7 @@ pub(super) fn text_menu(ui: &mut egui::Ui, model: &TextViewModel) {
                 {
                     tracing::error!("could not export {}: {e}", path.display());
                 }
-                ui.close_menu();
+                ui.close();
             }
         }
     });

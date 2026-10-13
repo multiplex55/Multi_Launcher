@@ -218,9 +218,17 @@ Planner prepared this read-only packet while M1-B remained the sole source write
 
 Verification: iterate `cargo check --lib` for library blockers, then `cargo check --all-targets` for bin/test/bench closure. Run the narrow touched GUI/oracle/popup/selection/editor tests and pending M1-B lifecycle tests, not the full suite. Inspect diff and stale API references. Done: all targets check, relevant focused tests pass, M1-B acceptance is recorded honestly with implementing/enabling commits, fonts/integration prerequisites remain attributed to later behavioral acceptance, no styling or disposable adapters. Genuine uncertainties are compiler-discovered residual calls, resolved AccessKit/cache APIs, fractional margin semantics and old popup ownership.
 
-## M1-D — integration parity packet (read-only planning; execute after M1-C)
-
 M1-C required review follow-up before any M1-B test acceptance: `Context::default()` embeds viewports. `set_embed_viewports(false)` alone still falls back without a thread-local immediate viewport renderer. Extend the shared lifecycle test adapter with scoped renderer installation/cleanup, child `run_ui` and explicit FullOutput consumption. Preserve the actual production owners; check retained viewport state after final discarded-pass selection, not merely merged output. Execute all nine M1-B regressions, including hidden prompt wake, hidden toolbar and radial registration. Production M1-B source review is closed; this is a known test adapter defect pending M1-C, not a claimed test pass.
+
+Additional concrete hidden-adapter correction: use `Context::run_logic(&RawInput, closure)` and LogicOutput for run_hidden_logic_tick_for_test, matching native dispatch. The prior begin_pass/end_pass adapter activated fonts and UI/plugin state, unlike hidden logic; remove its manual font promotion and test that pending definitions remain pending through hidden logic until a real UI pass. The immediate renderer setter is a Context associated function with no public clear/previous-callback API. Restore the embed flag accurately and establish test-thread lifetime/isolation for the stateless callback; do not claim scoped TLS restoration that the API cannot perform. Final harness review must assess that lifetime contract.
+
+Focused reviewer guidance resolves the renderer lifetime contract: install one stateless callback per test thread using a test-owned TLS Once/Cell, capturing no app/context/fixture. Nested/sequential helpers reuse it; reinstalling during an active callback can panic on egui's immutable TLS borrow and adds avoidable benchmark-frame allocation. The RAII guard restores only each context's embed flag. No competing renderer or later no-renderer assumption on that thread; a test needing different semantics constructs and runs its entire fixture in a fresh thread and propagates panic. Reviewer verified local Rust1.99 libtest thread-per-normal-test source; Nextest process isolation is stronger. Callback lifetime ends with the test thread, not the helper. This is guidance pending implementation/execution/final review.
+
+M1-C font-boundary design review: distinguish staged requests, input-hook submissions and active revisions. Use a context-owned egui Plugin: installation coalesces requests without calling `set_fonts`; `input_hook` submits the final effective request immediately before egui activates fonts; `on_begin_pass` promotes only that submitted revision afterward. This avoids the upstream active A -> queued B -> request A trap: upstream `set_fonts(A)` compares active definitions and leaves queued B intact. Cancellation before activation must retain A's active revision. Hidden `run_logic` invokes neither activation hook. Discarded and immediate-child passes can activate context-global fonts. Bare `Context::begin_pass/end_pass` invokes the input hook but not the plugin begin callback, so genuine low-level harnesses explicitly promote the submitted revision after begin_pass or migrate to run_ui. Cache reads never promote requests. Register before the first relevant pass, initialize fresh contexts without pre-pass font access, and keep definition comparisons at installation; palette changes and atlas growth retain revision. The reviewer confirmed these constraints from cached upstream sources; implementation and tests remain the M1-C writer's responsibility.
+
+Interim actual-source review found registration in App::logic too late: run_ui captures its ordered plugin list before app logic. A first-frame font request plus discard can activate fonts on pass two while the captured begin callback list omits the owner, leaving revision stale. Register during LauncherApp construction before the first run_ui and at standalone context setup, remove per-frame registration, and cover first-frame request+discard through the actual setup contract. TypeId idempotence preserves plugin state but repeated add_plugin still allocates discarded handles. Other requested/submitted/active transitions in the inspected draft were sound; this is interim source evidence, not final acceptance or an executed test.
+
+## M1-D — integration parity packet (read-only planning; execute after M1-C)
 
 Objective: accept CommonMark, toast and image behavior after compilation closes, retaining the existing parsing, delivery and texture-cache owners. M1-C supplies compiler-required CommonMark scoped IDs, Toast defaults/UI call and test harnesses; these do not establish parity. M2-A retains font/cache correctness and performance acceptance. No styling, lifecycle redesign, broad image migration or full-suite expansion.
 
@@ -238,3 +246,82 @@ Tests: reuse markdown `horizontal_markdown_fragments_shrink_vertically_with_long
 Add missing migration protection only: two identical markdown fragments retain distinct stable scroll/widget IDs across repeated rendering/content changes; actual extras loader decodes small JPEG/GIF/WebP/PNG fixtures with bounded asynchronous readiness and remaining formats are enabled at the0.25 boundary; controlled toast frames verify ordering/root anchor/configured expiration/hover pause through public rendering hooks. `tests/toast_log.rs` protects logging, not lifetime.
 
 Verification/done: filtered Nextest for touched behavior, all-target check after dependency changes, image0.25 feature-tree inspection, diff inspection, and focused native smoke for rich preview/link/code/selection/scroll, toast/error, images/drop and note/QR picker cancel/return focus. Record actual evidence and unrun native checks. Genuine uncertainty: picker ownership/focus requires actual OS observation; existing rfd calls lack explicit parents, so add plumbing only for a demonstrated migration defect through the existing native owner. Planner performed source/cache inspection only, no builds/tests/edits.
+
+## M2-A — cache acceptance packet (read-only planning; execute after M1-D)
+
+Objective/ownership: accept migrated `RootListGeometryCache` and `NotesGeometry` correctness, cheap warm reuse, semantic font invalidation and bounded storage. Reuse the reviewed M1-C context font owner; do not introduce a second tracker. Confirm its final interface (`register`, `install`, `active_revision` in the inspected draft), compilation and harness migration before editing consumers. M1-D retains CommonMark/integration acceptance.
+
+Scope: `src/gui/render.rs` RootListGeometryKey, RootListGeometryCache::{ensure, ensure_grid}, invalidations, eager oracles and Track C observations; `src/gui/notes_dialog.rs` NotesGeometryKey/NotesGeometry, geometry_key, measure_notes_geometry, ensure_notes_geometry, eager oracles/capacity receipts. Shared revision owner changes only for missing acceptance or a demonstrated defect. Existing note_panel markdown analysis tests remain integration evidence.
+
+Current root keys include generation/count, width, pixels per point, button font, wrapping, padding, interaction size, vertical spacing, full-path display, mode, columns, nominal cell width and grid spacing. Alias/presentation changes explicitly invalidate display; replacements change generation. Notes keys include entry/metadata/projection generations, viewport width, DPI, title/small fonts, wrapping, spacing and interaction size. Preserve ordered width expansion from earlier wide rows and original row indices/identities for anchors and menus.
+
+Required changes:
+
+1. Key the active font revision actually measured, never the requested revision; retain existing content/layout factors. Check concrete target metric gaps: .36 text resolution prioritizes `Style::override_font_id`, which inspected root style resolution and Notes title resolution can bypass; plain WidgetText includes `spacing.extra_text_line_spacing`, absent from the inspected root key. Key the fonts/spacing the corresponding widgets actually use. Preserve Wrap/Extend/Truncate distinctions where geometry differs, rather than reducing to a boolean.
+2. Consumer acceptance: an in-pass font request leaves current-pass geometry valid; the next actual pass rebuilds using activated fonts; the following unchanged pass reuses. Test no-op/canceled installation without needless rebuilds, using Plugin owner tests as prerequisites rather than duplicating them.
+3. Finish stale atlas assertions if M1-C has not already done so. Inspection found C2D/C2E state/validation and `track_c2f_oracle_quick_notes_recipe_contract` still using old atlas ownership. Replace only relevant pointer receipts with active-revision/behavioral assertions: changed definitions reject otherwise unchanged keys, rebuild once, match eager geometry, then reuse. Preserve fixture causes and unchanged result/search state. Unrelated Arc identity assertions remain.
+4. Retain one current geometry per owner, no revision-indexed history, no warm full-list traversal/shaping. Root vectors stay proportional to current/retained peak fixtures; grid tree/columns proportional to rows/columns; Notes rows/identity map proportional to filtered projection. Preserve replacement overlap accounting and existing partial-capacity receipt limitations; those are not total process memory.
+
+Retain tests: `root_list_geometry_rebuilds_only_when_layout_or_display_inputs_change`, `root_grid_geometry_reuses_warm_cache_and_tracks_grid_layout_inputs`, `root_list_geometry_matches_eager_selectable_label_layout`, `root_grid_geometry_matches_settled_grid_cells_and_global_extents`, `root_grid_tall_cell_spill_stays_visible_without_intermediate_rows`, bounded viewport/absolute-ID tests, `quick_notes_browsing_virtualizes_rows_and_reuses_geometry`, both `track_c_oracle_quick_notes_*geometry` tests and C2D/C2E/C2F recipe oracles. The inspected Notes test expects text-style invalidation while override_font_id is set; migrate to effective target precedence while preserving geometry comparisons, not a stale implementation assertion.
+
+Minimal missing coverage: list/grid/Notes consumer activation -> rebuild -> warm reuse; palette-only changes preserve revision/rebuild/measured-work while rendering changed colors (stripe-color tests alone do not establish this); effective override font size/family and root extra line spacing rebuild/match eager; one large -> small -> mode/filter transition checks capacities, identity-map length and repeated warm stability using current storage observations.
+
+Before measuring, reconcile benchmark receipt owner labels with the completed migration. Parent observed `C2C_REUSE_RESULT` still naming `egui_Context_run+LauncherApp::render_root_frame` after those APIs were removed. Preserve recipe/schema compatibility where needed, but report the actual current run_ui/lifecycle owner and explicitly document label changes; do not attribute a new measurement to a removed path. Historical baseline labels stay unchanged.
+
+Verification: focused Nextest cache/oracle filters, all-target check after source/harness changes, then serial matched CPU comparisons for81 affected original cases: list6, grid30, Notes42, query3. Startup3 catalog cases are outside this milestone. Set MULTI_LAUNCHER_PERF=1, ML_SKIP_CLIPBOARD_SYNC=1, ML_TRACK_C_BENCH_MODE=full, ML_TRACK_C_SOURCE_SHA to actual measured source, ML_TRACK_C_PROFILE=fast-dev; restore environment afterward. Run each ignored owner separately, adapting this actual original pattern:
+
+```powershell
+cargo nextest run --success-output final --locked --offline --profile default --cargo-profile fast-dev --lib --run-ignored ignored-only -E 'test(track_c_benchmark_root_list_frame_geometry)'
+```
+
+Then separately run grid, Quick Notes and query owners. Preserve100/1,000/10,000 actions,100/1,000/5,000 notes, grid columns1/2/3/5/6, width transitions, five warmups/twenty samples. Baseline: tracked receipts/cpu-original-summary.json and ignored baseline/{owner-list.log,track_c_benchmark_root_grid_frame_geometry.log,track_c_benchmark_quick_notes_dialog_geometry.log,track_c_benchmark_root_query_to_usable_cpu_frame.log,cpu-original-results.json}. Attribute production72a01bd5 and test runnerf45e3773 accurately. Match profile/settings/viewport identities; retain outliers; report p50/p95 deltas plus rebuild/work/storage receipts. Failed oracles invalidate timings. Investigate regressions without reducing fixtures/instrumentation. These are CPU-only measurements.
+
+Done: semantic/oracle tests pass, warm reuse/storage bounds demonstrated, affected comparisons recorded and regressions resolved or explicitly explained. No styling, renderer selection, lifecycle redesign, native campaign or unrelated full suite. Planner performed source/test/recipe inspection only, no builds/tests/edits. Evolving M1-C signatures and already-migrated assertions must be confirmed from the final reviewed code.
+## M2-B concrete Windows native parity handoff (read-only planning)
+
+Objective: validate migrated native windows, activation, input and overlays; correct demonstrated migration defects at their existing owners. Execute after M2-A, with M1-C compilation and M1-B lifecycle tests accepted. Keep explicit Glow; backend comparison belongs to M2-C. Confirm completed M1-C viewport callback signatures before editing. This packet is planning evidence, not executed acceptance.
+
+### Ownership and invariants
+
+| Behavior | Existing owner |
+| --- | --- |
+| Root creation | `src/main.rs::build_viewport_with_icon`, `spawn_gui`: configured size/minimum size/icon/topmost, explicit Glow, Windows `with_any_thread(true)` |
+| HWND lifetime | `src/visibility.rs::RootWindowBridge`: synchronized handle/generation, `capture_frame`, `clear`, process/window revalidation; render owner captures frame handle and clears on exit |
+| Visibility and focus | `RootViewportCtx`, `apply_visibility_with_focus_intent`, ordered toggle/visibility owners; `src/window_activation.rs::{activate_window_if_current, WindowActivationFence}` |
+| Parking and capture | `src/launcher_parking.rs`: signed physical geometry, `compute_capture_safe_parking_position`, transaction/snapshot/restore; visibility owns logical conversion |
+| Secondary viewports | QR and Regex immediate viewports; `ParameterPromptUi` immediate/bootstrap; Radial Designer deferred viewport and identity capture/clear; Screen Draw independent immediate toolbar |
+| Invocation | `src/hotkey/launcher_invocation.rs::{LauncherInvocationAdapter, LauncherInvocationService}`, `src/hotkey/runtime.rs`, main visibility dispatch |
+| Native overlays | `src/radial/native.rs`; `src/screen_draw/{native_overlay,native_canvas,window_layers,geometry}.rs`; `src/mouse_gestures/overlay.rs`; `src/gui/mkmacro_dialog/{visual_overlay,visual_overlay_windows}.rs` |
+| Screenshot integration | `src/actions/screenshot.rs`, `src/plugins/screenshot.rs::launch_editor`; Screen Draw capture parking boundary |
+
+Windows root presentation deliberately uses `SW_SHOWNOACTIVATE`; ordered native activation owns focus. `RootViewportCtx` rejects unowned framework Focus. Hiding parks the root offscreen while retaining drawability. Preserve these decisions, generation fences, release/provenance ownership and overlay policies. Do not borrow HWND across threads or introduce stale-handle fallbacks, arbitrary delays, modifier compensation, duplicate hooks or focus workarounds.
+
+Inspection found no tray implementation or root `with_transparent` configuration. Record tray as absent and root opacity as existing behavior; do not add features to satisfy generic checklist wording. Static inspection identified no justified new windowing abstraction.
+
+### Required execution and focused tests
+
+1. Confirm root handle capture/clear, secondary identity/close/reopen and designer identity invalidation still traverse existing owners. Hidden child bootstrap must work with a parked root.
+2. Run exact Nextest `test(...)` filters for the existing contracts below. State tests do not prove OS behavior. If these paths change, relevant injected-event integration targets are `gui_visibility`, `focus_visibility`, `trigger_visibility`, `hotkey_events`, `quit_hotkey`; do not label them real-hook evidence.
+
+| Area | Existing test names |
+| --- | --- |
+| Visibility | `windows_root_presentation_lowers_to_owned_activation_without_framework_focus`; `windows_root_refuses_unowned_framework_focus_without_false_focus_receipt`; `windows_root_activation_from_child_context_targets_root_and_preserves_child_focus`; `simulated_root_wake_requires_requalification_after_replacement_clear_and_hwnd_reuse`; `parking_moves_a_configured_point_outside_the_virtual_desktop`; `hidden_grid_keeps_the_root_drawable_for_radial_preparation` |
+| Invocation | `exact_shift_alt_win_end_chord_uses_fake_time_for_tap_and_hold`; `modifier_repeat_does_not_leave_a_phantom_modifier_after_release`; `post_action_trigger_release_acknowledges_once_and_never_reopens` |
+| Geometry/layering | `native_rect_and_logical_fallback_conversion_are_checked_signed_and_dpi_aware`; `stale_handle_rearms_bounded_resolution_and_recreation_gets_fresh_identity`; `passive_overlay_remains_topmost_layered_noactivate_and_click_through`; `signed_coordinates_support_negative_monitors`; `native_surface_conversions_are_scale_consistent` |
+| Secondary fallback | `qr_viewport_has_scannable_size_and_embedded_escape_cleans_up`; `regex_tester_embedded_shell_focuses_once_and_escape_closes` |
+
+3. Perform one bounded native checklist on the isolated fixture:
+
+- Root show/hide/reopen from background and while focused, placement/topmost, usable query input after activation.
+- QR, Regex, parameter prompt, Designer and toolbar creation, intended focus, Escape/X close, reopen, stable owner identity, no unintended root activation. Include prompt creation while root is parked.
+- Screen Draw capture/toolbar restore, radial invocation, region selection, one passive crosshair/gesture overlay: layering, click-through versus interactive regions, cancellation and restoration.
+- Real keyboard/mouse Shift+Alt+Win+End tap versus hold, release after each, repeat while root/grid focused, ordinary typing afterward to expose sticky modifiers or missed key-up.
+- Available monitor/DPI transitions: negative origins, placement/pointer alignment, 100/125/150/200% where available; toolbar/selection coordinates and parking outside the complete virtual desktop.
+
+4. Fix only reproduced failures at the first responsible owner; add focused regression coverage for corrected invariants.
+
+### Acceptance evidence and genuine gaps
+
+Keep separate receipts for automated state/oracles; native HWND identity/generation/bounds/focus/visibility; real input; actual desktop composition/screenshots; hardware/OS availability. Six original Sky capture attempts failed. Accessibility-only query/Enter proves that interaction only, not visual/DPI/overlay/GPU parity. A renderer-owned screenshot route is researched but unimplemented; framebuffer pixels cannot prove desktop composition, click-through or OS focus.
+
+The applied computer-use skill prohibits synthetic Windows-key input; exact chord acceptance needs human/manual evidence. Report mixed-DPI, negative-origin topology, Win11 and remote-session coverage according to actual availability. Mark unsupported cases unavailable and required unobserved behavior pending, never passed. Finish when focused tests pass, available native checks have actual evidence, reproduced defects are resolved and environmental gaps are explicit. Planner performed no edits/builds/tests/native actions.

@@ -217,6 +217,8 @@ impl LauncherApp {
                                 kind: ToastKind::Success,
                                 options: ToastOptions::default()
                                     .duration_in_seconds(self.toast_duration as f64),
+
+                                style: Default::default(),
                             },
                         );
                     }
@@ -373,6 +375,8 @@ impl LauncherApp {
                     kind: ToastKind::Success,
                     options: ToastOptions::default()
                         .duration_in_seconds(self.toast_duration as f64),
+
+                    style: Default::default(),
                 },
             );
         }

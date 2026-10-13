@@ -69,6 +69,8 @@ pub struct TodoViewDialog {
     editing_priority: u8,
     editing_tags: String,
     load_error: Option<String>,
+    #[cfg(test)]
+    test_row_response: Option<egui::Response>,
 }
 
 impl TodoViewDialog {
@@ -209,6 +211,10 @@ impl TodoViewDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        #[cfg(test)]
+        {
+            self.test_row_response = None;
+        }
         if !self.open {
             return;
         }
@@ -279,7 +285,7 @@ impl TodoViewDialog {
                                         ui.label("Priority:");
                                         ui.add(
                                             egui::DragValue::new(&mut self.editing_priority)
-                                                .clamp_range(0..=255),
+                                                .range(0..=255),
                                         );
                                     });
                                     ui.horizontal(|ui| {
@@ -313,7 +319,7 @@ impl TodoViewDialog {
                                                             note.slug
                                                         ));
                                                     }
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                             }
                                         });
@@ -357,28 +363,46 @@ impl TodoViewDialog {
                                             save_now = true;
                                         }
                                         let text_for_render = entry.text.replace('\n', " ");
-                                        let resp = ui
-                                            .horizontal_wrapped(|ui| {
-                                                for token in text_for_render.split_whitespace() {
-                                                    if let Some((slug, anchor)) = parse_note_token(token) {
-                                                        let label = note_titles
-                                                            .get(&slug)
-                                                            .cloned()
-                                                            .unwrap_or_else(|| slug.to_string());
-                                                        let link_label = if let Some(anchor) = anchor.as_ref() {
-                                                            format!("{label}#{anchor}")
-                                                        } else {
-                                                            label
-                                                        };
-                                                        if ui.link(link_label).clicked() {
-                                                            app.open_note_panel(&slug, None);
-                                                        }
+                                        let row_contents = ui.horizontal_wrapped(|ui| {
+                                            let mut child_response: Option<egui::Response> = None;
+                                            for token in text_for_render.split_whitespace() {
+                                                let response = if let Some((slug, anchor)) =
+                                                    parse_note_token(token)
+                                                {
+                                                    let label = note_titles
+                                                        .get(&slug)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| slug.to_string());
+                                                    let link_label = if let Some(anchor) = anchor.as_ref() {
+                                                        format!("{label}#{anchor}")
                                                     } else {
-                                                        ui.label(token);
+                                                        label
+                                                    };
+                                                    let response = ui.link(link_label);
+                                                    if response.clicked() {
+                                                        app.open_note_panel(&slug, None);
                                                     }
-                                                }
-                                            })
-                                            .response;
+                                                    response
+                                                } else {
+                                                    ui.label(token)
+                                                };
+                                                child_response = Some(match child_response.take() {
+                                                    Some(combined) => combined.union(response),
+                                                    None => response,
+                                                });
+                                            }
+                                            child_response
+                                        });
+                                        let mut resp = row_contents
+                                            .response
+                                            .interact(egui::Sense::click());
+                                        if let Some(child_response) = row_contents.inner {
+                                            resp = resp.union(child_response);
+                                        }
+                                        #[cfg(test)]
+                                        {
+                                            self.test_row_response = Some(resp.clone());
+                                        }
                                         let idx_copy = idx;
                                         resp.clone().context_menu(|ui: &mut egui::Ui| {
                                             if ui.button("Edit Todo").clicked() {
@@ -386,7 +410,7 @@ impl TodoViewDialog {
                                                 self.editing_text = entry.text.clone();
                                                 self.editing_priority = entry.priority;
                                                 self.editing_tags = entry.tags.join(", ");
-                                                ui.close_menu();
+                                                ui.close();
                                             }
                                             ui.separator();
                                             ui.label("Link note");
@@ -408,13 +432,13 @@ impl TodoViewDialog {
                                                         &note.title,
                                                     );
                                                     save_now = true;
-                                                    ui.close_menu();
+                                                    ui.close();
                                                 }
                                             }
                                         });
                                         ui.add(
                                             egui::Label::new(format!("p{}", entry.priority))
-                                                .wrap(false),
+                                                .wrap_mode(egui::TextWrapMode::Extend),
                                         );
                                         if !entry.tags.is_empty() {
                                             ui.add(
@@ -422,7 +446,7 @@ impl TodoViewDialog {
                                                     "#{:?}",
                                                     entry.tags.join(", ")
                                                 ))
-                                                .wrap(false),
+                                                .wrap_mode(egui::TextWrapMode::Extend),
                                             );
                                         }
                                     });
@@ -493,6 +517,57 @@ impl TodoViewDialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app(ctx: &egui::Context, root: &std::path::Path) -> crate::gui::LauncherApp {
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        crate::gui::LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn render_todo_frame(
+        ctx: &egui::Context,
+        dialog: &mut TodoViewDialog,
+        app: &mut crate::gui::LauncherApp,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| dialog.ui(ui.ctx(), app),
+        )
+        .drop_without_applying_deltas();
+    }
 
     fn todo_entry(text: &str, priority: u8, tags: &[&str]) -> TodoEntry {
         TodoEntry {
@@ -612,5 +687,78 @@ mod tests {
         );
         assert_eq!(dialog.entries, initial);
         assert_eq!(std::fs::read(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn todo_row_context_menu_opens_on_secondary_click() {
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx, workspace.root());
+        let mut dialog = TodoViewDialog {
+            open: true,
+            entries: vec![todo_entry("Task with @note:linked", 1, &[])],
+            ..Default::default()
+        };
+        render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new(), 1.0);
+        let response = dialog
+            .test_row_response
+            .as_ref()
+            .expect("the todo row was rendered");
+        assert!(response.sense.senses_click());
+        let pointer = response.rect.center();
+
+        render_todo_frame(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            vec![egui::Event::PointerMoved(pointer)],
+            1.1,
+        );
+        render_todo_frame(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(pointer),
+                egui::Event::PointerButton {
+                    pos: pointer,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            1.2,
+        );
+        render_todo_frame(
+            &ctx,
+            &mut dialog,
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            1.3,
+        );
+        let row_response = dialog
+            .test_row_response
+            .as_ref()
+            .expect("the todo row remains rendered after the click");
+        assert!(
+            row_response.context_menu_opened(),
+            "the row's secondary-click menu opens on its wrapped text: id={:?}, rect={:?}, sense={:?}, hovered={}, contains={}, secondary={}, any={}",
+            row_response.id,
+            row_response.rect,
+            row_response.sense,
+            row_response.hovered(),
+            row_response.contains_pointer(),
+            row_response.secondary_clicked(),
+            egui::Popup::is_any_open(&ctx),
+        );
+        assert!(egui::Popup::is_any_open(&ctx));
+        drop(dialog);
+        drop(app);
+        drop(workspace);
     }
 }

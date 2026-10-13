@@ -71,7 +71,7 @@ impl CalendarPopover {
                     }
                     ui.separator();
                     ui.label("View");
-                    egui::ComboBox::from_id_source("calendar_view_mode")
+                    egui::ComboBox::from_id_salt("calendar_view_mode")
                         .selected_text(match self.view_mode {
                             CalendarViewMode::Day => "Day",
                             CalendarViewMode::Week => "Week",

@@ -1597,7 +1597,7 @@ mod tests {
             )
             .0;
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            let output = ctx.run(egui::RawInput::default(), |_| {
+            let output = ctx.run_ui(egui::RawInput::default(), |_| {
                 let disposition = revision
                     .with_current(
                         request_revision,
@@ -1680,7 +1680,7 @@ mod tests {
         let ctx = egui::Context::default();
         let root = RootViewportCtx::new(&ctx);
         acceptance_trace::take_root_activation_test_events();
-        let output = ctx.run(egui::RawInput::default(), |_| {
+        let output = ctx.run_ui(egui::RawInput::default(), |_| {
             root.send_viewport_cmd(egui::ViewportCommand::Focus)
         });
         assert!(
@@ -2486,7 +2486,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let _ = ctx.run(input, |child| {
+        let _ = ctx.run_ui(input, |child| {
             assert_eq!(child.viewport_id(), child_id);
             let root = RootViewportCtx::new(child);
             assert_eq!(root.viewport_id(), egui::ViewportId::ROOT);
@@ -2523,7 +2523,7 @@ mod tests {
         let request = revision.request(|| ()).0;
         let visible = Arc::new(AtomicBool::new(true));
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            let output = ctx.run(input, |child| {
+            let output = ctx.run_ui(input, |child| {
                 assert_eq!(child.viewport_id(), child_id);
                 child.send_viewport_cmd(egui::ViewportCommand::Focus);
                 let root = RootViewportCtx::with_window_bridge(child, bridge.clone());

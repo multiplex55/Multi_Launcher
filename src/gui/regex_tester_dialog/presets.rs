@@ -358,12 +358,12 @@ impl PresetState {
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<PresetAction> {
         let mut action = None;
         egui::ScrollArea::vertical()
-            .id_source("regex_presets_scroll")
+            .id_salt("regex_presets_scroll")
             .auto_shrink([false, false])
             .max_height(ui.available_height().max(1.0))
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width());
-                ui.style_mut().wrap = Some(true);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 if let Some(diagnostic) = self.store.diagnostic() {
                     ui.colored_label(ui.visuals().error_fg_color, &diagnostic.message);
                 }
@@ -389,7 +389,7 @@ impl PresetState {
                 if self.store.entries().is_empty() { ui.weak("No saved presets."); }
                 ui.separator();
                 ui.label("Name for Save / Rename:");
-                ui.add(egui::TextEdit::singleline(&mut self.name).id_source("regex_preset_name").desired_width(ui.available_width()));
+                ui.add(egui::TextEdit::singleline(&mut self.name).id_salt("regex_preset_name").desired_width(ui.available_width()));
                 ui.checkbox(&mut self.include_sample, "Include sample text");
                 ui.checkbox(&mut self.include_replacement, "Include replacement");
                 ui.weak("Save and Update store the current pattern and flags. Only checked buffers are stored; unchecked buffers are omitted.");

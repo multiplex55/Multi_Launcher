@@ -47,7 +47,7 @@ impl ClipboardRecentWidget {
                 ui.horizontal(|ui| {
                     ui.label("Show");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
+                        .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
                         .changed();
                     ui.label("clipboard items");
                 });
@@ -92,7 +92,7 @@ impl Widget for ClipboardRecentWidget {
             ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().item_spacing.y + 6.0;
         let scroll_id = ui.id().with("clipboard_recent_scroll");
         egui::ScrollArea::both()
-            .id_source(scroll_id)
+            .id_salt(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, rows, |ui, range| {
                 for idx in range {

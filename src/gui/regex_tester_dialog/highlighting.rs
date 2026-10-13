@@ -1,5 +1,8 @@
 use crate::regex_tester::session::EvaluatedText;
-use eframe::egui::{self, text::LayoutJob};
+use eframe::egui::{
+    self,
+    text::{ByteIndex, CharIndex, LayoutJob},
+};
 
 fn colors(visuals: &egui::Visuals) -> (egui::Color32, egui::Color32) {
     (
@@ -25,7 +28,7 @@ pub(super) fn layout(text: &str, view: &EvaluatedText<'_>, ui: &egui::Ui, width:
     };
     job.wrap.max_width = width;
     let (normal, active) = colors(ui.visuals());
-    let mut cursor = 0;
+    let mut cursor = ByteIndex::ZERO;
     let mut append = |range, background, selected| {
         let mut section_format = format.clone();
         section_format.background = background;
@@ -41,6 +44,7 @@ pub(super) fn layout(text: &str, view: &EvaluatedText<'_>, ui: &egui::Ui, width:
     if view.applies_to(text) {
         for (index, matched) in view.matches.iter().enumerate() {
             let span = matched.span.as_range();
+            let span = ByteIndex(span.start)..ByteIndex(span.end);
             if span.is_empty() {
                 continue;
             }
@@ -59,8 +63,9 @@ pub(super) fn layout(text: &str, view: &EvaluatedText<'_>, ui: &egui::Ui, width:
             cursor = span.end;
         }
     }
-    if cursor < text.len() || cursor == 0 {
-        append(cursor..text.len(), egui::Color32::TRANSPARENT, false);
+    let text_end = ByteIndex(text.len());
+    if cursor < text_end || cursor == ByteIndex::ZERO {
+        append(cursor..text_end, egui::Color32::TRANSPARENT, false);
     }
     job
 }
@@ -93,7 +98,7 @@ fn zero_width_indices(text: &str, view: &EvaluatedText<'_>) -> Vec<(usize, bool)
 
 fn marker_rects(galley: &egui::Galley, indices: &[(usize, bool)]) -> Vec<(egui::Rect, bool)> {
     let mut row_index = 0;
-    let mut row_start = 0;
+    let mut row_start = CharIndex::ZERO;
     let mut markers = Vec::with_capacity(indices.len());
     for &(character, active) in indices {
         while row_index + 1 < galley.rows.len() {
@@ -101,14 +106,14 @@ fn marker_rects(galley: &egui::Galley, indices: &[(usize, bool)]) -> Vec<(egui::
             let end = row_start + row.char_count_including_newline();
             // At a soft wrap boundary choose the following row. At a hard
             // newline the cursor before '\n' belongs to the preceding row.
-            if character < end {
+            if CharIndex(character) < end {
                 break;
             }
             row_start = end;
             row_index += 1;
         }
         if let Some(row) = galley.rows.get(row_index) {
-            let x = row.x_offset(character.saturating_sub(row_start));
+            let x = row.x_offset(CharIndex(character.saturating_sub(row_start.0)));
             markers.push((
                 egui::Rect::from_min_max(egui::pos2(x, row.min_y()), egui::pos2(x, row.max_y())),
                 active,
@@ -184,8 +189,8 @@ mod tests {
             ctx.set_visuals(visuals.clone());
             let mut session = evaluated("a", "a a");
             let (source, view) = session.text_edit_parts();
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     let job = layout(source, &view, ui, 100.0);
                     assert_eq!(job.text, "a a");
                     assert_eq!(job.sections[0].format.background, visuals.selection.bg_fill);
@@ -200,25 +205,26 @@ mod tests {
                     assert_ne!(normal, active);
                 });
             });
+            output.drop_without_applying_deltas();
         }
     }
 
     #[test]
     fn sections_preserve_adjacent_unicode_and_multiline_source_and_active_style() {
-        for (pattern, text) in [(".", "é🦀"), (".+", "éé\nab")] {
+        for (pattern, text) in [(".", "Ã©ðŸ¦€"), (".+", "Ã©Ã©\nab")] {
             let ctx = egui::Context::default();
             let mut session = evaluated(pattern, text);
             let (source, view) = session.text_edit_parts();
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     let job = layout(source, &view, ui, 80.0);
                     assert_eq!(job.text, text);
                     let mut end = 0;
                     for section in &job.sections {
-                        assert_eq!(section.byte_range.start, end);
-                        assert!(text.is_char_boundary(section.byte_range.start));
-                        assert!(text.is_char_boundary(section.byte_range.end));
-                        end = section.byte_range.end;
+                        assert_eq!(section.byte_range.start.0, end);
+                        assert!(text.is_char_boundary(section.byte_range.start.0));
+                        assert!(text.is_char_boundary(section.byte_range.end.0));
+                        end = section.byte_range.end.0;
                     }
                     assert_eq!(end, text.len());
                     let backgrounds = job
@@ -231,6 +237,7 @@ mod tests {
                     assert_ne!(backgrounds[0], backgrounds[1]);
                 });
             });
+            output.drop_without_applying_deltas();
             assert_eq!(source, text);
         }
     }
@@ -238,13 +245,13 @@ mod tests {
     #[test]
     fn same_frame_multibyte_edit_and_revision_mismatch_discard_all_stale_highlights() {
         let ctx = egui::Context::default();
-        let mut session = evaluated("a", "aaé");
+        let mut session = evaluated("a", "aaÃ©");
         let (text, mut view) = session.text_edit_parts();
-        text.insert_str(0, "文");
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        text.insert_str(0, "æ–‡");
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let job = layout(text, &view, ui, 100.0);
-                assert_eq!(job.text, "文aaé");
+                assert_eq!(job.text, "æ–‡aaÃ©");
                 assert_eq!(job.sections.len(), 1);
                 assert_eq!(
                     job.sections[0].format.background,
@@ -264,7 +271,7 @@ mod tests {
 
     #[test]
     fn zero_width_markers_map_unicode_crlf_eof_empty_and_soft_wrap_in_one_row_walk() {
-        for text in ["", "é\r\n🦀\n", "abcdefghi"] {
+        for text in ["", "Ã©\r\nðŸ¦€\n", "abcdefghi"] {
             for width in [400.0, 15.0] {
                 let ctx = egui::Context::default();
                 let mut session = evaluated("", text);
@@ -274,21 +281,22 @@ mod tests {
                     indices.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
                     (0..=text.chars().count()).collect::<Vec<_>>()
                 );
-                let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                    egui::CentralPanel::default().show(ctx, |ui| {
-                        let galley =
-                            ui.fonts(|fonts| fonts.layout_job(layout(source, &view, ui, width)));
+                let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+                    egui::CentralPanel::default().show(root_ui, |ui| {
+                        let job = layout(source, &view, ui, width);
+                        let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
                         let markers = marker_rects(&galley, &indices);
                         assert_eq!(markers.len(), indices.len());
                         for ((rect, _), (index, _)) in markers.iter().zip(&indices) {
-                            let expected = galley.pos_from_ccursor(egui::text::CCursor {
-                                index: *index,
+                            let expected = galley.pos_from_cursor(egui::text::CCursor {
+                                index: egui::text::CharIndex(*index),
                                 prefer_next_row: true,
                             });
                             assert_eq!(*rect, expected);
                         }
                     });
                 });
+                output.drop_without_applying_deltas();
             }
         }
     }

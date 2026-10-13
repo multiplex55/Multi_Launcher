@@ -48,7 +48,7 @@ impl SnippetsFavoritesWidget {
                 ui.horizontal(|ui| {
                     ui.label("Show");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=50))
+                        .add(egui::DragValue::new(&mut cfg.count).range(1..=50))
                         .changed();
                     ui.label("favorite snippets");
                 });

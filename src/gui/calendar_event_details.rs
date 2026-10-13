@@ -123,7 +123,7 @@ impl CalendarEventDetails {
                 if event.recurrence.is_some() {
                     ui.horizontal(|ui| {
                         ui.label("Edit scope");
-                        egui::ComboBox::from_id_source("calendar_edit_scope")
+                        egui::ComboBox::from_id_salt("calendar_edit_scope")
                             .selected_text(self.edit_scope.label())
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -171,7 +171,7 @@ impl CalendarEventDetails {
                 if event.recurrence.is_some() {
                     ui.horizontal(|ui| {
                         ui.label("Delete scope");
-                        egui::ComboBox::from_id_source("calendar_delete_scope")
+                        egui::ComboBox::from_id_salt("calendar_delete_scope")
                             .selected_text(self.delete_scope.label())
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -209,7 +209,7 @@ impl CalendarEventDetails {
                     }
                     ui.separator();
                     ui.label("Snooze (minutes)");
-                    ui.add(egui::DragValue::new(&mut self.snooze_minutes).clamp_range(1..=1440));
+                    ui.add(egui::DragValue::new(&mut self.snooze_minutes).range(1..=1440));
                     if ui.button("Snooze").clicked() {
                         if let Err(err) =
                             snooze_event(&event.id, Duration::minutes(self.snooze_minutes))

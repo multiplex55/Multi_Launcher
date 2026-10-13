@@ -852,7 +852,7 @@ mod tests {
         // Settle constructor placement before observing this workflow's effects.
         // The native mouse position can otherwise queue startup geometry into
         // the first frame measured by a direct test executable.
-        let _ = ctx.run(egui::RawInput::default(), |_| {});
+        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
         app.last_visible = true;
         app.visibility_revision
             .request_with_focus_intent(RootFocusIntent::PreserveForeground, || {});
@@ -1089,9 +1089,9 @@ mod tests {
         fixture.observer.wait_for_commands(1);
         fixture.observer.cancel_rectangle(id);
         let ctx = app.egui_ctx.clone();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         wait(&mut app, |app| !app.ocr_owns_root());
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
         assert!(observer.restored_rects().is_empty());
         assert_eq!(observer.current_rect(), parked);
         assert!(!app.visible_flag.load(Ordering::SeqCst));
@@ -1162,9 +1162,9 @@ mod tests {
         app.static_size = Some((900, 650));
         visibility(&app, true);
         let ctx = app.egui_ctx.clone();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         wait(&mut app, |app| !app.ocr_owns_root());
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert_eq!(observer.current_rect(), hidden); // exact native restore precedes egui placement
         let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
@@ -1390,9 +1390,9 @@ mod tests {
         observer.set_current_rect(original());
         app.root_window_bridge.request_presentation_reconcile();
         let ctx = app.egui_ctx.clone();
-        let output = ctx.run(egui::RawInput::default(), |root| {
-            app.render_root_frame(root, None)
-        });
+        let output = app
+            .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+            .0;
         assert!(app.ocr_owns_root());
         assert_eq!(observer.current_rect(), parked);
         let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
@@ -1423,11 +1423,11 @@ mod tests {
         let (fixture, observer, id) = start(&mut app);
         fixture.observer.cancel_rectangle(id);
         let ctx = app.egui_ctx.clone();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         let (_, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
             wait(&mut app, |app| !app.ocr_owns_root())
         });
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
         assert_eq!(queued, [(app.visibility_revision.current(), 42)]);
         assert_eq!(observer.current_rect(), original());
         let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
@@ -1539,14 +1539,14 @@ mod tests {
         app.static_size = Some((900, 650));
         confirm(&fixture, id);
         let ctx = app.egui_ctx.clone();
-        ctx.begin_frame(egui::RawInput::default());
+        ctx.begin_pass(egui::RawInput::default());
         wait(&mut app, |app| {
             matches!(
                 app.ocr.controller.presentation(),
                 Some(OcrPresentation::Recognizing)
             )
         });
-        let output = ctx.end_frame();
+        let output = ctx.end_pass();
         assert!(app.visible_flag.load(Ordering::SeqCst));
         assert!(!app.ocr_owns_root());
         assert_eq!(observer.current_rect(), original());
@@ -1640,7 +1640,7 @@ mod tests {
                 app.query = "newer UI".into();
             }
             let ctx = app.egui_ctx.clone();
-            ctx.begin_frame(egui::RawInput {
+            ctx.begin_pass(egui::RawInput {
                 events: vec![egui::Event::Key {
                     key: egui::Key::Escape,
                     physical_key: None,
@@ -1652,7 +1652,7 @@ mod tests {
             });
             poll(&mut app);
             assert!(ctx.input(|input| input.key_pressed(egui::Key::Escape)));
-            let _ = ctx.end_frame();
+            let _ = ctx.end_pass();
             wait(&mut app, |app| !app.ocr_owns_root());
         }
     }
@@ -1758,7 +1758,7 @@ mod tests {
             fail: false,
         };
         let ctx = app.egui_ctx.clone();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             app.show_ocr_surface_with_clipboard(ctx, &clipboard)
         });
         assert_eq!(clipboard.reads.load(Ordering::SeqCst), 0);
@@ -1814,7 +1814,7 @@ mod tests {
             ),
         ] {
             *app.ocr.controller.presentation_mut().unwrap() = state;
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
                 app.show_ocr_surface_with_clipboard(ctx, &clipboard)
             });
             app.apply_ocr_view_event(event(&app, OcrViewIntent::Copy), &clipboard);
@@ -1833,9 +1833,13 @@ mod tests {
         let selected = app.selected;
         let ctx = app.egui_ctx.clone();
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_input")));
-        let _ = ctx.run(key_input(egui::Key::Enter, egui::Modifiers::NONE), |ctx| {
-            app.render_root_frame(ctx, None)
-        });
+        let _ = app
+            .run_root_frame_for_test(
+                &ctx,
+                key_input(egui::Key::Enter, egui::Modifiers::NONE),
+                false,
+            )
+            .0;
         assert!(app.test_activation_trace.is_empty());
         assert!(app.test_recorded_history_queries.is_empty());
         assert!(!app.action_sheet.is_open());
@@ -1849,9 +1853,13 @@ mod tests {
             OcrPresentation::Result(text) => text.len(),
             _ => unreachable!(),
         };
-        let _ = ctx.run(key_input(egui::Key::Enter, egui::Modifiers::NONE), |ctx| {
-            app.render_root_frame(ctx, None)
-        });
+        let _ = app
+            .run_root_frame_for_test(
+                &ctx,
+                key_input(egui::Key::Enter, egui::Modifiers::NONE),
+                false,
+            )
+            .0;
         assert!(
             matches!(app.ocr.controller.presentation(),Some(OcrPresentation::Result(text)) if text.len()==before+1)
         );
@@ -1860,10 +1868,13 @@ mod tests {
         );
         assert!(app.test_activation_trace.is_empty());
         assert!(app.json_utility_dialog.open);
-        let _ = ctx.run(
-            key_input(egui::Key::Enter, egui::Modifiers::COMMAND),
-            |ctx| app.render_root_frame(ctx, None),
-        );
+        let _ = app
+            .run_root_frame_for_test(
+                &ctx,
+                key_input(egui::Key::Enter, egui::Modifiers::COMMAND),
+                false,
+            )
+            .0;
         assert!(!app.action_sheet.is_open());
         assert!(app.test_activation_trace.is_empty());
         assert_eq!(app.query, query);
@@ -1879,11 +1890,11 @@ mod tests {
             app.json_utility_dialog.open = true;
             let generation = app.ocr.controller.presented_generation().unwrap();
             let ctx = app.egui_ctx.clone();
-            let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
             assert!(app.any_panel_open());
-            let _ = ctx.run(key_input(key, modifiers), |ctx| {
-                app.render_root_frame(ctx, None)
-            });
+            let _ = app
+                .run_root_frame_for_test(&ctx, key_input(key, modifiers), false)
+                .0;
             assert!(app.ocr.session.is_none());
             assert!(!app.ocr_surface_visible());
             assert!(app.visible_flag.load(Ordering::SeqCst));
@@ -1956,7 +1967,7 @@ mod tests {
             let old_editor = super::super::ocr_view::editor_id(old.generation);
             let ctx = app.egui_ctx.clone();
             for _ in 0..2 {
-                let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+                let _ = ctx.run_ui(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
             }
             if !old_text.is_empty() {
                 assert!(egui::text_edit::TextEditState::load(&ctx, old_editor).is_some());
@@ -2001,7 +2012,7 @@ mod tests {
             );
             assert_eq!(backend.rectangles.lock().unwrap().len(), 1);
             for _ in 0..2 {
-                let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+                let _ = ctx.run_ui(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
             }
             assert!(ctx.memory(|memory| memory.has_focus(super::super::ocr_view::editor_id(generation))));
             assert!(app.ocr.view.feedback.is_none());
@@ -2139,7 +2150,7 @@ mod tests {
             let editor = super::super::ocr_view::editor_id(generation);
             let ctx = app.egui_ctx.clone();
             if !during_capture {
-                let _ = ctx.run(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
+                let _ = ctx.run_ui(egui::RawInput::default(), |ctx| app.show_ocr_surface(ctx));
                 egui::text_edit::TextEditState::default().store(&ctx, editor);
                 ctx.memory_mut(|memory| memory.request_focus(editor));
             }
@@ -2222,9 +2233,9 @@ mod tests {
         });
         let generation = app.ocr.session.as_ref().unwrap().id;
         let ctx = app.egui_ctx.clone();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            app.render_root_frame(ctx, None)
-        });
+        let _ = app
+            .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+            .0;
         backend.recognition_gate.release();
         assert_eq!(
             app.selected,
@@ -2234,9 +2245,9 @@ mod tests {
         assert!(app.ocr_surface_visible());
         assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
         app.close_ocr_surface();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            app.render_root_frame(ctx, None)
-        });
+        let _ = app
+            .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+            .0;
         assert_eq!(
             app.selected, None,
             "ordinary net refresh resumes after Close"
@@ -2279,9 +2290,9 @@ mod tests {
             });
             let generation = app.ocr.session.as_ref().unwrap().id;
             let ctx = app.egui_ctx.clone();
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                app.render_root_frame(ctx, None)
-            });
+            let _ = app
+                .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                .0;
             assert_eq!(app.selected, Some(2), "{query}");
             assert_eq!(app.last_plugin_search_generation, unconsumed_generation);
             assert_eq!(app.last_timer_update, timer_update);
@@ -2289,9 +2300,9 @@ mod tests {
             assert!(app.ocr_surface_visible());
             assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
             app.close_ocr_surface();
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                app.render_root_frame(ctx, None)
-            });
+            let _ = app
+                .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+                .0;
             assert_eq!(app.selected, None, "due refresh resumes for {query}");
             assert_eq!(
                 app.last_plugin_search_generation,
@@ -2322,18 +2333,18 @@ mod tests {
             .send(super::super::WatchEvent::AuthoringProviderCapacityAvailable)
             .unwrap();
         let ctx = app.egui_ctx.clone();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            app.render_root_frame(ctx, None)
-        });
+        let _ = app
+            .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+            .0;
         assert_eq!(app.selected, Some(2));
         assert!(app.background_query_refresh_pending);
         assert_eq!(app.ocr.session.as_ref().unwrap().id, generation);
         assert!(app.ocr_owns_root());
         app.close_ocr_surface();
         wait(&mut app, |app| app.ocr.session.is_none());
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            app.render_root_frame(ctx, None)
-        });
+        let _ = app
+            .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+            .0;
         assert!(!app.background_query_refresh_pending);
         assert_eq!(app.selected, None);
         assert!(app.last_results_valid);
@@ -2346,9 +2357,9 @@ mod tests {
         assert!(app.background_query_refresh_pending);
         app.pending_query = Some("new explicit query".into());
         let ctx = app.egui_ctx.clone();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            app.render_root_frame(ctx, None)
-        });
+        let _ = app
+            .run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
+            .0;
         assert_eq!(app.query, "new explicit query");
         assert!(!app.background_query_refresh_pending);
         assert!(!app.ocr_surface_visible());

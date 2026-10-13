@@ -84,7 +84,7 @@ impl TimerDialog {
                 });
                 ui.horizontal(|ui| {
                     ui.label("Sound");
-                    egui::ComboBox::from_id_source("sound_select")
+                    egui::ComboBox::from_id_salt("sound_select")
                         .selected_text(crate::sound::SOUND_NAMES[self.sound_idx])
                         .show_ui(ui, |ui| {
                             for (idx, name) in crate::sound::SOUND_NAMES.iter().enumerate() {
@@ -100,6 +100,8 @@ impl TimerDialog {
                                     kind: ToastKind::Error,
                                     options: ToastOptions::default()
                                         .duration_in_seconds(app.toast_duration as f64),
+
+                                    style: Default::default(),
                                 });
                             }
                         } else {
@@ -165,7 +167,7 @@ mod tests {
     use eframe::egui;
 
     fn render_duration_frame(dialog: &mut TimerDialog, ctx: &egui::Context) {
-        let _ = ctx.run(Default::default(), |ctx| {
+        let _ = ctx.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| dialog.duration_ui(ui));
         });
     }

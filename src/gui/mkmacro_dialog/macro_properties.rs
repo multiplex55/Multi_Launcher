@@ -134,7 +134,7 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     let (selected_folder, folder_label) = current_folder_choice(&folders, m.folder_id);
     ui.horizontal(|ui| {
         ui.label("Folder:");
-        egui::ComboBox::from_id_source(("macro_properties_folder", macro_id))
+        egui::ComboBox::from_id_salt(("macro_properties_folder", macro_id))
             .selected_text(folder_label)
             .show_ui(ui, |ui| {
                 for (folder_id, name) in &folders {
@@ -192,14 +192,14 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         changed |= ui
             .add(
                 egui::DragValue::new(&mut m.playback.random_delay_ms)
-                    .clamp_range(0..=60_000)
+                    .range(0..=60_000)
                     .suffix(" ms random delay"),
             )
             .changed();
         changed |= ui
             .add(
                 egui::DragValue::new(&mut m.playback.random_offset_px)
-                    .clamp_range(0..=10_000)
+                    .range(0..=10_000)
                     .suffix(" px random offset"),
             )
             .changed();

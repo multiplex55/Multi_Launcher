@@ -226,13 +226,13 @@ impl Plugin for NetworkPlugin {
             ui.label("Refresh rate (s)");
             ui.add(
                 egui::DragValue::new(&mut cfg.refresh_rate)
-                    .clamp_range(0.1..=60.0)
+                    .range(0.1..=60.0)
                     .speed(0.1),
             );
         });
         ui.horizontal(|ui| {
             ui.label("Units");
-            egui::ComboBox::from_id_source("net_units")
+            egui::ComboBox::from_id_salt("net_units")
                 .selected_text(cfg.unit.to_string())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut cfg.unit, NetUnit::Auto, "Auto");

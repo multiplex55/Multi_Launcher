@@ -86,7 +86,7 @@ impl WindowsOverviewWidget {
                 ui.horizontal(|ui| {
                     ui.label("Show up to");
                     changed |= ui
-                        .add(egui::DragValue::new(&mut cfg.limit).clamp_range(1..=25))
+                        .add(egui::DragValue::new(&mut cfg.limit).range(1..=25))
                         .changed();
                     ui.label("windows");
                 });

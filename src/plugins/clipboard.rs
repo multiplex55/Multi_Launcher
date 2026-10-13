@@ -323,7 +323,7 @@ impl Plugin for ClipboardPlugin {
             serde_json::from_value(value.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label("Clipboard limit");
-            ui.add(egui::DragValue::new(&mut cfg.max_entries).clamp_range(1..=200));
+            ui.add(egui::DragValue::new(&mut cfg.max_entries).range(1..=200));
         });
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,

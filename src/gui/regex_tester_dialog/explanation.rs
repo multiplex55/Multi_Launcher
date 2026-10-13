@@ -5,12 +5,12 @@ use eframe::egui;
 
 pub(super) fn show(ui: &mut egui::Ui, result: &ExplanationResult) {
     egui::ScrollArea::vertical()
-        .id_source("regex_explanation_scroll")
+        .id_salt("regex_explanation_scroll")
         .auto_shrink([false, false])
         .max_height(ui.available_height().max(1.0))
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width());
-            ui.style_mut().wrap = Some(true);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             match result {
                 ExplanationResult::InvalidPattern(error) => {
                     ui.add(super::presentation::compiler_label(

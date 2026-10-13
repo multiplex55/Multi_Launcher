@@ -265,16 +265,16 @@ impl SnippetPromptDialog {
             },
             session.alias
         );
-        let available = ctx.available_rect().size();
-        let style = ctx.style();
-        let mut window_frame = egui::Frame::window(&style);
-        window_frame.inner_margin += window_frame.stroke.width / 2.0;
+        let available = ctx.content_rect().size();
+        let style = ctx.style_of(ctx.theme());
+        let window_frame = egui::Frame::window(&style);
+        let inner_margin = window_frame.inner_margin.sum()
+            + egui::vec2(window_frame.stroke.width, window_frame.stroke.width);
         let title_bar_height = ctx
-            .fonts(|fonts| fonts.row_height(&style.text_styles[&egui::TextStyle::Heading]))
+            .fonts_mut(|fonts| fonts.row_height(&style.text_styles[&egui::TextStyle::Heading]))
             + style.spacing.window_margin.sum().y;
-        let window_chrome = window_frame.outer_margin.sum()
-            + window_frame.inner_margin.sum()
-            + egui::vec2(0.0, title_bar_height);
+        let window_chrome =
+            window_frame.outer_margin.sum() + inner_margin + egui::vec2(0.0, title_bar_height);
         let max_size = (available - window_chrome).max(egui::vec2(1.0, 1.0));
         let default_size = egui::vec2(max_size.x.min(620.0), max_size.y.min(700.0));
         let min_size = egui::vec2(max_size.x.min(280.0), max_size.y.min(180.0));
@@ -323,7 +323,7 @@ impl SnippetPromptDialog {
                 let body_height =
                     (ui.available_height() - footer_height - feedback_height).max(24.0);
                 let _body_output = egui::ScrollArea::vertical()
-                    .id_source(("snippet_prompt_body", generation))
+                    .id_salt(("snippet_prompt_body", generation))
                     .auto_shrink([false, false])
                     .max_height(body_height)
                     .show(ui, |ui| {
@@ -387,7 +387,7 @@ impl SnippetPromptDialog {
                                     }
                                 }
                                 egui::ScrollArea::vertical()
-                                    .id_source(("snippet_prompt_preview", generation))
+                                    .id_salt(("snippet_prompt_preview", generation))
                                     .auto_shrink([false, false])
                                     .max_height(ui.available_height().min(150.0).max(44.0))
                                     .show(ui, |ui| {
@@ -754,7 +754,7 @@ mod tests {
         dialog: &mut SnippetPromptDialog,
         events: Vec<egui::Event>,
     ) {
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -768,6 +768,7 @@ mod tests {
                 let _ = dialog.show(ctx);
             },
         );
+        output.drop_without_applying_deltas();
     }
 
     fn type_into_rendered_field(
@@ -1160,7 +1161,7 @@ mod tests {
         let first_field_id = field_widget_id(first_generation, "name");
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 220.0));
 
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
@@ -1169,6 +1170,7 @@ mod tests {
                 assert!(dialog.show(ctx).is_none());
             },
         );
+        output.drop_without_applying_deltas();
         assert!(ctx.memory(|memory| memory.has_focus(first_field_id)));
 
         dialog.set_value("name", "old transient value".into());
@@ -1179,7 +1181,7 @@ mod tests {
             egui::Id::new(("snippet_prompt_window", first_generation)),
             egui::Id::new(("snippet_prompt_window", second_generation))
         );
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
@@ -1188,6 +1190,7 @@ mod tests {
                 assert!(dialog.show(ctx).is_none());
             },
         );
+        output.drop_without_applying_deltas();
         assert!(ctx.memory(|memory| memory.has_focus(second_field_id)));
         assert!(!ctx.memory(|memory| memory.has_focus(first_field_id)));
         assert_eq!(
@@ -1201,7 +1204,7 @@ mod tests {
         let mut draft = entry();
         draft.alias = "draft".into();
         dialog.begin_preview(&ctx, draft).unwrap();
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
@@ -1210,6 +1213,7 @@ mod tests {
                 assert!(dialog.show(ctx).is_none());
             },
         );
+        output.drop_without_applying_deltas();
         assert!(dialog.copy_widget_id.is_none());
         assert!(dialog.cancel_widget_id.is_some());
     }

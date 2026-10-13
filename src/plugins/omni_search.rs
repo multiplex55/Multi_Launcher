@@ -637,7 +637,7 @@ mod tests {
         let mut value = json!("invalid");
         let ctx = egui::Context::default();
 
-        let _ = ctx.run(Default::default(), |ctx| {
+        let _ = ctx.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 plugin.settings_ui(ui, &mut value);
             });

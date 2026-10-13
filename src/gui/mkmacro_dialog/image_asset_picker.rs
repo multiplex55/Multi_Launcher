@@ -72,7 +72,7 @@ fn select_browser_entry(image: &mut MkImageRef, filename: &str) -> ImageAssetSel
 /// Render a picker whose persistent state is isolated by `editor_id`.
 pub fn show(
     ui: &mut egui::Ui,
-    editor_id: impl std::hash::Hash,
+    editor_id: impl std::hash::Hash + std::fmt::Debug,
     context: ImageAssetUiContext<'_>,
     image: &mut MkImageRef,
 ) -> Option<ImageAssetSelection> {
@@ -83,7 +83,7 @@ pub fn show(
 /// Embedded picker variant for callers that already render their own section label.
 pub fn show_browser(
     ui: &mut egui::Ui,
-    editor_id: impl std::hash::Hash,
+    editor_id: impl std::hash::Hash + std::fmt::Debug,
     context: ImageAssetUiContext<'_>,
     image: &mut MkImageRef,
 ) -> Option<ImageAssetSelection> {
@@ -94,9 +94,11 @@ pub fn show_browser(
     let search = ui.add(
         egui::TextEdit::singleline(&mut query)
             .hint_text("Search assets...")
-            .id_source(id.with("search")),
+            .id_salt(id.with("search")),
     );
-    search.widget_info(|| egui::WidgetInfo::text_edit("", "Search image assets"));
+    search.widget_info(|| {
+        egui::WidgetInfo::text_edit(ui.is_enabled(), "", "", "Search image assets")
+    });
     ui.ctx()
         .data_mut(|data| data.insert_temp(id, query.clone()));
 
@@ -110,7 +112,7 @@ pub fn show_browser(
     let matches = browser_entries(&assets, &query, image);
     let mut selection = None;
     egui::ScrollArea::vertical()
-        .id_source(id.with("scroll"))
+        .id_salt(id.with("scroll"))
         .max_height(230.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
@@ -126,9 +128,9 @@ pub fn show_browser(
                 } else {
                     egui::Color32::TRANSPARENT
                 };
-                let row = egui::Frame::none()
+                let row = egui::Frame::NONE
                     .fill(fill)
-                    .inner_margin(egui::Margin::same(4.0))
+                    .inner_margin(egui::Margin::same(4))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             super::image_preview::show_thumbnail(
@@ -150,6 +152,7 @@ pub fn show_browser(
                 response.widget_info(|| {
                     egui::WidgetInfo::selected(
                         egui::WidgetType::SelectableLabel,
+                        ui.is_enabled(),
                         selected,
                         format!(
                             "{}; {}",

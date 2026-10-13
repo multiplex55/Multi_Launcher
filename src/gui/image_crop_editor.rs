@@ -489,7 +489,11 @@ impl ImageCropEditorState {
             ),
         );
         let painter = ui.painter().with_clip_rect(viewport);
-        painter.rect_filled(viewport, egui::Rounding::ZERO, egui::Color32::from_gray(24));
+        painter.rect_filled(
+            viewport,
+            egui::CornerRadius::ZERO,
+            egui::Color32::from_gray(24),
+        );
         if let Some(texture) = &self.texture {
             painter.image(
                 texture.id(),
@@ -517,7 +521,7 @@ impl ImageCropEditorState {
         let selected_visible = selection_rect.intersect(viewport);
         painter.rect_filled(
             viewport,
-            egui::Rounding::ZERO,
+            egui::CornerRadius::ZERO,
             egui::Color32::from_black_alpha(150),
         );
         if selected_visible.is_positive()
@@ -532,17 +536,23 @@ impl ImageCropEditorState {
         }
         painter.rect_stroke(
             selection_rect,
-            egui::Rounding::ZERO,
+            egui::CornerRadius::ZERO,
             egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(255, 210, 50)),
+            egui::StrokeKind::Middle,
         );
         for (_, center) in Self::handle_centers(selection_rect) {
             let handle_rect =
                 egui::Rect::from_center_size(center, egui::vec2(HANDLE_SIZE, HANDLE_SIZE));
-            painter.rect_filled(handle_rect, egui::Rounding::same(2.0), egui::Color32::WHITE);
+            painter.rect_filled(
+                handle_rect,
+                egui::CornerRadius::same(2),
+                egui::Color32::WHITE,
+            );
             painter.rect_stroke(
                 handle_rect,
-                egui::Rounding::same(2.0),
+                egui::CornerRadius::same(2),
                 egui::Stroke::new(1.0_f32, egui::Color32::BLACK),
+                egui::StrokeKind::Middle,
             );
         }
     }
@@ -602,7 +612,7 @@ impl ImageCropEditorState {
                     ui.allocate_exact_size(viewport_size, egui::Sense::click_and_drag());
                 let _ = self.viewport_transform(viewport).unwrap();
                 if response.hovered() {
-                    let scroll = ui.input(|input| input.raw_scroll_delta.y);
+                    let scroll = ui.input(|input| input.smooth_scroll_delta.y);
                     if scroll != 0.0
                         && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
                     {

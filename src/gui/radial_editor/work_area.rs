@@ -36,7 +36,7 @@ pub(crate) fn restore_geometry(
 }
 
 fn viewport_size(ctx: &egui::Context) -> CanvasPoint {
-    let screen = ctx.screen_rect();
+    let screen = ctx.content_rect();
     ctx.input(|input| input.viewport().monitor_size)
         .map(|size| CanvasPoint::new(size.x, size.y))
         .unwrap_or_else(|| CanvasPoint::new(screen.width(), screen.height()))

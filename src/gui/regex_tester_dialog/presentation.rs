@@ -2,7 +2,8 @@ use crate::regex_tester::{EvaluationLimit, EvaluationSuspension};
 use eframe::egui;
 
 pub(super) fn compiler_label(message: &str, color: egui::Color32) -> egui::Label {
-    egui::Label::new(egui::RichText::new(message).monospace().color(color)).wrap(true)
+    egui::Label::new(egui::RichText::new(message).monospace().color(color))
+        .wrap_mode(egui::TextWrapMode::Wrap)
 }
 
 pub(super) fn suspension(reason: &EvaluationSuspension) -> String {

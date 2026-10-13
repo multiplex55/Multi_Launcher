@@ -468,15 +468,17 @@ fn dialog_scrolls_with_many_entries() {
         dlg.test_add_todo();
     }
 
-    ctx.begin_frame(egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1000.0, 2000.0),
-        )),
-        ..Default::default()
-    });
-    dlg.ui(&ctx, &mut app);
-    let _ = ctx.end_frame();
+    let output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 2000.0),
+            )),
+            ..Default::default()
+        },
+        |ui| dlg.ui(ui.ctx(), &mut app),
+    );
+    output.drop_without_applying_deltas();
 
     let rect = ctx
         .memory(|m| m.area_rect(egui::Id::new("Todos")))
@@ -494,15 +496,17 @@ fn todo_view_dialog_has_fixed_size() {
     let mut dlg = TodoViewDialog::default();
     dlg.open();
 
-    ctx.begin_frame(egui::RawInput {
-        screen_rect: Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::vec2(1000.0, 2000.0),
-        )),
-        ..Default::default()
-    });
-    dlg.ui(&ctx, &mut app);
-    let _ = ctx.end_frame();
+    let output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 2000.0),
+            )),
+            ..Default::default()
+        },
+        |ui| dlg.ui(ui.ctx(), &mut app),
+    );
+    output.drop_without_applying_deltas();
 
     let (min_size, max_size) = todo_view_window_constraints();
     let _rect = ctx

@@ -261,7 +261,7 @@ impl CalendarEventEditor {
                 ui.checkbox(&mut self.repeat_enabled, "Enable recurrence");
                 if self.repeat_enabled {
                     ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_source("calendar_repeat_frequency")
+                        egui::ComboBox::from_id_salt("calendar_repeat_frequency")
                             .selected_text(format!("{:?}", self.repeat_frequency))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -291,12 +291,10 @@ impl CalendarEventEditor {
                                 );
                             });
                         ui.label("Every");
-                        ui.add(
-                            egui::DragValue::new(&mut self.repeat_interval).clamp_range(1..=365),
-                        );
+                        ui.add(egui::DragValue::new(&mut self.repeat_interval).range(1..=365));
                     });
                     if self.repeat_frequency == RecurrenceFrequency::Custom {
-                        egui::ComboBox::from_id_source("calendar_repeat_custom")
+                        egui::ComboBox::from_id_salt("calendar_repeat_custom")
                             .selected_text(format!("{:?}", self.repeat_custom_unit))
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(
@@ -345,7 +343,7 @@ impl CalendarEventEditor {
                     }
                     ui.horizontal(|ui| {
                         ui.label("Ends");
-                        egui::ComboBox::from_id_source("calendar_repeat_end")
+                        egui::ComboBox::from_id_salt("calendar_repeat_end")
                             .selected_text(match self.repeat_end_mode {
                                 RecurrenceEndMode::Never => "Never",
                                 RecurrenceEndMode::OnDate => "On date",
@@ -377,10 +375,7 @@ impl CalendarEventEditor {
                             }
                         }
                         RecurrenceEndMode::AfterCount => {
-                            ui.add(
-                                egui::DragValue::new(&mut self.repeat_end_count)
-                                    .clamp_range(1..=999),
-                            );
+                            ui.add(egui::DragValue::new(&mut self.repeat_end_count).range(1..=999));
                         }
                         RecurrenceEndMode::Never => {}
                     }

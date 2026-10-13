@@ -20,7 +20,7 @@ use crate::plugins::todo::{TODO_FILE, load_todos_or_last_good, todo_version};
 use crate::process::configure_background_command;
 use crate::settings::{NoteSettings, NoteViewMode};
 use chrono::{DateTime, Local, TimeZone};
-use eframe::egui::{self, Color32, FontId, Key, RichText, popup};
+use eframe::egui::{self, Color32, FontId, Key, RichText};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_toast::{Toast, ToastKind, ToastOptions};
 use fuzzy_matcher::FuzzyMatcher;
@@ -502,8 +502,8 @@ fn char_range_to_byte_range(s: &str, start: usize, end: usize) -> (usize, usize)
 
 fn selected_char_range(state: &egui::widgets::text_edit::TextEditState) -> Option<(usize, usize)> {
     state.cursor.char_range().and_then(|range| {
-        let [start, end] = range.sorted();
-        (start.index != end.index).then_some((start.index, end.index))
+        let range = range.as_sorted_char_range();
+        (range.start != range.end).then_some((range.start.0, range.end.0))
     })
 }
 
@@ -844,7 +844,17 @@ fn classify_markdown_link(target: &str) -> MarkdownLinkAction {
 }
 
 fn handle_markdown_links(ui: &egui::Ui, app: &mut LauncherApp) {
-    if let Some(mut open_url) = ui.ctx().output_mut(|o| o.open_url.take()) {
+    let open_url = ui.ctx().output_mut(|output| {
+        let command_index = output
+            .commands
+            .iter()
+            .rposition(|command| matches!(command, egui::OutputCommand::OpenUrl(_)))?;
+        match output.commands.remove(command_index) {
+            egui::OutputCommand::OpenUrl(open_url) => Some(open_url),
+            _ => unreachable!("the selected output command was checked as an OpenUrl"),
+        }
+    });
+    if let Some(mut open_url) = open_url {
         match classify_markdown_link(&open_url.url) {
             MarkdownLinkAction::NoteReference(slug) => app.open_note_panel(&slug, None),
             MarkdownLinkAction::TodoReference(todo_id) => open_todo_reference(app, &todo_id),
@@ -1480,6 +1490,8 @@ impl NotePanel {
                 text: message.into(),
                 kind: ToastKind::Warning,
                 options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+
+                style: Default::default(),
             }),
             Ok(None) => {}
             Err(err) => app.report_error(
@@ -2040,6 +2052,8 @@ impl NotePanel {
             text: "No convertible plain links found.".into(),
             kind: ToastKind::Info,
             options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+
+            style: Default::default(),
         });
     }
 
@@ -2079,7 +2093,7 @@ impl NotePanel {
         }
         let mut open = self.open;
         let mut save_now = false;
-        let screen_rect = ctx.available_rect();
+        let screen_rect = ctx.content_rect();
         let margin = 24.0;
         let max_width = (screen_rect.width() - margin).max(200.0);
         let max_height = (screen_rect.height() - margin).max(150.0);
@@ -2375,35 +2389,37 @@ impl NotePanel {
                     }
                     NoteExternalOpen::Neither => {
                         self.show_open_with_menu = true;
-                        ui.memory_mut(|m| m.open_popup(popup_id));
+                        egui::Popup::open_id(ui.ctx(), popup_id);
                     }
                 }
             }
             if self.show_open_with_menu {
                 let mut close = false;
-                if popup::popup_below_widget(ui, popup_id, &open_resp, |ui| {
-                    if ui.button("Powershell").clicked() {
-                        self.save(app);
-                        self.open_external(app, NoteExternalOpen::Powershell);
-                        close = true;
-                    }
-                    if ui.button("WezTerm").clicked() {
-                        self.save(app);
-                        self.open_external(app, NoteExternalOpen::Wezterm);
-                        close = true;
-                    }
-                    if ui.button("Notepad").clicked() {
-                        self.save(app);
-                        self.open_external(app, NoteExternalOpen::Notepad);
-                        close = true;
-                    }
-                })
-                .is_none()
+                if egui::Popup::new(popup_id, ui.ctx().clone(), &open_resp, open_resp.layer_id)
+                    .open_memory(None)
+                    .show(|ui| {
+                        if ui.button("Powershell").clicked() {
+                            self.save(app);
+                            self.open_external(app, NoteExternalOpen::Powershell);
+                            close = true;
+                        }
+                        if ui.button("WezTerm").clicked() {
+                            self.save(app);
+                            self.open_external(app, NoteExternalOpen::Wezterm);
+                            close = true;
+                        }
+                        if ui.button("Notepad").clicked() {
+                            self.save(app);
+                            self.open_external(app, NoteExternalOpen::Notepad);
+                            close = true;
+                        }
+                    })
+                    .is_none()
                 {
                     close = true;
                 }
                 if close {
-                    ui.memory_mut(|m| m.close_popup());
+                    egui::Popup::close_id(ui.ctx(), popup_id);
                     self.show_open_with_menu = false;
                 }
             }
@@ -2521,7 +2537,7 @@ impl NotePanel {
         ui.vertical(|ui| {
             ui.set_width(outline_width);
             egui::ScrollArea::vertical()
-                .id_source(outline_scroll_id)
+                .id_salt(outline_scroll_id)
                 .max_height(outline_size.y)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
@@ -2530,7 +2546,7 @@ impl NotePanel {
                         ui.label("Outline");
                         ui.add(
                             egui::DragValue::new(&mut self.outline_width)
-                                .clamp_range(120.0..=360.0)
+                                .range(120.0..=360.0)
                                 .speed(4.0)
                                 .prefix("width "),
                         );
@@ -2717,7 +2733,7 @@ impl NotePanel {
                 // never performs clipboard inspection.
                 let _ = self.native_paste_detector.sample();
                 egui::ScrollArea::vertical()
-                    .id_source(scroll_id_source)
+                    .id_salt(scroll_id_source)
                     .max_height(available_size.y)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -3147,7 +3163,7 @@ impl NotePanel {
         ui: &mut egui::Ui,
         app: &mut LauncherApp,
         ctx: &egui::Context,
-        text_id_source: impl std::hash::Hash,
+        text_id_source: impl std::hash::Hash + std::fmt::Debug,
         available_size: egui::Vec2,
     ) -> egui::Response {
         let native_edge = self.native_paste_detector.sample();
@@ -3168,7 +3184,7 @@ impl NotePanel {
         ui: &mut egui::Ui,
         app: &mut LauncherApp,
         ctx: &egui::Context,
-        text_id_source: impl std::hash::Hash,
+        text_id_source: impl std::hash::Hash + std::fmt::Debug,
         available_size: egui::Vec2,
         mut native_edge: Native,
         mut lookup: Lookup,
@@ -3227,7 +3243,6 @@ impl NotePanel {
             .id(editor_id)
             .desired_width(desired_width)
             .font(FontId::monospace(app.note_font_size))
-            .frame(true)
             .lock_focus(true);
         let response = if let Some(size) = desired_size {
             ui.add_sized(size, text_edit)
@@ -3414,7 +3429,7 @@ impl NotePanel {
                 if response.hovered() {
                     let scroll = ui.ctx().input(|i| {
                         if i.modifiers.ctrl {
-                            i.raw_scroll_delta.y
+                            i.smooth_scroll_delta.y
                         } else {
                             0.0
                         }
@@ -3430,7 +3445,7 @@ impl NotePanel {
                 response.context_menu(|ui| {
                     let mut w = width.unwrap_or(display.x);
                     if ui
-                        .add(egui::DragValue::new(&mut w).clamp_range(20.0..=4096.0))
+                        .add(egui::DragValue::new(&mut w).range(20.0..=4096.0))
                         .changed()
                     {
                         let repl = format!("![{alt}]({rel}|{:.0})", w.round());
@@ -3441,7 +3456,7 @@ impl NotePanel {
                         let repl = format!("![{alt}]({rel})");
                         self.note.content.replace_range(range.clone(), &repl);
                         modified = true;
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             }
@@ -3470,11 +3485,11 @@ impl NotePanel {
         let visuals = ui.visuals().clone();
         let fill = visuals.faint_bg_color;
         let stroke = egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color);
-        egui::Frame::none()
+        egui::Frame::NONE
             .fill(fill)
             .stroke(stroke)
-            .rounding(egui::Rounding::same(6.0))
-            .inner_margin(egui::Margin::same(8.0))
+            .corner_radius(egui::CornerRadius::same(6))
+            .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
                 ui.vertical(|ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -3661,7 +3676,7 @@ impl NotePanel {
                 |ui| {
                     ui.set_width(preview_width);
                     egui::ScrollArea::vertical()
-                        .id_source(preview_scroll_id)
+                        .id_salt(preview_scroll_id)
                         .max_width(preview_width)
                         .max_height(total_height)
                         .auto_shrink([false, false])
@@ -3737,7 +3752,7 @@ impl NotePanel {
                 .and_then(|range| normalize_char_range(range, self.note.content.chars().count()))
             {
                 Some(cached) => {
-                    let caret = state.cursor.char_range().map(|range| range.primary.index);
+                    let caret = state.cursor.char_range().map(|range| range.primary.index.0);
                     if caret.is_some_and(|caret| caret_is_within_range(caret, cached)) {
                         restore_char_range(&mut state, cached);
                         state.store(ctx, resp.id);
@@ -3765,7 +3780,13 @@ impl NotePanel {
                 self.pending_selection = Some(range);
             }
             let pos = resp.rect.left_top();
-            popup::show_tooltip_at(ctx, egui::Id::new("note_ctx_menu"), Some(pos), |ui| {
+            let _ = egui::Tooltip::always_open(
+                ctx.clone(),
+                resp.layer_id,
+                egui::Id::new("note_ctx_menu"),
+                egui::PopupAnchor::Position(pos),
+            )
+            .show(|ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     self.build_textedit_menu(ui, ctx, resp.id, app);
                 });
@@ -3789,7 +3810,7 @@ impl NotePanel {
         let mut idx = state
             .cursor
             .char_range()
-            .map(|r| r.primary.index)
+            .map(|r| r.primary.index.0)
             .unwrap_or(0)
             .min(total_chars);
         let mut moved = false;
@@ -3834,7 +3855,11 @@ impl NotePanel {
                 .find('\n')
                 .map(|p| byte_idx + p)
                 .unwrap_or_else(|| self.note.content.len());
-            ctx.output_mut(|o| o.copied_text = self.note.content[start_byte..end_byte].to_string());
+            ctx.output_mut(|output| {
+                output.commands.push(egui::OutputCommand::CopyText(
+                    self.note.content[start_byte..end_byte].to_string(),
+                ));
+            });
         }
 
         if moved {
@@ -3894,6 +3919,8 @@ impl NotePanel {
                 text: format!("Saved note {}", self.note.title).into(),
                 kind: ToastKind::Success,
                 options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+
+                style: Default::default(),
             });
         }
     }
@@ -3925,11 +3952,9 @@ impl NotePanel {
                     .show(ui, |ui| {
                         ui.set_min_width(fragment_width);
                         ui.set_max_width(fragment_width);
-                        CommonMarkViewer::new(format!("note_seg_{}", cache_id)).show(
-                            ui,
-                            &mut self.markdown_cache,
-                            &processed,
-                        );
+                        ui.push_id(("note_seg", cache_id.to_string()), |ui| {
+                            CommonMarkViewer::new().show(ui, &mut self.markdown_cache, &processed);
+                        });
                     });
             }));
             match render_result {
@@ -4176,7 +4201,7 @@ impl NotePanel {
                 let idx = state
                     .cursor
                     .char_range()
-                    .map(|r| r.primary.index)
+                    .map(|r| r.primary.index.0)
                     .unwrap_or_else(|| self.note.content.chars().count());
                 let idx_byte = char_to_byte_index(&self.note.content, idx);
                 self.note.content.insert_str(idx_byte, "- [ ] ");
@@ -4187,12 +4212,12 @@ impl NotePanel {
                         egui::text::CCursor::new(idx + 6),
                     )));
                 state.store(ctx, id);
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Insert Timestamp").clicked() {
                 let timestamp = format_note_editor_timestamp_now();
                 self.insert_text_at_cursor_or_selection(ctx, id, &timestamp);
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Insert Link...").clicked() {
                 if let Some((start, end)) = self.resolve_selection(ctx, id) {
@@ -4202,38 +4227,38 @@ impl NotePanel {
                     self.link_text.clear();
                 }
                 self.link_dialog_open = true;
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Convert plain links").clicked() {
                 if !self.start_plain_link_conversion() {
                     Self::show_no_plain_links_toast(app);
                 }
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Bold Selection").clicked() {
                 self.wrap_selection(ctx, id, "**", "**");
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Italic Selection").clicked() {
                 self.wrap_selection(ctx, id, "*", "*");
-                ui.close_menu();
+                ui.close();
             }
             ui.separator();
             if ui.button("Insert NOTE callout").clicked() {
                 self.insert_callout(ctx, id, "note");
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Insert WARNING callout").clicked() {
                 self.insert_callout(ctx, id, "warning");
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Insert TODO callout").clicked() {
                 self.insert_callout(ctx, id, "todo");
-                ui.close_menu();
+                ui.close();
             }
             if ui.button("Wrap selection in callout").clicked() {
                 self.wrap_selection_in_callout(ctx, id, "note");
-                ui.close_menu();
+                ui.close();
             }
         });
 
@@ -4244,7 +4269,7 @@ impl NotePanel {
                 if ui.button("Link new").clicked() {
                     self.link_new_dialog_open = true;
                     self.link_new_name.clear();
-                    ui.close_menu();
+                    ui.close();
                 }
             });
             ui.text_edit_singleline(&mut self.link_search);
@@ -4262,7 +4287,7 @@ impl NotePanel {
                             self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.link_search.clear();
                             self.invalidate_link_menu_results();
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
                     if results.len() == NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT {
@@ -4286,7 +4311,7 @@ impl NotePanel {
                     let insert = format!("![{0}](assets/{0})", fname);
                     self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                     self.image_search.clear();
-                    ui.close_menu();
+                    ui.close();
                 }
             }
             if ui.button("Screenshot...").clicked() {
@@ -4307,7 +4332,7 @@ impl NotePanel {
                                 let insert = format!("![{0}](assets/{0})", fname);
                                 self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                                 self.image_search.clear();
-                                ui.close_menu();
+                                ui.close();
                             }
                         }
                     }
@@ -4330,7 +4355,7 @@ impl NotePanel {
                             let insert = format!("![{0}](assets/{0})", img);
                             self.insert_text_at_cursor_or_selection(ctx, id, &insert);
                             self.image_search.clear();
-                            ui.close_menu();
+                            ui.close();
                         }
                     }
                 });
@@ -4354,7 +4379,7 @@ impl NotePanel {
                     let idx = state
                         .cursor
                         .char_range()
-                        .map(|r| r.primary.index)
+                        .map(|r| r.primary.index.0)
                         .unwrap_or_else(|| self.note.content.chars().count());
                     let idx_byte = char_to_byte_index(&self.note.content, idx);
                     let ends_with_ws = self.note.content[..idx_byte]
@@ -4375,7 +4400,7 @@ impl NotePanel {
                             egui::text::CCursor::new(idx + insert.chars().count()),
                         )));
                     state.store(ctx, id);
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -4424,7 +4449,7 @@ impl NotePanel {
         let idx = state
             .cursor
             .char_range()
-            .map(|r| r.primary.index)
+            .map(|r| r.primary.index.0)
             .unwrap_or_else(|| self.note.content.chars().count());
         let (updated, cursor) = insert_callout_at_char(&self.note.content, idx, kind);
         self.note.content = updated;
@@ -4495,7 +4520,7 @@ impl NotePanel {
         let idx = state
             .cursor
             .char_range()
-            .map(|r| r.primary.index)
+            .map(|r| r.primary.index.0)
             .unwrap_or_else(|| self.note.content.chars().count())
             .min(self.note.content.chars().count());
         let idx_byte = char_to_byte_index(&self.note.content, idx);
@@ -4666,7 +4691,7 @@ fn insert_tag_menu(ui: &mut egui::Ui, search: &mut String) -> Option<String> {
                     let insert = format!("#{tag}");
                     inserted = Some(insert);
                     search.clear();
-                    ui.close_menu();
+                    ui.close();
                 }
             }
         });
@@ -6674,7 +6699,7 @@ mod tests {
         app: &mut LauncherApp,
         time: f64,
     ) -> egui::FullOutput {
-        context.run(
+        context.run_ui(
             egui::RawInput {
                 time: Some(time),
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -8514,13 +8539,15 @@ mod tests {
                         .content
                         .push_str(&format!("\nDraft marker {frame:02}"));
                     panel.mark_content_changed(now);
-                    let _ = context.run(
-                        egui::RawInput {
-                            time: Some(now + 1.0),
-                            ..Default::default()
-                        },
-                        |_| {},
-                    );
+                    context
+                        .run_ui(
+                            egui::RawInput {
+                                time: Some(now + 1.0),
+                                ..Default::default()
+                            },
+                            |_| {},
+                        )
+                        .drop_without_applying_deltas();
                 },
                 |panel| panel.maybe_refresh_heavy_derived(&context, true),
             );
@@ -8624,13 +8651,14 @@ mod tests {
     }
 
     fn run_heavy_refresh_at(panel: &mut NotePanel, ctx: &egui::Context, time: f64) {
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 time: Some(time),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
         );
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -8667,7 +8695,7 @@ mod tests {
         let mut observed = None;
         for _ in 0..4 {
             observed = None;
-            let output = ctx.run(
+            let output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -8701,7 +8729,7 @@ mod tests {
                     .find(|(id, _)| *id == egui::accesskit::NodeId(widget.widget_id))
                     .unwrap();
                 assert_eq!(node.role(), egui::accesskit::Role::Button);
-                assert_eq!(node.name(), Some("Discard Changes"));
+                assert_eq!(node.label(), Some("Discard Changes"));
                 let bounds = node.bounds().unwrap();
                 assert_eq!(
                     widget.bounds,
@@ -8726,7 +8754,7 @@ mod tests {
         assert_eq!(app.query, "preserved ordinary query");
         assert!(!app.note_save_on_close && app.note_confirm_discard_unsaved_changes);
         let mut panels = [panel, other];
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -8789,7 +8817,8 @@ mod tests {
                     .unwrap();
                 assert!(sole.fixture_slug && !sole.fixture_marker);
             },
-        );
+        )
+        .drop_without_applying_deltas();
     }
 
     #[test]
@@ -8800,11 +8829,12 @@ mod tests {
         let editor_id = egui::Id::new("explicit-note-editor");
         let mut response_id = None;
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 response_id = Some(panel.render_editor(ui, &app, editor_id, None).id);
             });
-        });
+        })
+        .drop_without_applying_deltas();
 
         assert_eq!(response_id, Some(editor_id));
     }
@@ -8825,7 +8855,7 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| {
+            ctx.run_ui(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let response = ui.add(egui::TextEdit::singleline(&mut query).id(query_id));
                     // ROOT's initial show may focus its query after the note's sizing pass.
@@ -8834,7 +8864,8 @@ mod tests {
                     }
                 });
                 panel.ui(ctx, &mut app);
-            });
+            })
+            .drop_without_applying_deltas();
             if frame == 0 {
                 assert!(panel.focus_textedit_next_frame);
             } else if frame < 3 {
@@ -8857,12 +8888,13 @@ mod tests {
         let size = egui::vec2(320.0, 140.0);
         let mut first_id = None;
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 let response = panel.render_bounded_editor_with_paste(
                     ui,
                     &mut app,
-                    ctx,
+                    &frame_context,
                     source,
                     size,
                     || false,
@@ -8871,10 +8903,11 @@ mod tests {
                 );
                 first_id = Some(response.id);
                 response.request_focus();
-                store_cursor(ctx, response.id, 2, 1);
-                panel.handle_editor_response(response, ctx, &mut app, false);
+                store_cursor(&frame_context, response.id, 2, 1);
+                panel.handle_editor_response(response, &frame_context, &mut app, false);
             });
         });
+        output.drop_without_applying_deltas();
         let first_id = first_id.unwrap();
         assert_eq!(panel.last_textedit_id, Some(first_id));
 
@@ -8895,19 +8928,20 @@ mod tests {
                 egui::Event::Text("unrelated".into()),
                 egui::Event::Paste("text fallback".into()),
                 key_event(egui::Modifiers::CTRL),
+                egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
             ],
-            modifiers: egui::Modifiers::CTRL,
             ..Default::default()
         };
         // A text event would deliberately alter the editor; keep it unrelated to
         // text editing while still proving paste filtering is selective.
         input.events[0] = egui::Event::PointerGone;
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(input, |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 let response = panel.render_bounded_editor_with_paste(
                     ui,
                     &mut app,
-                    ctx,
+                    &frame_context,
                     source,
                     size,
                     || false,
@@ -8926,11 +8960,12 @@ mod tests {
                         Ok::<_, String>(filename.into())
                     },
                 );
-                events_after_interceptor = Some(input_events(ctx));
+                events_after_interceptor = Some(input_events(&frame_context));
                 second_id = Some(response.id);
-                panel.handle_editor_response(response, ctx, &mut app, false);
+                panel.handle_editor_response(response, &frame_context, &mut app, false);
             });
         });
+        output.drop_without_applying_deltas();
 
         let second_id = second_id.unwrap();
         assert_eq!((lookups.get(), saves.get()), (1, 1));
@@ -8952,7 +8987,10 @@ mod tests {
         assert!(ctx.memory(|memory| memory.has_focus(second_id)));
         assert_eq!(
             events_after_interceptor.unwrap(),
-            vec![egui::Event::PointerGone]
+            vec![
+                egui::Event::PointerGone,
+                egui::Event::ModifiersChanged(egui::Modifiers::CTRL),
+            ]
         );
         assert_eq!(panel.note.content, format!("α{markdown}ω"));
         assert!(!panel.note.content.contains("text fallback"));
@@ -8961,8 +8999,8 @@ mod tests {
             .cursor
             .char_range()
             .unwrap();
-        assert_eq!(range.primary.index, 1 + markdown.chars().count());
-        assert_eq!(range.primary.index, range.secondary.index);
+        assert_eq!(range.primary.index.0, 1 + markdown.chars().count());
+        assert_eq!(range.primary.index.0, range.secondary.index.0);
         assert!(panel.pending_selection.is_none());
         assert!(panel.fast_derived_dirty && panel.heavy_recompute_requested);
         assert_eq!(panel.last_edit_at_secs, Some(88.25));
@@ -8977,12 +9015,13 @@ mod tests {
         let source = "render-path-text-editor";
         let size = egui::vec2(320.0, 140.0);
         let mut id = None;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 let response = panel.render_bounded_editor_with_paste(
                     ui,
                     &mut app,
-                    ctx,
+                    &frame_context,
                     source,
                     size,
                     || false,
@@ -8991,28 +9030,30 @@ mod tests {
                 );
                 id = Some(response.id);
                 response.request_focus();
-                store_cursor(ctx, response.id, 1, 1);
-                panel.handle_editor_response(response, ctx, &mut app, false);
+                store_cursor(&frame_context, response.id, 1, 1);
+                panel.handle_editor_response(response, &frame_context, &mut app, false);
             });
         });
+        output.drop_without_applying_deltas();
         panel.fast_derived_dirty = false;
         panel.heavy_recompute_requested = false;
         panel.last_edit_at_secs = None;
         let lookups = std::cell::Cell::new(0);
         let mut response_changed = false;
         let mut event_seen_before_textedit = None;
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
                 time: Some(99.5),
                 events: vec![egui::Event::Paste("hello".into())],
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |root_ui| {
+                let frame_context = root_ui.ctx().clone();
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     let response = panel.render_bounded_editor_with_paste(
                         ui,
                         &mut app,
-                        ctx,
+                        &frame_context,
                         source,
                         size,
                         || false,
@@ -9022,13 +9063,14 @@ mod tests {
                         },
                         |_| -> Result<String, String> { panic!("saver must not run") },
                     );
-                    event_seen_before_textedit = Some(input_events(ctx));
+                    event_seen_before_textedit = Some(input_events(&frame_context));
                     response_changed = response.changed();
                     assert_eq!(response.id, id.unwrap());
-                    panel.handle_editor_response(response, ctx, &mut app, false);
+                    panel.handle_editor_response(response, &frame_context, &mut app, false);
                 });
             },
         );
+        output.drop_without_applying_deltas();
         assert_eq!(lookups.get(), 1);
         assert_eq!(
             panel.last_paste_outcome,
@@ -9056,20 +9098,21 @@ mod tests {
         let mut second = None;
 
         for _ in 0..2 {
-            let _ = ctx.run(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+                let frame_context = root_ui.ctx().clone();
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     let size = egui::vec2(300.0, 120.0);
                     let edit = panel.render_bounded_editor(
                         ui,
                         &mut app,
-                        ctx,
+                        &frame_context,
                         ("note_text", "same-slug"),
                         size,
                     );
                     let split = panel.render_bounded_editor(
                         ui,
                         &mut app,
-                        ctx,
+                        &frame_context,
                         ("note_split_text", "same-slug"),
                         size,
                     );
@@ -9080,6 +9123,7 @@ mod tests {
                     }
                 });
             });
+            output.drop_without_applying_deltas();
         }
 
         assert_eq!(first, second);
@@ -9097,12 +9141,14 @@ mod tests {
         assert_eq!(panel.pending_cursor_position, Some(3));
         let editor_id = egui::Id::new("actual-rendered-editor");
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 let response = panel.render_editor(ui, &app, editor_id, None);
-                panel.handle_editor_response(response, ctx, &mut app, false);
+                panel.handle_editor_response(response, &frame_context, &mut app, false);
             });
         });
+        output.drop_without_applying_deltas();
 
         assert_eq!(panel.last_textedit_id, Some(editor_id));
         assert!(panel.pending_cursor_position.is_none());
@@ -9111,7 +9157,7 @@ mod tests {
             .cursor
             .char_range()
             .unwrap();
-        assert_eq!(cursor.primary.index, 3);
+        assert_eq!(cursor.primary.index.0, 3);
 
         panel.insert_text_at_cursor_or_selection(&ctx, panel.last_textedit_id.unwrap(), "!");
         assert_eq!(panel.note.content, "abc!def");
@@ -9120,7 +9166,7 @@ mod tests {
             .cursor
             .char_range()
             .unwrap();
-        assert_eq!(cursor.primary.index, 4);
+        assert_eq!(cursor.primary.index.0, 4);
     }
 
     #[derive(Default)]
@@ -9153,12 +9199,15 @@ mod tests {
         }
 
         fn begin(self, ctx: &egui::Context, focused: egui::Id) {
-            ctx.begin_frame(egui::RawInput {
+            let modifiers = self.modifiers;
+            ctx.begin_pass(egui::RawInput {
                 time: Some(123.456),
-                modifiers: self.modifiers,
                 events: self.events,
                 ..Default::default()
             });
+            // egui 0.36 removed RawInput.modifiers. Preserve the old frame
+            // state directly while keeping this event fixture unchanged.
+            ctx.input_mut(|input| input.modifiers = modifiers);
             ctx.memory_mut(|memory| memory.request_focus(focused));
         }
     }
@@ -9181,6 +9230,7 @@ mod tests {
         state.cursor.set_char_range(Some(CCursorRange {
             primary: CCursor::new(primary),
             secondary: CCursor::new(secondary),
+            h_pos: None,
         }));
         state.store(ctx, id);
     }
@@ -9348,9 +9398,9 @@ mod tests {
             .cursor
             .char_range()
             .unwrap();
-        assert_eq!(range.primary.index, 1 + markdown.chars().count());
-        assert_eq!(range.primary.index, range.secondary.index);
-        let _ = ctx.end_frame();
+        assert_eq!(range.primary.index.0, 1 + markdown.chars().count());
+        assert_eq!(range.primary.index.0, range.secondary.index.0);
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -9390,7 +9440,7 @@ mod tests {
         assert_eq!((lookups.get(), saves.get()), (1, 1));
         assert_eq!(panel.note.content, format!("a{markdown}b"));
         assert!(input_events(&ctx).is_empty());
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -9446,11 +9496,16 @@ mod tests {
                 .char_range(),
             before_state
         );
-        egui::CentralPanel::default().show(&ctx, |ui| {
+        let mut root_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("text-only-paste-root"),
+            egui::UiBuilder::new().max_rect(ctx.content_rect()),
+        );
+        let _panel_response = egui::CentralPanel::default().show(&mut root_ui, |ui| {
             ui.add(egui::TextEdit::multiline(&mut panel.note.content).id(id));
         });
         assert_eq!(panel.note.content, "aordinary textb");
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -9496,7 +9551,7 @@ mod tests {
             assert_eq!((lookups.get(), saves.get()), (0, 0));
             assert_eq!(input_events(&ctx), original);
             assert_eq!(panel.note.content, "unchanged");
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
         }
     }
 
@@ -9510,12 +9565,13 @@ mod tests {
         let size = egui::vec2(320.0, 140.0);
         let mut first_id = None;
 
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(egui::RawInput::default(), |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 let response = panel.render_bounded_editor_with_paste(
                     ui,
                     &mut app,
-                    ctx,
+                    &frame_context,
                     source,
                     size,
                     || false,
@@ -9524,26 +9580,30 @@ mod tests {
                 );
                 first_id = Some(response.id);
                 response.request_focus();
-                store_cursor(ctx, response.id, 1, 1);
-                panel.handle_editor_response(response, ctx, &mut app, false);
+                store_cursor(&frame_context, response.id, 1, 1);
+                panel.handle_editor_response(response, &frame_context, &mut app, false);
             });
         });
+        output.drop_without_applying_deltas();
 
         let lookups = std::cell::Cell::new(0);
         let saves = std::cell::Cell::new(0);
         let mut second_id = None;
-        let _ = ctx.run(
+        let output = ctx.run_ui(
             egui::RawInput {
-                events: vec![key_event(egui::Modifiers::COMMAND)],
-                modifiers: egui::Modifiers::COMMAND,
+                events: vec![
+                    key_event(egui::Modifiers::COMMAND),
+                    egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+                ],
                 ..Default::default()
             },
-            |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
+            |root_ui| {
+                let frame_context = root_ui.ctx().clone();
+                egui::CentralPanel::default().show(root_ui, |ui| {
                     let response = panel.render_bounded_editor_with_paste(
                         ui,
                         &mut app,
-                        ctx,
+                        &frame_context,
                         source,
                         size,
                         || false,
@@ -9562,10 +9622,11 @@ mod tests {
                         },
                     );
                     second_id = Some(response.id);
-                    panel.handle_editor_response(response, ctx, &mut app, false);
+                    panel.handle_editor_response(response, &frame_context, &mut app, false);
                 });
             },
         );
+        output.drop_without_applying_deltas();
 
         assert_eq!((lookups.get(), saves.get()), (1, 1));
         assert_eq!(first_id, second_id);
@@ -9634,7 +9695,7 @@ mod tests {
                 .cursor
                 .char_range()
                 .unwrap();
-            assert_eq!((range.primary.index, range.secondary.index), (2, 1));
+            assert_eq!((range.primary.index.0, range.secondary.index.0), (2, 1));
             let error = app.error.as_deref().unwrap();
             assert!(
                 error.contains(if save_fails {
@@ -9644,7 +9705,7 @@ mod tests {
                 }),
                 "{error}"
             );
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
         }
     }
 
@@ -9679,7 +9740,7 @@ mod tests {
                 .unwrap()
                 .contains("could not open the clipboard")
         );
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -9728,7 +9789,7 @@ mod tests {
                 .to_string_lossy()
                 .contains("staging")
         }));
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -9991,9 +10052,10 @@ mod tests {
     }
 
     fn render_panel_once(ctx: &egui::Context, panel: &mut NotePanel, app: &mut LauncherApp) {
-        let _ = ctx.run(Default::default(), |ctx| {
+        ctx.run_ui(Default::default(), |ctx| {
             panel.ui(ctx, app);
-        });
+        })
+        .drop_without_applying_deltas();
     }
 
     fn render_note_body_once(
@@ -10010,21 +10072,23 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = ctx.run(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(raw_input, |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.set_width(size.x);
                     ui.set_height(size.y);
                     panel.render_note_body_row(
                         ui,
                         app,
-                        ctx,
+                        &frame_context,
                         scroll_id_source.clone(),
                         text_id_source.clone(),
                     );
                 });
             });
         });
+        output.drop_without_applying_deltas();
     }
 
     fn assert_split_panes_share_content_width(
@@ -10079,9 +10143,10 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = ctx.run(raw_input(), |ctx| {
+        ctx.run_ui(raw_input(), |ctx| {
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
         let original_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should be remembered after rendering");
@@ -10090,9 +10155,10 @@ mod tests {
         panel.note.content = "# Renamed From Markdown\n\nBody".into();
         app.note_panel_default_size = (760.0, 560.0);
 
-        let _ = ctx.run(raw_input(), |ctx| {
+        ctx.run_ui(raw_input(), |ctx| {
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
         let renamed_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should still be remembered after title changes");
@@ -10117,9 +10183,10 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run(raw_input, |ctx| {
+        ctx.run_ui(raw_input, |ctx| {
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
 
         let content_rect = panel
             .last_content_rect
@@ -10164,9 +10231,10 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run(raw_input, |ctx| {
+        ctx.run_ui(raw_input, |ctx| {
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
 
         let rect = ctx
             .memory(|memory| memory.area_rect(window_id))
@@ -10207,9 +10275,10 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let _ = ctx.run(raw_input, |ctx| {
+            ctx.run_ui(raw_input, |ctx| {
                 panel.ui(ctx, &mut app);
-            });
+            })
+            .drop_without_applying_deltas();
 
             ctx.memory(|memory| memory.area_rect(window_id))
                 .expect("note panel window rect should be remembered after rendering")
@@ -10250,9 +10319,10 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run(raw_input, |ctx| {
+        ctx.run_ui(raw_input, |ctx| {
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
 
         let content_rect = panel
             .last_content_rect
@@ -10496,9 +10566,10 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run(raw_input, |ctx| {
+        ctx.run_ui(raw_input, |ctx| {
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
 
         assert_eq!(panel.split_ratio, 0.8);
     }
@@ -10518,7 +10589,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = ctx.run(raw_input, |ctx| {
+        ctx.run_ui(raw_input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.allocate_ui_with_layout(
                     egui::vec2(pane_width, 300.0),
@@ -10529,7 +10600,8 @@ mod tests {
                     },
                 );
             });
-        });
+        })
+        .drop_without_applying_deltas();
 
         let fallback_rect = panel
             .last_preview_fallback_rect
@@ -11177,8 +11249,8 @@ More text.
         assert_eq!(panel.note.content, "**hello** world");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
-        let [min, max] = range.sorted();
-        assert_eq!((min.index, max.index), (2, 7));
+        let [min, max] = range.sorted_cursors();
+        assert_eq!((min.index.0, max.index.0), (2, 7));
         assert_eq!(panel.pending_selection, Some((2, 7)));
     }
 
@@ -11236,7 +11308,7 @@ More text.
     fn timestamp_insertion_at_caret_preserves_surrounding_text_and_collapses_cursor() {
         const TIMESTAMP: &str = "20260808-202512.347";
         let ctx = egui::Context::default();
-        ctx.begin_frame(egui::RawInput {
+        ctx.begin_pass(egui::RawInput {
             time: Some(42.25),
             ..Default::default()
         });
@@ -11254,8 +11326,8 @@ More text.
         assert_eq!(panel.note.content, "Hello 20260808-202512.347world");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
-        assert_eq!(range.primary.index, range.secondary.index);
-        assert_eq!(range.primary.index, 6 + TIMESTAMP.chars().count());
+        assert_eq!(range.primary.index.0, range.secondary.index.0);
+        assert_eq!(range.primary.index.0, 6 + TIMESTAMP.chars().count());
         assert!(panel.fast_derived_dirty);
         assert!(panel.heavy_recompute_requested);
         assert_eq!(panel.last_edit_at_secs, Some(42.25));
@@ -11266,7 +11338,7 @@ More text.
                 resulting_char_index: 6 + TIMESTAMP.chars().count(),
             }
         );
-        let _ = ctx.end_frame();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -11282,8 +11354,8 @@ More text.
         assert_eq!(panel.note.content, "Before 20260808-202512.347 after");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
-        assert_eq!(range.primary.index, range.secondary.index);
-        assert_eq!(range.primary.index, 7 + TIMESTAMP.chars().count());
+        assert_eq!(range.primary.index.0, range.secondary.index.0);
+        assert_eq!(range.primary.index.0, 7 + TIMESTAMP.chars().count());
         assert!(panel.pending_selection.is_none());
     }
 
@@ -11300,8 +11372,8 @@ More text.
         assert_eq!(panel.note.content, "alpha 20260808-202512.347eta");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
         let range = state.cursor.char_range().unwrap();
-        assert_eq!(range.primary.index, range.secondary.index);
-        assert_eq!(range.primary.index, 6 + TIMESTAMP.chars().count());
+        assert_eq!(range.primary.index.0, range.secondary.index.0);
+        assert_eq!(range.primary.index.0, 6 + TIMESTAMP.chars().count());
         assert!(panel.pending_selection.is_none());
     }
 
@@ -11330,7 +11402,7 @@ More text.
 
         assert_eq!(panel.note.content, "hello [[Other]]");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
-        let idx = state.cursor.char_range().unwrap().primary.index;
+        let idx = state.cursor.char_range().unwrap().primary.index.0;
         assert_eq!(idx, "hello [[Other]]".chars().count());
         assert!(panel.fast_derived_dirty);
         assert!(panel.heavy_recompute_requested);
@@ -11360,7 +11432,7 @@ More text.
 
         assert_eq!(panel.note.content, "hello [[Other]]");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
-        let idx = state.cursor.char_range().unwrap().primary.index;
+        let idx = state.cursor.char_range().unwrap().primary.index.0;
         assert_eq!(idx, "hello [[Other]]".chars().count());
         assert!(panel.fast_derived_dirty);
         assert!(panel.heavy_recompute_requested);
@@ -11461,7 +11533,7 @@ More text.
 
         assert_eq!(panel.note.content, "hello [[linked-note]]");
         let state = egui::widgets::text_edit::TextEditState::load(&ctx, id).unwrap();
-        let idx = state.cursor.char_range().unwrap().primary.index;
+        let idx = state.cursor.char_range().unwrap().primary.index.0;
         assert_eq!(idx, "hello [[linked-note]]".chars().count());
 
         if let Some(p) = prev {
@@ -11522,11 +11594,12 @@ More text.
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         let mut rect = egui::Rect::NOTHING;
-        let _ = ctx.run(Default::default(), |ctx| {
+        ctx.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 rect = show_wiki_link(ui, &mut app, "Second Note").rect;
             });
-        });
+        })
+        .drop_without_applying_deltas();
         assert!(app.note_panels.is_empty());
 
         let pos = rect.center();
@@ -11545,11 +11618,12 @@ More text.
             modifiers: egui::Modifiers::default(),
         });
 
-        let _ = ctx.run(input, |ctx| {
+        ctx.run_ui(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 show_wiki_link(ui, &mut app, "Second Note");
             });
-        });
+        })
+        .drop_without_applying_deltas();
 
         assert_eq!(app.note_panels.len(), 1);
         assert_eq!(slugify(&app.note_panels[0].note.title), "second-note");
@@ -11588,13 +11662,15 @@ More text.
         panel.view_mode = NoteViewMode::Edit;
         app.note_panels.push(panel);
 
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |_ui| {
+        let output = ctx.run_ui(Default::default(), |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |_ui| {
                 let mut panel = app.note_panels.remove(0);
-                panel.ui(ctx, &mut app);
+                panel.ui(&frame_context, &mut app);
                 app.note_panels.insert(0, panel);
             });
         });
+        output.drop_without_applying_deltas();
 
         let mut input = egui::RawInput::default();
         // Keep this test independent from exact widget Y-positioning. The editor
@@ -11616,13 +11692,15 @@ More text.
             modifiers: egui::Modifiers::default(),
         });
 
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |_ui| {
+        let output = ctx.run_ui(input, |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |_ui| {
                 let mut panel = app.note_panels.remove(0);
-                panel.ui(ctx, &mut app);
+                panel.ui(&frame_context, &mut app);
                 app.note_panels.insert(0, panel);
             });
         });
+        output.drop_without_applying_deltas();
 
         assert_eq!(app.query, "initial");
         assert_eq!(app.note_panels[0].note.content, "line1\n");
@@ -11652,18 +11730,31 @@ More text.
     fn handle_markdown_links_promotes_www() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
-        let output = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ctx.output_mut(|o| {
-                    o.open_url = Some(egui::OpenUrl::same_tab("www.example.com"));
+        let output =
+            ctx.run_ui(Default::default(), |root_ui| {
+                let frame_context = root_ui.ctx().clone();
+                egui::CentralPanel::default().show(root_ui, |ui| {
+                    frame_context.output_mut(|output| {
+                        output.commands.push(egui::OutputCommand::OpenUrl(
+                            egui::OpenUrl::same_tab("www.example.com"),
+                        ));
+                    });
+                    handle_markdown_links(ui, &mut app);
                 });
-                handle_markdown_links(ui, &mut app);
             });
-        });
         assert_eq!(
-            output.platform_output.open_url.unwrap().url,
+            output
+                .platform_output
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    egui::OutputCommand::OpenUrl(open_url) => Some(open_url.url.as_str()),
+                    _ => None,
+                })
+                .expect("external markdown links retain an OpenUrl output command"),
             "https://www.example.com"
         );
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -11725,16 +11816,27 @@ More text.
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
         app.show_inline_errors = true;
-        let output = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ctx.output_mut(|o| {
-                    o.open_url = Some(egui::OpenUrl::same_tab(target));
+        let output =
+            ctx.run_ui(Default::default(), |root_ui| {
+                let frame_context = root_ui.ctx().clone();
+                egui::CentralPanel::default().show(root_ui, |ui| {
+                    frame_context.output_mut(|output| {
+                        output.commands.push(egui::OutputCommand::OpenUrl(
+                            egui::OpenUrl::same_tab(target),
+                        ));
+                    });
+                    handle_markdown_links(ui, &mut app);
                 });
-                handle_markdown_links(ui, &mut app);
             });
-        });
         assert!(app.error.is_some());
-        assert!(output.platform_output.open_url.is_none());
+        assert!(
+            !output
+                .platform_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::OutputCommand::OpenUrl(_)))
+        );
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -12237,13 +12339,14 @@ Body visible always",
 
         let ctx = egui::Context::default();
         let refresh_with_setting = |panel: &mut NotePanel, enabled| {
-            let _ = ctx.run(
+            ctx.run_ui(
                 egui::RawInput {
                     time: Some(1.0),
                     ..Default::default()
                 },
                 |ctx| panel.maybe_refresh_heavy_derived(ctx, enabled),
-            );
+            )
+            .drop_without_applying_deltas();
         };
 
         refresh_with_setting(&mut panel, true);
@@ -12550,12 +12653,14 @@ Body with [[Other]]"
         };
         let mut panel = NotePanel::from_note(note);
         let initial = panel.heavy_recompute_count;
-        let _ = ctx.run(Default::default(), |ctx| {
+        ctx.run_ui(Default::default(), |ctx| {
             panel.ui(ctx, &mut app);
-        });
-        let _ = ctx.run(Default::default(), |ctx| {
+        })
+        .drop_without_applying_deltas();
+        ctx.run_ui(Default::default(), |ctx| {
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
         assert_eq!(panel.heavy_recompute_count, initial);
     }
 
@@ -12579,9 +12684,10 @@ Body with [[Other]]"
         panel.mark_content_changed(f64::MAX);
 
         for _ in 0..3 {
-            let _ = ctx.run(Default::default(), |ctx| {
+            ctx.run_ui(Default::default(), |ctx| {
                 panel.ui(ctx, &mut app);
-            });
+            })
+            .drop_without_applying_deltas();
         }
 
         assert_eq!(panel.heavy_recompute_count, initial);
@@ -12622,13 +12728,14 @@ Body with [[Other]]"
         panel.invalidate_note_derived_data_after_external_mutation();
 
         let ctx = egui::Context::default();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(0.0),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
 
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert!(!panel.heavy_recompute_requested);
@@ -12643,13 +12750,14 @@ Body with [[Other]]"
         panel.last_todo_revision = todo_version().wrapping_add(1);
 
         let ctx = egui::Context::default();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(0.0),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
 
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert!(!panel.heavy_recompute_requested);
@@ -12774,13 +12882,14 @@ Body with [[Other]]"
         notes_dir.refresh_cache();
 
         let ctx = egui::Context::default();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(0.0),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
 
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert_eq!(panel.last_notes_version, note_version());
@@ -13087,13 +13196,14 @@ Body with [[Other]]"
         notes_dir.refresh_cache();
 
         let ctx = egui::Context::default();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(0.0),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert!(panel.heavy_refresh_retry.is_none());
 
@@ -13103,13 +13213,14 @@ Body with [[Other]]"
             backlinks_enabled: true,
             retry_at: std::time::Instant::now() + std::time::Duration::from_secs(60),
         });
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(0.1),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, false),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert_eq!(panel.last_backlinks_enabled, Some(false));
         assert!(panel.heavy_refresh_retry.is_none());
@@ -13137,13 +13248,14 @@ Body with [[Other]]"
         assert_eq!(panel.heavy_recompute_count, initial_recomputes);
 
         let ctx = egui::Context::default();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(0.1),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(panel.heavy_recompute_count, initial_recomputes);
 
         panel
@@ -13151,13 +13263,14 @@ Body with [[Other]]"
             .as_mut()
             .expect("force failure should schedule a retry")
             .retry_at = std::time::Instant::now() - std::time::Duration::from_secs(1);
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(0.2),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert!(!panel.heavy_recompute_requested);
         assert!(panel.heavy_refresh_retry.is_none());
@@ -13177,23 +13290,25 @@ Body with [[Other]]"
         assert!(panel.heavy_refresh_retry.is_none());
 
         let ctx = egui::Context::default();
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(10.1),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(panel.heavy_recompute_count, initial_recomputes);
         assert!(panel.heavy_recompute_requested);
 
-        let _ = ctx.run(
+        ctx.run_ui(
             egui::RawInput {
                 time: Some(10.251),
                 ..Default::default()
             },
             |ctx| panel.maybe_refresh_heavy_derived(ctx, true),
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(panel.heavy_recompute_count, initial_recomputes + 1);
         assert!(!panel.heavy_recompute_requested);
     }
@@ -13297,11 +13412,13 @@ Body with [[Other]]"
         panel.markdown_analysis = None;
         panel.markdown_analysis_source_hash = None;
 
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                assert!(!panel.render_segment(ui, &mut app, "- [ ] item", 0, ctx));
+        let output = ctx.run_ui(Default::default(), |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
+                assert!(!panel.render_segment(ui, &mut app, "- [ ] item", 0, &frame_context));
             });
         });
+        output.drop_without_applying_deltas();
 
         assert_eq!(panel.note.content, "- [ ] item");
         assert!(panel.markdown_analysis.is_none());
@@ -13317,17 +13434,19 @@ Body with [[Other]]"
         let mut panel =
             NotePanel::from_note(empty_note("* [ ] item with [[Link]] #tag @todo:missing"));
 
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
+        let output = ctx.run_ui(Default::default(), |root_ui| {
+            let frame_context = root_ui.ctx().clone();
+            egui::CentralPanel::default().show(root_ui, |ui| {
                 assert!(!panel.render_segment(
                     ui,
                     &mut app,
                     "* [ ] item with [[Link]] #tag @todo:missing",
                     0,
-                    ctx,
+                    &frame_context,
                 ));
             });
         });
+        output.drop_without_applying_deltas();
 
         assert_eq!(
             panel.note.content,
@@ -13589,12 +13708,17 @@ body"
             entity_refs: Vec::new(),
         };
         let mut panel = NotePanel::from_note(note);
-        let _ = ctx.run(Default::default(), |ctx| {
-            ctx.output_mut(|o| {
-                o.open_url = Some(egui::OpenUrl::same_tab("note://linked-note"));
+        ctx.run_ui(Default::default(), |ctx| {
+            ctx.output_mut(|output| {
+                output
+                    .commands
+                    .push(egui::OutputCommand::OpenUrl(egui::OpenUrl::same_tab(
+                        "note://linked-note",
+                    )));
             });
             panel.ui(ctx, &mut app);
-        });
+        })
+        .drop_without_applying_deltas();
         drop(dir);
         if let Some(p) = prev {
             unsafe { std::env::set_var("ML_NOTES_DIR", p) };

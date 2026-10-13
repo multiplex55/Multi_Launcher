@@ -66,7 +66,7 @@ impl PinnedCommandsWidget {
             for (idx, action_id) in cfg.action_ids.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
                     ui.label(format!("Action {}", idx + 1));
-                    egui::ComboBox::from_id_source(format!("pin-choice-{idx}"))
+                    egui::ComboBox::from_id_salt(format!("pin-choice-{idx}"))
                         .selected_text(label_for(action_id, &options))
                         .show_ui(ui, |ui| {
                             for (id, label) in &options {

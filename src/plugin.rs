@@ -1764,7 +1764,7 @@ mod tests {
         started_rx.recv().unwrap();
         let mut rendered_busy = false;
         let context = egui::Context::default();
-        let _ = context.run(egui::RawInput::default(), |ctx| {
+        let _ = context.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 if matches!(manager.try_write_plugin("blocking"), Err("plugin busy")) {
                     ui.label("blocking settings are temporarily busy; retry next frame.");

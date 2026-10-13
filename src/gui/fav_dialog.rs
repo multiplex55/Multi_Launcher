@@ -160,7 +160,7 @@ impl FavDialog {
                         let mut plugin_names: Vec<_> =
                             app.plugins.iter().map(|p| p.name().to_string()).collect();
                         plugin_names.sort_unstable();
-                        egui::ComboBox::from_id_source("fav_cat")
+                        egui::ComboBox::from_id_salt("fav_cat")
                             .selected_text(if self.add_plugin.is_empty() {
                                 "Select".to_string()
                             } else {

@@ -127,20 +127,14 @@ impl DashboardEditorDialog {
                     ui.horizontal(|ui| {
                         ui.label("Rows");
                         if ui
-                            .add(
-                                egui::DragValue::new(&mut self.config.grid.rows)
-                                    .clamp_range(1..=12),
-                            )
+                            .add(egui::DragValue::new(&mut self.config.grid.rows).range(1..=12))
                             .changed()
                         {
                             self.clamp_all_slots();
                         }
                         ui.label("Cols");
                         if ui
-                            .add(
-                                egui::DragValue::new(&mut self.config.grid.cols)
-                                    .clamp_range(1..=12),
-                            )
+                            .add(egui::DragValue::new(&mut self.config.grid.cols).range(1..=12))
                             .changed()
                         {
                             self.clamp_all_slots();
@@ -384,7 +378,7 @@ impl DashboardEditorDialog {
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut slot.row)
-                                                .clamp_range(0..=rows.saturating_sub(1)),
+                                                .range(0..=rows.saturating_sub(1)),
                                         )
                                         .changed()
                                     {
@@ -399,7 +393,7 @@ impl DashboardEditorDialog {
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut slot.col)
-                                                .clamp_range(0..=cols.saturating_sub(1)),
+                                                .range(0..=cols.saturating_sub(1)),
                                         )
                                         .changed()
                                     {
@@ -417,7 +411,7 @@ impl DashboardEditorDialog {
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut slot.row_span)
-                                                .clamp_range(1..=max_row_span),
+                                                .range(1..=max_row_span),
                                         )
                                         .changed()
                                     {
@@ -429,7 +423,7 @@ impl DashboardEditorDialog {
                                     if ui
                                         .add(
                                             egui::DragValue::new(&mut slot.col_span)
-                                                .clamp_range(1..=max_col_span),
+                                                .range(1..=max_col_span),
                                         )
                                         .changed()
                                     {
@@ -947,6 +941,7 @@ impl DashboardEditorDialog {
                         ui.visuals().window_stroke().color
                     },
                 ),
+                egui::StrokeKind::Middle,
             );
             let slot_label = Self::slot_label(&display_slot);
             let slot_response = ui.interact(
@@ -1074,6 +1069,7 @@ impl DashboardEditorDialog {
                         ui.visuals().selection.stroke.color
                     },
                 ),
+                egui::StrokeKind::Middle,
             );
             if conflict {
                 for r in row..row + row_span {
@@ -1087,6 +1083,7 @@ impl DashboardEditorDialog {
                                 cell_rect.shrink(1.0),
                                 1.0,
                                 (1.0, egui::Color32::from_rgb(200, 64, 64)),
+                                egui::StrokeKind::Middle,
                             );
                         }
                     }

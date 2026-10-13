@@ -188,6 +188,8 @@ impl SettingsEditor {
                 text: "Settings saved".into(),
                 kind: ToastKind::Success,
                 options: ToastOptions::default().duration_in_seconds(app.toast_duration as f64),
+
+                style: Default::default(),
             });
         }
     }

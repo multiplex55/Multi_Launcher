@@ -34,7 +34,7 @@ pub(super) fn byte_label(span: crate::regex_tester::ByteSpan) -> String {
 
 fn value(ui: &mut egui::Ui, text: &str, id: &str) {
     egui::ScrollArea::both()
-        .id_source(id)
+        .id_salt(id)
         .max_height(120.0)
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -70,7 +70,7 @@ pub(super) fn show(
         copy = Some(CopyTarget::Match);
     }
     egui::CollapsingHeader::new("Full match text")
-        .id_source("regex_inspection_match_text")
+        .id_salt("regex_inspection_match_text")
         .show(ui, |ui| {
             value(ui, &matched.text, "regex_match_value_scroll")
         });
@@ -78,7 +78,7 @@ pub(super) fn show(
         return copy;
     }
     *selected_capture = (*selected_capture).min(matched.captures.len() - 1);
-    egui::ComboBox::from_id_source("regex_inspection_capture")
+    egui::ComboBox::from_id_salt("regex_inspection_capture")
         .width(ui.available_width().min(220.0))
         .selected_text(capture_label(&matched.captures[*selected_capture]))
         .show_ui(ui, |ui| {
@@ -97,7 +97,7 @@ pub(super) fn show(
                 ui.weak("Matched empty capture");
             }
             egui::CollapsingHeader::new("Full capture text")
-                .id_source(("regex_inspection_capture_text", capture.group_index))
+                .id_salt(("regex_inspection_capture_text", capture.group_index))
                 .show(ui, |ui| value(ui, text, "regex_capture_value_scroll"));
         }
     }
@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(copy_text(matched, CopyTarget::Capture(3)), Some(""));
         let ctx = egui::Context::default();
         let mut selected = 2;
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 show(ui, matched, &mut selected);
             });

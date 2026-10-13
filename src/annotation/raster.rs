@@ -233,19 +233,19 @@ pub fn default_font_arc() -> Option<(ab_glyph::FontArc, eframe::egui::FontTweak)
         .get(&eframe::egui::FontFamily::Proportional)?;
     let font_name = family.first()?;
     let data = definitions.font_data.get(font_name)?.clone();
-    let font = match data.font {
+    let font = match &data.font {
         std::borrow::Cow::Borrowed(bytes) => {
             ab_glyph::FontRef::try_from_slice_and_index(bytes, data.index)
                 .map(ab_glyph::FontArc::from)
                 .ok()
         }
         std::borrow::Cow::Owned(bytes) => {
-            ab_glyph::FontVec::try_from_vec_and_index(bytes, data.index)
+            ab_glyph::FontVec::try_from_vec_and_index(bytes.clone(), data.index)
                 .map(ab_glyph::FontArc::from)
                 .ok()
         }
     }?;
-    Some((font, data.tweak))
+    Some((font, data.tweak.clone()))
 }
 
 pub fn draw_text(

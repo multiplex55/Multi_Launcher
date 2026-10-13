@@ -688,7 +688,7 @@ impl MgGesturesDialog {
         let mut binding_enabled_changed = false;
         let binding_len = entry.bindings.len();
         egui::ScrollArea::vertical()
-            .id_source("mg_binding_list")
+            .id_salt("mg_binding_list")
             .max_height(200.0)
             .show(ui, |ui| {
                 if binding_len == 0 {
@@ -845,7 +845,7 @@ impl MgGesturesDialog {
                             app.plugins.iter().map(|p| p.name().to_string()).collect();
                         plugin_names.push("app".to_string());
                         plugin_names.sort_unstable();
-                        egui::ComboBox::from_id_source("mg_binding_category")
+                        egui::ComboBox::from_id_salt("mg_binding_category")
                             .selected_text(if editor.add_plugin.is_empty() {
                                 "Select".to_string()
                             } else {
@@ -872,7 +872,7 @@ impl MgGesturesDialog {
                     if editor.add_plugin == "app" {
                         let filter = editor.add_filter.trim().to_lowercase();
                         egui::ScrollArea::vertical()
-                            .id_source("mg_binding_app_list")
+                            .id_salt("mg_binding_app_list")
                             .max_height(160.0)
                             .show(ui, |ui| {
                                 for act in app.actions.iter() {
@@ -896,7 +896,7 @@ impl MgGesturesDialog {
                         let mut actions =
                             resolve_action_source(plugin.as_ref(), &editor.add_filter);
                         egui::ScrollArea::vertical()
-                            .id_source("mg_binding_action_list")
+                            .id_salt("mg_binding_action_list")
                             .max_height(160.0)
                             .show(ui, |ui| {
                                 for act in actions.drain(..) {
@@ -1029,8 +1029,11 @@ impl MgGesturesDialog {
                         egui::vec2(left_width, content_height),
                         egui::Sense::hover(),
                     );
-                    let mut left_ui =
-                        ui.child_ui(left_rect, egui::Layout::top_down(egui::Align::Min));
+                    let mut left_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(left_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
                     // Hard clip the left panel to its allocated rect so wide widgets
                     // (e.g. rename row text edit + buttons) don't paint over the right panel.
                     let left_clip = left_rect.shrink(1.0);
@@ -1040,7 +1043,7 @@ impl MgGesturesDialog {
 
                     left_ui.label("Gestures");
                     egui::ScrollArea::vertical()
-                        .id_source("mg_gestures_list")
+                        .id_salt("mg_gestures_list")
                         .auto_shrink([false, false])
                         .max_height(left_ui.available_height())
                         .show(&mut left_ui, |ui| {
@@ -1110,14 +1113,17 @@ impl MgGesturesDialog {
                         egui::vec2(ui.available_width(), content_height),
                         egui::Sense::hover(),
                     );
-                    let mut right_ui =
-                        ui.child_ui(right_rect, egui::Layout::top_down(egui::Align::Min));
+                    let mut right_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(right_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
                     right_ui.set_min_height(content_height);
                     right_ui.set_min_width(320.0);
                     right_ui.set_clip_rect(right_rect.shrink(1.0));
 
                     egui::ScrollArea::both()
-                        .id_source("mg_right_panel")
+                        .id_salt("mg_right_panel")
                         .auto_shrink([false, false])
                         .show(&mut right_ui, |ui| {
                             if let Some(idx) = self.selected_idx {
@@ -1126,7 +1132,7 @@ impl MgGesturesDialog {
                                     ui.horizontal(|ui| {
                                         ui.label("Direction mode");
                                         let mut dir_mode = entry.dir_mode;
-                                        egui::ComboBox::from_id_source("mg_dir_mode")
+                                        egui::ComboBox::from_id_salt("mg_dir_mode")
                                             .selected_text(match dir_mode {
                                                 DirMode::Four => "4-way",
                                                 DirMode::Eight => "8-way",
@@ -1198,6 +1204,7 @@ impl MgGesturesDialog {
                                         rect,
                                         0.0,
                                         egui::Stroke::new(1.0_f32, egui::Color32::GRAY),
+                                        egui::StrokeKind::Middle,
                                     );
                                     if response.drag_started() {
                                         // Starting a new recording replaces any existing saved preview stroke.
@@ -1265,7 +1272,9 @@ impl MgGesturesDialog {
                                         if ui.button("Export").clicked() {
                                             self.token_buffer = entry.tokens.clone();
                                             ctx.output_mut(|o| {
-                                                o.copied_text = self.token_buffer.clone();
+                                                o.commands.push(egui::OutputCommand::CopyText(
+                                                    self.token_buffer.clone(),
+                                                ));
                                             });
                                         }
                                     });

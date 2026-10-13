@@ -98,12 +98,12 @@ pub(super) fn show(
 ) -> Option<ClipboardAction> {
     let mut action = None;
     egui::ScrollArea::vertical()
-        .id_source("regex_clipboard_controls_scroll")
+        .id_salt("regex_clipboard_controls_scroll")
         .auto_shrink([false, false])
         .max_height(ui.available_height().max(1.0))
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width());
-            ui.style_mut().wrap = Some(true);
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.weak("Clipboard access happens only when you press an action.");
             if ui.button("Use Clipboard Text").clicked() {
                 action = Some(ClipboardAction::ImportText);

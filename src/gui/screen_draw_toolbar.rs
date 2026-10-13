@@ -391,9 +391,9 @@ pub(super) fn retained_current_launcher_observation_for_test(
     let settings = app.screen_draw_controller.settings().clone();
     let mut rendered = None;
     let mut actions = Vec::new();
-    let _ = ctx.run(input, |ctx| {
+    ctx.run_ui(input, |ui| {
         rendered = render_toolbar(
-            ctx,
+            ui,
             app.screen_draw_controller.state(),
             app.screen_draw_controller.runtime_state(),
             &settings,
@@ -403,7 +403,8 @@ pub(super) fn retained_current_launcher_observation_for_test(
             &mut actions,
             Some(lifetime),
         );
-    });
+    })
+    .drop_without_applying_deltas();
     assert!(
         actions.is_empty(),
         "observation fixture must not drive tool actions"
@@ -1146,7 +1147,7 @@ fn egui_local_shortcut_input(
 }
 
 fn toolbar_text_editing_owns_keyboard(ctx: &egui::Context) -> bool {
-    if !ctx.wants_keyboard_input() {
+    if !ctx.egui_wants_keyboard_input() {
         return false;
     }
     let focused = ctx.memory(|memory| memory.focused());
@@ -1402,7 +1403,7 @@ fn active_session(state: &ScreenDrawState) -> bool {
 }
 
 fn render_toolbar(
-    ctx: &egui::Context,
+    ui: &mut egui::Ui,
     state: &ScreenDrawState,
     runtime: Option<crate::screen_draw::NativeRuntimeState>,
     settings: &ScreenDrawSettings,
@@ -1412,6 +1413,7 @@ fn render_toolbar(
     actions: &mut Vec<ToolbarAction>,
     observation_lifetime: Option<u64>,
 ) -> Option<ToolbarRenderedObservation> {
+    let ctx = ui.ctx().clone();
     // inner_rect is desktop-positioned; widget and clip rectangles are already
     // client-local. Only its size participates in this conversion.
     let mut observation =
@@ -1425,7 +1427,7 @@ fn render_toolbar(
                 Some(ToolbarRenderedObservation {
                     lifetime,
                     generation: state.generation()?.get(),
-                    frame_nr: ctx.frame_nr().checked_add(1)?,
+                    frame_nr: ctx.cumulative_frame_nr().checked_add(1)?,
                     state: observed_state(state),
                     runtime_mode: observed_mode(runtime?.mode),
                     client_size,
@@ -1436,7 +1438,7 @@ fn render_toolbar(
         } else {
             None
         };
-    egui::CentralPanel::default().show(ctx, |ui| {
+    egui::CentralPanel::default().show(ui, |ui| {
         let mut contents = |ui: &mut egui::Ui| {
             render_toolbar_contents(
                 ui,
@@ -1619,7 +1621,7 @@ fn export_controls(
     ui.separator();
     ui.label(heading);
     ui.add_enabled_ui(!export_in_flight, |ui| {
-        egui::ComboBox::from_id_source("screen_draw_export_background")
+        egui::ComboBox::from_id_salt("screen_draw_export_background")
             .selected_text(export_background_label(*export_background))
             .show_ui(ui, |ui| {
                 for background in [
@@ -2056,6 +2058,14 @@ mod tests {
     use super::*;
     use crate::screen_draw::ScreenDrawGeneration;
 
+    fn test_root_ui(context: &egui::Context, id: egui::Id) -> egui::Ui {
+        egui::Ui::new(
+            context.clone(),
+            id,
+            egui::UiBuilder::new().max_rect(context.content_rect()),
+        )
+    }
+
     fn observation_owner(state: &ScreenDrawState) -> ScreenDrawLauncherObservation {
         ScreenDrawLauncherObservation {
             visibility_revision: 115,
@@ -2334,9 +2344,9 @@ mod tests {
     ) -> Option<ToolbarRenderedObservation> {
         let mut measured = None;
         let mut actions = Vec::new();
-        let _ = ctx.run(observation_input(size, scale), |ctx| {
+        ctx.run_ui(observation_input(size, scale), |ui| {
             measured = render_toolbar(
-                ctx,
+                ui,
                 state,
                 Some(observation_runtime(mode)),
                 &ScreenDrawSettings::default(),
@@ -2346,7 +2356,8 @@ mod tests {
                 &mut actions,
                 lifetime,
             );
-        });
+        })
+        .drop_without_applying_deltas();
         assert!(
             actions.is_empty(),
             "observation must not activate toolbar actions"
@@ -2546,7 +2557,7 @@ mod tests {
             retained_toolbar_frame(&ctx, &state, ScreenDrawMode::Ghost, logical, scale, true)
                 .unwrap();
         let mut measured = Some(base);
-        let _ = ctx.run(observation_input(logical, scale), |ctx| {
+        let _ = ctx.run_ui(observation_input(logical, scale), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let logical_client = egui::Rect::from_min_size(egui::Pos2::ZERO, logical);
                 let response = ui.small("Ghost");
@@ -2706,7 +2717,7 @@ mod tests {
         measured.as_mut().unwrap().label = None;
         measured.as_mut().unwrap().resume = None;
         let mut actions = Vec::new();
-        let _ = ctx.run(observation_input(egui::vec2(264.0, 700.0), 1.0), |ctx| {
+        let _ = ctx.run_ui(observation_input(egui::vec2(264.0, 700.0), 1.0), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add_enabled_ui(false, |ui| {
                     render_toolbar_contents(
@@ -3028,7 +3039,7 @@ mod tests {
             (ScreenDrawState::Finish { generation }, false),
         ] {
             let ctx = egui::Context::default();
-            ctx.begin_frame(egui::RawInput {
+            ctx.begin_pass(egui::RawInput {
                 events: vec![egui::Event::Key {
                     key: egui::Key::Escape,
                     physical_key: None,
@@ -3044,7 +3055,7 @@ mod tests {
                     input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                 }));
             }
-            let _ = ctx.end_frame();
+            let _ = ctx.end_pass();
         }
     }
 
@@ -3055,7 +3066,7 @@ mod tests {
         };
         let settings = ScreenDrawSettings::default();
         let ctx = egui::Context::default();
-        ctx.begin_frame(raw_input(vec![
+        ctx.begin_pass(raw_input(vec![
             key_press(egui::Key::P, egui::Modifiers::NONE),
             key_press(egui::Key::Z, ctrl()),
             key_release(egui::Key::Z, ctrl()),
@@ -3095,7 +3106,7 @@ mod tests {
         assert!(
             ctx.input(|input| matches!(input.events[0], egui::Event::Key { pressed: false, .. }))
         );
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
     }
 
     #[test]
@@ -3121,12 +3132,12 @@ mod tests {
         );
 
         let ctx = egui::Context::default();
-        ctx.begin_frame(raw_input(vec![key_press(egui::Key::F12, ctrl())]));
+        ctx.begin_pass(raw_input(vec![key_press(egui::Key::F12, ctrl())]));
         assert_eq!(
             consume_toolbar_local_shortcuts(&ctx, &state, &settings),
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Rectangle)]
         );
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
     }
 
     #[test]
@@ -3136,7 +3147,7 @@ mod tests {
         };
         let settings = ScreenDrawSettings::default();
         let ctx = egui::Context::default();
-        ctx.begin_frame(raw_input(vec![key_press(
+        ctx.begin_pass(raw_input(vec![key_press(
             egui::Key::P,
             egui::Modifiers::NONE,
         )]));
@@ -3144,19 +3155,19 @@ mod tests {
             consume_toolbar_local_shortcuts(&ctx, &state, &settings),
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
         );
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
 
         let mut repeated = key_press(egui::Key::P, egui::Modifiers::NONE);
         if let egui::Event::Key { repeat, .. } = &mut repeated {
             *repeat = true;
         }
-        ctx.begin_frame(raw_input(vec![
+        ctx.begin_pass(raw_input(vec![
             repeated,
             key_press(egui::Key::F24, egui::Modifiers::NONE),
         ]));
         assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
         assert_eq!(ctx.input(|input| input.events.len()), 2);
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
     }
 
     #[test]
@@ -3174,7 +3185,7 @@ mod tests {
         };
 
         let empty = egui::Context::default();
-        empty.begin_frame(raw_input(Vec::new()));
+        empty.begin_pass(raw_input(Vec::new()));
         assert!(
             consume_toolbar_local_shortcuts_with_win_modifier(
                 &empty,
@@ -3185,10 +3196,10 @@ mod tests {
             .is_empty()
         );
         assert_eq!(reads.get(), 0);
-        let _ = empty.end_frame();
+        let _ = empty.end_pass();
 
         let unsupported = egui::Context::default();
-        unsupported.begin_frame(raw_input(vec![key_press(
+        unsupported.begin_pass(raw_input(vec![key_press(
             egui::Key::Comma,
             egui::Modifiers::NONE,
         )]));
@@ -3202,10 +3213,10 @@ mod tests {
             .is_empty()
         );
         assert_eq!(reads.get(), 0);
-        let _ = unsupported.end_frame();
+        let _ = unsupported.end_pass();
 
         let repeated = egui::Context::default();
-        repeated.begin_frame(raw_input(vec![key_press(
+        repeated.begin_pass(raw_input(vec![key_press(
             egui::Key::P,
             egui::Modifiers::NONE,
         )]));
@@ -3213,12 +3224,12 @@ mod tests {
             consume_toolbar_local_shortcuts(&repeated, &state, &settings),
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
         );
-        let _ = repeated.end_frame();
+        let _ = repeated.end_pass();
         let mut repeated_press = key_press(egui::Key::P, egui::Modifiers::NONE);
         if let egui::Event::Key { repeat, .. } = &mut repeated_press {
             *repeat = true;
         }
-        repeated.begin_frame(raw_input(vec![repeated_press]));
+        repeated.begin_pass(raw_input(vec![repeated_press]));
         assert!(
             consume_toolbar_local_shortcuts_with_win_modifier(
                 &repeated,
@@ -3229,7 +3240,7 @@ mod tests {
             .is_empty()
         );
         assert_eq!(reads.get(), 0);
-        let _ = repeated.end_frame();
+        let _ = repeated.end_pass();
     }
 
     #[test]
@@ -3272,14 +3283,14 @@ mod tests {
             (ScreenDrawState::Drawing { generation }, false),
         ] {
             let ctx = egui::Context::default();
-            ctx.begin_frame(egui::RawInput {
+            ctx.begin_pass(egui::RawInput {
                 focused,
                 events: vec![key_press(egui::Key::P, egui::Modifiers::NONE)],
                 ..Default::default()
             });
             assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
             assert_eq!(ctx.input(|input| input.events.len()), 1);
-            let _ = ctx.end_frame();
+            let _ = ctx.end_pass();
         }
     }
 
@@ -3291,38 +3302,40 @@ mod tests {
         let settings = ScreenDrawSettings::default();
 
         let text_ctx = egui::Context::default();
-        text_ctx.begin_frame(raw_input(Vec::new()));
+        text_ctx.begin_pass(raw_input(Vec::new()));
         let mut text = String::new();
-        egui::CentralPanel::default().show(&text_ctx, |ui| {
+        let mut root_ui = test_root_ui(&text_ctx, egui::Id::new("toolbar-text-focus-root"));
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             ui.text_edit_singleline(&mut text).request_focus();
         });
-        let _ = text_ctx.end_frame();
-        text_ctx.begin_frame(raw_input(vec![key_press(
+        text_ctx.end_pass().drop_without_applying_deltas();
+        text_ctx.begin_pass(raw_input(vec![key_press(
             egui::Key::P,
             egui::Modifiers::NONE,
         )]));
         assert!(toolbar_text_editing_owns_keyboard(&text_ctx));
         assert!(consume_toolbar_local_shortcuts(&text_ctx, &state, &settings).is_empty());
         assert_eq!(text_ctx.input(|input| input.events.len()), 1);
-        let _ = text_ctx.end_frame();
+        text_ctx.end_pass().drop_without_applying_deltas();
 
         let button_ctx = egui::Context::default();
-        button_ctx.begin_frame(raw_input(Vec::new()));
-        egui::CentralPanel::default().show(&button_ctx, |ui| {
+        button_ctx.begin_pass(raw_input(Vec::new()));
+        let mut root_ui = test_root_ui(&button_ctx, egui::Id::new("toolbar-button-focus-root"));
+        egui::CentralPanel::default().show(&mut root_ui, |ui| {
             ui.button("Focused button").request_focus();
         });
-        let _ = button_ctx.end_frame();
-        button_ctx.begin_frame(raw_input(vec![key_press(
+        button_ctx.end_pass().drop_without_applying_deltas();
+        button_ctx.begin_pass(raw_input(vec![key_press(
             egui::Key::P,
             egui::Modifiers::NONE,
         )]));
-        assert!(button_ctx.wants_keyboard_input());
+        assert!(button_ctx.egui_wants_keyboard_input());
         assert!(!toolbar_text_editing_owns_keyboard(&button_ctx));
         assert_eq!(
             consume_toolbar_local_shortcuts(&button_ctx, &state, &settings),
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
         );
-        let _ = button_ctx.end_frame();
+        button_ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -3337,23 +3350,25 @@ mod tests {
                 crate::screen_draw::HotkeyChord::from_unchecked(chord),
             );
             let ctx = egui::Context::default();
-            ctx.begin_frame(raw_input(Vec::new()));
-            egui::CentralPanel::default().show(&ctx, |ui| {
+            ctx.begin_pass(raw_input(Vec::new()));
+            let mut root_ui = test_root_ui(&ctx, egui::Id::new("toolbar-shortcut-button-root"));
+            egui::CentralPanel::default().show(&mut root_ui, |ui| {
                 ui.button("Focused button").request_focus();
             });
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
 
-            ctx.begin_frame(raw_input(vec![key_press(key, egui::Modifiers::NONE)]));
+            ctx.begin_pass(raw_input(vec![key_press(key, egui::Modifiers::NONE)]));
             assert_eq!(
                 consume_toolbar_local_shortcuts(&ctx, &state, &settings),
                 vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
             );
             let mut clicked = false;
-            egui::CentralPanel::default().show(&ctx, |ui| {
+            let mut root_ui = test_root_ui(&ctx, egui::Id::new("toolbar-shortcut-button-root"));
+            egui::CentralPanel::default().show(&mut root_ui, |ui| {
                 clicked = ui.button("Focused button").clicked();
             });
             assert!(!clicked, "{chord} activated the focused button");
-            let _ = ctx.end_frame();
+            ctx.end_pass().drop_without_applying_deltas();
         }
     }
 
@@ -3398,14 +3413,14 @@ mod tests {
         };
         let settings = ScreenDrawSettings::default();
         let ctx = egui::Context::default();
-        ctx.begin_frame(raw_input(vec![key_press(
+        ctx.begin_pass(raw_input(vec![key_press(
             egui::Key::Escape,
             egui::Modifiers::NONE,
         )]));
         assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
         assert!(consume_drawing_escape(&ctx, &state));
         assert!(ctx.input(|input| input.events.is_empty()));
-        let _ = ctx.end_frame();
+        let _ = ctx.end_pass();
     }
 
     #[test]

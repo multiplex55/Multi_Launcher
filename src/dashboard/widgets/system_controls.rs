@@ -269,7 +269,7 @@ impl Widget for SystemControlsWidget {
                     let mut selection_changed = None;
                     let selected_label =
                         Self::power_plan_label(&self.cache.data.power_plans, &selection);
-                    egui::ComboBox::from_id_source("system_controls_power_plan")
+                    egui::ComboBox::from_id_salt("system_controls_power_plan")
                         .selected_text(selected_label)
                         .show_ui(ui, |ui| {
                             for plan in &self.cache.data.power_plans {

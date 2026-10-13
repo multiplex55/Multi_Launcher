@@ -93,7 +93,7 @@ mod tests {
             root_window_bridge: Default::default(),
         };
         let draw = |editor: &mut RadialEditorState| {
-            let _ = context.run(
+            let _ = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -386,7 +386,7 @@ mod tests {
         let depths = session.acceptance_history_depths();
         let mut gallery = AppearanceGallery::default();
         let context = egui::Context::default();
-        context.style_mut(|style| style.animation_time = 0.0);
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
         fn text(
             shape: &egui::epaint::Shape,
             labels: &mut Vec<String>,
@@ -425,7 +425,7 @@ mod tests {
                 Vec::new()
             };
             labels.clear();
-            let output = context.run(
+            let output = context.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
                         egui::Pos2::ZERO,
@@ -1435,7 +1435,7 @@ impl AppearanceGallery {
             .show(ui, |ui| {
                 for (index, entry) in entries.iter().enumerate() {
                     ui.vertical(|ui| {
-                        let response = ui.add(egui::SelectableLabel::new(
+                        let response = ui.add(egui::Button::selectable(
                             self.choice.as_ref().is_some_and(|choice| {
                                 choice.key == entry.key
                                     && choice.builtin == entry.builtin

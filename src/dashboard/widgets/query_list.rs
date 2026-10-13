@@ -91,7 +91,7 @@ impl QueryListWidget {
             ui.horizontal(|ui| {
                 ui.label("Show up to");
                 changed |= ui
-                    .add(egui::DragValue::new(&mut cfg.count).clamp_range(1..=25))
+                    .add(egui::DragValue::new(&mut cfg.count).range(1..=25))
                     .changed();
                 ui.label("results");
             });
@@ -288,13 +288,16 @@ impl Widget for QueryListWidget {
         let max_rows = self.cache.data.len().min(self.cfg.count);
         let scroll_id = ui.id().with("query_list_scroll");
         egui::ScrollArea::both()
-            .id_source(scroll_id)
+            .id_salt(scroll_id)
             .auto_shrink([false; 2])
             .show_rows(ui, row_height, max_rows, |ui, range| {
                 for action in &self.cache.data[range] {
                     ui.horizontal(|ui| {
                         if ui
-                            .add(egui::Button::new(&action.label).wrap(false))
+                            .add(
+                                egui::Button::new(&action.label)
+                                    .wrap_mode(egui::TextWrapMode::Extend),
+                            )
                             .clicked()
                         {
                             clicked = Some(action.clone());
@@ -302,7 +305,7 @@ impl Widget for QueryListWidget {
                         if self.cfg.show_desc {
                             ui.add(
                                 egui::Label::new(egui::RichText::new(&action.desc).small())
-                                    .wrap(false),
+                                    .wrap_mode(egui::TextWrapMode::Extend),
                             );
                         }
                     });
