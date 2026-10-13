@@ -346,6 +346,16 @@ After release control/review, next independently scoped prototype may reuse plan
 
 Prototype verification: fresh equivalent stock/reuse100/1,000 cold/warm owners,complete ordered run/glyph and eager geometry parity,hits/misses/builds,max entries/run counts,lookup/replacement overhead; incompatible keys,face isolation,eviction/font replacement,valid available variation-instance fixture. Keep unavailable fixtures explicit rather than invent coordinates. No Full81 repeat or production vendoring until actual material savings,bounded ownership and parity are demonstrated and reviewed. Remaining cold shaping and warm UI costs remain visible; theoretical45% plan share is not acceptance.
 
+### M2-A queued warm-row attribution after bounded plan reuse
+
+Read-only planner inspection identifies changed visible-row paths: original SelectableLabel directly lays out/allocates/paints; current Button::selectable traverses AtomLayout, previous-response lookup, class/style resolution, Frame preparation and an owned text copy for widget information. Row scopes use UiBuilder. These are source facts, not measured causes. Accepted warm cases have no layout misses/shaping; avoid repeating cold attribution.
+
+Next smallest step, sequentially after the active archive prototype: subdivide the existing100-row warm LauncherRowsBuilt observation on the actual row loop. Test-only opt-in aggregates for action/display-text preparation, row Ui/scope construction, existing row_ui.add(Button::selectable(...)), and remaining tooltip/context-menu/response work. Retain owner/UI/RowsBuilt totals, stage counts/sums and instrumentation-off/on controls; no per-row logging or clocks in ordinary builds. Preserve visible indices,selection,IDs,rectangles,interaction sense,primitive output and accessibility assertions; require zero geometry rebuilds/measured rows/shaping. Source/API placement must be confirmed by the assigned implementer before editing.
+
+Independent review: scope/with_layout timing can enclose Button timing. Make stages disjoint or explicitly label scope inclusive and never add overlapping values; retain a RowsBuilt remainder for uninstrumented loop/observer work. Bind zero-shaping proof to the existing archived epaint observer if executed there; live cache counters alone do not directly prove it. No new observation framework.
+
+Use the resulting dominant boundary for a focused correction. No legacy hand-painted widget substitution, accessibility removal, retained catalog galleys or styling changes to obtain speed. This packet is queued planning only; no source edits/builds/tests yet and no authorization for overlapping writers.
+
 ## M2-B concrete Windows native parity handoff (read-only planning)
 
 Objective: validate migrated native windows, activation, input and overlays; correct demonstrated migration defects at their existing owners. Execute after M2-A, with M1-C compilation and M1-B lifecycle tests accepted. Keep explicit Glow; backend comparison belongs to M2-C. Confirm completed M1-C viewport callback signatures before editing. This packet is planning evidence, not executed acceptance.
