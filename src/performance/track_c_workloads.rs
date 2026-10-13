@@ -7,6 +7,8 @@
 use super::workloads::{self, Fixture, IsolatedWorkspace};
 use crate::actions::Action;
 use crate::plugins::note::Note;
+#[cfg(test)]
+use eframe::egui;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -15,6 +17,34 @@ pub use super::workloads::StableSignature;
 
 pub const WARMUPS: usize = 5;
 pub const MEASURED_SAMPLES: usize = 20;
+
+/// Keeps a test-owned egui frame output inspectable through validation, then
+/// discards renderer deltas when the owner result is dropped.
+#[cfg(test)]
+pub(crate) struct TestFrameOutput(egui::FullOutput);
+
+#[cfg(test)]
+impl From<egui::FullOutput> for TestFrameOutput {
+    fn from(output: egui::FullOutput) -> Self {
+        Self(output)
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestFrameOutput {
+    type Target = egui::FullOutput;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestFrameOutput {
+    fn drop(&mut self) {
+        std::mem::take(&mut self.0).drop_without_applying_deltas();
+    }
+}
 
 const TRACK_C_SEED_DOMAIN: u64 = 0x435F_574F_524B_4C44;
 
@@ -425,6 +455,38 @@ pub fn emit_samples(metadata: ReportMetadata, samples: &[SampleRecord]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_c_test_frame_output_discards_pending_texture_deltas_on_drop() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.label("pending font-atlas texture delta");
+            },
+        );
+        assert!(
+            !output.textures_delta.set.is_empty() || !output.textures_delta.free.is_empty(),
+            "the first text pass produces a pending texture delta"
+        );
+
+        let output = TestFrameOutput::from(output);
+        assert!(
+            !output.shapes.is_empty(),
+            "validation can inspect the full output"
+        );
+        assert!(
+            !output.textures_delta.set.is_empty() || !output.textures_delta.free.is_empty(),
+            "wrapping preserves pending deltas until validation is done"
+        );
+        drop(output);
+    }
 
     #[test]
     fn track_c_fixture_mode_and_domains_are_stable_and_separate() {

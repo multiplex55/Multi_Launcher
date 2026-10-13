@@ -260,7 +260,8 @@ struct RootListGeometryKey {
     width_bits: u32,
     pixels_per_point_bits: u32,
     button_font: egui::FontId,
-    wrap: bool,
+    wrap_mode: egui::TextWrapMode,
+    extra_text_line_spacing_bits: u32,
     button_padding_x_bits: u32,
     button_padding_y_bits: u32,
     interaction_height_bits: u32,
@@ -457,12 +458,10 @@ impl RootListGeometryCache {
         is_grid: bool,
     ) -> bool {
         let spacing = ui.spacing();
-        let effective_text_style = ui
-            .style()
-            .override_text_style
-            .as_ref()
-            .unwrap_or(&egui::TextStyle::Button);
-        let button_font = effective_text_style.resolve(ui.style());
+        let button_font = egui::FontSelection::Default.resolve_with_fallback(
+            ui.style(),
+            egui::FontSelection::Style(egui::TextStyle::Button),
+        );
         let key = RootListGeometryKey {
             result_generation: self.result_generation,
             result_count: results.len(),
@@ -470,7 +469,8 @@ impl RootListGeometryCache {
             width_bits: ui.available_width().to_bits(),
             pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
             button_font,
-            wrap: ui.wrap_mode() == egui::TextWrapMode::Wrap,
+            wrap_mode: ui.wrap_mode(),
+            extra_text_line_spacing_bits: spacing.extra_text_line_spacing.to_bits(),
             button_padding_x_bits: spacing.button_padding.x.to_bits(),
             button_padding_y_bits: spacing.button_padding.y.to_bits(),
             interaction_height_bits: spacing.interact_size.y.to_bits(),
@@ -498,7 +498,7 @@ impl RootListGeometryCache {
         let spacing_y = f32::from_bits(key.item_spacing_y_bits);
         let padding = spacing.button_padding;
         let interaction_height = spacing.interact_size.y;
-        let wrap = key.wrap;
+        let wrap_mode = key.wrap_mode;
         let mut row_tops = Vec::with_capacity(results.len());
         let mut row_heights = Vec::with_capacity(results.len());
         let mut row_x_offsets = Vec::with_capacity(results.len());
@@ -522,11 +522,7 @@ impl RootListGeometryCache {
                 ui.ctx(),
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
-                    if wrap {
-                        egui::TextWrapMode::Wrap
-                    } else {
-                        egui::TextWrapMode::Extend
-                    },
+                    wrap_mode,
                     (content_width - 2.0 * padding.x).max(0.0),
                 ),
                 egui::FontSelection::Style(egui::TextStyle::Button),
@@ -583,14 +579,13 @@ impl RootListGeometryCache {
         let nominal_width = ((width - (columns.saturating_sub(1) as f32 * grid_spacing_x))
             / columns as f32)
             .max(160.0);
-        let effective_text_style = ui
-            .style()
-            .override_text_style
-            .as_ref()
-            .unwrap_or(&egui::TextStyle::Button);
-        let button_font = effective_text_style.resolve(ui.style());
-        let wrap =
-            ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Extend) == egui::TextWrapMode::Wrap;
+        // Grid buttons are placed in a left-to-right child UI, whose default
+        // text mode is Extend unless the style explicitly overrides it.
+        let wrap_mode = ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Extend);
+        let button_font = egui::FontSelection::Default.resolve_with_fallback(
+            ui.style(),
+            egui::FontSelection::Style(egui::TextStyle::Button),
+        );
         let key = RootListGeometryKey {
             result_generation: self.result_generation,
             result_count: results.len(),
@@ -598,7 +593,8 @@ impl RootListGeometryCache {
             width_bits: width.to_bits(),
             pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
             button_font,
-            wrap,
+            wrap_mode,
+            extra_text_line_spacing_bits: spacing.extra_text_line_spacing.to_bits(),
             button_padding_x_bits: spacing.button_padding.x.to_bits(),
             button_padding_y_bits: spacing.button_padding.y.to_bits(),
             interaction_height_bits: spacing.interact_size.y.to_bits(),
@@ -641,11 +637,7 @@ impl RootListGeometryCache {
                 ui.ctx(),
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
-                    if wrap {
-                        egui::TextWrapMode::Wrap
-                    } else {
-                        egui::TextWrapMode::Extend
-                    },
+                    key.wrap_mode,
                     (nominal_width - 2.0 * padding.x).max(0.0),
                 ),
                 egui::FontSelection::Style(egui::TextStyle::Button),
@@ -5595,10 +5587,18 @@ mod tests {
     #[test]
     fn root_list_geometry_matches_eager_selectable_label_layout() {
         let cases = [
-            (220.0, false, 1.0, false),
-            (220.0, true, 1.0, false),
-            (420.0, true, 1.25, false),
-            (760.0, false, 1.0, true),
+            (220.0, egui::TextWrapMode::Extend, 1.0, false, None, 0.0),
+            (220.0, egui::TextWrapMode::Wrap, 1.0, false, None, 0.0),
+            (420.0, egui::TextWrapMode::Wrap, 1.25, false, None, 0.0),
+            (760.0, egui::TextWrapMode::Extend, 1.0, true, None, 0.0),
+            (
+                300.0,
+                egui::TextWrapMode::Truncate,
+                1.0,
+                false,
+                Some(egui::FontId::new(22.0, egui::FontFamily::Proportional)),
+                3.5,
+            ),
         ];
         let actions = vec![
             Action {
@@ -5628,11 +5628,19 @@ mod tests {
         ];
         let aliases = HashMap::from([("folder:alias".into(), Some("Alias".into()))]);
 
-        for (case_index, (width, wrap, scale, heading_override)) in cases.into_iter().enumerate() {
+        for (
+            case_index,
+            (width, wrap_mode, scale, heading_override, override_font, extra_line_spacing),
+        ) in cases.into_iter().enumerate()
+        {
             let ctx = egui::Context::default();
-            if heading_override {
+            if heading_override || override_font.is_some() || extra_line_spacing != 0.0 {
                 let mut style = (*ctx.style_of(ctx.theme())).clone();
-                style.override_text_style = Some(egui::TextStyle::Heading);
+                if heading_override {
+                    style.override_text_style = Some(egui::TextStyle::Heading);
+                }
+                style.override_font_id = override_font.clone();
+                style.spacing.extra_text_line_spacing = extra_line_spacing;
                 ctx.set_style_of(ctx.theme(), style);
             }
             let outer =
@@ -5651,6 +5659,7 @@ mod tests {
             let mut cache = RootListGeometryCache::default();
             let mut virtual_rows = Vec::new();
             let mut eager_layout = None;
+            let mut measured_button_font = egui::FontId::default();
 
             let output = ctx.run_ui(input, |ctx| {
                 let mut eager = test_child_ui(
@@ -5662,11 +5671,7 @@ mod tests {
                 );
                 eager.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     let mut style = ui.style().as_ref().clone();
-                    style.wrap_mode = Some(if wrap {
-                        egui::TextWrapMode::Wrap
-                    } else {
-                        egui::TextWrapMode::Extend
-                    });
+                    style.wrap_mode = Some(wrap_mode);
                     ui.set_style(style);
                     scale_ui(ui, scale, |ui| {
                         eager_layout = Some(eager_root_list_selectable_labels(
@@ -5684,13 +5689,13 @@ mod tests {
                 );
                 measured.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     let mut style = ui.style().as_ref().clone();
-                    style.wrap_mode = Some(if wrap {
-                        egui::TextWrapMode::Wrap
-                    } else {
-                        egui::TextWrapMode::Extend
-                    });
+                    style.wrap_mode = Some(wrap_mode);
                     ui.set_style(style);
                     scale_ui(ui, scale, |ui| {
+                        measured_button_font = egui::FontSelection::Default.resolve_with_fallback(
+                            ui.style(),
+                            egui::FontSelection::Style(egui::TextStyle::Button),
+                        );
                         cache.ensure(ui, &actions, &aliases, false, false);
                         for (index, action) in actions.iter().enumerate() {
                             let row_rect = egui::Rect::from_min_size(
@@ -5724,6 +5729,13 @@ mod tests {
             let eager_rows = &eager_layout.rows;
             let eager_available_widths = &eager_layout.available_widths;
             let eager_bounds = eager_layout.bounds;
+            let key = cache.key.as_ref().expect("the cache measured its rows");
+            assert_eq!(key.wrap_mode, wrap_mode);
+            assert_eq!(
+                key.extra_text_line_spacing_bits,
+                extra_line_spacing.to_bits()
+            );
+            assert_eq!(key.button_font, measured_button_font);
             assert_eq!(cache.row_tops.len(), eager_rows.len());
             for (index, response) in eager_rows.iter().enumerate() {
                 let expected_top = response.top() - outer.top();
@@ -6030,34 +6042,87 @@ mod tests {
             f32,
             usize,
             f32,
-            Option<bool>,
+            Option<egui::TextWrapMode>,
             bool,
             usize,
             Option<f32>,
             bool,
-        ); 9] = [
-            (360.0, 1, 1.0, None, false, 4, None, true),
-            (480.0, 2, 1.25, None, false, 9, None, true),
-            (960.0, 3, 1.0, Some(true), true, 7, None, true),
-            (230.0, 5, 0.9, Some(false), false, 3, None, true),
-            (1_600.0, 6, 1.0, None, true, 13, None, true),
-            (1_600.0, 6, 1.0, None, false, 3, None, false),
-            (420.0, 3, 1.0, None, false, 8, Some(210.0), true),
-            (800.0, 3, 1.35, None, false, 0, None, false),
-            (800.0, 3, 1.0, None, false, 1, None, false),
+            Option<egui::FontId>,
+            f32,
+        ); 10] = [
+            (360.0, 1, 1.0, None, false, 4, None, true, None, 0.0),
+            (480.0, 2, 1.25, None, false, 9, None, true, None, 0.0),
+            (
+                960.0,
+                3,
+                1.0,
+                Some(egui::TextWrapMode::Wrap),
+                true,
+                7,
+                None,
+                true,
+                None,
+                0.0,
+            ),
+            (
+                230.0,
+                5,
+                0.9,
+                Some(egui::TextWrapMode::Extend),
+                false,
+                3,
+                None,
+                true,
+                None,
+                0.0,
+            ),
+            (1_600.0, 6, 1.0, None, true, 13, None, true, None, 0.0),
+            (1_600.0, 6, 1.0, None, false, 3, None, false, None, 0.0),
+            (420.0, 3, 1.0, None, false, 8, Some(210.0), true, None, 0.0),
+            (800.0, 3, 1.35, None, false, 0, None, false, None, 0.0),
+            (800.0, 3, 1.0, None, false, 1, None, false, None, 0.0),
+            (
+                420.0,
+                2,
+                1.0,
+                Some(egui::TextWrapMode::Truncate),
+                false,
+                4,
+                None,
+                true,
+                Some(egui::FontId::new(21.0, egui::FontFamily::Proportional)),
+                2.5,
+            ),
         ];
 
         for (
             case_index,
-            (width, columns, scale, wrap, heading, count, interaction_width, wide_last),
+            (
+                width,
+                columns,
+                scale,
+                wrap_mode,
+                heading,
+                count,
+                interaction_width,
+                wide_last,
+                override_font,
+                extra_line_spacing,
+            ),
         ) in cases.into_iter().enumerate()
         {
             let ctx = egui::Context::default();
-            if heading || interaction_width.is_some() {
+            if heading
+                || interaction_width.is_some()
+                || override_font.is_some()
+                || extra_line_spacing != 0.0
+            {
                 let mut style = (*ctx.style_of(ctx.theme())).clone();
                 if heading {
                     style.override_text_style = Some(egui::TextStyle::Heading);
                 }
+                style.override_font_id = override_font.clone();
+                style.spacing.extra_text_line_spacing = extra_line_spacing;
                 if let Some(interaction_width) = interaction_width {
                     style.spacing.interact_size.x = interaction_width;
                 }
@@ -6098,6 +6163,8 @@ mod tests {
             let mut cached_cells = Vec::new();
             let mut interaction_size = egui::Vec2::ZERO;
             let mut measured_root_cursor = egui::Pos2::ZERO;
+            let mut measured_wrap_mode = egui::TextWrapMode::Extend;
+            let mut measured_button_font = egui::FontId::default();
 
             for frame in 0..4 {
                 let input = egui::RawInput {
@@ -6117,13 +6184,9 @@ mod tests {
                         outer,
                     );
                     eager.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        if let Some(wrap) = wrap {
+                        if let Some(wrap_mode) = wrap_mode {
                             let mut style = ui.style().as_ref().clone();
-                            style.wrap_mode = Some(if wrap {
-                                egui::TextWrapMode::Wrap
-                            } else {
-                                egui::TextWrapMode::Extend
-                            });
+                            style.wrap_mode = Some(wrap_mode);
                             ui.set_style(style);
                         }
                         scale_ui(ui, scale, |ui| {
@@ -6143,17 +6206,20 @@ mod tests {
                         outer,
                     );
                     measured.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                        if let Some(wrap) = wrap {
+                        if let Some(wrap_mode) = wrap_mode {
                             let mut style = ui.style().as_ref().clone();
-                            style.wrap_mode = Some(if wrap {
-                                egui::TextWrapMode::Wrap
-                            } else {
-                                egui::TextWrapMode::Extend
-                            });
+                            style.wrap_mode = Some(wrap_mode);
                             ui.set_style(style);
                         }
                         scale_ui(ui, scale, |ui| {
                             measured_root_cursor = ui.cursor().min;
+                            measured_wrap_mode =
+                                ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Extend);
+                            measured_button_font = egui::FontSelection::Default
+                                .resolve_with_fallback(
+                                    ui.style(),
+                                    egui::FontSelection::Style(egui::TextStyle::Button),
+                                );
                             interaction_size = ui.spacing().interact_size;
                             cache.ensure_grid(ui, &actions, columns);
                             cached_cells = actions
@@ -6171,6 +6237,16 @@ mod tests {
 
             assert_eq!(eager_cells.len(), actions.len());
             assert_eq!(cached_cells.len(), actions.len());
+            let key = cache.key.as_ref().expect("the cache measured the grid");
+            assert_eq!(key.wrap_mode, measured_wrap_mode);
+            if let Some(wrap_mode) = wrap_mode {
+                assert_eq!(key.wrap_mode, wrap_mode);
+            }
+            assert_eq!(
+                key.extra_text_line_spacing_bits,
+                extra_line_spacing.to_bits()
+            );
+            assert_eq!(key.button_font, measured_button_font);
             for (index, (eager, cached)) in eager_cells.iter().zip(&cached_cells).enumerate() {
                 assert!(
                     eager.min.distance(cached.min) <= 1.0 && eager.max.distance(cached.max) <= 1.0,
@@ -7081,6 +7157,8 @@ mod tests {
     ) -> TrackCRootListState {
         let ctx = egui::Context::default();
         let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         for frame in 0..9 {
             run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
                 .drop_without_applying_deltas();
@@ -7679,6 +7757,8 @@ mod tests {
         let ctx = egui::Context::default();
         crate::gui::font_revision::install(&ctx, default_font_definitions.clone());
         let mut app = root_list_app_at(&ctx, old_actions.clone(), root);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         // Keep the synthetic fixture independent from constructor-time host
         // aliases and bookmarks. The selected recipe installs only its own
         // deterministic aliases below.
@@ -7869,7 +7949,9 @@ mod tests {
         }
     }
 
-    fn track_c2d_run_list_owner(state: &mut TrackC2DListState) -> egui::FullOutput {
+    fn track_c2d_run_list_owner(
+        state: &mut TrackC2DListState,
+    ) -> crate::performance::track_c_workloads::TestFrameOutput {
         if state.recipe.installs_new_results() {
             state.app.actions = state
                 .prepared_catalog
@@ -7902,14 +7984,14 @@ mod tests {
         }
         let frame = state.frame_index;
         state.frame_index += 1;
-        run_root_list_frame(
+        crate::performance::track_c_workloads::TestFrameOutput::from(run_root_list_frame(
             &state.ctx,
             &mut state.app,
             frame,
             state.new_screen_width,
             state.screen_height,
             Vec::new(),
-        )
+        ))
     }
 
     fn track_c2d_geometry_signature(cache: &RootListGeometryCache) -> u64 {
@@ -8214,7 +8296,14 @@ mod tests {
         let new_key = cache.key.as_ref();
         assert!(new_key.is_some());
         if let Some(old_key) = old_key {
-            assert_eq!(old_key.wrap, state.old_wrap);
+            assert_eq!(
+                old_key.wrap_mode,
+                if state.old_wrap {
+                    egui::TextWrapMode::Wrap
+                } else {
+                    egui::TextWrapMode::Extend
+                }
+            );
             assert_eq!(
                 old_key.pixels_per_point_bits,
                 state.recipe.old_pixels_per_point().to_bits()
@@ -8273,8 +8362,10 @@ mod tests {
             TrackC2DRecipe::WrapChange => {
                 assert!(key_changed);
                 assert_ne!(
-                    old_key.expect("settled wrap recipe has an old key").wrap,
-                    new_key.expect("new frame has a key").wrap,
+                    old_key
+                        .expect("settled wrap recipe has an old key")
+                        .wrap_mode,
+                    new_key.expect("new frame has a key").wrap_mode,
                     "wrap transition changes that exact geometry-key field"
                 );
             }
@@ -8310,8 +8401,10 @@ mod tests {
             new_key.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
             old_key.map_or(0, |key| track_c2d_font_signature(Some(key))),
             new_key.map_or(0, |key| track_c2d_font_signature(Some(key))),
-            old_key.map_or(0, |key| key.wrap as u64),
-            new_key.map_or(state.new_wrap as u64, |key| key.wrap as u64),
+            old_key.map_or(0, |key| (key.wrap_mode == egui::TextWrapMode::Wrap) as u64),
+            new_key.map_or(state.new_wrap as u64, |key| {
+                (key.wrap_mode == egui::TextWrapMode::Wrap) as u64
+            }),
             old_key.map_or(0, |key| key.show_full_paths as u64),
             new_key.map_or(state.new_full_paths as u64, |key| {
                 key.show_full_paths as u64
@@ -8438,7 +8531,7 @@ mod tests {
         let case = recipe.token();
         assert!(!case.bytes().any(|byte| byte.is_ascii_whitespace()));
         eprintln!(
-            "C2D_LIST_RESULT schema=1 stage=cold_list_geometry_characterization installation=eager_list_geometry owner=RootListGeometryCache::ensure measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_root_list_geometry source={source} profile={profile} mode={mode} telemetry_enabled=true observer_enabled=false warmups={WARMUPS} samples={} exclusions=0 case={case} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] presentation_prefix_len=[{}] geometry_capacity_before_bytes=[{}] geometry_capacity_after_bytes=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{viewport_receipts}] transition_receipts=[{transition_receipts}]",
+            "C2D_LIST_RESULT schema=1 stage=cold_list_geometry_characterization installation=eager_list_geometry owner=RootListGeometryCache::ensure measurement_scope=installation+run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt fixture=synthetic_root_list_geometry source={source} profile={profile} mode={mode} telemetry_enabled=true observer_enabled=false warmups={WARMUPS} samples={} exclusions=0 case={case} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] presentation_prefix_len=[{}] geometry_capacity_before_bytes=[{}] geometry_capacity_after_bytes=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{viewport_receipts}] transition_receipts=[{transition_receipts}]",
             samples.len(),
             counters(0),
             counters(1),
@@ -8562,6 +8655,8 @@ mod tests {
     ) -> TrackCRootGridState {
         let ctx = egui::Context::default();
         let mut app = root_list_app_at(&ctx, actions.to_vec(), root);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         app.query_results_layout.enabled = true;
         app.query_results_layout.cols = columns;
         app.query_results_layout.respect_plugin_capability = false;
@@ -8885,8 +8980,8 @@ mod tests {
     #[ignore = "opt-in Track C owner benchmark; isolated synthetic action catalog only"]
     fn track_c_benchmark_root_list_frame_geometry() {
         use crate::performance::track_c_workloads::{
-            BenchmarkMode, ReportMetadata, TrackCWorkspace, action_fixture, emit_samples,
-            measure_owner,
+            BenchmarkMode, ReportMetadata, TestFrameOutput, TrackCWorkspace, action_fixture,
+            emit_samples, measure_owner,
         };
 
         assert!(crate::performance::enabled());
@@ -8905,20 +9000,20 @@ mod tests {
                     |state| {
                         let frame = state.frame_index;
                         state.frame_index += 1;
-                        run_root_list_frame(
+                        TestFrameOutput::from(run_root_list_frame(
                             &state.ctx,
                             &mut state.app,
                             frame,
                             960.0,
                             640.0,
                             Vec::new(),
-                        )
+                        ))
                     },
                     |state, _frame_output| track_c_validate_root_list_state(state),
                 );
                 emit_samples(
                     ReportMetadata {
-                        owner: "egui_Context_run+LauncherApp::render_root_frame",
+                        owner: "run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt",
                         fixture_name: "root-list-default-layout",
                         fixture_signature: fixture.summary.signature,
                         item_count: *count,
@@ -8965,8 +9060,8 @@ mod tests {
     #[ignore = "opt-in Track C owner benchmark; isolated synthetic action catalog only"]
     fn track_c_benchmark_root_grid_frame_geometry() {
         use crate::performance::track_c_workloads::{
-            BenchmarkMode, ReportMetadata, StableSignature, TrackCWorkspace, action_fixture,
-            action_fixture_identity, emit_samples, measure_owner,
+            BenchmarkMode, ReportMetadata, StableSignature, TestFrameOutput, TrackCWorkspace,
+            action_fixture, action_fixture_identity, emit_samples, measure_owner,
         };
 
         assert!(crate::performance::enabled());
@@ -9001,20 +9096,20 @@ mod tests {
                         |state| {
                             let frame = state.frame_index;
                             state.frame_index += 1;
-                            run_root_list_frame(
+                            TestFrameOutput::from(run_root_list_frame(
                                 &state.ctx,
                                 &mut state.app,
                                 frame,
                                 960.0,
                                 640.0,
                                 Vec::new(),
-                            )
+                            ))
                         },
                         |state, _frame_output| track_c_validate_root_grid_state(state),
                     );
                     emit_samples(
                         ReportMetadata {
-                            owner: "egui_Context_run+LauncherApp::render_root_frame",
+                            owner: "run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt",
                             fixture_name: "root_grid_action_fixture",
                             fixture_signature,
                             item_count: *count,
@@ -9326,7 +9421,7 @@ mod tests {
     }
 
     struct TrackC2EGridFrame {
-        _output: egui::FullOutput,
+        _output: crate::performance::track_c_workloads::TestFrameOutput,
         observation: c2e_grid_cell_loop_observer::Receipt,
     }
 
@@ -9385,6 +9480,8 @@ mod tests {
         );
 
         let mut app = root_list_app_at(&ctx, old_actions, root);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         app.folder_aliases.clear();
         app.folder_aliases_lc.clear();
         app.bookmark_aliases.clear();
@@ -9558,7 +9655,7 @@ mod tests {
         let output =
             run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new());
         TrackC2EGridFrame {
-            _output: output,
+            _output: crate::performance::track_c_workloads::TestFrameOutput::from(output),
             observation: scope.finish(),
         }
     }
@@ -9743,8 +9840,8 @@ mod tests {
             u64::from(key.width_bits),
             old.map_or(0, |key| u64::from(key.pixels_per_point_bits)),
             u64::from(key.pixels_per_point_bits),
-            old.is_some_and(|key| key.wrap) as u64,
-            key.wrap as u64,
+            old.is_some_and(|key| key.wrap_mode == egui::TextWrapMode::Wrap) as u64,
+            (key.wrap_mode == egui::TextWrapMode::Wrap) as u64,
             old.is_some_and(|key| key.show_full_paths) as u64,
             key.show_full_paths as u64,
             old.is_some_and(|key| key.is_grid) as u64,
@@ -9831,14 +9928,15 @@ mod tests {
             .expect("the prepared owner begins with settled grid geometry");
         assert_eq!(key.width_bits, actual_available_width.to_bits());
         assert_eq!(key.pixels_per_point_bits, 1.0_f32.to_bits());
-        assert!(!key.wrap && !key.show_full_paths && key.is_grid);
+        assert_eq!(key.wrap_mode, egui::TextWrapMode::Extend);
+        assert!(!key.show_full_paths && key.is_grid);
         assert_eq!(key.grid_columns, state.columns);
         assert_eq!(old_key.result_generation, state.generation_before);
         assert_eq!(old_key.result_count, state.count);
         assert_eq!(old_key.width_bits, key.width_bits);
         assert_eq!(old_key.pixels_per_point_bits, key.pixels_per_point_bits);
         assert_eq!(old_key.button_font, key.button_font);
-        assert_eq!(old_key.wrap, key.wrap);
+        assert_eq!(old_key.wrap_mode, key.wrap_mode);
         assert_eq!(old_key.show_full_paths, key.show_full_paths);
         assert_eq!(old_key.is_grid, key.is_grid);
         assert_eq!(old_key.grid_columns, key.grid_columns);
@@ -10213,7 +10311,7 @@ mod tests {
             crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
         };
         eprintln!(
-            "C2E_GRID_RESULT schema=1 stage=cold_grid_geometry_characterization installation=eager_grid_geometry fixture=synthetic_root_grid_geometry owner=RootListGeometryCache::ensure_grid measurement_scope=installation+egui_Context_run+LauncherApp::render_root_frame source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 case={} count={} columns={} fixture_signature={:016x} elapsed_ns=[{}] geometry_ns=[{}] cell_loop_ns=[{}] geometry_residual_ns=[{}] owner_residual_ns=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] painted_cells=[{}] presentation_prefix_len=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{}] transition_receipts=[{}] storage_receipts=[{}]",
+            "C2E_GRID_RESULT schema=1 stage=cold_grid_geometry_characterization installation=eager_grid_geometry fixture=synthetic_root_grid_geometry owner=RootListGeometryCache::ensure_grid measurement_scope=installation+run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt source={} profile={} mode={} telemetry_enabled=true observer_enabled=true warmups={} samples={} exclusions=0 case={} count={} columns={} fixture_signature={:016x} elapsed_ns=[{}] geometry_ns=[{}] cell_loop_ns=[{}] geometry_residual_ns=[{}] owner_residual_ns=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] painted_cells=[{}] presentation_prefix_len=[{}] full_output_state_ids=[{}] action_output_ids=[{}] presentation_ids=[{}] geometry_projection_ids=[{}] viewport_receipts=[{}] transition_receipts=[{}] storage_receipts=[{}]",
             source,
             profile,
             mode,
@@ -10381,6 +10479,7 @@ mod tests {
         let mut state = track_c2e_prepare_grid_state(root, fixture);
         let initial_frame = track_c2e_run_grid_owner(&mut state);
         track_c2e_validate_grid_state(&mut state, &initial_frame);
+        drop(initial_frame._output);
 
         let old_action_id = state.expected_result_action_id;
         let old_presentation_id = state.presentation_id;
@@ -10415,6 +10514,7 @@ mod tests {
             args_only_observation.structural_signature,
             args_only_action_id
         );
+        drop(args_only_frame._output);
 
         track_c2e_rebase_grid_state(&mut state);
         let old_key = state
@@ -10462,7 +10562,7 @@ mod tests {
             Vec::new(),
         );
         let atlas_frame = TrackC2EGridFrame {
-            _output: output,
+            _output: crate::performance::track_c_workloads::TestFrameOutput::from(output),
             observation: scope.finish(),
         };
         let app = &state.app;
@@ -10521,6 +10621,7 @@ mod tests {
             state.app.test_root_rendered_row_ids, state.expected_visible_ids,
             "same generation and presentation retain absolute widget IDs"
         );
+        drop(atlas_frame._output);
     }
 
     #[test]
@@ -10558,6 +10659,7 @@ mod tests {
                 observation.revision_receipts[1],
                 track_c2e_geometry_signature(&state.app.root_list_geometry)
             );
+            drop(frame._output);
             drop(state);
         }
         track_c2e_args_and_atlas_rejection_contract(workspace.root());
@@ -10650,6 +10752,8 @@ mod tests {
         );
         app.selected = None;
         focus_launcher_query(&ctx, &mut app);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         for frame in 0..9 {
             run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
                 .drop_without_applying_deltas();
@@ -10664,6 +10768,7 @@ mod tests {
         let available_width = ctx
             .data(|data| data.get_temp::<f32>(egui::Id::new("track-c-root-list-available-width")))
             .expect("the real scaled root UI records its available width");
+        assert!(available_width.is_finite() && available_width > 0.0);
         let expected_query = format!("app {QUERY_SUFFIX}");
         let expected_actions = track_c_expected_root_query_actions(actions, QUERY_SUFFIX);
         assert!(!expected_actions.is_empty());
@@ -10701,6 +10806,10 @@ mod tests {
             geometry_before.rebuild_count > 0,
             "setup settles real root geometry"
         );
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
         crate::performance::track_c::reset();
         TrackCRootQueryState {
             app,
@@ -10723,7 +10832,9 @@ mod tests {
         }
     }
 
-    fn track_c_run_root_query_owner(state: &mut TrackCRootQueryState) -> egui::FullOutput {
+    fn track_c_run_root_query_owner(
+        state: &mut TrackCRootQueryState,
+    ) -> crate::performance::track_c_workloads::TestFrameOutput {
         state.armed_revision = Some(arm_track_c_frame_sample(
             &mut state.app,
             state.invocation_id,
@@ -10738,6 +10849,7 @@ mod tests {
             640.0,
             vec![egui::Event::Text(state.query_suffix.to_owned())],
         )
+        .into()
     }
 
     fn track_c_validate_root_query_frame(
@@ -12702,7 +12814,7 @@ mod tests {
                 let output = serde_json::json!({
                     "schema": 2,
                     "stage": "gui_query_to_usable_cpu_viewport",
-                    "owner": "egui_Context_run+LauncherApp::render_root_frame",
+                    "owner": "run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt",
                     "owner_scope": "accepted_gui_mutation_to_first_usable_cpu_root_frame",
                     "sequence_elapsed_scope": "whole_controlled_sequence_including_interstep_validation",
                     "provider_scope": "captured_controlled_snapshot_no_other_provider_calls",
@@ -13490,7 +13602,7 @@ mod tests {
             crate::performance::track_c_workloads::BenchmarkMode::Full => "full",
         };
         eprintln!(
-            "C2C_REUSE_RESULT schema=1 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+egui_Context_run+LauncherApp::render_root_frame fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=active_font_revision settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=scoped_installation_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
+            "C2C_REUSE_RESULT schema=1 stage=forced_refresh_equal_reuse installation=full_action_equal_reuse owner=LauncherApp::search+run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt fixture=synthetic_action_catalog_controlled_provider query=app_empty_term_exact viewport=960x640 fonts=active_font_revision settings=exact_app_prefix_default_list source={source} profile={profile} mode={mode} telemetry_enabled=true warmups={WARMUPS} samples={} exclusions=0 notification_scope=inside_owner_before_frame mutation_scope=setup_outside_owner geometry_scope=scoped_installation_observer case={} count={count} fixture_signature={fixture_signature:016x} elapsed_ns=[{elapsed}] result_count=[{}] provider_calls=[{}] provider_generation_delta=[{}] result_generation_delta=[{}] geometry_rebuilds=[{}] geometry_measured_rows=[{}] geometry_measured_cells=[{}] geometry_ns=[{}] painted_rows=[{}] search_valid=[{}] search_pending=[{}] provider_deferral=[{}] catalog_versions_stable=[{}] selected_index=[{}] suggestion_count=[{}] comparison_calls=[{}] comparison_ns=[{}] comparison_input_results=[{}] equal_reuses=[{}] discarded_incoming_actions=[{}] replacements=[{}] installed_actions=[{}] installation_ns=[{}] catalog_receipts=[{catalog_receipts}] provider_revision_receipts=[{provider_revision_receipts}] complete_output_state_ids=[{complete_output_state_ids}] action_output_ids=[{action_output_ids}] viewport_receipts=[{viewport_receipts}]",
             samples.len(),
             case.key(),
             numeric(0),
@@ -13949,7 +14061,7 @@ mod tests {
             );
             emit_samples(
                 ReportMetadata {
-                    owner: "query_event+egui_Context_run+LauncherApp::render_root_frame",
+                    owner: "query_event+run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt",
                     fixture_name: "root_query_action_fixture",
                     fixture_signature,
                     item_count: *count,
@@ -14210,13 +14322,69 @@ mod tests {
         frame += 1;
         expect_rebuild(&app);
 
+        let override_font = egui::FontId::new(19.0, egui::FontFamily::Proportional);
         let mut style = (*ctx.style_of(ctx.theme())).clone();
-        style.wrap_mode = Some(egui::TextWrapMode::Extend);
+        style.override_font_id = Some(override_font.clone());
+        ctx.set_style_of(ctx.theme(), style.clone());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        expect_rebuild(&app);
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().button_font,
+            override_font
+        );
+
+        let prior_rebuilds = app.root_list_geometry.test_observation().rebuild_count;
+        style.override_text_style = Some(egui::TextStyle::Monospace);
+        ctx.set_style_of(ctx.theme(), style.clone());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        assert_eq!(
+            app.root_list_geometry.test_observation().rebuild_count,
+            prior_rebuilds,
+            "override_font_id takes precedence over text-style overrides"
+        );
+
+        let resized_override_font = egui::FontId::new(22.0, egui::FontFamily::Proportional);
+        style.override_font_id = Some(resized_override_font.clone());
+        ctx.set_style_of(ctx.theme(), style.clone());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        expect_rebuild(&app);
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().button_font,
+            resized_override_font
+        );
+
+        style.spacing.extra_text_line_spacing = 2.75;
+        ctx.set_style_of(ctx.theme(), style.clone());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        expect_rebuild(&app);
+        assert_eq!(
+            app.root_list_geometry
+                .key
+                .as_ref()
+                .unwrap()
+                .extra_text_line_spacing_bits,
+            2.75_f32.to_bits()
+        );
+
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.wrap_mode = Some(egui::TextWrapMode::Truncate);
         ctx.set_style_of(ctx.theme(), style);
         run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
             .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().wrap_mode,
+            egui::TextWrapMode::Truncate
+        );
 
         ctx.set_pixels_per_point(1.25);
         run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
@@ -14267,6 +14435,183 @@ mod tests {
             prior_rebuilds + 1,
             "returning from grid mode rebuilds list geometry"
         );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn root_list_and_grid_geometry_follow_consumer_font_activation() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) =
+            root_list_test_app(&ctx, (0..12).map(root_list_action).collect());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+
+        let changed_definitions = |copies: usize| {
+            let mut definitions = egui::FontDefinitions::default();
+            let family = definitions
+                .families
+                .get_mut(&egui::FontFamily::Proportional)
+                .expect("default proportional family exists");
+            let existing_face = family[0].clone();
+            for _ in 0..copies {
+                family.push(existing_face.clone());
+            }
+            definitions
+        };
+        let first_replacement = changed_definitions(1);
+        let second_replacement = changed_definitions(2);
+        let default_definitions = egui::FontDefinitions::default();
+        let mut frame = 0;
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        app.dashboard_data_cache.wait_for_refresh();
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        let action_count = app.results.len() as u64;
+        let initial = app.root_list_geometry.test_observation();
+        assert_eq!(initial.rebuild_count, 1);
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().font_revision,
+            0
+        );
+
+        let run_frame_with_installs =
+            |app: &mut LauncherApp, frame_index: usize, installs: &[egui::FontDefinitions]| {
+                let output = app
+                    .run_root_frame_for_test_with(
+                        &ctx,
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(960.0, 640.0),
+                            )),
+                            time: Some(1.0 + frame_index as f64 / 60.0),
+                            ..Default::default()
+                        },
+                        false,
+                        |app, ui| {
+                            app.render_root_ui(ui);
+                            for definitions in installs {
+                                crate::gui::font_revision::install(ui.ctx(), definitions.clone());
+                            }
+                        },
+                    )
+                    .0;
+                output.drop_without_applying_deltas();
+            };
+
+        run_frame_with_installs(&mut app, frame, &[default_definitions.clone()]);
+        frame += 1;
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(app.root_list_geometry.test_observation(), initial);
+
+        run_frame_with_installs(
+            &mut app,
+            frame,
+            &[first_replacement.clone(), default_definitions],
+        );
+        frame += 1;
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(app.root_list_geometry.test_observation(), initial);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(app.root_list_geometry.test_observation(), initial);
+
+        run_frame_with_installs(&mut app, frame, &[first_replacement]);
+        frame += 1;
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().font_revision,
+            0,
+            "an in-pass request leaves the already measured geometry valid"
+        );
+        assert_eq!(app.root_list_geometry.test_observation(), initial);
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        let list_active_revision = crate::gui::font_revision::active_revision(&ctx);
+        assert!(list_active_revision > 0);
+        let after_list_activation = app.root_list_geometry.test_observation();
+        assert_eq!(
+            after_list_activation.rebuild_count,
+            initial.rebuild_count + 1
+        );
+        assert_eq!(
+            after_list_activation.measured_rows - initial.measured_rows,
+            action_count
+        );
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().font_revision,
+            list_active_revision
+        );
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            after_list_activation,
+            "the next unchanged list frame reuses the font-revision geometry"
+        );
+
+        app.query_results_layout.enabled = true;
+        app.query_results_layout.cols = 3;
+        app.query_results_layout.respect_plugin_capability = false;
+        app.recompute_query_results_layout();
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        let before_grid_activation = app.root_list_geometry.test_observation();
+        assert!(app.root_list_geometry.key.as_ref().unwrap().is_grid);
+
+        run_frame_with_installs(&mut app, frame, &[second_replacement]);
+        frame += 1;
+        assert_eq!(
+            crate::gui::font_revision::active_revision(&ctx),
+            list_active_revision
+        );
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            before_grid_activation
+        );
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().font_revision,
+            list_active_revision,
+            "grid measurement keeps the font revision active at its own pass"
+        );
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        let grid_active_revision = crate::gui::font_revision::active_revision(&ctx);
+        assert!(grid_active_revision > list_active_revision);
+        let after_grid_activation = app.root_list_geometry.test_observation();
+        assert_eq!(
+            after_grid_activation.rebuild_count,
+            before_grid_activation.rebuild_count + 1
+        );
+        assert_eq!(
+            after_grid_activation.measured_cells - before_grid_activation.measured_cells,
+            action_count
+        );
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().font_revision,
+            grid_active_revision
+        );
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            after_grid_activation,
+            "the next unchanged grid frame reuses the activated geometry"
+        );
+
         drop(app);
         drop(workspace);
     }
@@ -14650,7 +14995,7 @@ mod tests {
         expect_rebuild(&app);
 
         let mut style = (*ctx.style_of(ctx.theme())).clone();
-        style.wrap_mode = Some(egui::TextWrapMode::Wrap);
+        style.wrap_mode = Some(egui::TextWrapMode::Truncate);
         ctx.set_style_of(ctx.theme(), style);
         run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
             .drop_without_applying_deltas();
@@ -14682,6 +15027,60 @@ mod tests {
         run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
             .drop_without_applying_deltas();
         expect_rebuild(&app);
+
+        let paints_fill = |output: &egui::FullOutput, color| {
+            output.shapes.iter().any(|clipped| {
+                matches!(
+                    &clipped.shape,
+                    egui::Shape::Rect(rect) if rect.fill == color
+                )
+            })
+        };
+        let first_palette_color = egui::Color32::from_rgb(231, 23, 143);
+        let second_palette_color = egui::Color32::from_rgb(17, 219, 167);
+        let mut visuals = (*ctx.style_of(ctx.theme())).visuals.clone();
+        visuals.striped = true;
+        visuals.faint_bg_color = first_palette_color;
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.visuals = visuals.clone();
+        ctx.set_style_of(ctx.theme(), style);
+        let palette_observation = app.root_list_geometry.test_observation();
+        let palette_revision = crate::gui::font_revision::active_revision(&ctx);
+        let first_output = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        assert!(
+            paints_fill(&first_output, first_palette_color),
+            "the actual grid frame paints the active stripe color"
+        );
+        first_output.drop_without_applying_deltas();
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            palette_observation
+        );
+        assert_eq!(
+            crate::gui::font_revision::active_revision(&ctx),
+            palette_revision
+        );
+        frame += 1;
+
+        visuals.faint_bg_color = second_palette_color;
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.visuals = visuals;
+        ctx.set_style_of(ctx.theme(), style);
+        let second_output = run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new());
+        assert!(
+            paints_fill(&second_output, second_palette_color),
+            "a palette-only change reaches the actual grid paint output"
+        );
+        assert!(!paints_fill(&second_output, first_palette_color));
+        second_output.drop_without_applying_deltas();
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            palette_observation
+        );
+        assert_eq!(
+            crate::gui::font_revision::active_revision(&ctx),
+            palette_revision
+        );
 
         let mut visuals = egui::Visuals::dark();
         visuals.striped = true;
@@ -15124,7 +15523,7 @@ mod tests {
                 };
                 workloads::emit_summary_with_root_geometries(
                     &format!("launcher-{count}-{scenario}"),
-                    "production render_root_frame(None); headless egui debug-test CPU",
+                    "production render_root_ui; headless run_ui lifecycle debug-test CPU",
                     summary,
                     timing,
                     &metrics,

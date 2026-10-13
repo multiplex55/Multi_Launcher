@@ -412,6 +412,7 @@ struct NotesGeometryKey {
     title_font: egui::FontId,
     small_font: egui::FontId,
     wrap_mode: Option<egui::TextWrapMode>,
+    extra_text_line_spacing_bits: u32,
     spacing_x: u32,
     spacing_y: u32,
     interact_width: u32,
@@ -497,12 +498,13 @@ fn geometry_key(
         font_revision,
         viewport_width: viewport_width.to_bits(),
         pixels_per_point: pixels_per_point.to_bits(),
-        title_font: style.override_text_style.as_ref().map_or_else(
-            || egui::FontSelection::Default.resolve(style),
-            |text_style| text_style.resolve(style),
-        ),
-        small_font: egui::TextStyle::Small.resolve(style),
+        title_font: egui::FontSelection::Default.resolve(style),
+        small_font: style
+            .override_font_id
+            .clone()
+            .unwrap_or_else(|| egui::TextStyle::Small.resolve(style)),
         wrap_mode: style.wrap_mode,
+        extra_text_line_spacing_bits: spacing.extra_text_line_spacing.to_bits(),
         spacing_x: spacing.item_spacing.x.to_bits(),
         spacing_y: spacing.item_spacing.y.to_bits(),
         interact_width: spacing.interact_size.x.to_bits(),
@@ -514,21 +516,14 @@ fn galley_size(
     ctx: &egui::Context,
     style: &egui::Style,
     text: egui::WidgetText,
-    wrap: bool,
+    wrap_mode: egui::TextWrapMode,
     width: f32,
     valign: egui::Align,
 ) -> egui::Vec2 {
     text.into_galley_impl(
         ctx,
         style,
-        egui::text::TextWrapping::from_wrap_mode_and_width(
-            if wrap {
-                egui::TextWrapMode::Wrap
-            } else {
-                egui::TextWrapMode::Extend
-            },
-            width,
-        ),
+        egui::text::TextWrapping::from_wrap_mode_and_width(wrap_mode, width),
         egui::FontSelection::Default,
         valign,
     )
@@ -559,10 +554,8 @@ fn measure_notes_geometry(
     );
     let spacing_x = style.spacing.item_spacing.x;
     let spacing_y = style.spacing.item_spacing.y;
-    let header_wrap =
-        style.wrap_mode.unwrap_or(egui::TextWrapMode::Extend) == egui::TextWrapMode::Wrap;
-    let preview_wrap =
-        style.wrap_mode.unwrap_or(egui::TextWrapMode::Wrap) == egui::TextWrapMode::Wrap;
+    let header_wrap = style.wrap_mode.unwrap_or(egui::TextWrapMode::Extend);
+    let preview_wrap = style.wrap_mode.unwrap_or(egui::TextWrapMode::Wrap);
     let mut prefix_width = viewport_width.max(0.0);
     let mut top = 0.0;
     let mut content_height = 0.0;
@@ -2229,7 +2222,7 @@ mod tests {
             egui::Id::new("track-c-notes-eager-oracle"),
         );
         let mut result = None;
-        let _ = ctx.run_ui(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(viewport),
                 ..Default::default()
@@ -2274,6 +2267,7 @@ mod tests {
                 });
             },
         );
+        output.drop_without_applying_deltas();
         result.expect("the projection-aware eager note oracle runs its row composition")
     }
 
@@ -2912,7 +2906,7 @@ mod tests {
         let profile =
             std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
         eprintln!(
-            "TRACK_C_WIDTH_RECEIPT schema=1 owner=egui_Context_run+NotesDialog::ui source={} profile={} mode={:?} telemetry_enabled={} fixture=quick_notes_note_fixture fixture_signature={:016x} count={} viewport=screen_300x640_transition_960x640 settings=notes_empty_backlinks_on_tasks_on cold_type={} scenario=quick_notes_empty_horizontal_width_transition transition=screen_960x640_to_300x640 actual_scroll_area_width_milli=[{}] samples={}",
+            "TRACK_C_WIDTH_RECEIPT schema=1 owner=run_ui+NotesDialog::ui source={} profile={} mode={:?} telemetry_enabled={} fixture=quick_notes_note_fixture fixture_signature={:016x} count={} viewport=screen_300x640_transition_960x640 settings=notes_empty_backlinks_on_tasks_on cold_type={} scenario=quick_notes_empty_horizontal_width_transition transition=screen_960x640_to_300x640 actual_scroll_area_width_milli=[{}] samples={}",
             source,
             profile,
             mode,
@@ -3015,8 +3009,8 @@ mod tests {
     #[ignore = "opt-in Track C owner benchmark; isolated synthetic note fixture only"]
     fn track_c_benchmark_quick_notes_dialog_geometry() {
         use crate::performance::track_c_workloads::{
-            BenchmarkMode, ReportMetadata, TrackCWorkspace, emit_samples, measure_owner,
-            note_fixture,
+            BenchmarkMode, ReportMetadata, TestFrameOutput, TrackCWorkspace, emit_samples,
+            measure_owner, note_fixture,
         };
 
         assert!(crate::performance::enabled());
@@ -3054,20 +3048,20 @@ mod tests {
                             |state| {
                                 let frame = state.frame_index;
                                 state.frame_index += 1;
-                                run_track_c_notes_frame(
+                                TestFrameOutput::from(run_track_c_notes_frame(
                                     &state.ctx,
                                     &mut state.dialog,
                                     &mut state.app,
                                     2.0 + frame as f64 / 60.0,
                                     state.screen_width,
                                     state.screen_height,
-                                )
+                                ))
                             },
                             |state, _frame_output| track_c_validate_quick_notes_state(state),
                         );
                         emit_samples(
                             ReportMetadata {
-                                owner: "egui_Context_run+NotesDialog::ui",
+                                owner: "run_ui+NotesDialog::ui",
                                 fixture_name: "quick_notes_note_fixture",
                                 fixture_signature,
                                 item_count: *count,
@@ -3121,14 +3115,14 @@ mod tests {
                     |state| {
                         let frame = state.frame_index;
                         state.frame_index += 1;
-                        run_track_c_notes_frame(
+                        TestFrameOutput::from(run_track_c_notes_frame(
                             &state.ctx,
                             &mut state.dialog,
                             &mut state.app,
                             2.0 + frame as f64 / 60.0,
                             state.screen_width,
                             state.screen_height,
-                        )
+                        ))
                     },
                     |state, _frame_output| {
                         let observation = track_c_validate_quick_notes_state(state);
@@ -3158,7 +3152,7 @@ mod tests {
                 );
                 emit_samples(
                     ReportMetadata {
-                        owner: "egui_Context_run+NotesDialog::ui",
+                        owner: "run_ui+NotesDialog::ui",
                         fixture_name: "quick_notes_note_fixture",
                         fixture_signature,
                         item_count: *count,
@@ -3327,6 +3321,11 @@ mod tests {
         }
         assert_eq!(dialog.filtered_indices.len(), 240);
         assert_eq!(dialog.notes_geometry.as_ref().unwrap().rows.len(), 240);
+        let large_geometry_capacity = dialog
+            .notes_geometry
+            .as_ref()
+            .unwrap()
+            .partial_capacity_bytes();
         assert!(
             dialog.notes_geometry.as_ref().unwrap().rows[0].width_after
                 > dialog.test_scroll_area_inner_rect.unwrap().width(),
@@ -3489,6 +3488,25 @@ mod tests {
         }
         assert_eq!(dialog.filtered_indices, vec![174]);
         assert_eq!(dialog.last_rendered_indices, vec![174]);
+        let sparse_geometry = dialog.notes_geometry.as_ref().unwrap();
+        assert_eq!(sparse_geometry.rows.len(), 1);
+        assert_eq!(sparse_geometry.row_by_identity.len(), 1);
+        assert!(
+            sparse_geometry.partial_capacity_bytes() < large_geometry_capacity,
+            "the filtered geometry and identity map shrink with the one-row projection"
+        );
+        let sparse_rebuilds = dialog.test_geometry_rebuilds;
+        let sparse_rows_measured = dialog.test_geometry_rows_measured;
+        let sparse_capacity = sparse_geometry.partial_capacity_bytes();
+        for frame in 0..4 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 2.545 + frame as f64 * 0.002);
+        }
+        assert_eq!(dialog.test_geometry_rebuilds, sparse_rebuilds);
+        assert_eq!(dialog.test_geometry_rows_measured, sparse_rows_measured);
+        let sparse_geometry = dialog.notes_geometry.as_ref().unwrap();
+        assert_eq!(sparse_geometry.rows.len(), 1);
+        assert_eq!(sparse_geometry.row_by_identity.len(), 1);
+        assert_eq!(sparse_geometry.partial_capacity_bytes(), sparse_capacity);
 
         let sparse_row = rendered_note_rect(&dialog, 174);
         let sparse_inner = dialog.test_scroll_area_inner_rect.unwrap();
@@ -3582,15 +3600,34 @@ mod tests {
         style.override_text_style = Some(egui::TextStyle::Monospace);
         ctx.set_style_of(ctx.theme(), style.clone());
         render_notes_frame(&ctx, &mut dialog, &mut app, 2.82);
-        assert!(
-            dialog.test_geometry_rebuilds > font_style_rebuilds,
-            "effective title text style invalidates geometry even with override_font_id"
+        assert_eq!(
+            dialog.test_geometry_rebuilds, font_style_rebuilds,
+            "override_font_id takes precedence over text-style overrides for title and small RichText"
         );
+        let effective_override_font = style.override_font_id.clone().unwrap();
+        let geometry = dialog.notes_geometry.as_ref().unwrap();
+        assert_eq!(geometry.key.title_font, effective_override_font);
+        assert_eq!(geometry.key.small_font, effective_override_font);
+
+        style.override_font_id = Some(egui::FontId::new(21.0, egui::FontFamily::Proportional));
+        ctx.set_style_of(ctx.theme(), style.clone());
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.83);
+        assert!(dialog.test_geometry_rebuilds > font_style_rebuilds);
         let wrap_rebuilds = dialog.test_geometry_rebuilds;
         style.wrap_mode = Some(egui::TextWrapMode::Wrap);
-        ctx.set_style_of(ctx.theme(), style);
+        ctx.set_style_of(ctx.theme(), style.clone());
         render_notes_frame(&ctx, &mut dialog, &mut app, 2.84);
         assert!(dialog.test_geometry_rebuilds > wrap_rebuilds);
+        let wrap_rebuilds = dialog.test_geometry_rebuilds;
+        style.spacing.extra_text_line_spacing = 3.0;
+        ctx.set_style_of(ctx.theme(), style.clone());
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.85);
+        assert!(dialog.test_geometry_rebuilds > wrap_rebuilds);
+        let spacing_rebuilds = dialog.test_geometry_rebuilds;
+        style.wrap_mode = Some(egui::TextWrapMode::Truncate);
+        ctx.set_style_of(ctx.theme(), style.clone());
+        render_notes_frame(&ctx, &mut dialog, &mut app, 2.855);
+        assert!(dialog.test_geometry_rebuilds > spacing_rebuilds);
         let row = dialog
             .notes_geometry
             .as_ref()
@@ -3604,6 +3641,38 @@ mod tests {
         assert!((actual.outer.width() - row.body_width).abs() < 0.5);
         assert!((actual.header.height() - row.header_height).abs() < 0.5);
         assert!((actual.header.width() - row.header_width).abs() < 0.5);
+        let expected_indices = dialog.filtered_indices.clone();
+        let viewport_size = dialog
+            .test_scroll_area_inner_rect
+            .expect("the Notes viewport remains measured")
+            .size();
+        let eager = eager_notes_geometry_for_projection(
+            &egui::Context::default(),
+            &dialog.entries,
+            &expected_indices,
+            viewport_size,
+            &style,
+            app.note_settings.backlinks_enabled,
+            app.note_settings.task_lists_enabled,
+        );
+        assert_quick_notes_geometry_matches_eager(&dialog, &eager, &expected_indices);
+        assert_eq!(
+            dialog
+                .notes_geometry
+                .as_ref()
+                .unwrap()
+                .key
+                .extra_text_line_spacing_bits,
+            3.0_f32.to_bits()
+        );
+        assert_eq!(
+            dialog.notes_geometry.as_ref().unwrap().key.title_font,
+            style.override_font_id.clone().unwrap()
+        );
+        assert_eq!(
+            dialog.notes_geometry.as_ref().unwrap().key.small_font,
+            style.override_font_id.clone().unwrap()
+        );
 
         let pixels_rebuilds = dialog.test_geometry_rebuilds;
         ctx.set_pixels_per_point(1.5);
@@ -3636,6 +3705,133 @@ mod tests {
         drop(dialog);
         drop(app);
         drop(_inserted_cache);
+        drop(_cache);
+        drop(workspace);
+    }
+
+    #[test]
+    fn quick_notes_geometry_follows_consumer_font_activation() {
+        let _lock = TEST_MUTEX.lock().unwrap();
+        let workspace = crate::performance::workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        let entries = vec![
+            note(
+                "Font activation title",
+                "font-activation",
+                "A preview with enough text to exercise line layout under the active font.",
+            ),
+            note("Second title", "font-second", "Second preview row."),
+        ];
+        let _cache = crate::plugins::note::publish_note_cache_for_test(entries.clone());
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+
+        let mut changed_definitions = egui::FontDefinitions::default();
+        let proportional = changed_definitions
+            .families
+            .get_mut(&egui::FontFamily::Proportional)
+            .expect("default proportional family exists");
+        proportional.push(proportional[0].clone());
+        let default_definitions = egui::FontDefinitions::default();
+        let run_with_installs =
+            |dialog: &mut NotesDialog,
+             app: &mut LauncherApp,
+             time: f64,
+             installs: &[egui::FontDefinitions]| {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 640.0),
+                        )),
+                        time: Some(time),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        dialog.ui(ctx, app);
+                        for definitions in installs {
+                            crate::gui::font_revision::install(ctx, definitions.clone());
+                        }
+                    },
+                )
+                .drop_without_applying_deltas();
+            };
+
+        for frame in 0..4 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
+        }
+        assert_eq!(dialog.filtered_indices, vec![0, 1]);
+        let initial_rebuilds = dialog.test_geometry_rebuilds;
+        let initial_rows_measured = dialog.test_geometry_rows_measured;
+        let initial_geometry = dialog.notes_geometry.as_ref().unwrap();
+        assert_eq!(initial_geometry.key.font_revision, 0);
+        assert_eq!(initial_rebuilds, 1);
+
+        run_with_installs(&mut dialog, &mut app, 1.1, &[default_definitions.clone()]);
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(dialog.test_geometry_rebuilds, initial_rebuilds);
+        assert_eq!(dialog.test_geometry_rows_measured, initial_rows_measured);
+
+        run_with_installs(
+            &mut dialog,
+            &mut app,
+            1.12,
+            &[changed_definitions.clone(), default_definitions],
+        );
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(dialog.test_geometry_rebuilds, initial_rebuilds);
+        assert_eq!(dialog.test_geometry_rows_measured, initial_rows_measured);
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.14);
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(dialog.test_geometry_rebuilds, initial_rebuilds);
+
+        run_with_installs(&mut dialog, &mut app, 1.16, &[changed_definitions.clone()]);
+        assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
+        assert_eq!(dialog.test_geometry_rebuilds, initial_rebuilds);
+        assert_eq!(
+            dialog.notes_geometry.as_ref().unwrap().key.font_revision,
+            0,
+            "the in-pass font request does not invalidate already measured geometry"
+        );
+
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.18);
+        let active_font_revision = crate::gui::font_revision::active_revision(&ctx);
+        assert!(active_font_revision > 0);
+        assert_eq!(dialog.test_geometry_rebuilds, initial_rebuilds + 1);
+        assert_eq!(
+            dialog.test_geometry_rows_measured - initial_rows_measured,
+            entries.len() as u64
+        );
+        assert_eq!(
+            dialog.notes_geometry.as_ref().unwrap().key.font_revision,
+            active_font_revision
+        );
+        let active_rebuilds = dialog.test_geometry_rebuilds;
+        let active_rows_measured = dialog.test_geometry_rows_measured;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.20);
+        assert_eq!(dialog.test_geometry_rebuilds, active_rebuilds);
+        assert_eq!(dialog.test_geometry_rows_measured, active_rows_measured);
+
+        let oracle_ctx = egui::Context::default();
+        crate::gui::font_revision::install(&oracle_ctx, changed_definitions);
+        let viewport_size = dialog
+            .test_scroll_area_inner_rect
+            .expect("the active Notes viewport is measured")
+            .size();
+        let eager = eager_notes_geometry_for_projection(
+            &oracle_ctx,
+            &dialog.entries,
+            &dialog.filtered_indices,
+            viewport_size,
+            ctx.style_of(ctx.theme()).as_ref(),
+            app.note_settings.backlinks_enabled,
+            app.note_settings.task_lists_enabled,
+        );
+        assert_quick_notes_geometry_matches_eager(&dialog, &eager, &dialog.filtered_indices);
+
+        drop(dialog);
+        drop(app);
         drop(_cache);
         drop(workspace);
     }
@@ -5997,7 +6193,7 @@ mod tests {
         state.observer = Some(super::c2f_observation::Scope::begin());
         let started = std::time::Instant::now();
         let output = track_c2f_run_owner(state, frame);
-        drop(output);
+        output.drop_without_applying_deltas();
         let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         let observation = state
             .observer
@@ -6145,7 +6341,7 @@ mod tests {
         let fields = vec![
             "schema=1".to_owned(),
             "stage=quick_notes_refresh_characterization".to_owned(),
-            "owner=egui_Context_run+NotesDialog::ui".to_owned(),
+            "owner=run_ui+NotesDialog::ui".to_owned(),
             format!("source={source}"),
             format!("profile={profile}"),
             format!("mode={mode}"),
