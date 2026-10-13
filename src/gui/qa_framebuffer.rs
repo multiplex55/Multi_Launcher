@@ -20,7 +20,19 @@ const BENCH_MODE_ENV: &str = "ML_TRACK_C_BENCH_MODE";
 const PNG_FILE_NAME: &str = "framebuffer.png";
 const RECEIPT_FILE_NAME: &str = "receipt.json";
 const SCREENSHOT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const QR_STARTUP_CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITER_QUEUE_CAPACITY: usize = 2;
+
+fn selected_reply_timeout(target: CaptureTarget) -> Duration {
+    match target {
+        CaptureTarget::Root => SCREENSHOT_REPLY_TIMEOUT,
+        CaptureTarget::Qr => QR_STARTUP_CAPTURE_TIMEOUT,
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -369,6 +381,7 @@ enum ReceiptStatus {
 struct CompletionReceipt {
     schema_version: u32,
     status: ReceiptStatus,
+    reply_wait_timeout_ms: u64,
     run_id: String,
     request_id: String,
     target: CaptureTarget,
@@ -389,10 +402,11 @@ struct CompletionReceipt {
 }
 
 impl CompletionReceipt {
-    fn new(request: &QaFramebufferRequest) -> Self {
+    fn new(request: &QaFramebufferRequest, reply_timeout: Duration) -> Self {
         Self {
             schema_version: 1,
             status: ReceiptStatus::Failed,
+            reply_wait_timeout_ms: duration_millis(reply_timeout),
             run_id: request.manifest.run_id.clone(),
             request_id: request.manifest.request_id.clone(),
             target: request.manifest.target,
@@ -437,7 +451,8 @@ pub(super) struct FramebufferProbe {
 
 impl FramebufferProbe {
     fn new(request: QaFramebufferRequest, ctx: egui::Context) -> Result<Self, String> {
-        Self::new_with_reply_timeout(request, ctx, SCREENSHOT_REPLY_TIMEOUT)
+        let reply_timeout = selected_reply_timeout(request.manifest.target);
+        Self::new_with_reply_timeout(request, ctx, reply_timeout)
     }
 
     fn new_with_reply_timeout(
@@ -448,7 +463,7 @@ impl FramebufferProbe {
         let (writer_tx, writer_rx) = spawn_writer(request.output_dir.clone(), ctx, reply_timeout)?;
         let target = request.manifest.target;
         let token = UserData::new(ScreenshotToken(1));
-        let receipt = CompletionReceipt::new(&request);
+        let receipt = CompletionReceipt::new(&request, reply_timeout);
         let mut probe = Self {
             token,
             target,
@@ -1393,13 +1408,20 @@ fn spawn_writer(
                                 WriterJob::Failure(receipt)
                             }
                             Err(RecvTimeoutError::Timeout) => {
-                                let seconds = reply_timeout.as_secs();
+                                let deadline = if receipt.reply_wait_timeout_ms % 1_000 == 0 {
+                                    format!(
+                                        "{} seconds",
+                                        receipt.reply_wait_timeout_ms / 1_000
+                                    )
+                                } else {
+                                    format!("{} milliseconds", receipt.reply_wait_timeout_ms)
+                                };
                                 receipt.failure = Some(match receipt.target {
                                     CaptureTarget::Root => format!(
-                                        "ROOT screenshot reply was not delivered within {seconds} seconds"
+                                        "ROOT screenshot reply was not delivered within {deadline}"
                                     ),
                                     CaptureTarget::Qr => format!(
-                                        "selected QR capture did not complete within {seconds} seconds"
+                                        "selected QR capture did not complete within {deadline}"
                                     ),
                                 });
                                 WriterJob::Failure(receipt)
@@ -1611,6 +1633,34 @@ mod tests {
         )
     }
 
+    fn test_request_for_target(
+        target: CaptureTarget,
+        trigger: CaptureTrigger,
+        output_dir: PathBuf,
+    ) -> QaFramebufferRequest {
+        QaFramebufferRequest {
+            manifest: RequestManifest {
+                run_id: "test-run".into(),
+                request_id: "test-request".into(),
+                target,
+                trigger,
+                output_dir: output_dir.clone(),
+                fixture_manifest_sha256: "a".repeat(64),
+                build_receipt_identity: "test-build".into(),
+            },
+            manifest_sha256: "b".repeat(64),
+            output_dir,
+            executable: ExecutableIdentity {
+                path: PathBuf::from("test.exe"),
+                sha256: "c".repeat(64),
+            },
+            process: ProcessIdentity {
+                pid: 1,
+                probe_initialized_at_unix_ms: 1,
+            },
+        }
+    }
+
     fn eligible_surface() -> SurfaceEligibility {
         SurfaceEligibility {
             logical_root_visible: true,
@@ -1667,27 +1717,7 @@ mod tests {
         Receiver<WriterJob>,
         SyncSender<WriterOutcome>,
     ) {
-        let request = QaFramebufferRequest {
-            manifest: RequestManifest {
-                run_id: "test-run".into(),
-                request_id: "test-request".into(),
-                target,
-                trigger,
-                output_dir: PathBuf::from("unused"),
-                fixture_manifest_sha256: "a".repeat(64),
-                build_receipt_identity: "test-build".into(),
-            },
-            manifest_sha256: "b".repeat(64),
-            output_dir: PathBuf::from("unused"),
-            executable: ExecutableIdentity {
-                path: PathBuf::from("test.exe"),
-                sha256: "c".repeat(64),
-            },
-            process: ProcessIdentity {
-                pid: 1,
-                probe_initialized_at_unix_ms: 1,
-            },
-        };
+        let request = test_request_for_target(target, trigger, PathBuf::from("unused"));
         let token = UserData::new(ScreenshotToken(1));
         let (writer_tx, writer_rx) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
         let (outcome_tx, outcome_rx) = mpsc::sync_channel(1);
@@ -1708,7 +1738,7 @@ mod tests {
             qr_acquired: false,
             qr_capture_parent_logic_frame_id: None,
             pending_reply: None,
-            receipt: CompletionReceipt::new(&request),
+            receipt: CompletionReceipt::new(&request, selected_reply_timeout(target)),
             writer_tx,
             writer_rx: outcome_rx,
         };
@@ -2078,7 +2108,33 @@ mod tests {
                 .unwrap();
         assert_eq!(receipt["target"], "QR");
         assert_eq!(receipt["trigger"], "startup");
+        assert_eq!(receipt["reply_wait_timeout_ms"], 20);
         assert!(!output_dir.path().join(PNG_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn selected_target_deadlines_are_recorded_in_the_receipt() {
+        let root_request = test_request_for_target(
+            CaptureTarget::Root,
+            CaptureTrigger::Startup,
+            PathBuf::from("unused"),
+        );
+        let qr_request = test_request_for_target(
+            CaptureTarget::Qr,
+            CaptureTrigger::Startup,
+            PathBuf::from("unused"),
+        );
+        let root_receipt =
+            CompletionReceipt::new(&root_request, selected_reply_timeout(CaptureTarget::Root));
+        let qr_receipt =
+            CompletionReceipt::new(&qr_request, selected_reply_timeout(CaptureTarget::Qr));
+
+        assert_eq!(root_receipt.reply_wait_timeout_ms, 30_000);
+        assert_eq!(qr_receipt.reply_wait_timeout_ms, 120_000);
+        assert_eq!(
+            serde_json::to_value(qr_receipt).unwrap()["reply_wait_timeout_ms"],
+            120_000
+        );
     }
 
     #[test]
@@ -2485,7 +2541,8 @@ mod tests {
                 probe_initialized_at_unix_ms: 1,
             },
         };
-        let mut receipt = CompletionReceipt::new(&request);
+        let mut receipt =
+            CompletionReceipt::new(&request, selected_reply_timeout(CaptureTarget::Root));
         receipt.captured = Some(test_evidence(2, 3, 0));
         let outcome = write_job(
             &output_dir,
