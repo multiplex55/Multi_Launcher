@@ -57,3 +57,30 @@ Local artifacts: `target/egui-modernization/m2a/owner-list-df27da17.log`, SHA256
 Preserved test binary and parsed analysis are under `target/egui-modernization/m2a/df27da17-list-analysis/`. Executable SHA256 `D4FFD2FE04ABD0211B6EED30DCF49DFB65FE45B1B8EFA1B3D6A8B121629E8DE1`; copy hash verified. No original artifact was overwritten. QA feature/request were excluded, all fixture processes were closed, and no other build/test was run concurrently. Parent made two bounded process-progress observations; read-only planner source inspection occurred during the series. Retain this context when repeating measurements.
 
 Read-only diagnostic inspection found no extra visible-only domain workload: inert provider, worker suppression, seeded generations and visibility transition avoidance remain intact. Actual migration costs include the mock frame/native-handle path, lifecycle receipt/finalization and changed released-egui text layout. In0.27 `WidgetText::from(String)` produced RichText; in0.36 Text resolves line height through a font access before another access for layout. This is a source-backed candidate, not measured attribution. Next work is a bounded phase/text-layout diagnostic and root-cause correction with existing eager invariants retained. No styling or renderer changes are authorized by this failure.
+
+### Bounded phase diagnostic
+
+`nextest-root-geometry-diagnostic-100-1000-fast-dev.log`: ignored diagnostic passed1/1 in33.965s after a1m06s fast-dev build,5,232 skipped. This supplements the full benchmark: counts100/1,000,2 warmups and5 samples for each cold/warm case. Source label identifies df27 production base plus dirty diagnostic render.rs SHA256 `aaa3362ae962d63248c07f44382583ab04c328d01858c1def232b271a2499835`. No production fix yet. Parent inspected the log and independently parsed all20 diagnostic records.
+
+| Actions / case | Whole-owner p50 ms | RootGeometryCold p50 ms |
+| --- | ---: | ---: |
+| 100 cold | 58.8387 | 56.4948 |
+| 100 warm | 2.2614 | 0 |
+| 1,000 cold | 751.6604 | 749.3544 |
+| 1,000 warm | 2.3268 | 0 |
+
+Every sample had one adapter pass and25 painted rows. Cold samples had one rebuild, exactly count measured rows and phase work, no abandoned/error phase; warm had zero geometry calls/work/rebuilds. Geometry accounts for nearly all cold time, while the remainder is about2.3ms. The diagnostic distinguishes stored previous rebuild duration from zero current-frame warm geometry work. Validation and texture disposal follow timing. Next authorized step is aggregate metric/job/layout/vector stage measurement and equivalent supported job variants; no production change until attribution is reported.
+
+### Text-stage and adapter diagnostics accepted
+
+Final diagnostic source render.rs SHA256 `D3590ED37F65FAB4677378DD59ECA89F4662E9DCC3813F0D61C6B75514726B9A`, production base df27 unchanged. `nextest-root-text-stage-diagnostic-v2.log` passed1/1 in61.420s after1m05s build,5,234 skipped; earlier v1 remains retained. Counts100/1,000,2 warmups and3 samples for each of four variants. Parent inspected actual log completion and fresh-state isolation; independent reviewer accepted measurement validity and source without findings. Parent final fmt/diff checks passed, and raw source hash matches the receipts. All additions are test-only; existing benchmark timer remains unchanged.
+
+At1,000 rows, medians: current WidgetText735.98ms; manually equivalent current path756.47ms, including font metrics6.07ms, job construction1.19ms, layout748.10ms and vector bookkeeping0.34ms. Display strings about0.56ms. Metrics-once/per-row access729.72ms; metrics-once/batched access726.15ms, retaining an833.18ms outlier. Three samples are diagnostic evidence, not statistical acceptance. Repeated invariant metric/context resolution is too small to explain or fix the regression. No production optimization was applied.
+
+Each variant starts from a fresh equivalent prepared state, preventing earlier variants from warming its galley cache. Separate preflight asserts exact supported LayoutJobs and galley dimensions for Wrap/Extend/Truncate; timed results compare every cached row geometry vector and width progression. These controls preserve the current semantics rather than replacing Text with RichText.
+
+`nextest-root-test-adapter-overhead-diagnostic-v1.log` passed1/1. Five samples,2 warmups,1,000 operations each: mock Frame construction about20ns/op, warmed renderer guard157–160ns/op, combined about176ns/op. Correct conversion is **0.000176ms per operation**, or0.176ms per1,000-operation batch. The writer's interim prose used the latter as a per-frame figure; raw labels were correct and the prose error was acknowledged. This bounds only these test infrastructure components, not all lifecycle/native-handle/finalizer work. It cannot explain the observed warm increase. `black_box` is used; no timer subtraction is applied.
+
+Next source-backed candidate: epaint's shape_text invokes HarfRust with default ShapeOptions; locked HarfRust0.12 builds a ShapePlan when none is supplied. Existing ShaperData/buffer caching does not establish plan reuse. A bounded direct plan-construction/reuse experiment is required before any production patch. Planner compared cached assets: Ubuntu-Light/Hack/NotoEmoji bytes match old/current; emoji-icon and tweaks differ. Font swapping is unsupported by this evidence.
+
+Primary upstream context: [egui's OpenType shaping change](https://github.com/emilk/egui/pull/8031) documents the new engine and existing data/buffer reuse; [HarfRust changelog](https://github.com/harfbuzz/harfrust/blob/main/CHANGELOG.md) documents public shape-plan caching support. [Upstream text-performance issue](https://github.com/emilk/egui/issues/8093) discusses cold rasterization during zoom; that is not proof of this fixed-scale/warm-glyph cause. Do not apply scale binning, disable hinting or change profiles based on that separate case.

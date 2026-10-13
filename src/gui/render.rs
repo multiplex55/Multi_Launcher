@@ -6500,6 +6500,17 @@ mod tests {
         height: f32,
         events: Vec<egui::Event>,
     ) -> egui::FullOutput {
+        run_root_list_frame_with_pass_count(ctx, app, frame_index, width, height, events).0
+    }
+
+    fn run_root_list_frame_with_pass_count(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        frame_index: usize,
+        width: f32,
+        height: f32,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, usize) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -6509,7 +6520,7 @@ mod tests {
             events,
             ..Default::default()
         };
-        app.run_root_frame_for_test(ctx, input, false).0
+        app.run_root_frame_for_test(ctx, input, false)
     }
 
     fn assert_retained_immediate_viewport(ctx: &egui::Context, viewport_id: egui::ViewportId) {
@@ -9028,6 +9039,663 @@ mod tests {
                 );
             }
         }
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "bounded M2-A root-list geometry timing diagnostic; uses 100/1,000 actions and 5 samples"]
+    fn track_c_diagnostic_root_list_geometry_cost_breakdown() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        const DIAGNOSTIC_WARMUPS: usize = 2;
+        const DIAGNOSTIC_SAMPLES: usize = 5;
+
+        assert!(crate::performance::enabled());
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_DIAGNOSTIC_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let workspace = TrackCWorkspace::new();
+
+        for count in [100, 1_000] {
+            let fixture = action_fixture(count);
+            for cold in [true, false] {
+                let cold_label = if cold { "cold" } else { "warm" };
+                for _ in 0..DIAGNOSTIC_WARMUPS {
+                    let mut state =
+                        track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold);
+                    let frame = state.frame_index;
+                    state.frame_index += 1;
+                    let (output, _) = run_root_list_frame_with_pass_count(
+                        &state.ctx,
+                        &mut state.app,
+                        frame,
+                        960.0,
+                        640.0,
+                        Vec::new(),
+                    );
+                    let _ = track_c_validate_root_list_state(&state);
+                    output.drop_without_applying_deltas();
+                    drop(state);
+                }
+
+                for sample_index in 0..DIAGNOSTIC_SAMPLES {
+                    let mut state =
+                        track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold);
+                    let frame = state.frame_index;
+                    state.frame_index += 1;
+                    let started = std::time::Instant::now();
+                    let (output, adapter_passes) = run_root_list_frame_with_pass_count(
+                        &state.ctx,
+                        &mut state.app,
+                        frame,
+                        960.0,
+                        640.0,
+                        Vec::new(),
+                    );
+                    let owner_elapsed_ns =
+                        started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                    let observation = track_c_validate_root_list_state(&state);
+                    let geometry_phase = crate::performance::track_c::snapshot()
+                        .into_iter()
+                        .find(|(phase, _)| {
+                            *phase == crate::performance::track_c::Phase::RootGeometryCold
+                        })
+                        .expect("the fixed Track C phase set includes root geometry")
+                        .1;
+                    let after = state.app.root_list_geometry.test_observation();
+                    let rebuilds = observation.work_counters[0];
+                    let measured_rows = observation.work_counters[1];
+                    let last_rebuild_ns = if rebuilds == 0 {
+                        0
+                    } else {
+                        after.last_rebuild_nanos
+                    };
+                    let painted_rows = state.app.test_root_rendered_rows.len();
+
+                    eprintln!(
+                        "M2A_ROOT_GEOMETRY_DIAGNOSTIC schema=1 source={source} profile={profile} owner=run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt fixture=root_list_action_fixture fixture_signature={:016x} count={count} cold_type={cold_label} warmups={DIAGNOSTIC_WARMUPS} samples={DIAGNOSTIC_SAMPLES} sample_index={sample_index} owner_elapsed_ns={owner_elapsed_ns} last_rebuild_ns={last_rebuild_ns} stored_last_rebuild_ns={} root_geometry_phase_ns={} root_geometry_phase_calls={} root_geometry_phase_work={} root_geometry_phase_completed={} root_geometry_phase_errors={} root_geometry_phase_abandoned={} rebuilds={rebuilds} measured_rows={measured_rows} painted_rows={painted_rows} adapter_passes={adapter_passes} output_identity={:016x}",
+                        fixture.summary.signature,
+                        after.last_rebuild_nanos,
+                        geometry_phase.elapsed_nanos_total,
+                        geometry_phase.calls,
+                        geometry_phase.work_units,
+                        geometry_phase.completed,
+                        geometry_phase.errors,
+                        geometry_phase.abandoned,
+                        observation.output_identity,
+                    );
+                    output.drop_without_applying_deltas();
+                    drop(state);
+                }
+            }
+        }
+
+        drop(workspace);
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct RootListTextDiagnosticGeometry {
+        row_tops: Vec<f32>,
+        row_heights: Vec<f32>,
+        row_x_offsets: Vec<f32>,
+        row_response_x_offsets: Vec<f32>,
+        row_widths: Vec<f32>,
+        row_response_widths: Vec<f32>,
+        cursor_y: f32,
+        content_x_offset: f32,
+        content_width: f32,
+    }
+
+    impl RootListTextDiagnosticGeometry {
+        fn new(key: &RootListGeometryKey, capacity: usize) -> Self {
+            Self {
+                row_tops: Vec::with_capacity(capacity),
+                row_heights: Vec::with_capacity(capacity),
+                row_x_offsets: Vec::with_capacity(capacity),
+                row_response_x_offsets: Vec::with_capacity(capacity),
+                row_widths: Vec::with_capacity(capacity),
+                row_response_widths: Vec::with_capacity(capacity),
+                cursor_y: 0.0,
+                content_x_offset: 0.0,
+                content_width: f32::from_bits(key.width_bits),
+            }
+        }
+
+        fn begin_row(&mut self, index: usize, spacing_y: f32) {
+            if index != 0 {
+                self.cursor_y += spacing_y;
+            }
+            self.row_tops.push(self.cursor_y);
+            self.row_x_offsets.push(self.content_x_offset);
+            self.row_widths.push(self.content_width);
+        }
+
+        fn finish_row(
+            &mut self,
+            galley_size: egui::Vec2,
+            padding: egui::Vec2,
+            interaction_height: f32,
+        ) {
+            let row_height = (galley_size.y + 2.0 * padding.y).max(interaction_height);
+            let response_width = self.content_width.max(galley_size.x + 2.0 * padding.x);
+            self.row_response_x_offsets
+                .push(self.content_x_offset - (response_width - self.content_width) * 0.5);
+            self.row_response_widths.push(response_width);
+            self.content_x_offset -= (response_width - self.content_width) * 0.5;
+            self.content_width = response_width;
+            self.row_heights.push(row_height);
+            self.cursor_y += row_height;
+        }
+
+        fn assert_matches_cache(&self, cache: &RootListGeometryCache, label: &str) {
+            fn assert_close(actual: &[f32], expected: &[f32], label: &str, field: &str) {
+                assert_eq!(actual.len(), expected.len(), "{label} {field} length");
+                for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                    assert!(
+                        (actual - expected).abs() <= 0.01,
+                        "{label} {field}[{index}] differs: {actual} vs {expected}"
+                    );
+                }
+            }
+
+            assert_close(&self.row_tops, &cache.row_tops, label, "row_tops");
+            assert_close(&self.row_heights, &cache.row_heights, label, "row_heights");
+            assert_close(
+                &self.row_x_offsets,
+                &cache.row_x_offsets,
+                label,
+                "row_x_offsets",
+            );
+            assert_close(
+                &self.row_response_x_offsets,
+                &cache.row_response_x_offsets,
+                label,
+                "row_response_x_offsets",
+            );
+            assert_close(&self.row_widths, &cache.row_widths, label, "row_widths");
+            assert_close(
+                &self.row_response_widths,
+                &cache.row_response_widths,
+                label,
+                "row_response_widths",
+            );
+            assert!(
+                (self.cursor_y - cache.total_height).abs() <= 0.01,
+                "{label} total height differs: {} vs {}",
+                self.cursor_y,
+                cache.total_height
+            );
+            assert!(
+                (self.content_x_offset - cache.content_x_offset).abs() <= 0.01,
+                "{label} content x offset differs: {} vs {}",
+                self.content_x_offset,
+                cache.content_x_offset
+            );
+            assert!(
+                (self.content_width - cache.content_width).abs() <= 0.01,
+                "{label} content width differs: {} vs {}",
+                self.content_width,
+                cache.content_width
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RootListTextDiagnosticPipeline {
+        WidgetText,
+        CurrentSteps,
+        MetricsOnce,
+        MetricsOnceBatched,
+    }
+
+    impl RootListTextDiagnosticPipeline {
+        fn label(self) -> &'static str {
+            match self {
+                Self::WidgetText => "widget_text",
+                Self::CurrentSteps => "equivalent_job_per_row_metrics_and_font_access",
+                Self::MetricsOnce => "equivalent_job_metrics_once_font_access_per_row",
+                Self::MetricsOnceBatched => "equivalent_job_metrics_once_batched_font_access",
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RootListTextDiagnosticTimes {
+        pipeline_ns: u128,
+        font_metrics_ns: u128,
+        job_build_ns: u128,
+        widget_text_into_galley_ns: u128,
+        layout_ns: u128,
+        vector_bookkeeping_ns: u128,
+    }
+
+    fn root_list_text_diagnostic_job(
+        text: String,
+        font_id: &egui::FontId,
+        line_height: f32,
+        text_color: egui::Color32,
+        wrap_mode: egui::TextWrapMode,
+        available_width: f32,
+    ) -> egui::text::LayoutJob {
+        let mut job = egui::text::LayoutJob::simple_format(
+            text,
+            egui::text::TextFormat {
+                font_id: font_id.clone(),
+                color: text_color,
+                valign: egui::Align::Center,
+                line_height: Some(line_height),
+                ..Default::default()
+            },
+        );
+        job.wrap = egui::text::TextWrapping::from_wrap_mode_and_width(wrap_mode, available_width);
+        job
+    }
+
+    fn run_root_list_text_diagnostic_pipeline(
+        ctx: &egui::Context,
+        style: &egui::Style,
+        key: &RootListGeometryKey,
+        texts: Vec<String>,
+        pipeline: RootListTextDiagnosticPipeline,
+    ) -> (RootListTextDiagnosticGeometry, RootListTextDiagnosticTimes) {
+        let pipeline_started = std::time::Instant::now();
+        let font_id = key.button_font.clone();
+        let text_color = style
+            .visuals
+            .override_text_color
+            .unwrap_or(egui::Color32::PLACEHOLDER);
+        let padding = egui::vec2(
+            f32::from_bits(key.button_padding_x_bits),
+            f32::from_bits(key.button_padding_y_bits),
+        );
+        let spacing_y = f32::from_bits(key.item_spacing_y_bits);
+        let interaction_height = f32::from_bits(key.interaction_height_bits);
+        let extra_text_line_spacing = f32::from_bits(key.extra_text_line_spacing_bits);
+        let mut times = RootListTextDiagnosticTimes::default();
+        let geometry_started = std::time::Instant::now();
+        let mut geometry = RootListTextDiagnosticGeometry::new(key, texts.len());
+        times.vector_bookkeeping_ns += geometry_started.elapsed().as_nanos();
+
+        let once_metrics = matches!(
+            pipeline,
+            RootListTextDiagnosticPipeline::MetricsOnce
+                | RootListTextDiagnosticPipeline::MetricsOnceBatched
+        );
+        let resolved_line_height = if once_metrics {
+            let started = std::time::Instant::now();
+            let resolved_font = egui::FontSelection::Default
+                .resolve_with_fallback(style, egui::FontSelection::Style(egui::TextStyle::Button));
+            assert_eq!(resolved_font, font_id, "effective root button font changed");
+            let line_height =
+                ctx.fonts_mut(|fonts| fonts.row_height(&resolved_font)) + extra_text_line_spacing;
+            times.font_metrics_ns += started.elapsed().as_nanos();
+            Some(line_height)
+        } else {
+            None
+        };
+
+        if matches!(pipeline, RootListTextDiagnosticPipeline::MetricsOnceBatched) {
+            ctx.fonts_mut(|fonts| {
+                for (index, text) in texts.into_iter().enumerate() {
+                    let started = std::time::Instant::now();
+                    geometry.begin_row(index, spacing_y);
+                    times.vector_bookkeeping_ns += started.elapsed().as_nanos();
+
+                    let started = std::time::Instant::now();
+                    let job = root_list_text_diagnostic_job(
+                        text,
+                        &font_id,
+                        resolved_line_height.expect("metrics resolved once"),
+                        text_color,
+                        key.wrap_mode,
+                        (geometry.content_width - 2.0 * padding.x).max(0.0),
+                    );
+                    times.job_build_ns += started.elapsed().as_nanos();
+
+                    let started = std::time::Instant::now();
+                    let galley = fonts.layout_job(job);
+                    times.layout_ns += started.elapsed().as_nanos();
+
+                    let started = std::time::Instant::now();
+                    geometry.finish_row(galley.size(), padding, interaction_height);
+                    times.vector_bookkeeping_ns += started.elapsed().as_nanos();
+                }
+            });
+        } else {
+            for (index, text) in texts.into_iter().enumerate() {
+                let started = std::time::Instant::now();
+                geometry.begin_row(index, spacing_y);
+                times.vector_bookkeeping_ns += started.elapsed().as_nanos();
+
+                let galley = match pipeline {
+                    RootListTextDiagnosticPipeline::WidgetText => {
+                        let started = std::time::Instant::now();
+                        let galley = egui::WidgetText::from(text).into_galley_impl(
+                            ctx,
+                            style,
+                            egui::text::TextWrapping::from_wrap_mode_and_width(
+                                key.wrap_mode,
+                                (geometry.content_width - 2.0 * padding.x).max(0.0),
+                            ),
+                            egui::FontSelection::Style(egui::TextStyle::Button),
+                            egui::Align::Center,
+                        );
+                        times.widget_text_into_galley_ns += started.elapsed().as_nanos();
+                        galley
+                    }
+                    RootListTextDiagnosticPipeline::CurrentSteps
+                    | RootListTextDiagnosticPipeline::MetricsOnce => {
+                        let line_height = if let Some(line_height) = resolved_line_height {
+                            line_height
+                        } else {
+                            let started = std::time::Instant::now();
+                            let resolved_font = egui::FontSelection::Default.resolve_with_fallback(
+                                style,
+                                egui::FontSelection::Style(egui::TextStyle::Button),
+                            );
+                            assert_eq!(resolved_font, font_id);
+                            let line_height = ctx
+                                .fonts_mut(|fonts| fonts.row_height(&resolved_font))
+                                + extra_text_line_spacing;
+                            times.font_metrics_ns += started.elapsed().as_nanos();
+                            line_height
+                        };
+
+                        let started = std::time::Instant::now();
+                        let job = root_list_text_diagnostic_job(
+                            text,
+                            &font_id,
+                            line_height,
+                            text_color,
+                            key.wrap_mode,
+                            (geometry.content_width - 2.0 * padding.x).max(0.0),
+                        );
+                        times.job_build_ns += started.elapsed().as_nanos();
+
+                        let started = std::time::Instant::now();
+                        let galley = ctx.fonts_mut(|fonts| fonts.layout_job(job));
+                        times.layout_ns += started.elapsed().as_nanos();
+                        galley
+                    }
+                    RootListTextDiagnosticPipeline::MetricsOnceBatched => unreachable!(),
+                };
+
+                let started = std::time::Instant::now();
+                geometry.finish_row(galley.size(), padding, interaction_height);
+                times.vector_bookkeeping_ns += started.elapsed().as_nanos();
+            }
+        }
+
+        times.pipeline_ns = pipeline_started.elapsed().as_nanos();
+        (geometry, times)
+    }
+
+    fn assert_root_list_text_job_equivalence(
+        ctx: &egui::Context,
+        style: &egui::Style,
+        key: &RootListGeometryKey,
+        texts: &[String],
+    ) {
+        let button_font = egui::FontSelection::Default
+            .resolve_with_fallback(style, egui::FontSelection::Style(egui::TextStyle::Button));
+        assert_eq!(button_font, key.button_font);
+        assert_eq!(ctx.pixels_per_point().to_bits(), key.pixels_per_point_bits);
+        assert_eq!(
+            style.spacing.extra_text_line_spacing.to_bits(),
+            key.extra_text_line_spacing_bits
+        );
+        let line_height = ctx.fonts_mut(|fonts| fonts.row_height(&button_font))
+            + f32::from_bits(key.extra_text_line_spacing_bits);
+        let text_color = style
+            .visuals
+            .override_text_color
+            .unwrap_or(egui::Color32::PLACEHOLDER);
+        let padding_x = f32::from_bits(key.button_padding_x_bits);
+
+        for wrap_mode in [
+            egui::TextWrapMode::Wrap,
+            egui::TextWrapMode::Extend,
+            egui::TextWrapMode::Truncate,
+        ] {
+            let mut content_width = f32::from_bits(key.width_bits);
+            for (index, text) in texts.iter().enumerate() {
+                let available_width = (content_width - 2.0 * padding_x).max(0.0);
+                let current = egui::WidgetText::from(text.clone()).into_galley_impl(
+                    ctx,
+                    style,
+                    egui::text::TextWrapping::from_wrap_mode_and_width(wrap_mode, available_width),
+                    egui::FontSelection::Style(egui::TextStyle::Button),
+                    egui::Align::Center,
+                );
+                let job = root_list_text_diagnostic_job(
+                    text.clone(),
+                    &button_font,
+                    line_height,
+                    text_color,
+                    wrap_mode,
+                    available_width,
+                );
+                assert_eq!(
+                    current.job.as_ref(),
+                    &job,
+                    "{wrap_mode:?} equivalent job parameters for row {index}"
+                );
+                let equivalent = ctx.fonts_mut(|fonts| fonts.layout_job(job));
+                assert_eq!(
+                    equivalent.size(),
+                    current.size(),
+                    "{wrap_mode:?} galley dimensions for row {index}"
+                );
+                content_width = content_width.max(current.size().x + 2.0 * padding_x);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "bounded M2-A text-stage diagnostic; 100/1,000 actions, 2 warmups and 3 samples per variant"]
+    fn track_c_diagnostic_root_list_text_stage_costs() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        const DIAGNOSTIC_WARMUPS: usize = 2;
+        const DIAGNOSTIC_SAMPLES: usize = 3;
+        const PIPELINES: [RootListTextDiagnosticPipeline; 4] = [
+            RootListTextDiagnosticPipeline::WidgetText,
+            RootListTextDiagnosticPipeline::CurrentSteps,
+            RootListTextDiagnosticPipeline::MetricsOnce,
+            RootListTextDiagnosticPipeline::MetricsOnceBatched,
+        ];
+
+        assert!(crate::performance::enabled());
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_DIAGNOSTIC_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let workspace = TrackCWorkspace::new();
+
+        for count in [100, 1_000] {
+            let fixture = action_fixture(count);
+            let equivalence_state =
+                track_c_prepare_root_list_state(workspace.root(), &fixture.values, false);
+            let equivalence_key = equivalence_state
+                .app
+                .root_list_geometry
+                .key
+                .as_ref()
+                .expect("visible setup built the root list cache")
+                .clone();
+            let equivalence_style = equivalence_state
+                .ctx
+                .style_of(equivalence_state.ctx.theme())
+                .as_ref()
+                .clone();
+            let equivalence_texts = fixture
+                .values
+                .iter()
+                .map(|action| {
+                    root_list_display_text(action, &equivalence_state.app.folder_aliases, false)
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
+            assert_root_list_text_job_equivalence(
+                &equivalence_state.ctx,
+                &equivalence_style,
+                &equivalence_key,
+                &equivalence_texts,
+            );
+            drop(equivalence_state);
+
+            for pipeline in PIPELINES {
+                for warmup in 0..DIAGNOSTIC_WARMUPS {
+                    let state =
+                        track_c_prepare_root_list_state(workspace.root(), &fixture.values, false);
+                    let key = state
+                        .app
+                        .root_list_geometry
+                        .key
+                        .as_ref()
+                        .expect("visible setup built the root list cache")
+                        .clone();
+                    let style = state.ctx.style_of(state.ctx.theme()).as_ref().clone();
+                    let texts = fixture
+                        .values
+                        .iter()
+                        .map(|action| {
+                            root_list_display_text(action, &state.app.folder_aliases, false)
+                                .into_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    let (geometry, _) = run_root_list_text_diagnostic_pipeline(
+                        &state.ctx, &style, &key, texts, pipeline,
+                    );
+                    geometry.assert_matches_cache(
+                        &state.app.root_list_geometry,
+                        &format!("{} warmup {warmup} count {count}", pipeline.label()),
+                    );
+                }
+
+                for sample_index in 0..DIAGNOSTIC_SAMPLES {
+                    let state =
+                        track_c_prepare_root_list_state(workspace.root(), &fixture.values, false);
+                    let key = state
+                        .app
+                        .root_list_geometry
+                        .key
+                        .as_ref()
+                        .expect("visible setup built the root list cache")
+                        .clone();
+                    let style = state.ctx.style_of(state.ctx.theme()).as_ref().clone();
+                    let text_started = std::time::Instant::now();
+                    let texts = fixture
+                        .values
+                        .iter()
+                        .map(|action| {
+                            root_list_display_text(action, &state.app.folder_aliases, false)
+                                .into_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    let display_text_ns = text_started.elapsed().as_nanos();
+                    let (geometry, times) = run_root_list_text_diagnostic_pipeline(
+                        &state.ctx, &style, &key, texts, pipeline,
+                    );
+                    geometry.assert_matches_cache(
+                        &state.app.root_list_geometry,
+                        &format!("{} sample {sample_index} count {count}", pipeline.label()),
+                    );
+
+                    eprintln!(
+                        "M2A_ROOT_TEXT_STAGE_DIAGNOSTIC schema=1 source={source} profile={profile} fixture=root_list_action_fixture fixture_signature={:016x} count={count} variant={} warmups={DIAGNOSTIC_WARMUPS} samples={DIAGNOSTIC_SAMPLES} sample_index={sample_index} display_text_ns={display_text_ns} pipeline_ns={} font_metrics_ns={} job_build_ns={} widget_text_into_galley_ns={} layout_ns={} vector_bookkeeping_ns={} rows={} wrap_mode={:?} ppp_bits={} font_size_bits={} line_height_bits={} width_bits={}",
+                        fixture.summary.signature,
+                        pipeline.label(),
+                        times.pipeline_ns,
+                        times.font_metrics_ns,
+                        times.job_build_ns,
+                        times.widget_text_into_galley_ns,
+                        times.layout_ns,
+                        times.vector_bookkeeping_ns,
+                        count,
+                        key.wrap_mode,
+                        key.pixels_per_point_bits,
+                        key.button_font.size.to_bits(),
+                        ctx_line_height_for_diagnostic(&state.ctx, &key).to_bits(),
+                        key.width_bits,
+                    );
+                }
+            }
+        }
+
+        drop(workspace);
+    }
+
+    fn ctx_line_height_for_diagnostic(ctx: &egui::Context, key: &RootListGeometryKey) -> f32 {
+        ctx.fonts_mut(|fonts| fonts.row_height(&key.button_font))
+            + f32::from_bits(key.extra_text_line_spacing_bits)
+    }
+
+    #[test]
+    #[ignore = "bounded M2-A test-adapter overhead diagnostic; 1,000 operations and 5 samples"]
+    fn track_c_diagnostic_root_frame_test_adapter_overheads() {
+        use crate::performance::track_c_workloads::TrackCWorkspace;
+
+        const ITERATIONS: usize = 1_000;
+        const WARMUPS: usize = 2;
+        const SAMPLES: usize = 5;
+
+        assert!(crate::performance::enabled());
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_DIAGNOSTIC_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let workspace = TrackCWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = root_list_app_at(&ctx, Vec::new(), workspace.root());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+
+        let measure_frame_construction = || {
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                std::hint::black_box(eframe::Frame::_new_kittest());
+            }
+            started.elapsed().as_nanos()
+        };
+        let measure_renderer_guard = || {
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                with_immediate_viewport_renderer(&ctx, || std::hint::black_box(()));
+            }
+            started.elapsed().as_nanos()
+        };
+        let measure_frame_and_guard = || {
+            let started = std::time::Instant::now();
+            for _ in 0..ITERATIONS {
+                std::hint::black_box(eframe::Frame::_new_kittest());
+                with_immediate_viewport_renderer(&ctx, || std::hint::black_box(()));
+            }
+            started.elapsed().as_nanos()
+        };
+
+        for _ in 0..WARMUPS {
+            std::hint::black_box(measure_frame_construction());
+            std::hint::black_box(measure_renderer_guard());
+            std::hint::black_box(measure_frame_and_guard());
+        }
+
+        for sample_index in 0..SAMPLES {
+            let frame_construction_ns = measure_frame_construction();
+            let renderer_guard_ns = measure_renderer_guard();
+            let frame_and_guard_ns = measure_frame_and_guard();
+            eprintln!(
+                "M2A_ROOT_TEST_ADAPTER_DIAGNOSTIC schema=1 source={source} profile={profile} iterations={ITERATIONS} warmups={WARMUPS} samples={SAMPLES} sample_index={sample_index} frame_construction_ns={frame_construction_ns} renderer_guard_ns={renderer_guard_ns} frame_and_guard_ns={frame_and_guard_ns} frame_construction_ns_per_op={} renderer_guard_ns_per_op={} frame_and_guard_ns_per_op={}",
+                frame_construction_ns / ITERATIONS as u128,
+                renderer_guard_ns / ITERATIONS as u128,
+                frame_and_guard_ns / ITERATIONS as u128,
+            );
+        }
+
+        drop(app);
         drop(workspace);
     }
 
