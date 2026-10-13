@@ -5,6 +5,8 @@ use multi_launcher as startup_runtime;
 use multi_launcher::actions::{Action, load_startup_actions};
 use multi_launcher::common::persistence::PersistenceError;
 use multi_launcher::gui::LauncherApp;
+#[cfg(feature = "qa-framebuffer-capture")]
+use multi_launcher::gui::QaFramebufferRequest;
 use multi_launcher::hotkey::launcher_invocation::{
     InvocationConfig, LauncherInvocationService, PriorityOwner, RelatedAction, RelatedBinding,
     RouteHandoff, ServiceNotice, exclusive_owners, install_exclusive_wake,
@@ -919,6 +921,14 @@ fn spawn_gui(
     Arc<Mutex<Option<RootViewportCtx>>>,
     RootWindowBridge,
 ) {
+    #[cfg(feature = "qa-framebuffer-capture")]
+    let qa_framebuffer_request = match QaFramebufferRequest::from_environment() {
+        Ok(request) => request,
+        Err(error) => {
+            tracing::error!(%error, "QA framebuffer capture request was rejected");
+            None
+        }
+    };
     let custom_len_for_window = custom_len;
     let mut reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
     reserved_launcher_hotkeys.extend(radial_hotkey_reservations);
@@ -974,6 +984,8 @@ fn spawn_gui(
     let root_window_bridge_for_gui = root_window_bridge.clone();
     let actions_for_window = Arc::clone(&actions);
     let startup_indexing_for_window = startup_indexing;
+    #[cfg(feature = "qa-framebuffer-capture")]
+    let qa_framebuffer_request_for_window = qa_framebuffer_request;
 
     let worker = GuiWorker::spawn(event_tx, move |completion| {
         let viewport = build_viewport_with_icon(
@@ -1020,6 +1032,12 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                #[cfg(feature = "qa-framebuffer-capture")]
+                if let Some(request) = qa_framebuffer_request_for_window {
+                    if let Err(error) = app.install_qa_framebuffer_request(request) {
+                        tracing::error!(%error, "failed to install QA framebuffer capture");
+                    }
+                }
                 if let Some(startup) = startup_indexing_for_window {
                     if let Err(error) = app.install_startup_indexing(
                         startup.coordinator,

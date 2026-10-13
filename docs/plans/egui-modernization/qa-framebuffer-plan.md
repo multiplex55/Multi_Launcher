@@ -1,6 +1,6 @@
 # Opt-in framebuffer evidence probe — implementation packet
 
-Read-only planner packet,2026-10-13. Execute sequentially after M1-D source ownership releases. This is a bounded QA prerequisite for actual screenshot evidence after repeated Windows.Graphics.Capture transport failures, not a rendering redesign. User authorizes app launch/use/screenshots. No implementation or capture has occurred.
+Planner packet,2026-10-13. Execute sequentially after M1-D source ownership releases. This is a bounded QA prerequisite for actual screenshot evidence after repeated Windows.Graphics.Capture transport failures, not a rendering redesign. User authorizes app launch/use/screenshots. Current implementation is in progress; no successful native capture has occurred.
 
 ## Objective and ownership
 
@@ -46,3 +46,13 @@ While armed/awaiting pixels, revalidate logical visibility and ROOT/OCR/tool own
 ## Retained-pass marker clarification
 
 Existing finish_ui_frame_receipt clears root_frame_logic, and pending receipt is normally None with performance/query instrumentation disabled. Do not enable Track C or depend on that optional candidate. Stage a tiny feature-gated eligible-surface marker owned by the probe on every UI pass, including hidden/OCR early returns; overwrite it per pass so retained hidden/OCR state replaces discarded visible state. Read the final marker after existing completion finalization. This is the probe's own bounded QA state, not another production frame owner or performance receipt path.
+
+## Original0.27 archived-source backport handoff
+
+Read-only planner confirmed baseline72a01bd integration: main::spawn_gui900 creates app/bridges then returns Box; render_root_frame2085 captures native handle and routes snippet keyboard before launcher input; App::update3786 delegates to it. Context::run executes once (no discard-loop contract). Original Glow paints, reads previously armed screenshot, swaps, then processes current viewport commands; unit Screenshot and ROOT event have no UserData.
+
+After current-probe source/native validation, parent creates a fresh ignored source archive of72a01bd and assigns one sequential writer there. Keep currentcheckout and preserved binaries/performance receipts untouched. Minimal archived changes only: empty QA feature, optional owner/module/disabled constructor field, one-time main manifest init, pre/post App::update seams, and normal-tail render eligibility marker. Do not backport current lifecycle/vendor/Track C machinery.
+
+Update start resets marker and processes screenshot/F11 before ordinary routing; existing render_root_frame order/signature stays intact; normal tail stages visible/root ownership/query-generation/frame/PPP metadata (OCR early-return remains ineligible); update tail finalizes once and revalidates before issue/accept/save. For issueN request capture repaint; after expected captureN+1 tail record CPU state and request reply repaint; acceptROOTreplyN+2 only in expected outstanding state. Terminally cancel on hidden/OCR/tool/owner/incompatible transitions. No resume/retry/polling loop. Preserve foreignviewportevents; local correlation is weaker without UserData and must be labelled.
+
+Reuse compatible current manifest/worker/exclusive-write/provenance/benchmark-exclusion logic only. Startup after first eligible completed update, issue following update; local unmodified F11 only explicitly enabled/focused/no inputowner conflict. No synthetic/global hooks. Tests use original Context::run for scheduling, unsolicited/foreign replies, cancellation/F11ownership/save failure; no discard tests. Parent builds archived manifest with direct Cargo, lockedofflinefast-dev QAfeature, separate CARGO_TARGET_DIR, and separately hashed probe patch/executable/fixture/request/process receipts. Actual readable PNG required; label instrumented original0.27 framebuffer, never preserved unmodified output. No source/build/run occurred in planning.

@@ -43,6 +43,8 @@ mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
 mod ocr_view;
+#[cfg(feature = "qa-framebuffer-capture")]
+mod qa_framebuffer;
 mod qr_dialog;
 mod query_history;
 mod query_observation;
@@ -119,6 +121,8 @@ pub use note_panel::{
     spawn_external,
 };
 pub use notes_dialog::NotesDialog;
+#[cfg(feature = "qa-framebuffer-capture")]
+pub use qa_framebuffer::QaFramebufferRequest;
 pub use qr_dialog::QrDialogState;
 pub use regex_tester_dialog::RegexTesterDialogState;
 pub use screenshot_editor::{
@@ -728,6 +732,8 @@ pub struct LauncherApp {
     root_list_geometry: render::RootListGeometryCache,
     root_frame_logic: Option<render::RootFrameLogic>,
     pending_ui_frame_receipt: Option<render::UiFrameReceiptCandidate>,
+    #[cfg(feature = "qa-framebuffer-capture")]
+    qa_framebuffer: Option<qa_framebuffer::FramebufferProbe>,
     indexing: indexing::IndexingOwner,
     pub matcher: SkimMatcherV2,
     pub error: Option<String>,
@@ -2221,6 +2227,8 @@ impl LauncherApp {
             root_list_geometry: render::RootListGeometryCache::default(),
             root_frame_logic: None,
             pending_ui_frame_receipt: None,
+            #[cfg(feature = "qa-framebuffer-capture")]
+            qa_framebuffer: None,
             indexing: indexing::IndexingOwner::new(desired_index_config),
             matcher: SkimMatcherV2::default(),
             error: None,

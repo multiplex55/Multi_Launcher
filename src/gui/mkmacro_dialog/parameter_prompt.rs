@@ -90,6 +90,11 @@ impl ParameterPromptUi {
         self.bootstrap_pending
     }
 
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(crate) fn owns_input(&self) -> bool {
+        self.pending.is_some() || self.notice.is_some()
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, handle_ui_actions: bool) {
         if self.pending.is_none() && self.notice.is_none() {
             return;

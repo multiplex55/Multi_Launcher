@@ -2505,6 +2505,8 @@ impl LauncherApp {
             return;
         }
         self.pending_ui_frame_receipt = None;
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.qa_framebuffer_begin_root_logic(ctx);
         let visible_input_allowed = self.visible_flag.load(Ordering::Relaxed);
         let track_c_enabled = visible_input_allowed && crate::performance::enabled();
         #[cfg(test)]
@@ -2534,6 +2536,8 @@ impl LauncherApp {
         let query_geometry_cause = self.run_runtime_tick(ctx, frame);
         let (visibility_request, visibility_invocation_id, should_be_visible, just_became_visible) =
             self.reconcile_root_visibility(ctx);
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.qa_framebuffer_revalidate_root_logic(ctx, should_be_visible);
         if !should_be_visible {
             self.cancel_root_hidden_query_observer();
         }
@@ -2570,6 +2574,8 @@ impl LauncherApp {
             self.cancel_root_hidden_query_observer();
             self.request_root_repaint_for_new_viewport_bootstrap(ctx, bootstrap_before_tick);
         }
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.qa_framebuffer_run_hidden_logic_tick();
     }
 
     fn viewport_bootstrap_state(&self) -> [bool; 4] {
@@ -2622,6 +2628,8 @@ impl LauncherApp {
         if let Some(logic) = self.root_frame_logic.as_mut() {
             logic.ui_passes = frame_logic.ui_passes;
         }
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.qa_framebuffer_start_ui_pass(frame_logic.ui_passes);
         if !frame_logic.should_be_visible {
             let bootstrap_before_background = self.viewport_bootstrap_state();
             self.show_macro_prompt(&ctx, first_ui_pass);
@@ -2639,7 +2647,14 @@ impl LauncherApp {
                     bootstrap_before_background,
                 );
             }
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
             return;
+        }
+
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if first_ui_pass {
+            self.qa_framebuffer_issue_if_ready(&ctx, frame_logic.should_be_visible);
         }
 
         let track_c_enabled = frame_logic.track_c_enabled;
@@ -3625,6 +3640,8 @@ impl LauncherApp {
                 painted_query_results,
                 false,
             );
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
             return;
         }
         let show_editor = self.show_editor;
@@ -4029,6 +4046,8 @@ impl LauncherApp {
                 },
             ]);
         }
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.qa_framebuffer_finish_ui_pass(&ctx, frame_logic.should_be_visible);
     }
 
     fn stage_ui_frame_receipt(
@@ -4123,6 +4142,8 @@ impl LauncherApp {
                 );
                 self.track_c_query_observer.end_frame_boundary();
             }
+            #[cfg(feature = "qa-framebuffer-capture")]
+            self.qa_framebuffer_finish_retained_ui_frame();
             self.root_frame_logic = None;
             return;
         };
@@ -4198,6 +4219,8 @@ impl LauncherApp {
             );
             self.track_c_query_observer.end_frame_boundary();
         }
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.qa_framebuffer_finish_retained_ui_frame();
         self.root_frame_logic = None;
     }
 }
