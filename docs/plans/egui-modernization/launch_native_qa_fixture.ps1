@@ -16,7 +16,13 @@ $taskProcessReceipt = Join-Path $taskRun 'process-receipt.json'
 if (!(Test-Path -LiteralPath $taskRequest) -or (Test-Path -LiteralPath $taskProcessReceipt)) {
     throw 'Request missing or fixture already launched'
 }
-$taskPreSettings = (Get-FileHash -LiteralPath (Join-Path $taskRun 'settings.json') -Algorithm SHA256).Hash
+$taskPreSettingsCopy = Join-Path $taskRun 'prelaunch-settings.json'
+if (Test-Path -LiteralPath $taskPreSettingsCopy) { throw 'Prelaunch settings snapshot already exists' }
+Copy-Item -LiteralPath (Join-Path $taskRun 'settings.json') -Destination $taskPreSettingsCopy -ErrorAction Stop
+$taskPreSettings = (Get-FileHash -LiteralPath $taskPreSettingsCopy -Algorithm SHA256).Hash
+if ((Get-FileHash -LiteralPath (Join-Path $taskRun 'settings.json') -Algorithm SHA256).Hash -ne $taskPreSettings) {
+    throw 'Settings changed while taking the prelaunch snapshot'
+}
 $taskEnvironment = @{
     ML_NOTES_DIR = (Join-Path $taskRun 'notes')
     ML_NOTE_TEMPLATES_DIR = (Join-Path $taskRun 'templates')
@@ -48,8 +54,12 @@ try {
         executable = $taskExecutable
         executable_sha256 = $taskExeHash
         source_commit = $taskBuildReceipt.source_commit
+        source_kind = $taskBuildReceipt.source_kind
+        instrumentation_patch_sha256 = $taskBuildReceipt.instrumentation_patch_sha256
+        build_receipt_sha256 = (Get-FileHash -LiteralPath (Join-Path $taskBuild 'build-receipt.json') -Algorithm SHA256).Hash
         cwd = $taskRun
         prelaunch_settings_sha256 = $taskPreSettings
+        prelaunch_settings_file = 'prelaunch-settings.json'
         request_sha256 = (Get-FileHash -LiteralPath $taskRequest -Algorithm SHA256).Hash
         window_style = 'Normal'
         performance_variable_present = $false
