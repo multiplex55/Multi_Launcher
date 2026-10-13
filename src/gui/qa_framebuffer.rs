@@ -1,4 +1,6 @@
 use super::LauncherApp;
+#[cfg(feature = "qa-framebuffer-capture")]
+use super::qr_dialog::QrViewportObservation;
 use eframe::egui::{
     self, ColorImage, Event, Key, Modifiers, UserData, ViewportCommand, ViewportId,
 };
@@ -31,6 +33,33 @@ enum CaptureTrigger {
 enum CaptureTarget {
     #[serde(rename = "ROOT")]
     Root,
+    #[serde(rename = "QR")]
+    Qr,
+}
+
+impl CaptureTarget {
+    fn viewport_id(self) -> ViewportId {
+        match self {
+            Self::Root => ViewportId::ROOT,
+            Self::Qr => super::qr_dialog::viewport_id(),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Root => "ROOT",
+            Self::Qr => "QR",
+        }
+    }
+
+    fn capture_semantics(self) -> &'static str {
+        match self {
+            Self::Root => "ROOT framebuffer pixels; CPU UI completion before GPU presentation",
+            Self::Qr => {
+                "QR native immediate-child framebuffer pixels; child paint and swap precede callback return; CPU observation is not GPU completion"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +176,9 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
             ));
         }
     }
+    if manifest.target == CaptureTarget::Qr && manifest.trigger == CaptureTrigger::F11 {
+        return Err("QR framebuffer capture supports the Startup trigger only".into());
+    }
     if !is_sha256(&manifest.fixture_manifest_sha256) {
         return Err("manifest fixture_manifest_sha256 must be 64 hexadecimal characters".into());
     }
@@ -258,6 +290,27 @@ struct PendingScreenshotReply {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct QrRenderEvidence {
+    parent_logic_frame_id: u64,
+    child_viewport_id: String,
+    callback_class: &'static str,
+    callback_frame_nr: u64,
+    callback_pass_nr: u64,
+    callback_pass_index: usize,
+    completed_frame_nr: Option<u64>,
+    completed_pass_nr: Option<u64>,
+    visible: Option<bool>,
+    minimized: Option<bool>,
+    occluded: Option<bool>,
+    focused: Option<bool>,
+    body_rendered: bool,
+    still_open: bool,
+    eligible: bool,
+    callback_observed_at_unix_ms: u64,
+    renderer_returned_at_unix_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct FrameEvidence {
     viewport_id: &'static str,
     logic_frame_id: u64,
@@ -278,6 +331,8 @@ struct FrameEvidence {
     tool_owner: bool,
     modal_or_key_capture_owner: bool,
     eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qr_observation: Option<QrRenderEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -287,6 +342,8 @@ struct ScreenshotReplyEvidence {
     received_at_unix_ms: u64,
     width: u64,
     height: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qr_observation: Option<QrRenderEvidence>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -323,6 +380,8 @@ struct CompletionReceipt {
     process: ProcessIdentity,
     capture_semantics: &'static str,
     issued: Option<FrameEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dispatch_boundary_baseline: Option<QrRenderEvidence>,
     captured: Option<FrameEvidence>,
     screenshot_received: Option<ScreenshotReplyEvidence>,
     saved: Option<SaveEvidence>,
@@ -343,8 +402,9 @@ impl CompletionReceipt {
             manifest_sha256: request.manifest_sha256.clone(),
             executable: request.executable.clone(),
             process: request.process.clone(),
-            capture_semantics: "ROOT framebuffer pixels; CPU UI completion before GPU presentation",
+            capture_semantics: request.manifest.target.capture_semantics(),
             issued: None,
+            dispatch_boundary_baseline: None,
             captured: None,
             screenshot_received: None,
             saved: None,
@@ -355,6 +415,7 @@ impl CompletionReceipt {
 
 pub(super) struct FramebufferProbe {
     token: UserData,
+    target: CaptureTarget,
     phase: ProbePhase,
     logic_frame_id: u64,
     ui_pass_id: u64,
@@ -364,6 +425,10 @@ pub(super) struct FramebufferProbe {
     issue_logic_frame_id: Option<u64>,
     capture_logic_frame_id: Option<u64>,
     expected_reply_logic_frame_id: Option<u64>,
+    reply_wait_armed: bool,
+    latest_qr_observation: Option<QrRenderEvidence>,
+    qr_acquired: bool,
+    qr_capture_parent_logic_frame_id: Option<u64>,
     pending_reply: Option<PendingScreenshotReply>,
     receipt: CompletionReceipt,
     writer_tx: SyncSender<WriterJob>,
@@ -372,11 +437,21 @@ pub(super) struct FramebufferProbe {
 
 impl FramebufferProbe {
     fn new(request: QaFramebufferRequest, ctx: egui::Context) -> Result<Self, String> {
-        let (writer_tx, writer_rx) = spawn_writer(request.output_dir.clone(), ctx)?;
+        Self::new_with_reply_timeout(request, ctx, SCREENSHOT_REPLY_TIMEOUT)
+    }
+
+    fn new_with_reply_timeout(
+        request: QaFramebufferRequest,
+        ctx: egui::Context,
+        reply_timeout: Duration,
+    ) -> Result<Self, String> {
+        let (writer_tx, writer_rx) = spawn_writer(request.output_dir.clone(), ctx, reply_timeout)?;
+        let target = request.manifest.target;
         let token = UserData::new(ScreenshotToken(1));
         let receipt = CompletionReceipt::new(&request);
-        Ok(Self {
+        let mut probe = Self {
             token,
+            target,
             phase: ProbePhase::Armed,
             logic_frame_id: 0,
             ui_pass_id: 0,
@@ -386,11 +461,19 @@ impl FramebufferProbe {
             issue_logic_frame_id: None,
             capture_logic_frame_id: None,
             expected_reply_logic_frame_id: None,
+            reply_wait_armed: false,
+            latest_qr_observation: None,
+            qr_acquired: false,
+            qr_capture_parent_logic_frame_id: None,
             pending_reply: None,
             receipt,
             writer_tx,
             writer_rx,
-        })
+        };
+        if target == CaptureTarget::Qr {
+            probe.arm_reply_wait()?;
+        }
+        Ok(probe)
     }
 
     fn begin_root_logic(&mut self, ctx: &egui::Context, eligibility: Option<SurfaceEligibility>) {
@@ -401,32 +484,36 @@ impl FramebufferProbe {
         self.retained_pass = None;
         self.current_ui_pass_id = None;
 
-        if matches!(self.phase, ProbePhase::Issued | ProbePhase::AwaitingReply)
-            && let Some(image) = take_matching_screenshot_event(ctx, &self.token)
+        if self.target == CaptureTarget::Root
+            && matches!(self.phase, ProbePhase::Issued | ProbePhase::AwaitingReply)
+            && let Some(image) =
+                take_matching_screenshot_event(ctx, self.target.viewport_id(), &self.token)
             && self.pending_reply.is_none()
         {
             let [width, height] = image.size;
             let evidence = ScreenshotReplyEvidence {
-                viewport_id: "ROOT",
+                viewport_id: self.target.label(),
                 logic_frame_id: self.logic_frame_id,
                 received_at_unix_ms: unix_millis(),
                 width: u64::try_from(width).unwrap_or(u64::MAX),
                 height: u64::try_from(height).unwrap_or(u64::MAX),
+                qr_observation: None,
             };
             self.receipt.screenshot_received = Some(evidence.clone());
             self.pending_reply = Some(PendingScreenshotReply { image, evidence });
         }
 
-        if matches!(self.phase, ProbePhase::AwaitingReply | ProbePhase::Saving) {
+        if self.phase == ProbePhase::Saving || self.target == CaptureTarget::Qr {
             self.poll_writer_outcome();
         }
         if !self.needs_root_logic() {
             return;
         }
 
-        if let Some(eligibility) = eligibility
+        if self.target == CaptureTarget::Root
             && self.receipt.trigger == CaptureTrigger::F11
             && self.phase == ProbePhase::Armed
+            && let Some(eligibility) = eligibility
             && eligibility.eligible()
             && ctx.input(|input| input.viewport().focused == Some(true))
             && take_unmodified_f11(ctx)
@@ -434,7 +521,7 @@ impl FramebufferProbe {
             self.phase = ProbePhase::Ready;
         }
 
-        if self.phase_is_active()
+        if self.phase_requires_eligibility()
             && let Some(eligibility) = eligibility
             && !eligibility.eligible()
         {
@@ -443,15 +530,21 @@ impl FramebufferProbe {
     }
 
     fn revalidate_root_logic(&mut self, eligibility: SurfaceEligibility) {
-        if self.phase_is_active() && !eligibility.eligible() {
+        if self.phase_requires_eligibility() && !eligibility.eligible() {
             self.fail(eligibility.failure_reason());
         }
     }
 
     fn run_hidden_logic_tick(&mut self) {
-        if self.phase == ProbePhase::Saving {
+        if self.phase == ProbePhase::Saving || self.target == CaptureTarget::Qr {
             self.poll_writer_outcome();
-        } else if self.phase_is_active() {
+        }
+        if self.phase == ProbePhase::Saving {
+            return;
+        }
+        if self.phase_is_active()
+            || (self.target == CaptureTarget::Qr && self.phase == ProbePhase::Armed)
+        {
             self.fail("ROOT became hidden before the retained screenshot reply boundary");
         }
     }
@@ -504,21 +597,133 @@ impl FramebufferProbe {
         self.issue_logic_frame_id = Some(self.logic_frame_id);
         self.phase = ProbePhase::Issued;
         ctx.send_viewport_cmd_to(
-            ViewportId::ROOT,
+            self.target.viewport_id(),
             ViewportCommand::Screenshot(self.token.clone()),
         );
-        // Glow services a screenshot command after the next paint and returns
-        // its event on the following input. One repaint requests that paint.
+        // Glow services the action after the selected viewport's next paint.
+        // The ROOT repaint also preserves the established event-delivery path.
         ctx.request_repaint_of(ViewportId::ROOT);
     }
 
+    fn after_qr_show(
+        &mut self,
+        ctx: &egui::Context,
+        root_eligibility: SurfaceEligibility,
+        qr_open: bool,
+        observation: Option<QrViewportObservation>,
+        frame_evidence: Option<FrameEvidence>,
+    ) {
+        if self.target != CaptureTarget::Qr || !self.needs_root_logic() {
+            return;
+        }
+
+        let Some(observation) = observation else {
+            if self.qr_acquired && !qr_open && self.phase_requires_eligibility() {
+                self.fail("QR dialog closed before the selected child capture completed");
+            }
+            return;
+        };
+
+        let qr_evidence = qr_render_evidence(self.logic_frame_id, &observation);
+        self.latest_qr_observation = Some(qr_evidence.clone());
+
+        if !root_eligibility.eligible() {
+            self.fail(root_eligibility.failure_reason());
+            return;
+        }
+        if !qr_open || !observation.still_open {
+            self.fail("QR dialog closed before the selected child capture completed");
+            return;
+        }
+        if !qr_evidence.eligible {
+            self.fail(qr_eligibility_failure(&observation));
+            return;
+        }
+        self.qr_acquired = true;
+
+        let Some(mut frame_evidence) = frame_evidence else {
+            if matches!(self.phase, ProbePhase::Ready | ProbePhase::Issued) {
+                self.fail("QR callback omitted its current ROOT UI-pass provenance");
+            }
+            return;
+        };
+        frame_evidence.viewport_id = self.target.label();
+        frame_evidence.viewport_focused = observation.focused.unwrap_or(false);
+        frame_evidence.eligible &= qr_evidence.eligible;
+        frame_evidence.qr_observation = Some(qr_evidence.clone());
+
+        match self.phase {
+            ProbePhase::Ready => {
+                frame_evidence.evidence_stage = "qr_screenshot_api_issued_after_child_callback";
+                self.issue_screenshot_if_ready(ctx, root_eligibility, frame_evidence);
+            }
+            ProbePhase::Issued => {
+                let Some(issue_parent_frame) = self.issue_logic_frame_id else {
+                    self.fail("QR screenshot issue frame was missing from probe state");
+                    return;
+                };
+                if self.logic_frame_id <= issue_parent_frame {
+                    return;
+                }
+                let Some(dispatch_baseline) = self.receipt.dispatch_boundary_baseline.as_ref()
+                else {
+                    return;
+                };
+                if !qr_child_advanced(dispatch_baseline, &qr_evidence) {
+                    return;
+                }
+
+                frame_evidence.evidence_stage =
+                    "qr_expected_capture_child_render_after_dispatch_boundary";
+                self.receipt.captured = Some(frame_evidence);
+                self.qr_capture_parent_logic_frame_id = Some(self.logic_frame_id);
+                self.phase = ProbePhase::AwaitingReply;
+                // A single ROOT repaint allows the child to advance again and
+                // deliver the event queued after its native paint and swap.
+                ctx.request_repaint_of(ViewportId::ROOT);
+            }
+            ProbePhase::AwaitingReply => {
+                let Some(captured) = self
+                    .receipt
+                    .captured
+                    .as_ref()
+                    .and_then(|captured| captured.qr_observation.as_ref())
+                else {
+                    self.fail("QR expected-capture child observation was missing");
+                    return;
+                };
+                if !qr_child_advanced(captured, &qr_evidence) {
+                    return;
+                }
+                let Some(image) =
+                    take_matching_screenshot_event(ctx, self.target.viewport_id(), &self.token)
+                else {
+                    return;
+                };
+                if self.pending_reply.is_none() {
+                    let [width, height] = image.size;
+                    let evidence = ScreenshotReplyEvidence {
+                        viewport_id: self.target.label(),
+                        logic_frame_id: self.logic_frame_id,
+                        received_at_unix_ms: unix_millis(),
+                        width: u64::try_from(width).unwrap_or(u64::MAX),
+                        height: u64::try_from(height).unwrap_or(u64::MAX),
+                        qr_observation: Some(qr_evidence),
+                    };
+                    self.receipt.screenshot_received = Some(evidence.clone());
+                    self.pending_reply = Some(PendingScreenshotReply { image, evidence });
+                }
+            }
+            ProbePhase::Armed | ProbePhase::Saving | ProbePhase::Complete | ProbePhase::Failed => {}
+        }
+    }
     fn finish_retained_ui_frame(
         &mut self,
         ctx: &egui::Context,
         final_eligibility: SurfaceEligibility,
     ) {
         let Some(mut marker) = self.retained_pass.take() else {
-            if self.phase_is_active() {
+            if self.phase_requires_eligibility() {
                 self.fail("ROOT UI completed without a retained-pass eligibility marker");
             }
             return;
@@ -533,7 +738,11 @@ impl FramebufferProbe {
             evidence.ocr_owner = marker.eligibility.ocr_owner;
             evidence.tool_owner = marker.eligibility.tool_owner;
             evidence.modal_or_key_capture_owner = marker.eligibility.modal_or_key_capture_owner;
-            evidence.eligible = marker.eligibility.eligible();
+            evidence.eligible = marker.eligibility.eligible()
+                && evidence
+                    .qr_observation
+                    .as_ref()
+                    .is_none_or(|observation| observation.eligible);
         }
 
         match self.phase {
@@ -557,8 +766,20 @@ impl FramebufferProbe {
                 if marker.logic_frame_id == issue_frame {
                     if !marker.eligibility.eligible() {
                         self.fail(marker.eligibility.failure_reason());
+                    } else if self.target == CaptureTarget::Qr {
+                        let Some(baseline) =
+                            self.latest_qr_observation.as_ref().filter(|observation| {
+                                observation.parent_logic_frame_id == issue_frame
+                                    && observation.eligible
+                            })
+                        else {
+                            self.fail("QR dispatch-boundary child observation was unavailable");
+                            return;
+                        };
+                        self.receipt.dispatch_boundary_baseline = Some(baseline.clone());
                     }
-                } else if marker.logic_frame_id > issue_frame {
+                } else if marker.logic_frame_id > issue_frame && self.target == CaptureTarget::Root
+                {
                     if !marker.eligibility.eligible() {
                         self.fail(marker.eligibility.failure_reason());
                     } else {
@@ -574,18 +795,12 @@ impl FramebufferProbe {
                         self.expected_reply_logic_frame_id =
                             Some(marker.logic_frame_id.saturating_add(1));
                         self.phase = ProbePhase::AwaitingReply;
-                        match self
-                            .writer_tx
-                            .try_send(WriterJob::AwaitReply(self.receipt.clone()))
-                        {
-                            Ok(()) => {
-                                // The capture frame is N+1; one bounded repaint
-                                // requests the reply input on N+2.
-                                ctx.request_repaint_of(ViewportId::ROOT);
-                            }
-                            Err(error) => {
-                                self.fail(format!("failed to arm screenshot reply wait: {error}"));
-                            }
+                        if let Err(error) = self.arm_reply_wait() {
+                            self.fail(format!("failed to arm screenshot reply wait: {error}"));
+                        } else {
+                            // The capture frame is N+1; one bounded repaint
+                            // requests the reply input on N+2.
+                            ctx.request_repaint_of(ViewportId::ROOT);
                         }
                     }
                 }
@@ -593,29 +808,68 @@ impl FramebufferProbe {
             ProbePhase::AwaitingReply => {
                 if !marker.eligibility.eligible() {
                     self.fail(marker.eligibility.failure_reason());
-                } else if let (Some(expected_reply), Some(reply)) = (
-                    self.expected_reply_logic_frame_id,
-                    self.pending_reply.take(),
-                ) {
-                    if self.logic_frame_id >= expected_reply
-                        && reply.evidence.logic_frame_id >= expected_reply
-                    {
-                        self.receipt.screenshot_received = Some(reply.evidence);
-                        match self.writer_tx.try_send(WriterJob::Save {
-                            receipt: self.receipt.clone(),
-                            image: reply.image,
-                        }) {
-                            Ok(()) => self.phase = ProbePhase::Saving,
-                            Err(error) => {
-                                self.fail(format!("failed to queue screenshot save: {error}"));
-                            }
+                    return;
+                }
+                if self.target == CaptureTarget::Qr
+                    && !self
+                        .latest_qr_observation
+                        .as_ref()
+                        .is_some_and(|observation| {
+                            observation.parent_logic_frame_id == marker.logic_frame_id
+                                && observation.eligible
+                        })
+                {
+                    self.fail("QR child lost eligibility before retained ROOT completion");
+                    return;
+                }
+
+                let reply_is_ready = match self.target {
+                    CaptureTarget::Root => self
+                        .expected_reply_logic_frame_id
+                        .zip(
+                            self.pending_reply
+                                .as_ref()
+                                .map(|reply| reply.evidence.logic_frame_id),
+                        )
+                        .is_some_and(|(expected, received)| {
+                            self.logic_frame_id >= expected && received >= expected
+                        }),
+                    CaptureTarget::Qr => self
+                        .qr_capture_parent_logic_frame_id
+                        .zip(
+                            self.pending_reply
+                                .as_ref()
+                                .map(|reply| reply.evidence.logic_frame_id),
+                        )
+                        .is_some_and(|(capture_parent, reply_parent)| {
+                            self.logic_frame_id >= capture_parent && reply_parent >= capture_parent
+                        }),
+                };
+                if reply_is_ready && let Some(reply) = self.pending_reply.take() {
+                    self.receipt.screenshot_received = Some(reply.evidence);
+                    match self.writer_tx.try_send(WriterJob::Save {
+                        receipt: self.receipt.clone(),
+                        image: reply.image,
+                    }) {
+                        Ok(()) => self.phase = ProbePhase::Saving,
+                        Err(error) => {
+                            self.fail(format!("failed to queue screenshot save: {error}"));
                         }
-                    } else {
-                        self.pending_reply = Some(reply);
                     }
                 }
             }
         }
+    }
+
+    fn arm_reply_wait(&mut self) -> Result<(), String> {
+        if self.reply_wait_armed {
+            return Ok(());
+        }
+        self.writer_tx
+            .try_send(WriterJob::AwaitReply(self.receipt.clone()))
+            .map_err(|error| error.to_string())?;
+        self.reply_wait_armed = true;
+        Ok(())
     }
 
     fn phase_is_active(&self) -> bool {
@@ -623,6 +877,11 @@ impl FramebufferProbe {
             self.phase,
             ProbePhase::Ready | ProbePhase::Issued | ProbePhase::AwaitingReply
         )
+    }
+
+    fn phase_requires_eligibility(&self) -> bool {
+        self.phase_is_active()
+            || (self.target == CaptureTarget::Qr && self.phase == ProbePhase::Armed)
     }
 
     fn needs_retained_marker(&self) -> bool {
@@ -641,7 +900,7 @@ impl FramebufferProbe {
     }
 
     fn fail(&mut self, reason: impl Into<String>) {
-        if !self.phase_is_active() {
+        if !self.phase_requires_eligibility() {
             return;
         }
         self.receipt.status = ReceiptStatus::Failed;
@@ -721,7 +980,7 @@ impl LauncherApp {
         if !self
             .qa_framebuffer
             .as_ref()
-            .is_some_and(FramebufferProbe::phase_is_active)
+            .is_some_and(FramebufferProbe::phase_requires_eligibility)
         {
             return;
         }
@@ -735,7 +994,7 @@ impl LauncherApp {
         if let Some(probe) = self
             .qa_framebuffer
             .as_mut()
-            .filter(|probe| probe.phase_is_active() || probe.phase == ProbePhase::Saving)
+            .filter(|probe| probe.phase_requires_eligibility() || probe.phase == ProbePhase::Saving)
         {
             probe.run_hidden_logic_tick();
         }
@@ -747,6 +1006,47 @@ impl LauncherApp {
         }
     }
 
+    pub(super) fn qa_framebuffer_needs_qr_observation(&self) -> bool {
+        self.qa_framebuffer
+            .as_ref()
+            .is_some_and(|probe| probe.target == CaptureTarget::Qr && probe.needs_root_logic())
+    }
+
+    pub(super) fn qa_framebuffer_after_qr_show(
+        &mut self,
+        ctx: &egui::Context,
+        logical_root_visible: bool,
+        qr_open: bool,
+        observation: Option<QrViewportObservation>,
+    ) {
+        let Some((logic_frame_id, ui_pass_id, ui_pass_index)) = self
+            .qa_framebuffer
+            .as_ref()
+            .filter(|probe| probe.target == CaptureTarget::Qr && probe.needs_root_logic())
+            .and_then(|probe| {
+                probe
+                    .current_ui_pass_id
+                    .map(|pass_id| (probe.logic_frame_id, pass_id, probe.current_ui_pass_index))
+            })
+        else {
+            return;
+        };
+        let root_eligibility = surface_eligibility(self, ctx, logical_root_visible);
+        let evidence = frame_evidence(
+            self,
+            ctx,
+            logic_frame_id,
+            ui_pass_id,
+            ui_pass_index,
+            "qr_child_callback_observed",
+            logical_root_visible,
+            root_eligibility,
+        );
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.after_qr_show(ctx, root_eligibility, qr_open, observation, Some(evidence));
+        }
+    }
+
     pub(super) fn qa_framebuffer_issue_if_ready(
         &mut self,
         ctx: &egui::Context,
@@ -755,7 +1055,7 @@ impl LauncherApp {
         let Some((logic_frame_id, ui_pass_id, ui_pass_index)) = self
             .qa_framebuffer
             .as_ref()
-            .filter(|probe| probe.phase == ProbePhase::Ready)
+            .filter(|probe| probe.target == CaptureTarget::Root && probe.phase == ProbePhase::Ready)
             .and_then(|probe| {
                 probe
                     .current_ui_pass_id
@@ -844,6 +1144,79 @@ impl LauncherApp {
     }
 }
 
+fn viewport_class_name(class: egui::ViewportClass) -> &'static str {
+    match class {
+        egui::ViewportClass::Root => "root",
+        egui::ViewportClass::Deferred => "deferred",
+        egui::ViewportClass::Immediate => "immediate",
+        egui::ViewportClass::EmbeddedWindow => "embedded_window",
+    }
+}
+
+fn qr_render_evidence(
+    parent_logic_frame_id: u64,
+    observation: &QrViewportObservation,
+) -> QrRenderEvidence {
+    let actual_target = observation.callback_class == egui::ViewportClass::Immediate
+        && observation.child_viewport_id == super::qr_dialog::viewport_id();
+    let eligible = actual_target
+        && observation.body_rendered
+        && observation.still_open
+        && observation.visible.unwrap_or(true)
+        && !observation.minimized.unwrap_or(false)
+        && !observation.occluded.unwrap_or(false);
+    QrRenderEvidence {
+        parent_logic_frame_id,
+        child_viewport_id: format!("{:?}", observation.child_viewport_id),
+        callback_class: viewport_class_name(observation.callback_class),
+        callback_frame_nr: observation.callback_frame_nr,
+        callback_pass_nr: observation.callback_pass_nr,
+        callback_pass_index: observation.callback_pass_index,
+        completed_frame_nr: observation.completed_frame_nr,
+        completed_pass_nr: observation.completed_pass_nr,
+        visible: observation.visible,
+        minimized: observation.minimized,
+        occluded: observation.occluded,
+        focused: observation.focused,
+        body_rendered: observation.body_rendered,
+        still_open: observation.still_open,
+        eligible,
+        callback_observed_at_unix_ms: observation.callback_observed_at_unix_ms,
+        renderer_returned_at_unix_ms: observation.renderer_returned_at_unix_ms,
+    }
+}
+
+fn qr_eligibility_failure(observation: &QrViewportObservation) -> &'static str {
+    if observation.callback_class != egui::ViewportClass::Immediate {
+        "selected QR viewport callback was not an immediate native child"
+    } else if observation.child_viewport_id != super::qr_dialog::viewport_id() {
+        "selected QR viewport callback had an unexpected child identity"
+    } else if !observation.body_rendered {
+        "selected QR viewport did not render its dialog body"
+    } else if !observation.still_open {
+        "QR dialog closed before the selected child capture completed"
+    } else if observation.visible == Some(false)
+        || observation.minimized == Some(true)
+        || observation.occluded == Some(true)
+    {
+        "selected QR viewport was explicitly hidden, minimized, or occluded"
+    } else {
+        "selected QR viewport was not eligible for native capture"
+    }
+}
+
+fn qr_child_advanced(baseline: &QrRenderEvidence, current: &QrRenderEvidence) -> bool {
+    let frame_advanced = baseline
+        .completed_frame_nr
+        .zip(current.completed_frame_nr)
+        .is_some_and(|(before, after)| after > before);
+    let pass_advanced = baseline
+        .completed_pass_nr
+        .zip(current.completed_pass_nr)
+        .is_some_and(|(before, after)| after > before);
+    frame_advanced || pass_advanced
+}
+
 fn merge_eligibility(
     retained: SurfaceEligibility,
     current: SurfaceEligibility,
@@ -928,14 +1301,16 @@ fn frame_evidence(
         tool_owner: eligibility.tool_owner,
         modal_or_key_capture_owner: eligibility.modal_or_key_capture_owner,
         eligible: eligibility.eligible(),
+        qr_observation: None,
     }
 }
 
 fn take_matching_screenshot_event(
     ctx: &egui::Context,
+    target_viewport_id: ViewportId,
     token: &UserData,
 ) -> Option<Arc<ColorImage>> {
-    ctx.input_mut(|input| {
+    ctx.input_mut_for(target_viewport_id, |input| {
         let mut first_image = None;
         input.events.retain(|event| {
             if let Event::Screenshot {
@@ -943,7 +1318,7 @@ fn take_matching_screenshot_event(
                 user_data,
                 image,
             } = event
-                && *viewport_id == ViewportId::ROOT
+                && *viewport_id == target_viewport_id
                 && user_data == token
             {
                 if first_image.is_none() {
@@ -999,6 +1374,7 @@ struct WriterOutcome {
 fn spawn_writer(
     output_dir: PathBuf,
     ctx: egui::Context,
+    reply_timeout: Duration,
 ) -> Result<(SyncSender<WriterJob>, Receiver<WriterOutcome>), String> {
     let (job_tx, job_rx) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
     let (outcome_tx, outcome_rx) = mpsc::sync_channel(1);
@@ -1008,7 +1384,7 @@ fn spawn_writer(
             if let Ok(job) = job_rx.recv() {
                 let job = match job {
                     WriterJob::AwaitReply(mut receipt) => {
-                        match job_rx.recv_timeout(SCREENSHOT_REPLY_TIMEOUT) {
+                        match job_rx.recv_timeout(reply_timeout) {
                             Ok(reply_job @ WriterJob::Save { .. })
                             | Ok(reply_job @ WriterJob::Failure(_)) => reply_job,
                             Ok(WriterJob::AwaitReply(_)) => {
@@ -1017,17 +1393,28 @@ fn spawn_writer(
                                 WriterJob::Failure(receipt)
                             }
                             Err(RecvTimeoutError::Timeout) => {
-                                receipt.failure = Some(format!(
-                                    "ROOT screenshot reply was not delivered within {} seconds",
-                                    SCREENSHOT_REPLY_TIMEOUT.as_secs()
-                                ));
+                                let seconds = reply_timeout.as_secs();
+                                receipt.failure = Some(match receipt.target {
+                                    CaptureTarget::Root => format!(
+                                        "ROOT screenshot reply was not delivered within {seconds} seconds"
+                                    ),
+                                    CaptureTarget::Qr => format!(
+                                        "selected QR capture did not complete within {seconds} seconds"
+                                    ),
+                                });
                                 WriterJob::Failure(receipt)
                             }
                             Err(RecvTimeoutError::Disconnected) => {
-                                receipt.failure = Some(
-                                    "capture owner exited before the ROOT screenshot reply arrived"
-                                        .into(),
-                                );
+                                receipt.failure = Some(match receipt.target {
+                                    CaptureTarget::Root => {
+                                        "capture owner exited before the ROOT screenshot reply arrived"
+                                            .into()
+                                    }
+                                    CaptureTarget::Qr => {
+                                        "capture owner exited before the selected QR child reply arrived"
+                                            .into()
+                                    }
+                                });
                                 WriterJob::Failure(receipt)
                             }
                         }
@@ -1192,7 +1579,37 @@ fn unix_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::TryRecvError;
+
+    fn test_launcher_app(ctx: &egui::Context, data_dir: &Path) -> LauncherApp {
+        let mut settings = crate::settings::Settings::default();
+        settings.dashboard.config_path = Some(
+            data_dir
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            data_dir.join("actions.json").to_string_lossy().into_owned(),
+            data_dir
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
 
     fn eligible_surface() -> SurfaceEligibility {
         SurfaceEligibility {
@@ -1224,6 +1641,7 @@ mod tests {
             tool_owner: false,
             modal_or_key_capture_owner: false,
             eligible: true,
+            qr_observation: None,
         }
     }
 
@@ -1238,11 +1656,22 @@ mod tests {
         Receiver<WriterJob>,
         SyncSender<WriterOutcome>,
     ) {
+        test_probe_for_target(trigger, CaptureTarget::Root)
+    }
+
+    fn test_probe_for_target(
+        trigger: CaptureTrigger,
+        target: CaptureTarget,
+    ) -> (
+        FramebufferProbe,
+        Receiver<WriterJob>,
+        SyncSender<WriterOutcome>,
+    ) {
         let request = QaFramebufferRequest {
             manifest: RequestManifest {
                 run_id: "test-run".into(),
                 request_id: "test-request".into(),
-                target: CaptureTarget::Root,
+                target,
                 trigger,
                 output_dir: PathBuf::from("unused"),
                 fixture_manifest_sha256: "a".repeat(64),
@@ -1262,8 +1691,9 @@ mod tests {
         let token = UserData::new(ScreenshotToken(1));
         let (writer_tx, writer_rx) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
         let (outcome_tx, outcome_rx) = mpsc::sync_channel(1);
-        let probe = FramebufferProbe {
+        let mut probe = FramebufferProbe {
             token,
+            target,
             phase: ProbePhase::Armed,
             logic_frame_id: 0,
             ui_pass_id: 0,
@@ -1273,14 +1703,20 @@ mod tests {
             issue_logic_frame_id: None,
             capture_logic_frame_id: None,
             expected_reply_logic_frame_id: None,
+            reply_wait_armed: false,
+            latest_qr_observation: None,
+            qr_acquired: false,
+            qr_capture_parent_logic_frame_id: None,
             pending_reply: None,
             receipt: CompletionReceipt::new(&request),
             writer_tx,
             writer_rx: outcome_rx,
         };
+        if target == CaptureTarget::Qr {
+            probe.arm_reply_wait().unwrap();
+        }
         (probe, writer_rx, outcome_tx)
     }
-
     fn issue_frame_one(probe: &mut FramebufferProbe, ctx: &egui::Context) {
         let eligibility = eligible_surface();
         probe.logic_frame_id = 1;
@@ -1335,6 +1771,7 @@ mod tests {
                 received_at_unix_ms: 3,
                 width: 1,
                 height: 1,
+                qr_observation: None,
             },
         });
         probe.retained_pass = Some(RetainedPassMarker {
@@ -1374,6 +1811,356 @@ mod tests {
         probe.finish_retained_ui_frame(ctx, eligible_surface());
         let output = ctx.end_pass();
         output.drop_without_applying_deltas();
+    }
+
+    fn test_qr_observation(completed_frame_nr: u64) -> QrViewportObservation {
+        QrViewportObservation {
+            child_viewport_id: super::super::qr_dialog::viewport_id(),
+            callback_class: egui::ViewportClass::Immediate,
+            callback_frame_nr: completed_frame_nr,
+            callback_pass_nr: completed_frame_nr,
+            callback_pass_index: 0,
+            visible: None,
+            minimized: None,
+            occluded: None,
+            focused: Some(true),
+            body_rendered: true,
+            still_open: true,
+            callback_observed_at_unix_ms: 1,
+            completed_frame_nr: Some(completed_frame_nr),
+            completed_pass_nr: Some(completed_frame_nr),
+            renderer_returned_at_unix_ms: Some(2),
+        }
+    }
+
+    fn start_qr_probe(probe: &mut FramebufferProbe, ctx: &egui::Context) {
+        let eligibility = eligible_surface();
+        ctx.begin_pass(egui::RawInput::default());
+        probe.begin_root_logic(ctx, Some(eligibility));
+        assert_eq!(probe.logic_frame_id, 1);
+        probe.start_ui_pass(0);
+        probe.finish_ui_pass(eligibility, None);
+        probe.finish_retained_ui_frame(ctx, eligibility);
+        ctx.end_pass().drop_without_applying_deltas();
+        assert_eq!(probe.phase, ProbePhase::Ready);
+    }
+
+    fn issue_qr_screenshot(probe: &mut FramebufferProbe, ctx: &egui::Context) {
+        let eligibility = eligible_surface();
+        ctx.begin_pass(egui::RawInput::default());
+        probe.begin_root_logic(ctx, Some(eligibility));
+        assert_eq!(probe.logic_frame_id, 2);
+        probe.start_ui_pass(0);
+        let first_pass = probe.current_ui_pass_id.unwrap();
+        probe.after_qr_show(
+            ctx,
+            eligibility,
+            true,
+            Some(test_qr_observation(20)),
+            Some(test_evidence(2, first_pass, 0)),
+        );
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        let mut discarded = eligibility;
+        discarded.modal_or_key_capture_owner = true;
+        probe.finish_ui_pass(discarded, Some(test_evidence(2, first_pass, 0)));
+
+        probe.start_ui_pass(1);
+        let retained_pass = probe.current_ui_pass_id.unwrap();
+        probe.after_qr_show(
+            ctx,
+            eligibility,
+            true,
+            Some(test_qr_observation(21)),
+            Some(test_evidence(2, retained_pass, 1)),
+        );
+        probe.finish_ui_pass(eligibility, Some(test_evidence(2, retained_pass, 1)));
+        probe.finish_retained_ui_frame(ctx, eligibility);
+        ctx.end_pass().drop_without_applying_deltas();
+
+        assert_eq!(probe.phase, ProbePhase::Issued);
+        let baseline = probe.receipt.dispatch_boundary_baseline.as_ref().unwrap();
+        assert_eq!(baseline.parent_logic_frame_id, 2);
+        assert_eq!(baseline.completed_frame_nr, Some(21));
+    }
+
+    fn capture_and_reply_in_one_qr_parent_frame(
+        probe: &mut FramebufferProbe,
+        ctx: &egui::Context,
+        final_eligibility: SurfaceEligibility,
+    ) {
+        let eligibility = eligible_surface();
+        let viewport_id = CaptureTarget::Qr.viewport_id();
+        ctx.begin_pass(egui::RawInput::default());
+        probe.begin_root_logic(ctx, Some(eligibility));
+        assert_eq!(probe.logic_frame_id, 3);
+        probe.start_ui_pass(0);
+        let ui_pass = probe.current_ui_pass_id.unwrap();
+        probe.after_qr_show(
+            ctx,
+            eligibility,
+            true,
+            Some(test_qr_observation(22)),
+            Some(test_evidence(3, ui_pass, 0)),
+        );
+        assert_eq!(probe.phase, ProbePhase::AwaitingReply);
+        assert_eq!(probe.qr_capture_parent_logic_frame_id, Some(3));
+
+        let image = test_image(egui::Color32::WHITE);
+        ctx.input_mut_for(viewport_id, |input| {
+            input.events.push(Event::Copy);
+            input.events.push(Event::Screenshot {
+                viewport_id,
+                user_data: probe.token.clone(),
+                image: Arc::clone(&image),
+            });
+        });
+        probe.after_qr_show(
+            ctx,
+            eligibility,
+            true,
+            Some(test_qr_observation(23)),
+            Some(test_evidence(3, ui_pass, 0)),
+        );
+        assert!(probe.pending_reply.is_some());
+        assert!(ctx.input_for(viewport_id, |input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Copy))
+        }));
+
+        probe.finish_ui_pass(final_eligibility, None);
+        probe.finish_retained_ui_frame(ctx, final_eligibility);
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn qr_dispatch_uses_retained_issue_baseline_and_accepts_child_reply_in_capture_parent_frame() {
+        let (mut probe, writer_rx, _outcome_tx) =
+            test_probe_for_target(CaptureTrigger::Startup, CaptureTarget::Qr);
+        assert!(matches!(writer_rx.try_recv(), Ok(WriterJob::AwaitReply(_))));
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        let ctx = egui::Context::default();
+        start_qr_probe(&mut probe, &ctx);
+        issue_qr_screenshot(&mut probe, &ctx);
+        assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        capture_and_reply_in_one_qr_parent_frame(&mut probe, &ctx, eligible_surface());
+        assert_eq!(probe.phase, ProbePhase::Saving);
+        let captured = probe.receipt.captured.as_ref().unwrap();
+        assert_eq!(captured.logic_frame_id, 3);
+        assert_eq!(
+            captured
+                .qr_observation
+                .as_ref()
+                .and_then(|observation| observation.completed_frame_nr),
+            Some(22)
+        );
+        assert_eq!(
+            probe
+                .receipt
+                .screenshot_received
+                .as_ref()
+                .unwrap()
+                .qr_observation
+                .as_ref()
+                .and_then(|observation| observation.completed_frame_nr),
+            Some(23)
+        );
+        assert!(matches!(writer_rx.try_recv(), Ok(WriterJob::Save { .. })));
+    }
+
+    #[test]
+    fn qr_buffered_reply_is_discarded_when_root_loses_eligibility_before_save() {
+        let (mut probe, writer_rx, _outcome_tx) =
+            test_probe_for_target(CaptureTrigger::Startup, CaptureTarget::Qr);
+        assert!(matches!(writer_rx.try_recv(), Ok(WriterJob::AwaitReply(_))));
+
+        let ctx = egui::Context::default();
+        start_qr_probe(&mut probe, &ctx);
+        issue_qr_screenshot(&mut probe, &ctx);
+        let mut ineligible = eligible_surface();
+        ineligible.tool_owner = true;
+        capture_and_reply_in_one_qr_parent_frame(&mut probe, &ctx, ineligible);
+
+        assert_eq!(probe.phase, ProbePhase::Failed);
+        assert!(probe.pending_reply.is_some());
+        assert!(probe.receipt.saved.is_none());
+        assert!(matches!(writer_rx.try_recv(), Ok(WriterJob::Failure(_))));
+    }
+
+    #[test]
+    fn qr_observation_requires_actual_child_and_treats_unknown_visibility_as_visible() {
+        let observation = test_qr_observation(1);
+        let evidence = qr_render_evidence(7, &observation);
+        assert!(evidence.eligible);
+        assert_eq!(evidence.callback_class, "immediate");
+
+        let mut embedded = test_qr_observation(1);
+        embedded.callback_class = egui::ViewportClass::EmbeddedWindow;
+        assert!(!qr_render_evidence(7, &embedded).eligible);
+
+        let mut wrong_child = test_qr_observation(1);
+        wrong_child.child_viewport_id = ViewportId::from_hash_of("not QR");
+        assert!(!qr_render_evidence(7, &wrong_child).eligible);
+
+        let mut hidden = test_qr_observation(1);
+        hidden.visible = Some(false);
+        assert!(!qr_render_evidence(7, &hidden).eligible);
+
+        let mut minimized = test_qr_observation(1);
+        minimized.minimized = Some(true);
+        assert!(!qr_render_evidence(7, &minimized).eligible);
+    }
+
+    #[test]
+    fn qr_manifest_rejects_the_root_only_f11_trigger() {
+        let manifest = RequestManifest {
+            run_id: "test-run".into(),
+            request_id: "test-request".into(),
+            target: CaptureTarget::Qr,
+            trigger: CaptureTrigger::F11,
+            output_dir: PathBuf::from("output"),
+            fixture_manifest_sha256: "a".repeat(64),
+            build_receipt_identity: "test-build".into(),
+        };
+
+        assert_eq!(
+            validate_manifest(&manifest).unwrap_err(),
+            "QR framebuffer capture supports the Startup trigger only"
+        );
+    }
+
+    #[test]
+    fn qr_startup_wait_times_out_when_the_dialog_never_opens() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let request = QaFramebufferRequest {
+            manifest: RequestManifest {
+                run_id: "unopened-qr-run".into(),
+                request_id: "unopened-qr-request".into(),
+                target: CaptureTarget::Qr,
+                trigger: CaptureTrigger::Startup,
+                output_dir: output_dir.path().to_path_buf(),
+                fixture_manifest_sha256: "a".repeat(64),
+                build_receipt_identity: "test-build".into(),
+            },
+            manifest_sha256: "b".repeat(64),
+            output_dir: output_dir.path().to_path_buf(),
+            executable: ExecutableIdentity {
+                path: PathBuf::from("test.exe"),
+                sha256: "c".repeat(64),
+            },
+            process: ProcessIdentity {
+                pid: 1,
+                probe_initialized_at_unix_ms: 1,
+            },
+        };
+        let probe = FramebufferProbe::new_with_reply_timeout(
+            request,
+            egui::Context::default(),
+            Duration::from_millis(20),
+        )
+        .unwrap();
+        assert_eq!(probe.phase, ProbePhase::Armed);
+
+        let outcome = probe
+            .writer_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(outcome.status, ReceiptStatus::Failed);
+        assert!(outcome.receipt_written);
+        assert!(outcome.error.as_deref().is_some_and(|error| {
+            error.starts_with("selected QR capture did not complete within")
+        }));
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&fs::read(output_dir.path().join(RECEIPT_FILE_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(receipt["target"], "QR");
+        assert_eq!(receipt["trigger"], "startup");
+        assert!(!output_dir.path().join(PNG_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn qr_armed_wrappers_cancel_hidden_and_modal_takeover_but_keep_root_f11_armed() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = test_launcher_app(&ctx, data_dir.path());
+
+        let (qr_hidden_probe, qr_hidden_jobs, _qr_hidden_outcome) =
+            test_probe_for_target(CaptureTrigger::Startup, CaptureTarget::Qr);
+        app.qa_framebuffer = Some(qr_hidden_probe);
+        app.qa_framebuffer_run_hidden_logic_tick();
+        let qr_hidden_probe = app.qa_framebuffer.as_ref().unwrap();
+        assert_eq!(qr_hidden_probe.phase, ProbePhase::Failed);
+        assert!(
+            qr_hidden_probe
+                .receipt
+                .failure
+                .as_deref()
+                .is_some_and(|failure| failure.contains("ROOT became hidden"))
+        );
+        assert!(matches!(
+            qr_hidden_jobs.try_recv(),
+            Ok(WriterJob::AwaitReply(_))
+        ));
+        assert!(matches!(
+            qr_hidden_jobs.try_recv(),
+            Ok(WriterJob::Failure(_))
+        ));
+
+        let (root_hidden_probe, root_hidden_jobs, _root_hidden_outcome) =
+            test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Root);
+        app.qa_framebuffer = Some(root_hidden_probe);
+        app.qa_framebuffer_run_hidden_logic_tick();
+        assert_eq!(
+            app.qa_framebuffer.as_ref().unwrap().phase,
+            ProbePhase::Armed,
+            "ROOT F11 capture remains armed until its pretrigger arrives"
+        );
+        assert!(matches!(
+            root_hidden_jobs.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+
+        app.confirm_modal
+            .open_custom("QA capture wrapper test", "Modal owns launcher input");
+        let (qr_modal_probe, qr_modal_jobs, _qr_modal_outcome) =
+            test_probe_for_target(CaptureTrigger::Startup, CaptureTarget::Qr);
+        app.qa_framebuffer = Some(qr_modal_probe);
+        ctx.begin_pass(egui::RawInput::default());
+        app.qa_framebuffer_revalidate_root_logic(&ctx, true);
+        ctx.end_pass().drop_without_applying_deltas();
+        let qr_modal_probe = app.qa_framebuffer.as_ref().unwrap();
+        assert_eq!(qr_modal_probe.phase, ProbePhase::Failed);
+        assert_eq!(
+            qr_modal_probe.receipt.failure.as_deref(),
+            Some("a modal or key-capture owner blocked the retained capture boundary")
+        );
+        assert!(matches!(
+            qr_modal_jobs.try_recv(),
+            Ok(WriterJob::AwaitReply(_))
+        ));
+        assert!(matches!(
+            qr_modal_jobs.try_recv(),
+            Ok(WriterJob::Failure(_))
+        ));
+
+        let (root_modal_probe, root_modal_jobs, _root_modal_outcome) =
+            test_probe_for_target(CaptureTrigger::F11, CaptureTarget::Root);
+        app.qa_framebuffer = Some(root_modal_probe);
+        ctx.begin_pass(egui::RawInput::default());
+        app.qa_framebuffer_revalidate_root_logic(&ctx, true);
+        ctx.end_pass().drop_without_applying_deltas();
+        assert_eq!(
+            app.qa_framebuffer.as_ref().unwrap().phase,
+            ProbePhase::Armed,
+            "ROOT F11 capture remains armed while a modal owns input"
+        );
+        assert!(matches!(
+            root_modal_jobs.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
     }
 
     #[test]
@@ -1552,7 +2339,7 @@ mod tests {
             ..Default::default()
         };
         ctx.begin_pass(raw_input);
-        let matched = take_matching_screenshot_event(&ctx, &token).unwrap();
+        let matched = take_matching_screenshot_event(&ctx, ViewportId::ROOT, &token).unwrap();
         assert!(Arc::ptr_eq(&matched, &first_image));
         let remaining = ctx.input(|input| input.events.clone());
         assert_eq!(remaining.len(), 3);

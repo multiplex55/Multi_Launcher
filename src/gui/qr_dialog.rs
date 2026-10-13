@@ -3,6 +3,48 @@ use crate::qr::{self, GeneratedQr, QrErrorCorrection, QrGenerationError, QrPaylo
 use eframe::egui;
 use image::RgbaImage;
 
+pub(super) fn viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("qr_generator_viewport")
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+#[derive(Clone)]
+pub(super) struct QrViewportObservation {
+    pub child_viewport_id: egui::ViewportId,
+    pub callback_class: egui::ViewportClass,
+    pub callback_frame_nr: u64,
+    pub callback_pass_nr: u64,
+    pub callback_pass_index: usize,
+    pub visible: Option<bool>,
+    pub minimized: Option<bool>,
+    pub occluded: Option<bool>,
+    pub focused: Option<bool>,
+    pub body_rendered: bool,
+    pub still_open: bool,
+    pub callback_observed_at_unix_ms: u64,
+    pub completed_frame_nr: Option<u64>,
+    pub completed_pass_nr: Option<u64>,
+    pub renderer_returned_at_unix_ms: Option<u64>,
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+impl QrViewportObservation {
+    fn is_immediate_target(&self) -> bool {
+        self.callback_class == egui::ViewportClass::Immediate
+            && self.child_viewport_id == viewport_id()
+            && self.body_rendered
+            && self.still_open
+    }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or_default()
+}
+
 fn viewport_builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default()
         .with_title("QR Generator")
@@ -194,49 +236,123 @@ impl QrDialogState {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
+        #[cfg(feature = "qa-framebuffer-capture")]
+        self.show_impl(ctx, None);
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
+        self.show_impl(ctx);
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    pub(super) fn show_with_qa_observation(
+        &mut self,
+        ctx: &egui::Context,
+    ) -> Option<QrViewportObservation> {
+        let mut observation = None;
+        self.show_impl(ctx, Some(&mut observation));
+        if let Some(observation) = observation.as_mut() {
+            if observation.is_immediate_target() {
+                let viewport_id = observation.child_viewport_id;
+                observation.completed_frame_nr = Some(ctx.cumulative_frame_nr_for(viewport_id));
+                observation.completed_pass_nr = Some(ctx.cumulative_pass_nr_for(viewport_id));
+            }
+            // `show_viewport_immediate` returns only after the native child renderer
+            // has painted and swapped this callback's output. This remains a CPU
+            // observation boundary, not a GPU completion timestamp.
+            observation.renderer_returned_at_unix_ms = Some(unix_millis());
+        }
+        observation
+    }
+
+    fn show_impl(
+        &mut self,
+        ctx: &egui::Context,
+        #[cfg(feature = "qa-framebuffer-capture")] mut qa_observation: Option<
+            &mut Option<QrViewportObservation>,
+        >,
+    ) {
         if !self.open {
             return;
         }
         self.refresh_generation();
-        ctx.show_viewport_immediate(
-            egui::ViewportId::from_hash_of("qr_generator_viewport"),
-            viewport_builder(),
-            |child, class| {
-                let independent = class == egui::ViewportClass::Immediate;
-                if independent && self.focus_source {
-                    child.send_viewport_cmd(egui::ViewportCommand::Focus);
-                }
-                let close = child.input_mut(|input| {
-                    input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
-                        || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
-                        || (independent && input.viewport().close_requested())
-                });
-                if close {
-                    self.close();
-                } else if independent {
-                    egui::CentralPanel::default().show(child, |ui| self.body(ui));
-                } else {
-                    // Test contexts embed viewports; keep the fallback within its parent.
-                    let size = child.input(|input| input.content_rect().size());
-                    let available = (size - egui::vec2(24.0, 48.0)).max(egui::vec2(1.0, 1.0));
-                    let mut open = self.open;
-                    egui::Window::new("QR Generator")
-                        .id(egui::Id::new("qr_generator_embedded"))
-                        .open(&mut open)
-                        .collapsible(false)
-                        .default_size(available.min(egui::vec2(620.0, 700.0)))
-                        .min_size(available.min(egui::vec2(320.0, 420.0)))
-                        .max_size(available)
-                        .show(child, |ui| self.body(ui));
-                    if !open {
-                        self.close();
+        ctx.show_viewport_immediate(viewport_id(), viewport_builder(), |child, class| {
+            let independent = class == egui::ViewportClass::Immediate;
+            #[cfg(feature = "qa-framebuffer-capture")]
+            let mut body_rendered = false;
+            if independent && self.focus_source {
+                child.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            let close = child.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                    || input.consume_key(egui::Modifiers::COMMAND, egui::Key::W)
+                    || (independent && input.viewport().close_requested())
+            });
+            if close {
+                self.close();
+            } else if independent {
+                egui::CentralPanel::default().show(child, |ui| {
+                    self.body(ui);
+                    #[cfg(feature = "qa-framebuffer-capture")]
+                    {
+                        body_rendered = true;
                     }
+                });
+            } else {
+                // Test contexts embed viewports; keep the fallback within its parent.
+                let size = child.input(|input| input.content_rect().size());
+                let available = (size - egui::vec2(24.0, 48.0)).max(egui::vec2(1.0, 1.0));
+                let mut open = self.open;
+                egui::Window::new("QR Generator")
+                    .id(egui::Id::new("qr_generator_embedded"))
+                    .open(&mut open)
+                    .collapsible(false)
+                    .default_size(available.min(egui::vec2(620.0, 700.0)))
+                    .min_size(available.min(egui::vec2(320.0, 420.0)))
+                    .max_size(available)
+                    .show(child, |ui| {
+                        self.body(ui);
+                        #[cfg(feature = "qa-framebuffer-capture")]
+                        {
+                            body_rendered = true;
+                        }
+                    });
+                if !open {
+                    self.close();
                 }
-                if independent && !self.open {
-                    child.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            },
-        );
+            }
+            if independent && !self.open {
+                child.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            #[cfg(feature = "qa-framebuffer-capture")]
+            if let Some(observation) = qa_observation.as_deref_mut() {
+                let child_context = child.ctx();
+                let (visible, minimized, occluded, focused) = child_context.input(|input| {
+                    let viewport = input.viewport();
+                    (
+                        viewport.visible(),
+                        viewport.minimized,
+                        viewport.occluded,
+                        viewport.focused,
+                    )
+                });
+                *observation = Some(QrViewportObservation {
+                    child_viewport_id: child_context.viewport_id(),
+                    callback_class: class,
+                    callback_frame_nr: child_context.cumulative_frame_nr(),
+                    callback_pass_nr: child_context.cumulative_pass_nr(),
+                    callback_pass_index: child_context.current_pass_index(),
+                    visible,
+                    minimized,
+                    occluded,
+                    focused,
+                    body_rendered,
+                    still_open: self.open,
+                    callback_observed_at_unix_ms: unix_millis(),
+                    completed_frame_nr: None,
+                    completed_pass_nr: None,
+                    renderer_returned_at_unix_ms: None,
+                });
+            }
+        });
     }
 
     fn body(&mut self, ui: &mut egui::Ui) {
@@ -531,7 +647,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = QrDialogState::default();
         state.open(Some("exact source"));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| state.show(ctx));
+        ctx.run_ui(egui::RawInput::default(), |ctx| state.show(ctx))
+            .drop_without_applying_deltas();
         assert!(!state.focus_source);
         state.feedback = Some(Ok("old".into()));
         let mut input = egui::RawInput::default();
@@ -542,7 +659,8 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(input, |ctx| state.show(ctx));
+        ctx.run_ui(input, |ctx| state.show(ctx))
+            .drop_without_applying_deltas();
         assert!(!state.open);
         assert!(state.feedback.is_none() && state.texture.is_none() && state.raster.is_none());
         assert_eq!(state.source, "exact source");
@@ -662,5 +780,50 @@ mod tests {
         state.refresh_generation();
         assert!(state.raster.is_some());
         assert_eq!(state.source, "recovered");
+    }
+}
+
+#[cfg(all(test, feature = "qa-framebuffer-capture"))]
+mod qa_observation_tests {
+    use super::*;
+
+    #[test]
+    fn observation_uses_the_actual_immediate_child_callback_identity() {
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        egui::Context::set_immediate_viewport_renderer(|parent_ctx, mut immediate| {
+            assert_eq!(parent_ctx.viewport_id(), egui::ViewportId::ROOT);
+            let child_id = immediate.ids.this;
+            let mut raw_input = egui::RawInput {
+                viewport_id: child_id,
+                ..Default::default()
+            };
+            raw_input
+                .viewports
+                .insert(child_id, egui::ViewportInfo::default());
+            let output = parent_ctx.run_ui(raw_input, |ui| {
+                (immediate.viewport_ui_cb)(ui);
+            });
+            output.drop_without_applying_deltas();
+        });
+
+        let mut state = QrDialogState::default();
+        state.open(Some("https://example.invalid/qr"));
+        let mut observation = None;
+        let output = ctx.run_ui(Default::default(), |ui| {
+            assert_eq!(ui.ctx().viewport_id(), egui::ViewportId::ROOT);
+            observation = state.show_with_qa_observation(ui.ctx());
+        });
+        output.drop_without_applying_deltas();
+
+        let observation = observation.expect("the immediate callback should be observed");
+        assert_eq!(observation.child_viewport_id, viewport_id());
+        assert!(observation.callback_class == egui::ViewportClass::Immediate);
+        assert!(observation.body_rendered);
+        assert!(observation.still_open);
+        assert_eq!(observation.visible, None);
+        assert!(observation.completed_frame_nr.is_some());
+        assert!(observation.completed_pass_nr.is_some());
+        assert!(observation.renderer_returned_at_unix_ms.is_some());
     }
 }

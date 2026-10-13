@@ -1603,6 +1603,35 @@ fn is_viewport_or_descendant_visible(
     })
 }
 
+fn fulfill_screenshot_actions(
+    viewport_id: ViewportId,
+    actions_requested: &mut Vec<ActionRequested>,
+    read_screen: impl FnOnce() -> Arc<egui::ColorImage>,
+    mut push_event: impl FnMut(egui::Event),
+) {
+    let mut screenshot_requests = Vec::new();
+    actions_requested.retain(|action| {
+        if let ActionRequested::Screenshot(user_data) = action {
+            screenshot_requests.push(user_data.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if screenshot_requests.is_empty() {
+        return;
+    }
+
+    let image = read_screen();
+    for user_data in screenshot_requests {
+        push_event(egui::Event::Screenshot {
+            viewport_id,
+            user_data,
+            image: Arc::clone(&image),
+        });
+    }
+}
+
 /// This is called (via a callback) by user code to render immediate viewports,
 /// i.e. viewport that are directly nested inside a parent viewport.
 fn render_immediate_viewport(
@@ -1736,6 +1765,20 @@ fn render_immediate_viewport(
         &mut viewport.pending_delta,
     );
 
+    fulfill_screenshot_actions(
+        viewport_id,
+        &mut viewport.actions_requested,
+        || {
+            Arc::new(
+                painter
+                    .borrow()
+                    .read_screen_rgba(screen_size_in_pixels)
+                    .into(),
+            )
+        },
+        |event| egui_winit.egui_input_mut().events.push(event),
+    );
+
     {
         profiling::scope!("swap_buffers");
         if let Err(err) = gl_surface.swap_buffers(current_gl_context) {
@@ -1775,4 +1818,57 @@ fn save_screenshot_and_exit(
 
     #[expect(clippy::exit)]
     std::process::exit(0);
+}
+
+#[cfg(test)]
+mod immediate_screenshot_tests {
+    use super::*;
+
+    #[test]
+    fn immediate_screenshot_uses_child_id_and_preserves_other_actions() {
+        let viewport_id = ViewportId::from_hash_of("immediate screenshot child");
+        let user_data = egui::UserData::new(17_u8);
+        let mut actions = vec![
+            ActionRequested::Cut,
+            ActionRequested::Screenshot(user_data.clone()),
+            ActionRequested::Copy,
+            ActionRequested::Paste,
+        ];
+        let image = Arc::new(egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]));
+        let mut read_count = 0;
+        let mut events = Vec::new();
+
+        fulfill_screenshot_actions(
+            viewport_id,
+            &mut actions,
+            || {
+                read_count += 1;
+                Arc::clone(&image)
+            },
+            |event| events.push(event),
+        );
+
+        assert_eq!(read_count, 1);
+        assert_eq!(
+            actions,
+            vec![
+                ActionRequested::Cut,
+                ActionRequested::Copy,
+                ActionRequested::Paste
+            ]
+        );
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            egui::Event::Screenshot {
+                viewport_id: actual_viewport_id,
+                user_data: actual_user_data,
+                image: actual_image,
+            } => {
+                assert_eq!(*actual_viewport_id, viewport_id);
+                assert_eq!(actual_user_data, &user_data);
+                assert!(Arc::ptr_eq(actual_image, &image));
+            }
+            event => panic!("expected screenshot event, got {event:?}"),
+        }
+    }
 }

@@ -3912,6 +3912,19 @@ impl LauncherApp {
         self.clipboard_modify_dialog = cm_dlg;
         self.json_utility_dialog.show(&ctx);
         self.regex_tester_dialog.show(&ctx);
+        #[cfg(feature = "qa-framebuffer-capture")]
+        if self.qa_framebuffer_needs_qr_observation() {
+            let observation = self.qr_dialog.show_with_qa_observation(&ctx);
+            self.qa_framebuffer_after_qr_show(
+                &ctx,
+                frame_logic.should_be_visible,
+                self.qr_dialog.open,
+                observation,
+            );
+        } else {
+            self.qr_dialog.show(&ctx);
+        }
+        #[cfg(not(feature = "qa-framebuffer-capture"))]
         self.qr_dialog.show(&ctx);
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
         conv_panel.ui(&ctx, self);

@@ -1,4 +1,5 @@
 /target
+/vendor/target/
 clean_branches.bat
 alarms.json
 history.json

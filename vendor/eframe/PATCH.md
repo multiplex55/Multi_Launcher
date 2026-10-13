@@ -20,6 +20,10 @@ The local source changes are limited to:
 - `src/native/glow_integration.rs` and `src/native/wgpu_integration.rs`: use the
   shared predicate so an opted-in hidden-root bootstrap can run the root UI
   pass without making the native root visible or forcing hidden child UI.
+- `src/native/glow_integration.rs`: fulfill screenshot actions requested by an
+  immediate native child after its paint and before buffer swap, while leaving
+  other queued native actions untouched. A focused test checks the child
+  viewport identity, screenshot user data, and action preservation.
 
 The hooks preserve existing behavior by default: `logic_only` forwards to
 `logic`, and all three policy/completion hooks are no-ops or return `false`.
