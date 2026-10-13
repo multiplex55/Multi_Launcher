@@ -13,7 +13,7 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 | M1-D — rich text, toasts, image and third-party compatibility | `complete` | Integration source `b30bc6d0`, scoped tests/checks and independent review pass. Actual current ROOT/Markdown/local-image/error-toast/native QR PNGs inspected; native picker cancel/focus return and automated file-drop boundary pass. Instrumented original comparison retains inherited warnings/layout differences. QR+ROOT native capture prerequisite independently accepted at `ff9ffc50`/`a8d31874`. Unrun native link/selection/scroll,OS drag transport/physical input remain explicit broader qualification gaps; no whole-app parity claim. |
 | M2-A — geometry/cache migration | `in_progress` | Planner packet reconciled with final font/cache state; implementer read-only preparation complete. Source authorization follows saved M1-D native gate; parent owns matched81-case CPU comparisons. |
 | M2-B — Windows windowing, renderer and event integration | `pending` | Not started. |
-| M2-C — renderer performance comparison and decision | `pending` | Not started. |
+| M2-C — renderer performance comparison and decision | `pending` | Concrete source-backed opt-in Wgpu/matched release packet independently reviewed and accepted in implementation-handoffs.md. Host preparation recheck recorded. No backend feature,selector,build or comparison executed; starts after M2-A/M2-B. |
 | M2-D — Track A final parity gate | `pending` | Not started. |
 | M3-A — semantic theme model | `pending` | Not started. |
 | M3-B — runtime theme application | `pending` | Not started. |

@@ -17,6 +17,8 @@ Verified input SHA256:
 
 Report p50/p95 deltas,absolute costs,raw spread and sample counts. Any resampling confidence interval describes only noise within these arrays; it cannot establish between-run variance or hardware/display latency. Repeat comparable cases when an apparent slowdown needs classification; do not accept an arbitrary percentage allowance or infer no regression from overlapping intervals alone. QA capture feature/request must be absent from performance runs.
 
+Preparation host recheck2026-10-13: scoped read-only CIM queries report Intel Core i7-7700K4cores/8logical processors,max clock4200MHz;Windows10Home10.0.19045;NVIDIA GTX1080 driver32.0.15.6094,controller-reported2560x1440@165Hz;Parsec Virtual Display Adapter0.45.0.0 reports no current resolution/refresh. powercfg reports Balanced. CPU/OS/driver/power fields match original recorded context. Initial sandbox CIM calls returned Access denied; scoped read retry succeeded. Controller properties do not identify the app's actual GL adapter,monitor topology or OS scaling. Native QA receipt PPP1/zoom1 remains separate measured app-renderer metadata. This is preparation context,not a benchmark result or GPU/display-timing measurement; record actual run attribution again with measured owners.
+
 Status: **PARTIAL.** All five original CPU owners passed (84 cases, five warmups/twenty measured samples per case); native visual/GPU/display latency acceptance remains unproven. Original profile build timings are in progress.
 
 ## Provenance and run constraints
