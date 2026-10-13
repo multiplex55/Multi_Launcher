@@ -211,6 +211,7 @@ enum ProbePhase {
 #[derive(Clone, Copy, Debug, Default)]
 struct SurfaceEligibility {
     logical_root_visible: bool,
+    root_visibility_reported: Option<bool>,
     root_visible: bool,
     ocr_owner: bool,
     tool_owner: bool,
@@ -270,6 +271,7 @@ struct FrameEvidence {
     native_pixels_per_point: Option<f32>,
     zoom_factor: f32,
     logical_root_visible: bool,
+    root_visibility_reported: Option<bool>,
     root_visible: bool,
     viewport_focused: bool,
     ocr_owner: bool,
@@ -526,6 +528,7 @@ impl FramebufferProbe {
         if let Some(evidence) = marker.evidence.as_mut() {
             evidence.completed_at_unix_ms = unix_millis();
             evidence.logical_root_visible = marker.eligibility.logical_root_visible;
+            evidence.root_visibility_reported = final_eligibility.root_visibility_reported;
             evidence.root_visible = marker.eligibility.root_visible;
             evidence.ocr_owner = marker.eligibility.ocr_owner;
             evidence.tool_owner = marker.eligibility.tool_owner;
@@ -847,6 +850,7 @@ fn merge_eligibility(
 ) -> SurfaceEligibility {
     SurfaceEligibility {
         logical_root_visible: retained.logical_root_visible && current.logical_root_visible,
+        root_visibility_reported: current.root_visibility_reported,
         root_visible: retained.root_visible && current.root_visible,
         ocr_owner: retained.ocr_owner || current.ocr_owner,
         tool_owner: retained.tool_owner || current.tool_owner,
@@ -860,10 +864,12 @@ fn surface_eligibility(
     ctx: &egui::Context,
     logical_root_visible: bool,
 ) -> SurfaceEligibility {
+    let root_visibility_reported = root_viewport_visibility_reported(ctx);
     SurfaceEligibility {
         logical_root_visible: logical_root_visible
             && app.visible_flag.load(std::sync::atomic::Ordering::Relaxed),
-        root_visible: ctx.input(|input| input.viewport().visible().unwrap_or(false)),
+        root_visibility_reported,
+        root_visible: root_visibility_from_reported(root_visibility_reported),
         ocr_owner: app.ocr_owns_root() || app.ocr_surface_visible(),
         tool_owner: app.color_pick_owns_root()
             || app.coordinate_tool.capture_pending()
@@ -880,6 +886,16 @@ fn surface_eligibility(
             || app.mkmacro_dialog.pause_record_hotkey_capture
             || app.mkmacro_dialog.marker_record_hotkey_capture,
     }
+}
+
+fn root_viewport_visibility_reported(ctx: &egui::Context) -> Option<bool> {
+    ctx.input(|input| input.viewport().visible())
+}
+
+fn root_visibility_from_reported(reported: Option<bool>) -> bool {
+    // Match eframe's Glow integration: unknown occlusion is not evidence that
+    // the viewport is hidden. Explicit minimized or occluded states still win.
+    reported.unwrap_or(true)
 }
 
 fn frame_evidence(
@@ -905,6 +921,7 @@ fn frame_evidence(
         native_pixels_per_point: ctx.native_pixels_per_point(),
         zoom_factor: ctx.zoom_factor(),
         logical_root_visible: eligibility.logical_root_visible && logical_root_visible,
+        root_visibility_reported: eligibility.root_visibility_reported,
         root_visible: eligibility.root_visible,
         viewport_focused: ctx.input(|input| input.viewport().focused.unwrap_or(false)),
         ocr_owner: eligibility.ocr_owner,
@@ -1180,6 +1197,7 @@ mod tests {
     fn eligible_surface() -> SurfaceEligibility {
         SurfaceEligibility {
             logical_root_visible: true,
+            root_visibility_reported: Some(true),
             root_visible: true,
             ..Default::default()
         }
@@ -1199,6 +1217,7 @@ mod tests {
             native_pixels_per_point: Some(1.0),
             zoom_factor: 1.0,
             logical_root_visible: true,
+            root_visibility_reported: Some(true),
             root_visible: true,
             viewport_focused: true,
             ocr_owner: false,
@@ -1553,6 +1572,50 @@ mod tests {
         assert!(reject_capture_mode(true, false).is_some());
         assert!(reject_capture_mode(false, true).is_some());
         assert!(reject_capture_mode(false, false).is_none());
+    }
+
+    #[test]
+    fn unknown_occlusion_keeps_root_eligible_but_explicit_hidden_states_do_not() {
+        let ctx = egui::Context::default();
+        let mut visible_input = egui::RawInput::default();
+        let viewport = visible_input.viewports.get_mut(&ViewportId::ROOT).unwrap();
+        viewport.minimized = Some(false);
+        viewport.occluded = None;
+        ctx.begin_pass(visible_input);
+        let reported = root_viewport_visibility_reported(&ctx);
+        let visible = root_visibility_from_reported(reported);
+        assert!(visible);
+        assert_eq!(reported, None);
+        assert!(
+            SurfaceEligibility {
+                logical_root_visible: true,
+                root_visible: visible,
+                ..Default::default()
+            }
+            .eligible()
+        );
+        ctx.end_pass().drop_without_applying_deltas();
+
+        for (minimized, occluded) in [(Some(true), None), (Some(false), Some(true))] {
+            let mut hidden_input = egui::RawInput::default();
+            let viewport = hidden_input.viewports.get_mut(&ViewportId::ROOT).unwrap();
+            viewport.minimized = minimized;
+            viewport.occluded = occluded;
+            ctx.begin_pass(hidden_input);
+            let reported = root_viewport_visibility_reported(&ctx);
+            let visible = root_visibility_from_reported(reported);
+            assert!(!visible);
+            assert_eq!(reported, Some(false));
+            assert!(
+                !SurfaceEligibility {
+                    logical_root_visible: true,
+                    root_visible: visible,
+                    ..Default::default()
+                }
+                .eligible()
+            );
+            ctx.end_pass().drop_without_applying_deltas();
+        }
     }
 
     #[test]
