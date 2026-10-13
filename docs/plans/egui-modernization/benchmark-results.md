@@ -1,5 +1,22 @@
 # M0-B original baseline measurements
 
+## M2-A comparison input audit —2026-10-13
+
+Before migrated measurements, parent independently reparsed all five original TRACK_C_RESULT logs and verified exact equality with the retained84-row cpu-original-results.json. Every row has five warmups/twenty raw samples,zero exclusions,Full mode/telemetry enabled. Stored p50/p95 values match nearest-rank quantiles recomputed from all arrays. Sourcef45e3773 is the corrected test runner; original production remains72a01bd5. No original receipt or sample was changed.
+
+The81 M2-A cases are list6/grid30/Notes42/query3; startup3 is excluded. `(fixture,count,settings,cold_type,viewport,scale_milli)` uniquely identifies all84 original cases. Join future current cases by these fields, check fixture signatures/settings/work/oracles explicitly, and map changed owner labels to actual run_ui/lifecycle paths rather than joining on obsolete API names. Preserve every sample/outlier. Current measurements have not run yet; source writer owns cache corrections and parent owns serial matched comparisons after source acceptance.
+
+Verified input SHA256:
+
+- cpu-original-results.json:4BFB209811B0FF4A72B59AB11A297DA6F560AF00667C64DB924110000E89AAFC
+- owner-list.log:25304122FDE2C7FB4026438FF8C7FDC07DE03824289749D2CA0B004DD6286A43
+- track_c_benchmark_root_grid_frame_geometry.log:8AA6EE32EF9FABFE62C86C204D7D1A266CA2FBA9F8EFF9E9B208EC31616551F8
+- track_c_benchmark_quick_notes_dialog_geometry.log:5BB83EF80401F861553C9604F00C2B435DC57AE47CCBC13308F3061E09C856DC
+- track_c_benchmark_root_query_to_usable_cpu_frame.log:A45DC1CA437C79F32CC737122E4B4419D9E33FCDF922661751084B1677C04E95
+- track_c_benchmark_startup_action_catalog_owner.log:561EBD3310265FDE0861F9C7731784938165477A32C0C1F7799253233A278EF6
+
+Report p50/p95 deltas,absolute costs,raw spread and sample counts. Any resampling confidence interval describes only noise within these arrays; it cannot establish between-run variance or hardware/display latency. Repeat comparable cases when an apparent slowdown needs classification; do not accept an arbitrary percentage allowance or infer no regression from overlapping intervals alone. QA capture feature/request must be absent from performance runs.
+
 Status: **PARTIAL.** All five original CPU owners passed (84 cases, five warmups/twenty measured samples per case); native visual/GPU/display latency acceptance remains unproven. Original profile build timings are in progress.
 
 ## Provenance and run constraints
