@@ -2606,6 +2606,12 @@ impl LauncherApp {
             .cancel(super::track_c_query_observer::Cause::RootHidden);
     }
 
+    fn render_root_toasts(&mut self, ui: &mut egui::Ui) {
+        if self.enable_toasts {
+            self.toasts.show(ui);
+        }
+    }
+
     fn render_root_ui(&mut self, ui: &mut egui::Ui) {
         use egui::*;
 
@@ -2705,9 +2711,7 @@ impl LauncherApp {
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
         }
         self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
-        if self.enable_toasts {
-            self.toasts.show(ui);
-        }
+        self.render_root_toasts(ui);
         if first_ui_pass {
             self.cancel_screen_draw_startup_on_escape(&ctx);
             crate::performance::record_frame(
@@ -5280,6 +5284,10 @@ mod tests {
     }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {
+        new_app_with_settings(ctx, Settings::default())
+    }
+
+    fn new_app_with_settings(ctx: &egui::Context, settings: Settings) -> LauncherApp {
         LauncherApp::new(
             ctx,
             Arc::new(Vec::new()),
@@ -5287,7 +5295,7 @@ mod tests {
             PluginManager::new(),
             "actions.json".into(),
             "settings.json".into(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -5296,6 +5304,118 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn root_toasts_preserve_anchor_stack_hover_pause_and_configured_duration() {
+        fn toast_layer(index: usize) -> egui::LayerId {
+            egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("__toasts").with("toast").with(index),
+            )
+        }
+
+        fn frame(ctx: &egui::Context, app: &mut LauncherApp, time: f64, events: Vec<egui::Event>) {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    time: Some(time),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.render_root_toasts(ui),
+            );
+            output.drop_without_applying_deltas();
+        }
+
+        fn visible(ctx: &egui::Context, index: usize) -> bool {
+            let layer = toast_layer(index);
+            ctx.memory(|memory| memory.areas().visible_last_frame(&layer))
+        }
+
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.enable_toasts = false;
+        settings.show_error_toasts = false;
+        let mut app = new_app_with_settings(&ctx, settings);
+        app.enable_toasts = true;
+        frame(&ctx, &mut app, 0.0, Vec::new());
+        assert!(!visible(&ctx, 0) && !visible(&ctx, 1));
+
+        let short_options = ToastOptions::default().duration_in_seconds(0.5);
+        assert!(short_options.show_icon && short_options.show_progress);
+        app.toasts.add(Toast {
+            text: "long success".into(),
+            kind: ToastKind::Success,
+            options: ToastOptions::default().duration_in_seconds(3.0),
+            style: Default::default(),
+        });
+        app.toasts.add(Toast {
+            text: "brief failure".into(),
+            kind: ToastKind::Error,
+            options: short_options,
+            style: Default::default(),
+        });
+
+        frame(&ctx, &mut app, 0.01, Vec::new());
+        // The first Area pass establishes its content size; anchor geometry is stable next frame.
+        frame(&ctx, &mut app, 0.02, Vec::new());
+        let first = ctx
+            .memory(|memory| memory.area_rect(toast_layer(0).id))
+            .expect("the first toast was rendered");
+        let second = ctx
+            .memory(|memory| memory.area_rect(toast_layer(1).id))
+            .expect("the second toast was rendered");
+        assert!(visible(&ctx, 0) && visible(&ctx, 1));
+        // RIGHT_TOP plus a positive x offset is clamped to the viewport edge by egui::Area.
+        assert!((first.right() - 800.0).abs() < 0.5, "{first:?}");
+        assert!((first.top() - 10.0).abs() < 0.1, "{first:?}");
+        assert!(
+            second.top() >= first.bottom() + 9.9,
+            "{first:?} then {second:?}"
+        );
+
+        frame(
+            &ctx,
+            &mut app,
+            0.03,
+            vec![egui::Event::PointerMoved(second.center())],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            0.1,
+            vec![egui::Event::PointerMoved(second.center())],
+        );
+        frame(
+            &ctx,
+            &mut app,
+            1.0,
+            vec![egui::Event::PointerMoved(second.center())],
+        );
+        assert!(
+            visible(&ctx, 0) && visible(&ctx, 1),
+            "hovering the short toast pauses its configured half-second lifetime"
+        );
+
+        frame(
+            &ctx,
+            &mut app,
+            1.1,
+            vec![egui::Event::PointerMoved(egui::pos2(400.0, 300.0))],
+        );
+        frame(&ctx, &mut app, 2.0, Vec::new());
+        assert!(visible(&ctx, 0) && visible(&ctx, 1));
+        frame(&ctx, &mut app, 2.01, Vec::new());
+        assert!(visible(&ctx, 0), "the longer toast remains after expiry");
+        assert!(
+            !visible(&ctx, 1),
+            "the short toast expires after hover ends"
+        );
     }
 
     #[derive(Clone, Debug)]

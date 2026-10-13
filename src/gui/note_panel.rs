@@ -980,6 +980,10 @@ pub struct NotePanel {
     #[cfg(test)]
     last_preview_heading_rects: Vec<egui::Rect>,
     #[cfg(test)]
+    test_markdown_fragment_ids: Vec<(String, egui::Id, egui::Id)>,
+    #[cfg(test)]
+    test_capture_markdown_fragment_ids: bool,
+    #[cfg(test)]
     last_preview_fallback_rect: Option<egui::Rect>,
     #[cfg(test)]
     metadata_details_render_count: usize,
@@ -1344,6 +1348,10 @@ impl NotePanel {
             last_outline_rect: None,
             #[cfg(test)]
             last_preview_heading_rects: Vec::new(),
+            #[cfg(test)]
+            test_markdown_fragment_ids: Vec::new(),
+            #[cfg(test)]
+            test_capture_markdown_fragment_ids: false,
             #[cfg(test)]
             last_preview_fallback_rect: None,
             #[cfg(test)]
@@ -3935,8 +3943,12 @@ impl NotePanel {
         if fragment.is_empty() {
             return;
         }
+        let fragment_id = cache_id.to_string();
+        let fragment_ui_id = ui.make_persistent_id(("note_seg", fragment_id.as_str()));
         let fragment_width = ui.available_width().max(0.0);
-        ui.scope(|ui| {
+        #[cfg(test)]
+        let capture_fragment_ids = self.test_capture_markdown_fragment_ids;
+        ui.scope_builder(egui::UiBuilder::new().id(fragment_ui_id), |ui| {
             ui.set_min_width(fragment_width);
             ui.set_max_width(fragment_width);
             ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
@@ -3947,18 +3959,34 @@ impl NotePanel {
             );
             let render_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 egui::ScrollArea::horizontal()
+                    .id_salt("note_markdown_scroll")
                     .max_width(fragment_width)
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.set_min_width(fragment_width);
                         ui.set_max_width(fragment_width);
-                        ui.push_id(("note_seg", cache_id.to_string()), |ui| {
+                        let _markdown_response =
                             CommonMarkViewer::new().show(ui, &mut self.markdown_cache, &processed);
-                        });
-                    });
+                        #[cfg(test)]
+                        {
+                            _markdown_response.response.id
+                        }
+                        #[cfg(not(test))]
+                        {
+                            ()
+                        }
+                    })
             }));
+            #[cfg(test)]
+            if capture_fragment_ids && let Ok(output) = &render_result {
+                self.test_markdown_fragment_ids.push((
+                    fragment_id.clone(),
+                    output.id,
+                    output.inner,
+                ));
+            }
             match render_result {
-                Ok(()) => handle_markdown_links(ui, app),
+                Ok(_) => handle_markdown_links(ui, app),
                 Err(_) => self.render_preview_fallback(ui, app, fragment),
             }
         });
@@ -8479,6 +8507,72 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[derive(Default)]
+    struct MarkdownImageBytesLoader {
+        fixtures: std::collections::HashMap<String, (std::sync::Arc<[u8]>, String)>,
+    }
+
+    impl egui::load::BytesLoader for MarkdownImageBytesLoader {
+        fn id(&self) -> &str {
+            concat!(module_path!(), "::MarkdownImageBytesLoader")
+        }
+
+        fn load(&self, _ctx: &egui::Context, uri: &str) -> egui::load::BytesLoadResult {
+            let Some((bytes, mime)) = self.fixtures.get(uri) else {
+                return Err(egui::load::LoadError::NotSupported);
+            };
+            Ok(egui::load::BytesPoll::Ready {
+                size: None,
+                bytes: std::sync::Arc::clone(bytes).into(),
+                mime: Some(mime.clone()),
+            })
+        }
+
+        fn forget(&self, _uri: &str) {}
+
+        fn forget_all(&self) {}
+
+        fn byte_size(&self) -> usize {
+            self.fixtures.values().map(|(bytes, _)| bytes.len()).sum()
+        }
+    }
+
+    fn tiny_encoded_image(format: image_025::ImageFormat) -> Vec<u8> {
+        let image = image_025::DynamicImage::ImageRgb8(image_025::ImageBuffer::from_pixel(
+            2,
+            2,
+            image_025::Rgb([16, 32, 48]),
+        ));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, format)
+            .expect("tiny image fixture should encode");
+        bytes.into_inner()
+    }
+
+    fn tiny_dxt1_dds() -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(136);
+        bytes.extend_from_slice(b"DDS ");
+        for value in [124_u32, 0x1007, 4, 4, 8, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        for _ in 0..11 {
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+        }
+        bytes.extend_from_slice(&32_u32.to_le_bytes());
+        bytes.extend_from_slice(&4_u32.to_le_bytes());
+        bytes.extend_from_slice(b"DXT1");
+        for _ in 0..5 {
+            bytes.extend_from_slice(&0_u32.to_le_bytes());
+        }
+        for value in [0x1000_u32, 0, 0, 0, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0x00, 0xf8, 0x00, 0x00, 0, 0, 0, 0]);
+        assert_eq!(bytes.len(), 136);
+        bytes
     }
 
     #[test]
@@ -13455,6 +13549,254 @@ Body with [[Other]]"
         assert!(!panel.fast_derived_dirty);
         assert!(!panel.heavy_recompute_requested);
         assert!(panel.markdown_analysis.is_some());
+    }
+
+    #[test]
+    fn markdown_fragments_keep_distinct_stable_ids_and_prepare_shared_cache() {
+        fn render_fragments(
+            ctx: &egui::Context,
+            panel: &mut NotePanel,
+            app: &mut LauncherApp,
+            order: [&str; 2],
+        ) -> Vec<(String, egui::Id, egui::Id)> {
+            panel.test_markdown_fragment_ids.clear();
+            panel.test_capture_markdown_fragment_ids = true;
+            let fragment = panel.note.content.clone();
+            let output = ctx.run_ui(Default::default(), |root_ui| {
+                egui::CentralPanel::default().show(root_ui, |ui| {
+                    for cache_id in order {
+                        panel.show_markdown_fragment(ui, app, &fragment, cache_id);
+                    }
+                });
+            });
+            output.drop_without_applying_deltas();
+            panel.test_capture_markdown_fragment_ids = false;
+            panel.test_markdown_fragment_ids.clone()
+        }
+
+        let ctx = egui::Context::default();
+        let mut app = new_app(&ctx);
+        let mut panel = NotePanel::from_note(empty_note("# Same fragment\n\nBody"));
+        panel.markdown_cache.add_link_hook("unused-link");
+        *panel
+            .markdown_cache
+            .link_hooks_mut()
+            .get_mut("unused-link")
+            .expect("test link hook was registered") = true;
+
+        let initial = render_fragments(&ctx, &mut panel, &mut app, ["first", "second"]);
+        assert_eq!(initial.len(), 2);
+        assert_eq!(initial[0].0, "first");
+        assert_eq!(initial[1].0, "second");
+        assert_ne!(initial[0].1, initial[1].1);
+        assert_ne!(initial[0].2, initial[1].2);
+        assert_eq!(
+            panel.markdown_cache.get_link_hook("unused-link"),
+            Some(false)
+        );
+        assert!(ctx.is_loader_installed(egui_extras::loaders::image_loader::ImageCrateLoader::ID));
+
+        let repeated = render_fragments(&ctx, &mut panel, &mut app, ["first", "second"]);
+        assert_eq!(repeated, initial);
+
+        let reordered = render_fragments(&ctx, &mut panel, &mut app, ["second", "first"]);
+        assert_eq!(reordered[0], initial[1]);
+        assert_eq!(reordered[1], initial[0]);
+
+        panel.replace_content_from_mutation("# Updated fragment\n\nChanged body".into(), 1.0);
+        let after_change = render_fragments(&ctx, &mut panel, &mut app, ["first", "second"]);
+        assert_eq!(after_change, initial);
+        assert_ne!(after_change[0].1, after_change[1].1);
+        assert_ne!(after_change[0].2, after_change[1].2);
+    }
+
+    #[test]
+    fn extras_image_loader_decodes_static_jpeg_gif_webp_and_png_asynchronously() {
+        use std::{
+            sync::Arc,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        let formats = [
+            (
+                "fixture://tiny.jpeg",
+                image_025::ImageFormat::Jpeg,
+                "image/jpeg",
+            ),
+            (
+                "fixture://tiny.gif",
+                image_025::ImageFormat::Gif,
+                "image/gif",
+            ),
+            (
+                "fixture://tiny.webp",
+                image_025::ImageFormat::WebP,
+                "image/webp",
+            ),
+            (
+                "fixture://tiny.png",
+                image_025::ImageFormat::Png,
+                "image/png",
+            ),
+        ];
+        let fixtures = formats
+            .iter()
+            .map(|(uri, format, mime)| {
+                (
+                    (*uri).to_owned(),
+                    (tiny_encoded_image(*format).into(), (*mime).to_owned()),
+                )
+            })
+            .collect();
+
+        let ctx = egui::Context::default();
+        ctx.add_bytes_loader(Arc::new(MarkdownImageBytesLoader { fixtures }));
+        let mut markdown_cache = CommonMarkCache::default();
+        let output = ctx.run_ui(Default::default(), |ui| {
+            CommonMarkViewer::new().show(ui, &mut markdown_cache, "# Loader setup");
+        });
+        output.drop_without_applying_deltas();
+        assert!(ctx.is_loader_installed(egui_extras::loaders::image_loader::ImageCrateLoader::ID));
+
+        for (uri, _, _) in formats {
+            assert!(
+                matches!(
+                    ctx.try_load_image(uri, egui::load::SizeHint::default()),
+                    Ok(egui::load::ImagePoll::Pending { .. })
+                ),
+                "the extras image loader should return promptly and schedule decoding for {uri}"
+            );
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let image = loop {
+                match ctx.try_load_image(uri, egui::load::SizeHint::default()) {
+                    Ok(egui::load::ImagePoll::Ready { image }) => break image,
+                    Ok(egui::load::ImagePoll::Pending { .. }) if Instant::now() < deadline => {
+                        thread::yield_now();
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(egui::load::ImagePoll::Pending { .. }) => {
+                        panic!("extras image decode did not become ready before timeout for {uri}")
+                    }
+                    Err(error) => panic!("extras image loader rejected {uri}: {error}"),
+                }
+            };
+            assert_eq!(image.size, [2, 2], "decoded dimensions for {uri}");
+        }
+
+        for (feature, format) in [
+            ("bmp", image_025::ImageFormat::Bmp),
+            ("dds", image_025::ImageFormat::Dds),
+            ("exr", image_025::ImageFormat::OpenExr),
+            ("ff", image_025::ImageFormat::Farbfeld),
+            ("gif", image_025::ImageFormat::Gif),
+            ("hdr", image_025::ImageFormat::Hdr),
+            ("ico", image_025::ImageFormat::Ico),
+            ("jpeg", image_025::ImageFormat::Jpeg),
+            ("png", image_025::ImageFormat::Png),
+            ("pnm", image_025::ImageFormat::Pnm),
+            ("qoi", image_025::ImageFormat::Qoi),
+            ("tga", image_025::ImageFormat::Tga),
+            ("tiff", image_025::ImageFormat::Tiff),
+            ("webp", image_025::ImageFormat::WebP),
+        ] {
+            assert!(
+                format.reading_enabled(),
+                "image 0.25 decoder feature {feature} must remain enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn extras_image_loader_admits_dds_extension_and_mime_before_decoding() {
+        use std::{
+            collections::HashMap,
+            sync::Arc,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        fn wait_for_image(
+            ctx: &egui::Context,
+            uri: &str,
+        ) -> Result<Arc<egui::ColorImage>, egui::load::LoadError> {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                match ctx.try_load_image(uri, egui::load::SizeHint::default()) {
+                    Ok(egui::load::ImagePoll::Ready { image }) => return Ok(image),
+                    Ok(egui::load::ImagePoll::Pending { .. }) if Instant::now() < deadline => {
+                        thread::yield_now();
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(egui::load::ImagePoll::Pending { .. }) => {
+                        panic!("extras image decode did not become ready before timeout for {uri}")
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        let format = image_025::ImageFormat::Dds;
+        assert!(format.can_read());
+        assert!(format.reading_enabled(), "the dds feature is enabled");
+        assert_eq!(format.to_mime_type(), "image/vnd-ms.dds");
+        let dds_bytes = tiny_dxt1_dds();
+        let decoded = image_025::load_from_memory(&dds_bytes).expect("the DDS fixture is valid");
+        assert_eq!((decoded.width(), decoded.height()), (4, 4));
+
+        let ctx = egui::Context::default();
+        let mut markdown_cache = CommonMarkCache::default();
+        let output = ctx.run_ui(Default::default(), |ui| {
+            CommonMarkViewer::new().show(ui, &mut markdown_cache, "# Loader setup");
+        });
+        output.drop_without_applying_deltas();
+        assert!(ctx.is_loader_installed(egui_extras::loaders::image_loader::ImageCrateLoader::ID));
+        assert!(ctx.is_loader_installed(egui_extras::loaders::file_loader::FileLoader::ID));
+
+        let directory = tempfile::tempdir().expect("temporary image directory");
+        let file_path = directory.path().join("tiny.dds");
+        std::fs::write(&file_path, &dds_bytes).expect("write DDS file fixture");
+        let file_uri = format!("file:///{}", file_path.to_string_lossy().replace('\\', "/"));
+        assert!(matches!(
+            ctx.try_load_image(&file_uri, egui::load::SizeHint::default()),
+            Ok(egui::load::ImagePoll::Pending { .. })
+        ));
+        let file_image = wait_for_image(&ctx, &file_uri).expect("DDS file extension is admitted");
+        assert_eq!(file_image.size, [4, 4]);
+
+        let mime_uri = "fixture://tiny-dds-mime";
+        let malformed_uri = "fixture://malformed-dds-mime";
+        let fixtures = HashMap::from([
+            (
+                mime_uri.to_owned(),
+                (Arc::<[u8]>::from(dds_bytes), "image/vnd-ms.dds".to_owned()),
+            ),
+            (
+                malformed_uri.to_owned(),
+                (
+                    Arc::<[u8]>::from(&b"DDS "[..]),
+                    "image/vnd-ms.dds".to_owned(),
+                ),
+            ),
+        ]);
+        ctx.add_bytes_loader(Arc::new(MarkdownImageBytesLoader { fixtures }));
+
+        assert!(matches!(
+            ctx.try_load_image(mime_uri, egui::load::SizeHint::default()),
+            Ok(egui::load::ImagePoll::Pending { .. })
+        ));
+        let mime_image = wait_for_image(&ctx, mime_uri).expect("DDS MIME type is admitted");
+        assert_eq!(mime_image.size, [4, 4]);
+
+        assert!(matches!(
+            ctx.try_load_image(malformed_uri, egui::load::SizeHint::default()),
+            Ok(egui::load::ImagePoll::Pending { .. })
+        ));
+        assert!(matches!(
+            wait_for_image(&ctx, malformed_uri),
+            Err(egui::load::LoadError::Loading(_))
+        ));
     }
 
     #[test]

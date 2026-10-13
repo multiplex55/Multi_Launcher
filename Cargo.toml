@@ -104,6 +104,24 @@ sysinfo = "0.35"
 chrono = "0.4"
 screenshots = "0.8.10"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "bmp", "ico", "gif", "tiff"] }
+# Keep egui_extras' image 0.25 loader on the decoder formats used before the egui upgrade.
+# This stays separate from image 0.24, which screenshot and application paths still use.
+image_025 = { package = "image", version = "0.25.6", default-features = false, features = [
+    "bmp",
+    "dds",
+    "exr",
+    "ff",
+    "gif",
+    "hdr",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "tga",
+    "tiff",
+    "webp",
+] }
 tempfile = "3"
 ipconfig = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
@@ -178,3 +196,7 @@ incremental = true
 # Local lifecycle seam for hidden-root prompt viewport bootstrapping.
 [patch.crates-io]
 eframe = { path = "vendor/eframe" }
+# Align image 0.25 DDS capability reporting with its existing decoder.
+image = { path = "vendor/image" }
+# Preserve toast hover-pause behavior with egui 0.36's full-rect close interaction.
+egui-toast = { path = "vendor/egui-toast" }

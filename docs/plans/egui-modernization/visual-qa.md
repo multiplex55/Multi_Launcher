@@ -26,7 +26,7 @@ $env:ML_NOTES_DIR = (Join-Path $fixtureRoot 'notes')
 $env:ML_NOTE_TEMPLATES_DIR = (Join-Path $fixtureRoot 'templates')
 $env:ML_SKIP_CLIPBOARD_SYNC = '1'
 $env:MULTI_LAUNCHER_PERF = '1'
-$process = Start-Process -FilePath $exe -WorkingDirectory $fixtureRoot -PassThru -WindowStyle Hidden
+$process = Start-Process -FilePath $exe -WorkingDirectory $fixtureRoot -PassThru -WindowStyle Normal
 ```
 
 Use a `try/finally` around the assignments and `Start-Process`, saving and restoring each prior process environment value, including the distinction between unset and set. Do not change user or machine environment. `ML_NOTES_DIR` is essential: without it, notes default beside the executable. `ML_NOTE_TEMPLATES_DIR` prevents note-template reads or writes under the user's home directory. `ML_SKIP_CLIPBOARD_SYNC=1` prevents clipboard synchronization/mutation.
@@ -121,3 +121,15 @@ Bounded source inspection found a supported application-output route distinct fr
 A later bounded QA-only probe could request one capture from an explicitly visible owned fixture viewport, consume the returned pixels and save a provenance-bound image, without desktop capture, custom OS automation or arbitrary repaint loops. This requires a reviewed implementation and actual runtime proof; it is not a screenshot success or a waiver of the native gate. Keep any probe opt-in and absent from benchmark runs, with no per-frame IO/decoding/hashing or steady-state work. Original screenshots would require a separately attributed instrumented original build; preserved unmodified original binaries and performance receipts remain authoritative for their existing claims.
 
 Framebuffer images could establish application-rendered visual evidence, not desktop composition, OS layering, focus, key-up behavior, mixed-monitor placement or display latency. Those checks still require the existing native observation/manual route. No probe source change, rebuild, launch, screenshot or performance measurement was performed in this investigation. M1-C remains the only active source milestone; evaluate this recovery after compiler/integration closure.
+
+## Capture recovery packet — 2026-10-13
+
+M1-C source checkpoint df9bdd91 compiles and passes focused tests; M1-D integration parity is active. The Windows sky helper responds to list_windows; no Multi Launcher test process is currently open. No new screenshot attempt or success is claimed. Planner completed [opt-in framebuffer capture packet](qa-framebuffer-plan.md) for sequential implementation after M1-D source ownership releases. Supported app framebuffer capture is distinct from the failed desktop-capture transport. Ordinary/benchmark builds exclude its proposed QA feature; pixels would prove rendered application content only. Probe source/build/runtime validation and original separately instrumented capture remain pending. Parent owns native launch/capture evidence and retains all original preserved binaries/receipts.
+
+## Seventh original attempt: explicit visible launch
+
+Parent identified that the earlier launch procedure used WindowStyle Hidden. Because this is an interactive GUI test, the procedure now uses Normal; background helpers remain hidden. This changed condition justified one fresh capture attempt without presuming a cause.
+
+Fresh run-original-007-visible used the unchanged provenance-bound helper99fcf5a and preserved original-fast-dev executable SHA25649873783D3BB1C6A57488D432A3EFAAD0088B310936EA2E9B2F55F638CEEFB35, build-head de6bcd22, production72a01bd5. Helper roundtrips passed for1000 synthetic actions/100 notes. Prelaunch settings hash EAFD1C21BF7BB8EBEF091C557E3EDA212F1A7FDB00EDDDA3E35EA2468BE60F4C was captured before Start-Process. Process-scoped notes/templates/clipboard-isolation environment was restored immediately; performance and Track C mode were unset. PID34672 started2026-10-13T00:23:52.3508546-04:00 with WindowStyle Normal in the fresh fixture CWD.
+
+Fresh sky selection returned the unique exact-executable Multi Lnchr window12719040; activation returned, then get_window_state with screenshot/text failed `FrameArrived timed out: timed out waiting on channel`. One fresh list_windows/get_window recovery failed `window capture timed out: timed out waiting on channel`. No screenshot or input action was obtained. Exact process path/start identity was verified, graceful taskkill without force succeeded, and exit was confirmed. Receipts remain in the ignored run directory. Normal launch did not resolve capture; neither hidden style nor any transport cause is established. No native visual/performance pass is claimed. The supported framebuffer plan remains the next bounded evidence route after M1-D source release.
