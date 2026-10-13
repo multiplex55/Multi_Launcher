@@ -4342,6 +4342,14 @@ impl eframe::App for LauncherApp {
 }
 
 #[cfg(test)]
+#[derive(Default)]
+pub(super) struct TestRootFramePhaseTimes {
+    begin_root_frame_logic_ns: u128,
+    render_root_ui_ns: u128,
+    finish_ui_frame_receipt_ns: u128,
+}
+
+#[cfg(test)]
 impl LauncherApp {
     /// Runs the same lifecycle owners as native eframe and finalizes only after
     /// egui has selected its retained pass.
@@ -4361,22 +4369,86 @@ impl LauncherApp {
         ctx: &egui::Context,
         input: egui::RawInput,
         force_discard_first_pass: bool,
+        render_pass: impl FnMut(&mut Self, &mut egui::Ui),
+    ) -> (egui::FullOutput, usize) {
+        self.run_root_frame_for_test_with_optional_phase_times(
+            ctx,
+            input,
+            force_discard_first_pass,
+            render_pass,
+            None,
+        )
+    }
+
+    /// The optional phase sink keeps diagnostic clocks on the same lifecycle
+    /// path as ordinary tests. With no sink, the existing owners run without
+    /// constructing timers or changing their order.
+    fn run_root_frame_for_test_with_optional_phase_times(
+        &mut self,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        force_discard_first_pass: bool,
         mut render_pass: impl FnMut(&mut Self, &mut egui::Ui),
+        mut phase_times: Option<&mut TestRootFramePhaseTimes>,
     ) -> (egui::FullOutput, usize) {
         let mut frame = eframe::Frame::_new_kittest();
         let mut passes = 0;
         let output = with_immediate_viewport_renderer(ctx, || {
             ctx.run_ui(input, |ui| {
-                self.begin_root_frame_logic(ui.ctx(), &mut frame);
-                render_pass(self, ui);
+                if let Some(times) = phase_times.as_deref_mut() {
+                    let started = std::time::Instant::now();
+                    self.begin_root_frame_logic(ui.ctx(), &mut frame);
+                    times.begin_root_frame_logic_ns = times
+                        .begin_root_frame_logic_ns
+                        .saturating_add(started.elapsed().as_nanos());
+                } else {
+                    self.begin_root_frame_logic(ui.ctx(), &mut frame);
+                }
+
+                if let Some(times) = phase_times.as_deref_mut() {
+                    let started = std::time::Instant::now();
+                    render_pass(self, ui);
+                    times.render_root_ui_ns = times
+                        .render_root_ui_ns
+                        .saturating_add(started.elapsed().as_nanos());
+                } else {
+                    render_pass(self, ui);
+                }
+
                 if force_discard_first_pass && passes == 0 {
                     ui.ctx().request_discard("forced M1-B lifecycle test pass");
                 }
                 passes += 1;
             })
         });
-        self.finish_ui_frame_receipt();
+        if let Some(times) = phase_times.as_deref_mut() {
+            let started = std::time::Instant::now();
+            self.finish_ui_frame_receipt();
+            times.finish_ui_frame_receipt_ns = times
+                .finish_ui_frame_receipt_ns
+                .saturating_add(started.elapsed().as_nanos());
+        } else {
+            self.finish_ui_frame_receipt();
+        }
         (output, passes)
+    }
+
+    /// Runs the shared lifecycle adapter with phase clocks enabled.
+    pub(super) fn run_root_frame_for_test_with_phase_times(
+        &mut self,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        force_discard_first_pass: bool,
+        mut render_pass: impl FnMut(&mut Self, &mut egui::Ui),
+        phase_times: &mut TestRootFramePhaseTimes,
+    ) -> (egui::FullOutput, usize) {
+        self.run_root_frame_for_test_with_optional_phase_times(
+            ctx,
+            input,
+            force_discard_first_pass,
+            &mut render_pass,
+            Some(phase_times),
+        )
     }
 
     /// Exercises the actual no-paint owner with one egui input pass. There is
@@ -6511,6 +6583,46 @@ mod tests {
         height: f32,
         events: Vec<egui::Event>,
     ) -> (egui::FullOutput, usize) {
+        run_root_list_frame_with_optional_phase_times(
+            ctx,
+            app,
+            frame_index,
+            width,
+            height,
+            events,
+            None,
+        )
+    }
+
+    fn run_root_list_frame_with_phase_times(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        frame_index: usize,
+        width: f32,
+        height: f32,
+        events: Vec<egui::Event>,
+        phase_times: &mut TestRootFramePhaseTimes,
+    ) -> (egui::FullOutput, usize) {
+        run_root_list_frame_with_optional_phase_times(
+            ctx,
+            app,
+            frame_index,
+            width,
+            height,
+            events,
+            Some(phase_times),
+        )
+    }
+
+    fn run_root_list_frame_with_optional_phase_times(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        frame_index: usize,
+        width: f32,
+        height: f32,
+        events: Vec<egui::Event>,
+        phase_times: Option<&mut TestRootFramePhaseTimes>,
+    ) -> (egui::FullOutput, usize) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -6520,7 +6632,16 @@ mod tests {
             events,
             ..Default::default()
         };
-        app.run_root_frame_for_test(ctx, input, false)
+        match phase_times {
+            Some(phase_times) => app.run_root_frame_for_test_with_phase_times(
+                ctx,
+                input,
+                false,
+                |app, ui| app.render_root_ui(ui),
+                phase_times,
+            ),
+            None => app.run_root_frame_for_test(ctx, input, false),
+        }
     }
 
     fn assert_retained_immediate_viewport(ctx: &egui::Context, viewport_id: egui::ViewportId) {
@@ -9129,6 +9250,199 @@ mod tests {
                     drop(state);
                 }
             }
+        }
+
+        drop(workspace);
+    }
+
+    #[test]
+    #[ignore = "bounded M2-A warm root-list owner diagnostic; 100 actions, 2 warmups and 5 samples"]
+    fn track_c_diagnostic_root_list_warm_owner_breakdown() {
+        use crate::performance::track_c_workloads::{TrackCWorkspace, action_fixture};
+
+        const DIAGNOSTIC_WARMUPS: usize = 2;
+        const DIAGNOSTIC_SAMPLES: usize = 5;
+        const VIEW_WIDTH: f32 = 960.0;
+        const VIEW_HEIGHT: f32 = 640.0;
+
+        assert!(crate::performance::enabled());
+        let source = std::env::var("ML_TRACK_C_SOURCE_SHA")
+            .unwrap_or_else(|_| "UNCOMMITTED_DIAGNOSTIC_SOURCE".into());
+        let profile =
+            std::env::var("ML_TRACK_C_PROFILE").unwrap_or_else(|_| "unspecified-profile".into());
+        let workspace = TrackCWorkspace::new();
+        let fixture = action_fixture(100);
+        let make_state =
+            || track_c_prepare_root_list_state(workspace.root(), &fixture.values, false);
+        let launcher_rows_snapshot = || {
+            crate::performance::snapshot_metrics()
+                .into_iter()
+                .find(|snapshot| snapshot.metric == crate::performance::Metric::LauncherRowsBuilt)
+                .expect("the fixed metric set includes launcher row construction")
+        };
+        eprintln!(
+            "M2A_ROOT_WARM_OWNER_PROTOCOL schema=1 source={source} profile={profile} owner=egui::Context::run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt adapter=run_root_list_frame_with_phase_times+Frame::_new_kittest+with_immediate_viewport_renderer fixture=root_list_action_fixture fixture_signature={:016x} count=100 viewport={}x{} warmups={DIAGNOSTIC_WARMUPS} samples={DIAGNOSTIC_SAMPLES} metric=LauncherRowsBuilt metric_scope=geometry_ensure+visible_result_widget_construction residual_scope=raw_input+frame+renderer_guard+egui_framework+adapter_dispatch output_disposal=outside_timing",
+            fixture.summary.signature, VIEW_WIDTH as u32, VIEW_HEIGHT as u32,
+        );
+
+        let mut stable_output = None;
+        for warmup_index in 0..DIAGNOSTIC_WARMUPS {
+            let mut state = make_state();
+            let frame = state.frame_index;
+            state.frame_index += 1;
+            let mut phase_times = TestRootFramePhaseTimes::default();
+            let (output, adapter_passes) = run_root_list_frame_with_phase_times(
+                &state.ctx,
+                &mut state.app,
+                frame,
+                VIEW_WIDTH,
+                VIEW_HEIGHT,
+                Vec::new(),
+                &mut phase_times,
+            );
+            assert!(adapter_passes > 0, "the warm adapter ran at least one pass");
+            let observation = track_c_validate_root_list_state(&state);
+            assert_eq!(
+                observation.work_counters[0], 0,
+                "warm geometry rebuilds zero times"
+            );
+            assert_eq!(
+                observation.work_counters[1], 0,
+                "warm geometry measures zero rows"
+            );
+            assert!(
+                observation.work_counters[2] > 0,
+                "the warm frame paints visible rows"
+            );
+            let signature = (
+                observation.output_identity,
+                observation.structural_signature,
+                observation.viewport_receipt,
+            );
+            if let Some(expected) = stable_output {
+                assert_eq!(
+                    signature, expected,
+                    "warmup preserves geometry and visible IDs"
+                );
+            } else {
+                stable_output = Some(signature);
+            }
+            output.drop_without_applying_deltas();
+            eprintln!(
+                "M2A_ROOT_WARM_OWNER_WARMUP schema=1 source={source} profile={profile} warmup_index={warmup_index} adapter_passes={adapter_passes} rebuilds={} measured_rows={} painted_rows={} output_identity={:016x} structural_signature={:016x} viewport_receipt={:016x}",
+                observation.work_counters[0],
+                observation.work_counters[1],
+                observation.work_counters[2],
+                observation.output_identity,
+                observation.structural_signature,
+                observation
+                    .viewport_receipt
+                    .expect("the root list records its viewport identity"),
+            );
+            drop(state);
+        }
+
+        for sample_index in 0..DIAGNOSTIC_SAMPLES {
+            let mut state = make_state();
+            let frame = state.frame_index;
+            state.frame_index += 1;
+            let metric_before = launcher_rows_snapshot();
+            let mut phase_times = TestRootFramePhaseTimes::default();
+            let started = std::time::Instant::now();
+            let (output, adapter_passes) = run_root_list_frame_with_phase_times(
+                &state.ctx,
+                &mut state.app,
+                frame,
+                VIEW_WIDTH,
+                VIEW_HEIGHT,
+                Vec::new(),
+                &mut phase_times,
+            );
+            let owner_elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            let metric_after = launcher_rows_snapshot();
+            let observation = track_c_validate_root_list_state(&state);
+            assert!(
+                adapter_passes > 0,
+                "the measured adapter ran at least one pass"
+            );
+            assert_eq!(
+                observation.work_counters[0], 0,
+                "warm geometry rebuilds zero times"
+            );
+            assert_eq!(
+                observation.work_counters[1], 0,
+                "warm geometry measures zero rows"
+            );
+            assert!(
+                observation.work_counters[2] > 0,
+                "the warm frame paints visible rows"
+            );
+            let signature = (
+                observation.output_identity,
+                observation.structural_signature,
+                observation.viewport_receipt,
+            );
+            assert_eq!(
+                Some(signature),
+                stable_output,
+                "measured frames preserve geometry and visible IDs"
+            );
+
+            let metric_calls = metric_after.calls.saturating_sub(metric_before.calls);
+            let metric_work_units = metric_after
+                .work_units
+                .saturating_sub(metric_before.work_units);
+            let metric_elapsed_ns = metric_after
+                .elapsed_nanos_total
+                .saturating_sub(metric_before.elapsed_nanos_total);
+            assert_eq!(
+                metric_calls, adapter_passes as u64,
+                "the existing row metric records the visible root UI once per pass"
+            );
+            assert!(
+                metric_work_units > 0,
+                "the existing row metric records painted widgets"
+            );
+            assert!(
+                metric_work_units <= metric_calls.saturating_mul(64),
+                "row metric work remains bounded by the visible-row limit"
+            );
+
+            let phase_total_ns = phase_times
+                .begin_root_frame_logic_ns
+                .saturating_add(phase_times.render_root_ui_ns)
+                .saturating_add(phase_times.finish_ui_frame_receipt_ns);
+            assert!(
+                phase_total_ns <= u128::from(owner_elapsed_ns),
+                "measured subphases fit within the whole adapter owner"
+            );
+            let residual_ns = u128::from(owner_elapsed_ns) - phase_total_ns;
+            let after = state.app.root_list_geometry.test_observation();
+
+            eprintln!(
+                "M2A_ROOT_WARM_OWNER_SAMPLE schema=1 source={source} profile={profile} owner=egui::Context::run_ui+LauncherApp::begin_root_frame_logic+LauncherApp::render_root_ui+LauncherApp::finish_ui_frame_receipt fixture=root_list_action_fixture fixture_signature={:016x} count=100 warmups={DIAGNOSTIC_WARMUPS} samples={DIAGNOSTIC_SAMPLES} sample_index={sample_index} owner_elapsed_ns={owner_elapsed_ns} begin_root_frame_logic_ns={} render_root_ui_ns={} finish_ui_frame_receipt_ns={} residual_ns={residual_ns} rows_metric_calls_before={} rows_metric_calls_after={} rows_metric_calls_delta={metric_calls} rows_metric_work_units_before={} rows_metric_work_units_after={} rows_metric_work_units_delta={metric_work_units} rows_metric_elapsed_ns_before={} rows_metric_elapsed_ns_after={} rows_metric_elapsed_ns_delta={metric_elapsed_ns} rebuilds={} measured_rows={} painted_rows={} adapter_passes={adapter_passes} stored_last_rebuild_ns={} output_identity={:016x} structural_signature={:016x} viewport_receipt={:016x}",
+                fixture.summary.signature,
+                phase_times.begin_root_frame_logic_ns,
+                phase_times.render_root_ui_ns,
+                phase_times.finish_ui_frame_receipt_ns,
+                metric_before.calls,
+                metric_after.calls,
+                metric_before.work_units,
+                metric_after.work_units,
+                metric_before.elapsed_nanos_total,
+                metric_after.elapsed_nanos_total,
+                observation.work_counters[0],
+                observation.work_counters[1],
+                observation.work_counters[2],
+                after.last_rebuild_nanos,
+                observation.output_identity,
+                observation.structural_signature,
+                observation
+                    .viewport_receipt
+                    .expect("the root list records its viewport identity"),
+            );
+            output.drop_without_applying_deltas();
+            drop(state);
         }
 
         drop(workspace);
