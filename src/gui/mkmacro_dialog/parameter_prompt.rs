@@ -1,7 +1,8 @@
 use crate::mkmacro::{
     MkInvocationValues,
     invocation_prompt::{
-        InvocationGuiRegistration, PendingInvocation, production_invocation_prompt_broker,
+        InvocationGuiRegistration, InvocationPromptBroker, PendingInvocation,
+        production_invocation_prompt_broker,
     },
     prepare_parameters,
 };
@@ -18,21 +19,24 @@ pub(crate) struct ParameterPromptUi {
     notice: Option<String>,
     first_frame: bool,
     valid: bool,
+    bootstrap_pending: bool,
 }
 impl ParameterPromptUi {
     pub fn new(ctx: &egui::Context) -> Self {
+        Self::with_broker(ctx, production_invocation_prompt_broker())
+    }
+
+    pub(crate) fn with_broker(ctx: &egui::Context, broker: Arc<InvocationPromptBroker>) -> Self {
         let ctx = ctx.clone();
         Self {
-            registration: Some(
-                production_invocation_prompt_broker()
-                    .register_gui(Arc::new(move || ctx.request_repaint())),
-            ),
+            registration: Some(broker.register_gui(Arc::new(move || ctx.request_repaint()))),
             pending: None,
             values: Default::default(),
             error: None,
             notice: None,
             first_frame: false,
             valid: false,
+            bootstrap_pending: false,
         }
     }
     pub fn shutdown(&mut self) {
@@ -43,8 +47,9 @@ impl ParameterPromptUi {
         self.values.clear();
         self.error = None;
         self.notice = None;
+        self.bootstrap_pending = false;
     }
-    pub fn show(&mut self, ctx: &egui::Context) {
+    pub fn acquire_pending(&mut self) {
         let Some(registration) = &self.registration else {
             return;
         };
@@ -56,10 +61,12 @@ impl ParameterPromptUi {
             self.pending = None;
             self.values.clear();
             self.error = None;
+            self.bootstrap_pending = false;
         }
         if let Some(notice) = registration.take_notice() {
             self.notice = Some(notice);
             self.first_frame = true;
+            self.bootstrap_pending = true;
         }
         if self.pending.is_none()
             && let Some(pending) = registration.take_pending()
@@ -75,7 +82,15 @@ impl ParameterPromptUi {
             self.pending = Some(pending);
             self.error = None;
             self.first_frame = true;
+            self.bootstrap_pending = true;
         }
+    }
+
+    pub fn needs_viewport_bootstrap(&self) -> bool {
+        self.bootstrap_pending
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context, handle_ui_actions: bool) {
         if self.pending.is_none() && self.notice.is_none() {
             return;
         }
@@ -99,10 +114,11 @@ impl ParameterPromptUi {
                         if self.pending.is_some() {
                             submit = ui
                                 .add_enabled(self.valid, egui::Button::new("Run"))
-                                .clicked();
-                            cancel = ui.button("Cancel").clicked();
+                                .clicked()
+                                && handle_ui_actions;
+                            cancel = ui.button("Cancel").clicked() && handle_ui_actions;
                         } else {
-                            cancel = ui.button("Close").clicked();
+                            cancel = ui.button("Close").clicked() && handle_ui_actions;
                         }
                     });
                 });
@@ -167,13 +183,16 @@ impl ParameterPromptUi {
                             }
                         });
                 });
-                if child.input(|input| {
-                    input.key_pressed(egui::Key::Escape) || input.viewport().close_requested()
-                }) {
+                if handle_ui_actions
+                    && child.input(|input| {
+                        input.key_pressed(egui::Key::Escape) || input.viewport().close_requested()
+                    })
+                {
                     cancel = true;
                 }
             },
         );
+        self.bootstrap_pending = false;
         if cancel {
             self.pending = None;
             self.values.clear();

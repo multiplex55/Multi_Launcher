@@ -772,6 +772,14 @@ impl super::LauncherApp {
     }
 
     pub(super) fn show_screen_draw_toolbar(&mut self, ctx: &egui::Context) {
+        self.show_screen_draw_toolbar_with_actions(ctx, true);
+    }
+
+    pub(super) fn show_screen_draw_toolbar_with_actions(
+        &mut self,
+        ctx: &egui::Context,
+        handle_ui_actions: bool,
+    ) {
         let open = self.screen_draw_controller.toolbar_open();
         if !open {
             if self.screen_draw_toolbar.was_open {
@@ -824,7 +832,11 @@ impl super::LauncherApp {
             // Consume configured shortcuts before widgets see this frame's key
             // events. Otherwise Space/Enter may both switch tools and activate
             // whichever toolbar button retained focus from the prior frame.
-            let shortcut_actions = consume_toolbar_local_shortcuts(child, &state, &settings);
+            let shortcut_actions = if handle_ui_actions {
+                consume_toolbar_local_shortcuts(child, &state, &settings)
+            } else {
+                Vec::new()
+            };
             let thickness = runtime.map_or(settings.default_thickness, |state| state.thickness);
             actions.extend(toolbar_actions_for_local_shortcuts(
                 shortcut_actions,
@@ -845,14 +857,18 @@ impl super::LauncherApp {
                 let viewport = input.viewport();
                 observed_position = viewport.outer_rect.map(|rect| rect.min);
                 observed_outer_rect = viewport.outer_rect;
-                close_requested = viewport.close_requested();
+                close_requested = handle_ui_actions && viewport.close_requested();
             });
             observed_pixels_per_point = Some(child.pixels_per_point());
-            escape_pressed = consume_drawing_escape(child, &state);
+            escape_pressed = handle_ui_actions && consume_drawing_escape(child, &state);
         });
-        self.screen_draw_toolbar.export_background = export_background;
+        if handle_ui_actions {
+            self.screen_draw_toolbar.export_background = export_background;
+        }
 
-        if let (Some(position), Some(scale)) = (observed_position, observed_pixels_per_point) {
+        if handle_ui_actions
+            && let (Some(position), Some(scale)) = (observed_position, observed_pixels_per_point)
+        {
             let physical = logical_to_physical(position, scale);
             let settings = self.screen_draw_controller.settings().clone();
             let mut updated = settings;
@@ -895,28 +911,32 @@ impl super::LauncherApp {
 
         let mut preferences_changed = false;
         let mut should_close_viewport = false;
-        for action in actions {
-            if matches!(action, ToolbarAction::Ghost | ToolbarAction::Finish)
-                && let Err(error) = self.revalidate_screen_draw_toolbar_for_layer_transition()
-            {
-                self.report_error_message("screen_draw.toolbar", error);
-            }
-            let result = match action {
-                ToolbarAction::Lifecycle(action) => self.apply_screen_draw_lifecycle(action),
-                action => apply_controller_toolbar_action(&mut self.screen_draw_controller, action),
-            };
-            match result {
-                Ok(effect) => {
-                    preferences_changed |= effect.preferences_changed;
-                    should_close_viewport |= effect.close_viewport;
+        if handle_ui_actions {
+            for action in actions {
+                if matches!(action, ToolbarAction::Ghost | ToolbarAction::Finish)
+                    && let Err(error) = self.revalidate_screen_draw_toolbar_for_layer_transition()
+                {
+                    self.report_error_message("screen_draw.toolbar", error);
                 }
-                Err(error) => self.report_error_message("screen_draw.toolbar", error),
+                let result = match action {
+                    ToolbarAction::Lifecycle(action) => self.apply_screen_draw_lifecycle(action),
+                    action => {
+                        apply_controller_toolbar_action(&mut self.screen_draw_controller, action)
+                    }
+                };
+                match result {
+                    Ok(effect) => {
+                        preferences_changed |= effect.preferences_changed;
+                        should_close_viewport |= effect.close_viewport;
+                    }
+                    Err(error) => self.report_error_message("screen_draw.toolbar", error),
+                }
             }
         }
         if preferences_changed {
             self.screen_draw_toolbar.mark_dirty();
         }
-        if acceptance_trace::enabled() {
+        if handle_ui_actions && acceptance_trace::enabled() {
             let bridge = &self.screen_draw_toolbar.native_bridge;
             let visibility = &self.visibility_revision;
             let visible = &self.visible_flag;
@@ -945,7 +965,9 @@ impl super::LauncherApp {
                     },
                 );
         }
-        if should_close_viewport || !self.screen_draw_controller.toolbar_open() {
+        if handle_ui_actions
+            && (should_close_viewport || !self.screen_draw_controller.toolbar_open())
+        {
             // Lifecycle actions perform their launcher work before requesting
             // this viewport-only close.
             self.clear_screen_draw_toolbar_native_bridge();
@@ -953,12 +975,14 @@ impl super::LauncherApp {
             self.screen_draw_toolbar.was_open = false;
         }
 
-        if should_close_viewport && self.screen_draw_toolbar.is_dirty() {
-            self.persist_screen_draw_settings();
-        } else if self.screen_draw_toolbar.persistence_due(Instant::now()) {
-            self.persist_screen_draw_settings();
-        } else if self.screen_draw_toolbar.is_dirty() {
-            ctx.request_repaint_after(PERSIST_DEBOUNCE);
+        if handle_ui_actions {
+            if should_close_viewport && self.screen_draw_toolbar.is_dirty() {
+                self.persist_screen_draw_settings();
+            } else if self.screen_draw_toolbar.persistence_due(Instant::now()) {
+                self.persist_screen_draw_settings();
+            } else if self.screen_draw_toolbar.is_dirty() {
+                ctx.request_repaint_after(PERSIST_DEBOUNCE);
+            }
         }
     }
 

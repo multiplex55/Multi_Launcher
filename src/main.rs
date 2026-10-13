@@ -982,6 +982,7 @@ fn spawn_gui(
         );
         let native_options = eframe::NativeOptions {
             viewport,
+            renderer: eframe::Renderer::Glow,
             event_loop_builder: Some(Box::new(|_builder| {
                 use winit::platform::windows::EventLoopBuilderExtWindows;
                 _builder.with_any_thread(true);
@@ -1035,7 +1036,7 @@ fn spawn_gui(
                 app.actions_persistence_diagnostic = startup_actions_diagnostic;
                 app.set_startup_persistence_context(startup_recovery);
                 launcher_timer.finish("startup.launcher_app");
-                Box::new(app)
+                Ok(Box::new(app))
             }),
         );
         completion.complete();

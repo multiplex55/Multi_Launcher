@@ -698,6 +698,7 @@ pub(crate) struct MacroPromptUi {
     pub pending: Option<crate::mkmacro::PendingPrompt>,
     pub text: String,
     pub first_frame: bool,
+    pub bootstrap_pending: bool,
 }
 
 pub struct LauncherApp {
@@ -724,6 +725,8 @@ pub struct LauncherApp {
     query_history: QueryHistoryNavigator,
     pub results: Vec<Action>,
     root_list_geometry: render::RootListGeometryCache,
+    root_frame_logic: Option<render::RootFrameLogic>,
+    pending_ui_frame_receipt: Option<render::UiFrameReceiptCandidate>,
     indexing: indexing::IndexingOwner,
     pub matcher: SkimMatcherV2,
     pub error: Option<String>,
@@ -868,6 +871,7 @@ pub struct LauncherApp {
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
     pub(crate) macro_prompt: MacroPromptUi,
+    macro_prompt_broker: Arc<crate::mkmacro::PromptBroker>,
     pub(crate) macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi,
     mouse_gestures_dialog: MgGesturesDialog,
     mouse_gesture_settings_dialog: MouseGestureSettingsDialog,
@@ -1200,7 +1204,7 @@ impl LauncherApp {
         }
     }
 
-    fn show_radial_placement_failure(&mut self, ctx: &egui::Context) {
+    fn show_radial_placement_failure(&mut self, ctx: &egui::Context, handle_ui_actions: bool) {
         if !self.radial_placement_viewport.present_requested() {
             return;
         }
@@ -1234,7 +1238,10 @@ impl LauncherApp {
                 }
                 return;
             }
-            if independent_viewport && child.input(|input| input.viewport().close_requested()) {
+            if handle_ui_actions
+                && independent_viewport
+                && child.input(|input| input.viewport().close_requested())
+            {
                 native_close_requested = true;
                 child.send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
@@ -1254,15 +1261,16 @@ impl LauncherApp {
                     "You can edit the menu in Designer or deliberately switch this parent to Cascade.",
                 );
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Open Designer").clicked() {
+                    if ui.button("Open Designer").clicked() && handle_ui_actions {
                         choice = Some(Choice::Designer);
                     }
                     if notice.can_switch_parent_to_cascade()
                         && ui.button("Switch this parent to Cascade").clicked()
+                        && handle_ui_actions
                     {
                         choice = Some(Choice::Cascade);
                     }
-                    if ui.button("Dismiss").clicked() {
+                    if ui.button("Dismiss").clicked() && handle_ui_actions {
                         choice = Some(Choice::Dismiss);
                     }
                 });
@@ -1273,6 +1281,7 @@ impl LauncherApp {
                 child.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
+        self.radial_placement_viewport.mark_viewport_registered();
         if close_because_resolved || native_close_requested {
             self.radial_placement_viewport.mark_viewport_closed();
         }
@@ -2190,6 +2199,8 @@ impl LauncherApp {
             query_history: QueryHistoryNavigator::default(),
             results: (*actions).clone(),
             root_list_geometry: render::RootListGeometryCache::default(),
+            root_frame_logic: None,
+            pending_ui_frame_receipt: None,
             indexing: indexing::IndexingOwner::new(desired_index_config),
             matcher: SkimMatcherV2::default(),
             error: None,
@@ -2338,6 +2349,7 @@ impl LauncherApp {
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
             macro_prompt: MacroPromptUi::default(),
+            macro_prompt_broker: crate::mkmacro::production_prompt_broker(),
             macro_parameter_prompt: mkmacro_dialog::parameter_prompt::ParameterPromptUi::new(ctx),
             mouse_gestures_dialog: MgGesturesDialog::default(),
             mouse_gesture_settings_dialog: MouseGestureSettingsDialog::default(),

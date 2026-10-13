@@ -114,6 +114,7 @@ pub(crate) struct RadialPlacementViewportState {
     notice: Option<RadialPlacementFailureNotice>,
     present_requested: bool,
     focus_requested: bool,
+    bootstrap_pending: bool,
 }
 
 impl RadialPlacementViewportState {
@@ -121,6 +122,7 @@ impl RadialPlacementViewportState {
         self.notice = Some(notice);
         self.present_requested = true;
         self.focus_requested = true;
+        self.bootstrap_pending = true;
     }
 
     pub(crate) fn notice(&self) -> Option<&RadialPlacementFailureNotice> {
@@ -129,6 +131,14 @@ impl RadialPlacementViewportState {
 
     pub(crate) fn present_requested(&self) -> bool {
         self.present_requested
+    }
+
+    pub(crate) fn needs_viewport_bootstrap(&self) -> bool {
+        self.bootstrap_pending
+    }
+
+    pub(crate) fn mark_viewport_registered(&mut self) {
+        self.bootstrap_pending = false;
     }
 
     pub(crate) fn take_focus_request(&mut self) -> bool {
@@ -175,6 +185,7 @@ impl RadialPlacementViewportState {
     pub(crate) fn dismiss_notice(&mut self) {
         self.notice = None;
         self.focus_requested = false;
+        self.bootstrap_pending = false;
     }
 
     /// The native window was closed or the renderer sent its Close command.
@@ -182,6 +193,7 @@ impl RadialPlacementViewportState {
         self.notice = None;
         self.present_requested = false;
         self.focus_requested = false;
+        self.bootstrap_pending = false;
     }
 }
 

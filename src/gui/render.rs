@@ -6,6 +6,59 @@ use crate::radial::acceptance_trace::{
 
 const ROOT_LIST_OVERSCAN_ROWS: usize = 2;
 
+type SourceStateBeforeFrame = (
+    u64,
+    crate::radial::dynamic::MutableResultCatalogVersions,
+    Option<usize>,
+);
+
+#[derive(Clone)]
+pub(super) struct RootFrameLogic {
+    track_c_enabled: bool,
+    query_geometry_cause: super::track_c_query_observer::GeometryCause,
+    source_state_before_frame: Option<SourceStateBeforeFrame>,
+    snippet_prompt_owns_input: bool,
+    just_became_visible: bool,
+    visibility_request: u64,
+    visibility_invocation_id: Option<u64>,
+    should_be_visible: bool,
+    ui_passes: u32,
+    trace_root_hwnd: Option<windows::Win32::Foundation::HWND>,
+}
+
+impl Default for RootFrameLogic {
+    fn default() -> Self {
+        Self {
+            track_c_enabled: false,
+            query_geometry_cause: super::track_c_query_observer::GeometryCause::Other,
+            source_state_before_frame: None,
+            snippet_prompt_owns_input: false,
+            just_became_visible: false,
+            visibility_request: 0,
+            visibility_invocation_id: None,
+            should_be_visible: false,
+            ui_passes: 0,
+            trace_root_hwnd: None,
+        }
+    }
+}
+
+pub(super) struct UiFrameReceiptCandidate {
+    track_c_enabled: bool,
+    visibility_request: u64,
+    visibility_invocation_id: Option<u64>,
+    should_be_visible: bool,
+    painted_root_generation: Option<u64>,
+    frame_eligible: bool,
+    generation_at_paint: u64,
+    query: Option<String>,
+    root_visible_at_paint: bool,
+    query_root_gates_clear: bool,
+    provider_revision_at_paint: u64,
+    catalog_versions_at_paint: crate::radial::dynamic::MutableResultCatalogVersions,
+    completed_at: Option<std::time::Instant>,
+}
+
 #[cfg(test)]
 mod c2e_grid_cell_loop_observer {
     use std::{cell::RefCell, time::Instant};
@@ -1957,8 +2010,16 @@ impl LauncherApp {
         pending.respond(response);
     }
 
-    fn poll_macro_prompt(&mut self, ctx: &egui::Context) {
-        let broker = crate::mkmacro::production_prompt_broker();
+    fn acquire_macro_prompt(&mut self, ctx: &egui::Context) {
+        let broker = Arc::clone(&self.macro_prompt_broker);
+        self.acquire_macro_prompt_from(ctx, broker.as_ref());
+    }
+
+    fn acquire_macro_prompt_from(
+        &mut self,
+        ctx: &egui::Context,
+        broker: &crate::mkmacro::PromptBroker,
+    ) {
         broker.set_repaint(std::sync::Arc::new({
             let ctx = ctx.clone();
             move || ctx.request_repaint()
@@ -1968,8 +2029,12 @@ impl LauncherApp {
         {
             self.macro_prompt.text = pending.request.default_value.clone();
             self.macro_prompt.first_frame = true;
+            self.macro_prompt.bootstrap_pending = true;
             self.macro_prompt.pending = Some(pending);
         }
+    }
+
+    fn show_macro_prompt(&mut self, ctx: &egui::Context, handle_ui_actions: bool) {
         let Some(pending) = self.macro_prompt.pending.as_ref() else {
             return;
         };
@@ -1984,7 +2049,7 @@ impl LauncherApp {
                 .with_always_on_top(),
             |child, _| {
                 egui::CentralPanel::default().show(child, |ui| {
-                    ui.label(prompt);
+                    ui.label(prompt.as_str());
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.macro_prompt.text)
                             .desired_width(f32::INFINITY)
@@ -1994,16 +2059,19 @@ impl LauncherApp {
                         response.request_focus();
                         self.macro_prompt.first_frame = false;
                     }
-                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if handle_ui_actions
+                        && response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                    {
                         answer = Some(crate::mkmacro::PromptResponse::Submitted(
                             self.macro_prompt.text.clone(),
                         ));
                     }
-                    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    if handle_ui_actions && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         answer = Some(crate::mkmacro::PromptResponse::Cancelled);
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
+                        if ui.button("OK").clicked() && handle_ui_actions {
                             answer = Some(crate::mkmacro::PromptResponse::Submitted(
                                 self.macro_prompt.text.clone(),
                             ));
@@ -2012,22 +2080,25 @@ impl LauncherApp {
                             .button("Cancel")
                             .on_hover_text("Cancel stops the running macro")
                             .clicked()
+                            && handle_ui_actions
                         {
                             answer = Some(crate::mkmacro::PromptResponse::Cancelled);
                         }
                     });
                 });
-                if child.input(|i| i.viewport().close_requested()) {
+                if handle_ui_actions && child.input(|i| i.viewport().close_requested()) {
                     answer.get_or_insert(crate::mkmacro::PromptResponse::Cancelled);
                 }
             },
         );
+        self.macro_prompt.bootstrap_pending = false;
         if let Some(answer) = answer {
             if let Some(pending) = self.macro_prompt.pending.take() {
                 pending.respond(answer);
             }
             self.macro_prompt.text.clear();
             self.macro_prompt.first_frame = false;
+            self.macro_prompt.bootstrap_pending = false;
         }
     }
 }
@@ -2082,108 +2153,26 @@ impl LauncherApp {
         self.root_list_geometry.invalidate_geometry();
     }
 
-    pub(super) fn render_root_frame(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
-        use egui::*;
-
-        self.track_c_query_observer.begin_frame();
-        let track_c_enabled = crate::performance::enabled();
-        #[cfg(test)]
-        let track_c_enabled = track_c_enabled || self.track_c_test_force_enabled;
-        let mut painted_root_generation = None;
-        let mut painted_query_results = false;
-        let mut query_geometry_cause = super::track_c_query_observer::GeometryCause::Other;
-        let source_state_before_frame = self.track_c_query_observer.is_enabled().then(|| {
-            (
-                self.plugins.search_generation(),
-                crate::radial::dynamic::MutableResultCatalogVersions::current(),
-                self.selected,
-            )
-        });
-
-        #[cfg(test)]
-        self.test_root_rendered_rows.clear();
-        #[cfg(test)]
-        self.test_root_rendered_row_ids.clear();
-        #[cfg(test)]
-        self.test_root_rendered_row_rects.clear();
-        #[cfg(test)]
-        {
-            self.test_root_scroll_viewport_rect = None;
-            self.test_root_scroll_area_extent = None;
+    fn run_runtime_tick(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+    ) -> super::track_c_query_observer::GeometryCause {
+        let mut geometry_cause = super::track_c_query_observer::GeometryCause::Other;
+        if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
+            self.launcher_hwnd = Some(hwnd.0 as usize);
         }
-
-        self.root_list_geometry
-            .observe_grid_mode(self.resolved_grid_layout);
-        self.root_list_geometry.close_pending_popup();
-
-        if acceptance_trace::enabled()
-            && ctx.input(|input| {
-                input.events.iter().any(|event| {
-                    matches!(
-                        event,
-                        Event::Key {
-                            key: Key::F24,
-                            pressed: true,
-                            ..
-                        }
-                    )
-                })
-            })
-        {
-            acceptance_trace::emit(acceptance_trace::Event::FrontendKey {
-                key: acceptance_trace::AcceptanceKey::F24,
-                focused: ctx.input(|input| input.viewport().focused).unwrap_or(false),
-                foreground_owner: acceptance_trace::foreground_owner(),
-            });
-        }
-
-        if let Some(frame) = frame {
-            self.root_window_bridge.capture_frame(frame);
-        }
-        let trace_root_hwnd = acceptance_trace::enabled()
-            .then(|| frame.and_then(crate::window_manager::get_hwnd))
-            .flatten();
-        if let Some(hwnd) = trace_root_hwnd {
-            crate::window_manager::register_root_hwnd(hwnd);
-        }
-        #[cfg(windows)]
-        if let Some(hwnd) = trace_root_hwnd {
-            trace_root_pointer_moves(ctx, hwnd);
-        }
-        if acceptance_trace::advance_window_sample_frame() {
-            if let Some(hwnd) = trace_root_hwnd {
-                while let Some(correlation) = acceptance_trace::take_window_sample_request() {
-                    crate::window_manager::emit_window_snapshot(hwnd, correlation);
-                }
-            }
-            if acceptance_trace::window_sample_pending() {
-                ctx.request_repaint_of(egui::ViewportId::ROOT);
-            }
-        }
-
-        // Prompt keyboard actions must win before Escape cleanup, action-sheet
-        // routing, or launcher-query handling can observe the same event.
-        let mut snippet_prompt_owns_input =
-            self.snippet_prompt_dialog.is_open() && !self.ocr_surface_visible();
-        if snippet_prompt_owns_input {
-            self.route_snippet_prompt_keyboard(ctx);
-        }
+        self.root_window_bridge.capture_frame(frame);
 
         let plugin_search_generation = self.plugins.search_generation();
         if plugin_search_generation != self.last_plugin_search_generation
             && !self.ocr_defers_launcher_query_refresh()
         {
-            query_geometry_cause = super::track_c_query_observer::GeometryCause::ProviderOrCatalog;
+            geometry_cause = super::track_c_query_observer::GeometryCause::ProviderOrCatalog;
             self.last_plugin_search_generation = plugin_search_generation;
             self.last_results_valid = false;
             self.search();
         }
-
-        crate::performance::record_frame(
-            self.visible_flag.load(Ordering::Relaxed),
-            ctx.input(|input| input.viewport().focused).unwrap_or(true),
-            self.should_show_dashboard(self.query.as_str()),
-        );
 
         if self
             .mkmacro_dialog
@@ -2205,16 +2194,8 @@ impl LauncherApp {
         self.poll_screen_draw_region_picker(ctx);
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
-        self.poll_macro_prompt(ctx);
-        if !snippet_prompt_owns_input {
-            self.macro_parameter_prompt.show(ctx);
-        }
-
-        // tracing::debug!("LauncherApp::update called");
-        if let Some(hwnd) = frame.and_then(crate::window_manager::get_hwnd) {
-            self.launcher_hwnd = Some(hwnd.0 as usize);
-        }
-        self.cancel_screen_draw_startup_on_escape(ctx);
+        self.acquire_macro_prompt(ctx);
+        self.macro_parameter_prompt.acquire_pending();
         self.poll_coordinate_pick(ctx);
         self.poll_color_pick(ctx);
         self.poll_ocr_selection(ctx);
@@ -2222,7 +2203,6 @@ impl LauncherApp {
         if let Some(error) = self.coordinate_tool.poll_error() {
             self.report_error_message("coordinate_tool.runtime", error);
         }
-        self.show_screen_draw_toolbar(ctx);
         self.multi_manager_drain_runtime_events();
         self.poll_clipboard_modify_runtime(ctx);
         let _ = self.multi_manager.start_pending_automatic_reconnect();
@@ -2243,20 +2223,15 @@ impl LauncherApp {
                 options: ToastOptions::default().duration_in_seconds(self.toast_duration as f64),
             });
         }
-        if self.enable_toasts {
-            self.toasts.show(ctx);
-        }
-        let frame_time = Duration::from_secs_f32(ctx.input(|i| i.unstable_dt).max(0.0));
-        self.dashboard.update_frame_timing(frame_time);
         if let Some(pending) = self.pending_query.take() {
             self.track_c_query_observer.begin_pending_query(&pending);
             self.query = pending;
-            query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
+            geometry_cause = super::track_c_query_observer::GeometryCause::Query;
             self.search();
             self.focus_input();
         }
         if !self.ocr_defers_launcher_query_refresh() && self.maybe_run_note_search_debounce() {
-            query_geometry_cause = super::track_c_query_observer::GeometryCause::Query;
+            geometry_cause = super::track_c_query_observer::GeometryCause::Query;
         }
         if let (Some(t), Some(_)) = (self.error_time, self.error.as_ref())
             && t.elapsed().as_secs_f32() >= 3.0
@@ -2304,15 +2279,36 @@ impl LauncherApp {
         for err in crate::plugins::macros::take_error_messages() {
             tracing::debug!("{err}");
         }
+        geometry_cause
+    }
 
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
-        self.handle_dropped_files(dropped);
-        if let Some(rect) = ctx.input(|i| i.viewport().inner_rect) {
-            self.window_size = (rect.width() as i32, rect.height() as i32);
+    fn run_background_after_menu(&mut self) -> super::track_c_query_observer::GeometryCause {
+        let prior_provider_revision = self.plugins.search_generation();
+        self.process_watch_events();
+        self.flush_background_query_refresh();
+        self.start_next_authoring_provider_search();
+        if self.plugins.search_generation() != prior_provider_revision {
+            super::track_c_query_observer::GeometryCause::ProviderOrCatalog
+        } else {
+            super::track_c_query_observer::GeometryCause::Other
         }
-        if let Some(rect) = ctx.input(|i| i.viewport().outer_rect) {
-            self.window_pos = (rect.min.x as i32, rect.min.y as i32);
+    }
+
+    fn refresh_timer_and_network_queries(&mut self) {
+        let trimmed = self.query.trim().to_string();
+        if !self.ocr_defers_launcher_query_refresh() {
+            self.maybe_refresh_timer_list();
+            self.maybe_refresh_stopwatch_list();
+            if trimmed.eq_ignore_ascii_case("net")
+                && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
+            {
+                self.search();
+                self.last_net_update = Instant::now();
+            }
         }
+    }
+
+    fn reconcile_root_visibility(&mut self, ctx: &egui::Context) -> (u64, Option<u64>, bool, bool) {
         let (
             visibility_request,
             (
@@ -2356,7 +2352,6 @@ impl LauncherApp {
         {
             self.help_window.overlay_open = !self.help_window.overlay_open;
         } else {
-            // reset any queued toggle when window not visible
             self.help_flag.store(false, Ordering::SeqCst);
         }
         let mut just_became_visible = false;
@@ -2368,7 +2363,9 @@ impl LauncherApp {
             visibility_request,
             || self.visible_flag.load(Ordering::SeqCst) == should_be_visible,
             || {
-                if color_pick_owns_root || ocr_owns_root { return; }
+                if color_pick_owns_root || ocr_owns_root {
+                    return;
+                }
                 just_became_visible = !self.last_visible && should_be_visible;
                 let visibility_changed = self.last_visible != should_be_visible;
                 if do_restore && should_be_visible {
@@ -2379,17 +2376,20 @@ impl LauncherApp {
                 }
                 #[cfg(windows)]
                 let waiting_for_first_native_identity = should_be_visible
-                    && do_restore && !visibility_changed && !reconcile_native_presentation
+                    && do_restore
+                    && !visibility_changed
+                    && !reconcile_native_presentation
                     && self.root_window_bridge.activation_target().is_none();
                 #[cfg(not(windows))]
                 let waiting_for_first_native_identity = false;
                 if waiting_for_first_native_identity {
-                    // HWND attachment wakes ROOT. Keep this current request
-                    // armed without a periodic repaint or a fabricated target.
                     self.restore_flag.store(true, Ordering::SeqCst);
                     return;
                 }
-                if (do_restore && should_be_visible) || visibility_changed || reconcile_native_presentation {
+                if (do_restore && should_be_visible)
+                    || visibility_changed
+                    || reconcile_native_presentation
+                {
                     let screen_draw_owns_hidden_geometry = reconcile_native_presentation
                         && !should_be_visible
                         && screen_draw_repark_result.as_ref().is_some_and(Result::is_ok);
@@ -2404,13 +2404,20 @@ impl LauncherApp {
                         native_activation_requested = acceptance_trace::with_visibility_trace_link(
                             visibility_request,
                             visibility_invocation_id,
-                            || apply_visibility_with_focus_intent(
-                                should_be_visible, focus_intent, placement_policy, &root_ctx,
-                                self.offscreen_pos, self.follow_mouse, self.static_location_enabled,
-                                self.static_pos.map(|(x, y)| (x as f32, y as f32)),
-                                self.static_size.map(|(w, h)| (w as f32, h as f32)),
-                                (self.window_size.0 as f32, self.window_size.1 as f32),
-                            ),
+                            || {
+                                apply_visibility_with_focus_intent(
+                                    should_be_visible,
+                                    focus_intent,
+                                    placement_policy,
+                                    &root_ctx,
+                                    self.offscreen_pos,
+                                    self.follow_mouse,
+                                    self.static_location_enabled,
+                                    self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                                    self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                                    (self.window_size.0 as f32, self.window_size.1 as f32),
+                                )
+                            },
                         ) == crate::visibility::RootActivationDisposition::OrderedNative;
                     }
                     if reconcile_native_presentation
@@ -2419,14 +2426,22 @@ impl LauncherApp {
                         tracing::warn!(%error, "failed to repark ROOT during stale activation reconciliation; queued ordinary visibility fallback");
                         if !should_be_visible {
                             acceptance_trace::with_visibility_trace_link(
-                                visibility_request, visibility_invocation_id,
-                                || apply_visibility_with_focus_intent(
-                                    false, focus_intent, VisiblePlacementPolicy::PreserveCurrentGeometry,
-                                    &root_ctx, self.offscreen_pos, self.follow_mouse, self.static_location_enabled,
-                                    self.static_pos.map(|(x, y)| (x as f32, y as f32)),
-                                    self.static_size.map(|(w, h)| (w as f32, h as f32)),
-                                    (self.window_size.0 as f32, self.window_size.1 as f32),
-                                ),
+                                visibility_request,
+                                visibility_invocation_id,
+                                || {
+                                    apply_visibility_with_focus_intent(
+                                        false,
+                                        focus_intent,
+                                        VisiblePlacementPolicy::PreserveCurrentGeometry,
+                                        &root_ctx,
+                                        self.offscreen_pos,
+                                        self.follow_mouse,
+                                        self.static_location_enabled,
+                                        self.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                                        self.static_size.map(|(w, h)| (w as f32, h as f32)),
+                                        (self.window_size.0 as f32, self.window_size.1 as f32),
+                                    )
+                                },
                             );
                             if let Some(transaction) = self.screen_draw_launcher_parking.as_mut() {
                                 transaction.retain_restore_point_after_fallback_park();
@@ -2443,32 +2458,265 @@ impl LauncherApp {
                 }
             },
         );
-        // Admission takes the same non-reentrant visibility gate. One current
-        // presentation (even restore+show+reconcile) submits at most one group.
-        if let Some(target) = native_restore_target {
-            if !crate::window_manager::restore_launcher_to_current_desktop_ordered(
+        if let Some(target) = native_restore_target
+            && !crate::window_manager::restore_launcher_to_current_desktop_ordered(
                 target,
                 self.visibility_revision.clone(),
                 visibility_request,
                 self.visible_flag.clone(),
                 self.root_window_bridge.clone(),
-            ) {
-                tracing::warn!(
-                    visibility_request,
-                    "ROOT native activation was rejected or could not be queued"
-                );
-            }
+            )
+        {
+            tracing::warn!(
+                visibility_request,
+                "ROOT native activation was rejected or could not be queued"
+            );
         }
         if reconcile_native_presentation && self.visibility_revision.current() != visibility_request
         {
-            // An exact Screen Draw repark or viewport command may have raced a
-            // newer show. Re-arm reconciliation so the newest frame repairs
-            // native geometry instead of trusting last_visible.
             self.root_window_bridge.request_presentation_reconcile();
         }
+        (
+            visibility_request,
+            visibility_invocation_id,
+            should_be_visible,
+            just_became_visible,
+        )
+    }
 
-        TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-            menu::bar(ui, |ui| {
+    fn begin_root_frame_logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if self.root_frame_logic.is_some() {
+            return;
+        }
+        self.pending_ui_frame_receipt = None;
+        let visible_input_allowed = self.visible_flag.load(Ordering::Relaxed);
+        let track_c_enabled = visible_input_allowed && crate::performance::enabled();
+        #[cfg(test)]
+        let track_c_enabled =
+            track_c_enabled || (visible_input_allowed && self.track_c_test_force_enabled);
+        let source_state_before_frame =
+            (visible_input_allowed && self.track_c_query_observer.is_enabled()).then(|| {
+                (
+                    self.plugins.search_generation(),
+                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                    self.selected,
+                )
+            });
+        if self.track_c_query_observer.is_enabled() && visible_input_allowed {
+            self.track_c_query_observer.begin_frame();
+        }
+
+        // This visible input phase must precede macro/plugin/pending-query work:
+        // an already-open snippet prompt owns its keyboard events first.
+        let snippet_prompt_owns_input = visible_input_allowed
+            && self.snippet_prompt_dialog.is_open()
+            && !self.ocr_surface_visible();
+        if snippet_prompt_owns_input {
+            self.route_snippet_prompt_keyboard(ctx);
+        }
+
+        let query_geometry_cause = self.run_runtime_tick(ctx, frame);
+        let (visibility_request, visibility_invocation_id, should_be_visible, just_became_visible) =
+            self.reconcile_root_visibility(ctx);
+        if !should_be_visible {
+            self.cancel_root_hidden_query_observer();
+        }
+        let trace_root_hwnd = acceptance_trace::enabled()
+            .then(|| crate::window_manager::get_hwnd(frame))
+            .flatten();
+
+        self.root_frame_logic = Some(RootFrameLogic {
+            track_c_enabled,
+            query_geometry_cause,
+            source_state_before_frame,
+            snippet_prompt_owns_input,
+            just_became_visible,
+            visibility_request,
+            visibility_invocation_id,
+            should_be_visible,
+            ui_passes: 0,
+            trace_root_hwnd,
+        });
+    }
+
+    fn run_hidden_logic_tick(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.root_frame_logic = None;
+        self.pending_ui_frame_receipt = None;
+        let bootstrap_before_tick = self.viewport_bootstrap_state();
+        self.run_runtime_tick(ctx, frame);
+        let (_, _, should_be_visible, _) = self.reconcile_root_visibility(ctx);
+        if !should_be_visible {
+            self.cancel_root_hidden_query_observer();
+        }
+        self.run_background_after_menu();
+        self.refresh_timer_and_network_queries();
+        if !should_be_visible {
+            self.cancel_root_hidden_query_observer();
+            self.request_root_repaint_for_new_viewport_bootstrap(ctx, bootstrap_before_tick);
+        }
+    }
+
+    fn viewport_bootstrap_state(&self) -> [bool; 4] {
+        [
+            self.macro_prompt.bootstrap_pending,
+            self.macro_parameter_prompt.needs_viewport_bootstrap(),
+            self.radial_placement_viewport.needs_viewport_bootstrap(),
+            self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
+        ]
+    }
+
+    fn needs_viewport_bootstrap(&self) -> bool {
+        self.viewport_bootstrap_state()
+            .into_iter()
+            .any(|pending| pending)
+    }
+
+    fn request_root_repaint_for_new_viewport_bootstrap(
+        &self,
+        ctx: &egui::Context,
+        previously_pending: [bool; 4],
+    ) {
+        let newly_pending = previously_pending
+            .into_iter()
+            .zip(self.viewport_bootstrap_state())
+            .any(|(was_pending, is_pending)| !was_pending && is_pending);
+        if newly_pending {
+            ctx.request_repaint_of(egui::ViewportId::ROOT);
+        }
+    }
+
+    fn cancel_root_hidden_query_observer(&mut self) {
+        self.track_c_query_observer
+            .cancel(super::track_c_query_observer::Cause::RootHidden);
+    }
+
+    fn render_root_ui(&mut self, ui: &mut egui::Ui) {
+        use egui::*;
+
+        let ctx = ui.ctx().clone();
+        let mut frame_logic = self.root_frame_logic.clone().unwrap_or_default();
+        let first_ui_pass = frame_logic.ui_passes == 0;
+        frame_logic.ui_passes = frame_logic.ui_passes.saturating_add(1);
+        if let Some(logic) = self.root_frame_logic.as_mut() {
+            logic.ui_passes = frame_logic.ui_passes;
+        }
+        if !frame_logic.should_be_visible {
+            let bootstrap_before_background = self.viewport_bootstrap_state();
+            self.show_macro_prompt(&ctx, first_ui_pass);
+            self.macro_parameter_prompt.show(&ctx, first_ui_pass);
+            self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
+            if first_ui_pass {
+                self.run_background_after_menu();
+            }
+            self.show_radial_placement_failure(&ctx, first_ui_pass);
+            if first_ui_pass {
+                self.refresh_timer_and_network_queries();
+                self.cancel_root_hidden_query_observer();
+                self.request_root_repaint_for_new_viewport_bootstrap(
+                    &ctx,
+                    bootstrap_before_background,
+                );
+            }
+            return;
+        }
+
+        let track_c_enabled = frame_logic.track_c_enabled;
+        let mut query_geometry_cause = frame_logic.query_geometry_cause;
+        let source_state_before_frame = frame_logic.source_state_before_frame.clone();
+        let mut snippet_prompt_owns_input = frame_logic.snippet_prompt_owns_input;
+        let just_became_visible = frame_logic.just_became_visible;
+        let visibility_request = frame_logic.visibility_request;
+        let visibility_invocation_id = frame_logic.visibility_invocation_id;
+        let should_be_visible = frame_logic.should_be_visible;
+        let mut painted_root_generation = None;
+        let mut painted_query_results = false;
+
+        #[cfg(test)]
+        self.test_root_rendered_rows.clear();
+        #[cfg(test)]
+        self.test_root_rendered_row_ids.clear();
+        #[cfg(test)]
+        self.test_root_rendered_row_rects.clear();
+        #[cfg(test)]
+        {
+            self.test_root_scroll_viewport_rect = None;
+            self.test_root_scroll_area_extent = None;
+        }
+
+        if first_ui_pass {
+            self.root_list_geometry
+                .observe_grid_mode(self.resolved_grid_layout);
+            self.root_list_geometry.close_pending_popup();
+            if acceptance_trace::enabled()
+                && ctx.input(|input| {
+                    input.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            Event::Key {
+                                key: Key::F24,
+                                pressed: true,
+                                ..
+                            }
+                        )
+                    })
+                })
+            {
+                acceptance_trace::emit(acceptance_trace::Event::FrontendKey {
+                    key: acceptance_trace::AcceptanceKey::F24,
+                    focused: ctx.input(|input| input.viewport().focused).unwrap_or(false),
+                    foreground_owner: acceptance_trace::foreground_owner(),
+                });
+            }
+            let trace_root_hwnd = frame_logic.trace_root_hwnd;
+            if let Some(hwnd) = trace_root_hwnd {
+                crate::window_manager::register_root_hwnd(hwnd);
+            }
+            #[cfg(windows)]
+            if let Some(hwnd) = trace_root_hwnd {
+                trace_root_pointer_moves(&ctx, hwnd);
+            }
+            if acceptance_trace::advance_window_sample_frame() {
+                if let Some(hwnd) = trace_root_hwnd {
+                    while let Some(correlation) = acceptance_trace::take_window_sample_request() {
+                        crate::window_manager::emit_window_snapshot(hwnd, correlation);
+                    }
+                }
+                if acceptance_trace::window_sample_pending() {
+                    ctx.request_repaint_of(egui::ViewportId::ROOT);
+                }
+            }
+        }
+
+        self.show_macro_prompt(&ctx, first_ui_pass);
+        if !snippet_prompt_owns_input {
+            self.macro_parameter_prompt.show(&ctx, first_ui_pass);
+        }
+        self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
+        if self.enable_toasts {
+            self.toasts.show(ui);
+        }
+        if first_ui_pass {
+            self.cancel_screen_draw_startup_on_escape(&ctx);
+            crate::performance::record_frame(
+                self.visible_flag.load(Ordering::Relaxed),
+                ctx.input(|input| input.viewport().focused).unwrap_or(true),
+                self.should_show_dashboard(self.query.as_str()),
+            );
+            self.dashboard.update_frame_timing(Duration::from_secs_f32(
+                ctx.input(|input| input.unstable_dt).max(0.0),
+            ));
+            let dropped = ctx.input(|input| input.raw.dropped_files.clone());
+            self.handle_dropped_files(dropped);
+            if let Some(rect) = ctx.input(|input| input.viewport().inner_rect) {
+                self.window_size = (rect.width() as i32, rect.height() as i32);
+            }
+            if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
+                self.window_pos = (rect.min.x as i32, rect.min.y as i32);
+            }
+        }
+
+        Panel::top("menu_bar").show(ui, |ui| {
+            MenuBar::new().ui(ui, |ui| {
                 let mut apps_menu_state = (false, false, false);
                 let mut file_menu_body_entered = false;
                 let mut apps_menu_body_entered = false;
@@ -2484,13 +2732,13 @@ impl LauncherApp {
                             crate::radial::acceptance_trace::RootMenuControl::Apps,
                             true,
                         );
-                        if ui.button("Edit Apps").clicked() {
+                        if ui.button("Edit Apps").clicked() && first_ui_pass {
                             self.show_editor = !self.show_editor;
                         }
-                        if ui.button("Edit Plugins").clicked() {
+                        if ui.button("Edit Plugins").clicked() && first_ui_pass {
                             self.show_plugins = !self.show_plugins;
                         }
-                        if ui.button("Edit Radial Menus").clicked() {
+                        if ui.button("Edit Radial Menus").clicked() && first_ui_pass {
                             self.focus_panel(crate::gui::Panel::RadialEditor);
                         }
                     });
@@ -2499,7 +2747,7 @@ impl LauncherApp {
                         apps_menu.response.clicked(),
                         apps_menu.inner.is_some(),
                     );
-                    if ui.button("Close Application").clicked() {
+                    if ui.button("Close Application").clicked() && first_ui_pass {
                         // eframe's `on_exit` is the single shutdown boundary. It
                         // tears down Screen Draw before flushing preferences.
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2530,22 +2778,22 @@ impl LauncherApp {
                     file_menu.inner.is_some(),
                 );
                 ui.menu_button("Settings", |ui| {
-                    if ui.button("Edit Settings").clicked() {
+                    if ui.button("Edit Settings").clicked() && first_ui_pass {
                         self.show_settings = !self.show_settings;
                     }
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("Command List").clicked() {
+                    if ui.button("Command List").clicked() && first_ui_pass {
                         self.help_window.open = true;
                     }
-                    if ui.button("Linking Guide (todo/note/cal)").clicked() {
+                    if ui.button("Linking Guide (todo/note/cal)").clicked() && first_ui_pass {
                         self.help_window.open = true;
                         self.help_window.filter = "todo note cal @note: @todo:".into();
                     }
-                    if ui.button("Quick Help Overlay").clicked() {
+                    if ui.button("Quick Help Overlay").clicked() && first_ui_pass {
                         self.help_window.overlay_open = true;
                     }
-                    if ui.button("Open Toast Log").clicked() {
+                    if ui.button("Open Toast Log").clicked() && first_ui_pass {
                         if std::fs::OpenOptions::new()
                             .create(true)
                             .write(true)
@@ -2560,13 +2808,13 @@ impl LauncherApp {
                             );
                         }
                     }
-                    if ui.button("View Toast Log").clicked() {
+                    if ui.button("View Toast Log").clicked() && first_ui_pass {
                         self.toast_log_dialog.open();
                     }
                 });
                 for panel in self.pinned_panels.clone() {
                     let label = format!("{:?}", panel);
-                    if ui.button(label).clicked() {
+                    if ui.button(label).clicked() && first_ui_pass {
                         if self.panel_stack.last() == Some(&panel) {
                             self.toggle_pin(panel);
                         } else {
@@ -2577,23 +2825,22 @@ impl LauncherApp {
             });
         });
 
-        self.process_watch_events();
-        self.flush_background_query_refresh();
-        self.start_next_authoring_provider_search();
-        self.show_radial_placement_failure(ctx);
+        if first_ui_pass {
+            let background_cause = self.run_background_after_menu();
+            if background_cause != super::track_c_query_observer::GeometryCause::Other {
+                query_geometry_cause = background_cause;
+                if let Some(logic) = self.root_frame_logic.as_mut() {
+                    logic.query_geometry_cause = background_cause;
+                }
+            }
+        }
+        self.show_radial_placement_failure(&ctx, first_ui_pass);
+        if first_ui_pass {
+            self.refresh_timer_and_network_queries();
+        }
 
         let trimmed = self.query.trim().to_string();
         let use_dashboard = self.should_show_dashboard(trimmed.as_str());
-        if !self.ocr_defers_launcher_query_refresh() {
-            self.maybe_refresh_timer_list();
-            self.maybe_refresh_stopwatch_list();
-            if trimmed.eq_ignore_ascii_case("net")
-                && self.last_net_update.elapsed().as_secs_f32() >= self.net_refresh
-            {
-                self.search();
-                self.last_net_update = Instant::now();
-            }
-        }
 
         // The Action Sheet owns keyboard input before the launcher query and
         // navigation paths see it. Opening is also resolved before rendering,
@@ -2602,7 +2849,8 @@ impl LauncherApp {
         // Latch ownership for this entire frame, including a dismissal frame,
         // so input cannot fall through to the underlying query after Close.
         let ocr_blocks_launcher_input = self.ocr_surface_visible();
-        if !ocr_blocks_launcher_input
+        if first_ui_pass
+            && !ocr_blocks_launcher_input
             && !snippet_prompt_owns_input
             && self.snippet_prompt_dialog.is_open()
         {
@@ -2610,24 +2858,32 @@ impl LauncherApp {
             // the rest of this frame, but the key that opened it must not also
             // be treated as a submit.
             snippet_prompt_owns_input = true;
-            Self::consume_prompt_opening_frame_keys(ctx);
+            Self::consume_prompt_opening_frame_keys(&ctx);
+            if let Some(logic) = self.root_frame_logic.as_mut() {
+                logic.snippet_prompt_owns_input = true;
+            }
         }
-        self.route_ocr_surface_dismissal(ctx);
+        if first_ui_pass {
+            self.route_ocr_surface_dismissal(&ctx);
+        }
         let mut selected_sheet_action = if ocr_blocks_launcher_input || snippet_prompt_owns_input {
             None
+        } else if first_ui_pass {
+            self.route_action_sheet_keyboard(&ctx, query_input_id)
         } else {
-            self.route_action_sheet_keyboard(ctx, query_input_id)
+            None
         };
 
         if self.action_sheet.is_open() && !ocr_blocks_launcher_input && !snippet_prompt_owns_input {
-            if let Some(action) = action_sheet::render(ctx, &mut self.action_sheet, &self.matcher) {
+            if let Some(action) = action_sheet::render(&ctx, &mut self.action_sheet, &self.matcher)
+            {
                 self.close_action_sheet();
                 selected_sheet_action = Some(action);
-            } else if !self.action_sheet.is_open() {
+            } else if first_ui_pass && !self.action_sheet.is_open() {
                 self.focus_input();
             }
         }
-        if let Some((action, source)) = selected_sheet_action {
+        if first_ui_pass && let Some((action, source)) = selected_sheet_action {
             // Closing first prevents primary and UI-intent execution from
             // competing with the sheet's focus or modal state.
             self.execute_universal_action(
@@ -2636,19 +2892,23 @@ impl LauncherApp {
                 source,
             );
         }
-        if !ocr_blocks_launcher_input
+        if first_ui_pass
+            && !ocr_blocks_launcher_input
             && !snippet_prompt_owns_input
             && self.snippet_prompt_dialog.is_open()
         {
             snippet_prompt_owns_input = true;
-            Self::consume_prompt_opening_frame_keys(ctx);
+            Self::consume_prompt_opening_frame_keys(&ctx);
+            if let Some(logic) = self.root_frame_logic.as_mut() {
+                logic.snippet_prompt_owns_input = true;
+            }
         }
         let action_sheet_blocks_launcher_input =
             self.action_sheet.is_open() || snippet_prompt_owns_input;
 
         let mut deferred_universal_action = None;
         let mut deferred_radial_authoring_add = None;
-        CentralPanel::default().show(ctx, |ui| {
+        CentralPanel::default().show(ui, |ui| {
             if ocr_blocks_launcher_input {
                 ui.heading("Screen Region OCR");
                 return;
@@ -2665,13 +2925,17 @@ impl LauncherApp {
                 let input_id = query_input_id;
 
                 let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
-                let numpad_navigation = ui.ctx().input_mut(|input| {
-                    consume_physical_numpad_navigation(
-                        query_owned_focus,
-                        input,
-                        &NativeNumpadKeyStateProbe,
-                    )
-                });
+                let numpad_navigation = if first_ui_pass {
+                    ui.ctx().input_mut(|input| {
+                        consume_physical_numpad_navigation(
+                            query_owned_focus,
+                            input,
+                            &NativeNumpadKeyStateProbe,
+                        )
+                    })
+                } else {
+                    Vec::new()
+                };
 
                 let text_edit_started = self.track_c_query_observer.tentative_start();
                 let mut query_output = egui::TextEdit::singleline(&mut self.query)
@@ -2694,7 +2958,8 @@ impl LauncherApp {
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
-                if Self::launcher_query_focus_should_be_requested(
+                if first_ui_pass
+                    && Self::launcher_query_focus_should_be_requested(
                     just_became_visible,
                     self.focus_query,
                     self.file_search_dialog.open,
@@ -2706,7 +2971,7 @@ impl LauncherApp {
                 let query_has_focus = query_response.has_focus();
 
                 self.query_history.synchronize(&self.query);
-                if query_response.changed() {
+                if first_ui_pass && query_response.changed() {
                     self.begin_track_c_query_intent(
                         text_edit_started,
                         super::track_c_query_observer::Origin::TextEdit,
@@ -2715,18 +2980,20 @@ impl LauncherApp {
                     self.handle_query_text_changed_after_intent();
                 }
 
-                let history_direction = if action_sheet_blocks_launcher_input {
+                let history_direction = if !first_ui_pass || action_sheet_blocks_launcher_input {
                     None
                 } else {
                     ctx.input_mut(|input| {
                         Self::consume_query_history_shortcut(query_has_focus, input)
                     })
                 };
-                if let Some(direction) = history_direction {
+                if first_ui_pass
+                    && let Some(direction) = history_direction
+                {
                     self.navigate_query_history(direction);
                 }
 
-                if !action_sheet_blocks_launcher_input {
+                if first_ui_pass && !action_sheet_blocks_launcher_input {
                     for direction in numpad_navigation {
                         self.handle_key(direction.navigation_key());
                     }
@@ -2740,7 +3007,8 @@ impl LauncherApp {
                     });
                 }
 
-                if !action_sheet_blocks_launcher_input
+                if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
                     && Self::launcher_escape_handling_enabled(self.file_search_dialog.open)
                     && ctx.input(|i| i.key_pressed(egui::Key::Escape))
                 {
@@ -2755,14 +3023,16 @@ impl LauncherApp {
                     }
                 }
 
-                if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W))
+                if first_ui_pass
+                    && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::W))
                     && self.any_panel_open()
                     && self.close_front_dialog()
                 {
                     ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::W));
                 }
 
-                if !action_sheet_blocks_launcher_input
+                if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
                     && history_direction.is_none()
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                 {
@@ -2783,13 +3053,14 @@ impl LauncherApp {
                 let tab = ctx.input(|i| i.key_pressed(egui::Key::Tab));
                 let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 let mut accepted_suggestion = false;
-                if !action_sheet_blocks_launcher_input
+                if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
                     && Self::launcher_query_keyboard_enabled(query_has_focus)
                     && (tab || (enter && self.selected.is_none()))
                 {
                     accepted_suggestion = self.accept_suggestion(tab);
                 }
-                if accepted_suggestion {
+                if first_ui_pass && accepted_suggestion {
                     ctx.input_mut(|i| {
                         if tab {
                             i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
@@ -2801,7 +3072,8 @@ impl LauncherApp {
                 }
 
                 let mut launch_idx: Option<usize> = None;
-                if !action_sheet_blocks_launcher_input
+                if first_ui_pass
+                    && !action_sheet_blocks_launcher_input
                     && !accepted_suggestion
                     && enter
                     && Self::launcher_enter_activation_enabled(
@@ -2821,14 +3093,16 @@ impl LauncherApp {
                     launch_idx = self.handle_key(egui::Key::Enter);
                 }
 
-                if let Some(i) = launch_idx {
+                if first_ui_pass
+                    && let Some(i) = launch_idx
+                {
                     deferred_activation =
                         deferred_activation_from_results(&self.results, i, ActivationSource::Enter);
                 }
             });
 
             if use_dashboard {
-                if !self.suggestions.is_empty() {
+                if first_ui_pass && !self.suggestions.is_empty() {
                     self.autocomplete_index = 0;
                     self.suggestions.clear();
                 }
@@ -2886,6 +3160,7 @@ impl LauncherApp {
                         painted_root_generation = Some(self.root_list_geometry.result_generation);
                     }
                     if let Some(action) = self.dashboard.ui(ui, &dash_ctx, WidgetActivation::Click)
+                        && first_ui_pass
                     {
                         self.activate_action(
                             action.action,
@@ -3245,13 +3520,14 @@ impl LauncherApp {
                             }
                             rows_timer.set_work_units(rows_built);
                             drop(rows_timer);
-                            if refresh {
+                            if first_ui_pass && refresh {
                                 self.last_results_valid = false;
                                 self.search();
                             }
-                            if set_focus {
+                            if first_ui_pass && set_focus {
                                 self.focus_input();
-                            } else if self.visible_flag.load(Ordering::SeqCst)
+                            } else if first_ui_pass
+                                && self.visible_flag.load(Ordering::SeqCst)
                                 && !self.any_panel_open()
                             {
                                 self.focus_input();
@@ -3271,21 +3547,29 @@ impl LauncherApp {
                     self.test_root_scroll_area_id = Some(_root_scroll_output.id);
                 }
             }
-            if let Some(deferred) = deferred_activation_unless_radial_add(
+            if first_ui_pass
+                && let Some(deferred) = deferred_activation_unless_radial_add(
                 deferred_activation.take(),
                 deferred_radial_authoring_add.is_some(),
-            ) {
+            )
+            {
                 self.activate_action(deferred.action, deferred.query_override, deferred.source);
             }
         });
-        self.execute_deferred_result_action(deferred_universal_action);
-        if !ocr_blocks_launcher_input
+        if first_ui_pass {
+            self.execute_deferred_result_action(deferred_universal_action);
+        }
+        if first_ui_pass
+            && !ocr_blocks_launcher_input
             && !snippet_prompt_owns_input
             && self.snippet_prompt_dialog.is_open()
         {
-            Self::consume_prompt_opening_frame_keys(ctx);
+            Self::consume_prompt_opening_frame_keys(&ctx);
+            if let Some(logic) = self.root_frame_logic.as_mut() {
+                logic.snippet_prompt_owns_input = true;
+            }
         }
-        if let Some(add) = deferred_radial_authoring_add {
+        if first_ui_pass && let Some(add) = deferred_radial_authoring_add {
             if let Ok(mut editor) = self.radial_editor.lock() {
                 editor.add_action_to_radial(
                     add.binding,
@@ -3302,56 +3586,59 @@ impl LauncherApp {
         if ocr_blocks_launcher_input {
             self.enforce_pinned();
             self.update_panel_stack();
-            self.show_ocr_surface(ctx);
-            if self.track_c_query_observer.is_enabled() {
-                self.track_c_query_observer.finish_frame(
-                    &self.query,
-                    self.visible_flag.load(Ordering::Relaxed),
-                    should_be_visible,
-                    false,
-                    self.plugins.search_generation(),
-                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
-                    painted_root_generation,
-                );
-            }
-            self.track_c_query_observer.end_frame_boundary();
+            self.show_ocr_surface(&ctx);
+            self.stage_ui_frame_receipt(
+                &frame_logic,
+                painted_root_generation,
+                painted_query_results,
+                false,
+            );
             return;
         }
         let show_editor = self.show_editor;
         if show_editor {
             let mut editor = std::mem::take(&mut self.editor);
-            editor.ui(ctx, self);
+            editor.ui(&ctx, self);
             self.editor = editor;
         }
         let show_settings = self.show_settings;
         if show_settings {
             let mut ed = std::mem::take(&mut self.settings_editor);
-            ed.ui(ctx, self);
+            ed.ui(&ctx, self);
             self.settings_editor = ed;
         }
         let show_plugin = self.show_plugins;
         if show_plugin {
             let mut ed = std::mem::take(&mut self.plugin_editor);
-            ed.ui(ctx, self);
+            ed.ui(&ctx, self);
             self.plugin_editor = ed;
         }
-        crate::gui::radial_editor::RadialEditorState::show_deferred(&self.radial_editor, ctx, self);
+        crate::gui::radial_editor::RadialEditorState::show_deferred(
+            &self.radial_editor,
+            &ctx,
+            self,
+        );
         let file_dialog_pending = self
             .radial_editor
             .lock()
             .map(|editor| editor.intent_bridge().has_pending_file_dialog())
             .unwrap_or(false);
-        if file_dialog_pending {
+        if first_ui_pass && file_dialog_pending {
             crate::gui::radial_editor::RadialEditorState::process_pending_file_dialog(
                 &self.radial_editor,
             );
         }
-        self.process_radial_designer_intents();
-        let designer_preferences = self
-            .radial_editor
-            .lock()
-            .ok()
-            .and_then(|mut editor| editor.take_preferences_for_persist());
+        if first_ui_pass {
+            self.process_radial_designer_intents();
+        }
+        let designer_preferences = first_ui_pass
+            .then(|| {
+                self.radial_editor
+                    .lock()
+                    .ok()
+                    .and_then(|mut editor| editor.take_preferences_for_persist())
+            })
+            .flatten();
         if let Some(preferences) = designer_preferences {
             let settings_path = self.settings_path.clone();
             if let Err(error) = crate::settings::Settings::update(&settings_path, |settings| {
@@ -3382,63 +3669,66 @@ impl LauncherApp {
                 enabled_plugins: self.enabled_plugins.as_ref(),
             };
             let reload = dlg.ui(
-                ctx,
+                &ctx,
                 &registry,
                 settings_ctx,
                 self.require_confirm_destructive,
             );
             self.show_dashboard_editor = dlg.open;
             self.dashboard_editor = dlg;
-            if reload {
+            if first_ui_pass && reload {
                 self.dashboard.reload();
             }
         }
 
         let mut mm_dlg = std::mem::take(&mut self.multi_manager_dialog);
-        mm_dlg.ui(ctx, self);
+        mm_dlg.ui(&ctx, self);
         self.multi_manager_dialog = mm_dlg;
         let mut mm_settings_dlg = std::mem::take(&mut self.multi_manager_settings_dialog);
-        mm_settings_dlg.ui(ctx, self);
+        mm_settings_dlg.ui(&ctx, self);
         self.multi_manager_settings_dialog = mm_settings_dlg;
         let mut dlg = std::mem::take(&mut self.alias_dialog);
-        dlg.ui(ctx, self);
+        dlg.ui(&ctx, self);
         self.alias_dialog = dlg;
         let mut bm_dlg = std::mem::take(&mut self.bookmark_alias_dialog);
-        bm_dlg.ui(ctx, self);
+        bm_dlg.ui(&ctx, self);
         self.bookmark_alias_dialog = bm_dlg;
         let mut tf_dlg = std::mem::take(&mut self.tempfile_alias_dialog);
-        tf_dlg.ui(ctx, self);
+        tf_dlg.ui(&ctx, self);
         self.tempfile_alias_dialog = tf_dlg;
         let mut create_tf = std::mem::take(&mut self.tempfile_dialog);
-        create_tf.ui(ctx, self);
+        create_tf.ui(&ctx, self);
         self.tempfile_dialog = create_tf;
         let mut add_bm_dlg = std::mem::take(&mut self.add_bookmark_dialog);
-        add_bm_dlg.ui(ctx, self);
+        add_bm_dlg.ui(&ctx, self);
         self.add_bookmark_dialog = add_bm_dlg;
         let mut help = std::mem::take(&mut self.help_window);
-        help.ui(ctx, self);
+        help.ui(&ctx, self);
         self.help_window = help;
         let mut timer_dlg = std::mem::take(&mut self.timer_dialog);
-        timer_dlg.ui(ctx, self);
+        timer_dlg.ui(&ctx, self);
         self.timer_dialog = timer_dlg;
         let mut comp = std::mem::take(&mut self.completion_dialog);
-        comp.ui(ctx);
+        comp.ui(&ctx);
         self.completion_dialog = comp;
         let mut shell_dlg = std::mem::take(&mut self.shell_cmd_dialog);
-        shell_dlg.ui(ctx, self);
+        shell_dlg.ui(&ctx, self);
         self.shell_cmd_dialog = shell_dlg;
         let preview_active =
             self.snippet_prompt_dialog.is_open() && self.snippet_prompt_dialog.is_preview_only();
         if !preview_active {
             let mut snip_dlg = std::mem::take(&mut self.snippet_dialog);
-            let preview_draft = snip_dlg.ui(ctx, self);
+            let preview_draft = snip_dlg.ui(&ctx, self);
             self.snippet_dialog = snip_dlg;
-            if let Some(draft) = preview_draft {
+            if first_ui_pass && let Some(draft) = preview_draft {
                 match self.begin_snippet_preview(draft) {
                     Ok(()) => {
                         snippet_prompt_owns_input |= self.snippet_prompt_dialog.is_open();
                         if snippet_prompt_owns_input {
-                            Self::consume_prompt_opening_frame_keys(ctx);
+                            Self::consume_prompt_opening_frame_keys(&ctx);
+                            if let Some(logic) = self.root_frame_logic.as_mut() {
+                                logic.snippet_prompt_owns_input = true;
+                            }
                         }
                     }
                     Err(error) => self.snippet_dialog.report_preview_start_failure(error),
@@ -3446,12 +3736,12 @@ impl LauncherApp {
             }
         }
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
-        macro_dlg.ui(ctx, self);
+        macro_dlg.ui(&ctx, self);
         self.macro_dialog = macro_dlg;
         self.mkmacro_dialog
             .set_coordinate_capture_active(self.coordinate_pick_blocks_other_screen_actions());
-        self.mkmacro_dialog.ui(ctx);
-        while let Some(notice) = self.mkmacro_dialog.take_ui_notice() {
+        self.mkmacro_dialog.ui(&ctx);
+        while first_ui_pass && let Some(notice) = self.mkmacro_dialog.take_ui_notice() {
             if self.enable_toasts {
                 push_toast(
                     &mut self.toasts,
@@ -3464,63 +3754,65 @@ impl LauncherApp {
                 );
             }
         }
-        self.crop_dialog.show(ctx);
+        self.crop_dialog.show(&ctx);
         let mut mg_dlg = std::mem::take(&mut self.mouse_gestures_dialog);
-        mg_dlg.ui(ctx, self);
+        mg_dlg.ui(&ctx, self);
         self.mouse_gestures_dialog = mg_dlg;
         let mut mg_settings_dlg = std::mem::take(&mut self.mouse_gesture_settings_dialog);
-        mg_settings_dlg.ui(ctx, self);
+        mg_settings_dlg.ui(&ctx, self);
         self.mouse_gesture_settings_dialog = mg_settings_dlg;
         let mut mouse_settings_dlg = std::mem::take(&mut self.mouse_settings_dialog);
-        mouse_settings_dlg.ui(ctx, &mut self.coordinate_tool);
+        mouse_settings_dlg.ui(&ctx, &mut self.coordinate_tool);
         self.mouse_settings_dialog = mouse_settings_dlg;
         let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
         let mut theme_open = self.theme_settings_dialog_open;
-        crate::gui::theme_settings_dialog::ui(ctx, self, &mut theme_open, &mut theme_state);
+        crate::gui::theme_settings_dialog::ui(&ctx, self, &mut theme_open, &mut theme_state);
         self.theme_settings_dialog_open = theme_open;
         self.theme_settings_dialog = theme_state;
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
-        fav_dlg.ui(ctx, self);
+        fav_dlg.ui(&ctx, self);
         self.fav_dialog = fav_dlg;
         let file_search_was_open = self.file_search_dialog.open;
         let file_search_commands = self
             .file_search_dialog
-            .ui(ctx, &mut self.file_search_coordinator);
-        for command in file_search_commands {
-            self.handle_file_search_ui_command(command);
+            .ui(&ctx, &mut self.file_search_coordinator);
+        if first_ui_pass {
+            for command in file_search_commands {
+                self.handle_file_search_ui_command(command);
+            }
         }
-        if file_search_was_open && !self.file_search_dialog.open {
+        if first_ui_pass && file_search_was_open && !self.file_search_dialog.open {
             self.save_file_search_ui_preferences_if_dirty();
         }
         self.file_search_dialog
             .preview_dialog
-            .ui(ctx, &self.file_search_dialog.settings);
-        self.diff_dialog.ui(ctx);
+            .ui(&ctx, &self.file_search_dialog.settings);
+        self.diff_dialog.ui(&ctx);
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
-        notes_dlg.ui(ctx, self);
+        notes_dlg.ui(&ctx, self);
         self.notes_dialog = notes_dlg;
         let mut graph_dlg = std::mem::take(&mut self.note_graph_dialog);
         let dashboard_snapshot = self.dashboard_data_cache.snapshot();
         graph_dlg.ui(
-            ctx,
+            &ctx,
             self,
             dashboard_snapshot,
             crate::plugins::note::note_version(),
         );
         self.note_graph_dialog = graph_dlg;
         let mut assets_dlg = std::mem::take(&mut self.unused_assets_dialog);
-        assets_dlg.ui(ctx, self);
+        assets_dlg.ui(&ctx, self);
         self.unused_assets_dialog = assets_dlg;
         let mut note_close_frame = self
             .radial_query_observation
             .has_note_close_request()
-            .then(|| super::query_observation::NoteCloseRenderFrame::new(ctx));
+            .then(|| super::query_observation::NoteCloseRenderFrame::new(&ctx));
         let mut i = 0;
         while i < self.note_panels.len() {
             let mut panel = self.note_panels.remove(i);
             let mut discard = None;
             panel.ui_with_note_close_observation(
-                ctx,
+                &ctx,
                 self,
                 note_close_frame.as_ref().map(|_| &mut discard),
             );
@@ -3535,7 +3827,7 @@ impl LauncherApp {
         let mut i = 0;
         while i < self.image_panels.len() {
             let mut panel = self.image_panels.remove(i);
-            panel.ui(ctx);
+            panel.ui(&ctx);
             if panel.open {
                 self.image_panels.insert(i, panel);
                 i += 1;
@@ -3544,120 +3836,139 @@ impl LauncherApp {
         let mut i = 0;
         while i < self.screenshot_editors.len() {
             let mut editor = self.screenshot_editors.remove(i);
-            editor.ui(ctx, self);
+            editor.ui(&ctx, self);
             if editor.open {
                 self.screenshot_editors.insert(i, editor);
                 i += 1;
             }
         }
         let mut todo_dlg = std::mem::take(&mut self.todo_dialog);
-        todo_dlg.ui(ctx, self);
+        todo_dlg.ui(&ctx, self);
         self.todo_dialog = todo_dlg;
         let mut todo_view = std::mem::take(&mut self.todo_view_dialog);
-        todo_view.ui(ctx, self);
+        todo_view.ui(&ctx, self);
         self.todo_view_dialog = todo_view;
         let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
-        cb_dlg.ui(ctx, self);
+        cb_dlg.ui(&ctx, self);
         self.clipboard_dialog = cb_dlg;
         let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
         cm_dlg.ui(
-            ctx,
+            &ctx,
             &crate::clipboard_modify::runtime::clipboard_service(),
             self.clipboard_modify_runtime.catalog_snapshot(),
             Some(&self.clipboard_modify_runtime.store),
         );
         self.clipboard_modify_dialog = cm_dlg;
-        self.json_utility_dialog.show(ctx);
-        self.regex_tester_dialog.show(ctx);
-        self.qr_dialog.show(ctx);
+        self.json_utility_dialog.show(&ctx);
+        self.regex_tester_dialog.show(&ctx);
+        self.qr_dialog.show(&ctx);
         let mut conv_panel = std::mem::take(&mut self.convert_panel);
-        conv_panel.ui(ctx, self);
+        conv_panel.ui(&ctx, self);
         self.convert_panel = conv_panel;
         let mut vol_dlg = std::mem::take(&mut self.volume_dialog);
-        vol_dlg.ui(ctx, self);
+        vol_dlg.ui(&ctx, self);
         self.volume_dialog = vol_dlg;
         let mut bright_dlg = std::mem::take(&mut self.brightness_dialog);
-        bright_dlg.ui(ctx, self);
+        bright_dlg.ui(&ctx, self);
         self.brightness_dialog = bright_dlg;
         let mut cpu_dlg = std::mem::take(&mut self.cpu_list_dialog);
-        cpu_dlg.ui(ctx, self);
+        cpu_dlg.ui(&ctx, self);
         self.cpu_list_dialog = cpu_dlg;
-        let (data_actions, data_notices) = self.data_recovery_dialog.ui(ctx);
-        for notice in data_notices {
-            if notice.error {
-                self.report_error_message("data", notice.message);
-            } else if self.enable_toasts {
-                self.add_toast(Toast {
-                    text: notice.message.into(),
-                    kind: ToastKind::Success,
-                    options: ToastOptions::default()
-                        .duration_in_seconds(self.toast_duration as f64),
-                });
-            }
-        }
-        for action in data_actions {
-            match action {
-                DataRecoveryUiAction::OpenPath(path) => {
-                    if let Err(error) = open::that(&path) {
-                        self.report_error_message(
-                            "data",
-                            format!("Failed to open {}: {error}", path.display()),
-                        );
-                    }
+        let (data_actions, data_notices) = self.data_recovery_dialog.ui(&ctx);
+        if first_ui_pass {
+            for notice in data_notices {
+                if notice.error {
+                    self.report_error_message("data", notice.message);
+                } else if self.enable_toasts {
+                    self.add_toast(Toast {
+                        text: notice.message.into(),
+                        kind: ToastKind::Success,
+                        options: ToastOptions::default()
+                            .duration_in_seconds(self.toast_duration as f64),
+                    });
                 }
-                DataRecoveryUiAction::Confirm(intent) => {
-                    self.queue_data_recovery_confirmation(intent);
+            }
+            for action in data_actions {
+                match action {
+                    DataRecoveryUiAction::OpenPath(path) => {
+                        if let Err(error) = open::that(&path) {
+                            self.report_error_message(
+                                "data",
+                                format!("Failed to open {}: {error}", path.display()),
+                            );
+                        }
+                    }
+                    DataRecoveryUiAction::Confirm(intent) => {
+                        self.queue_data_recovery_confirmation(intent);
+                    }
                 }
             }
         }
         let mut toast_dlg = std::mem::take(&mut self.toast_log_dialog);
-        toast_dlg.ui(ctx, self);
+        toast_dlg.ui(&ctx, self);
         self.toast_log_dialog = toast_dlg;
         let mut calendar_popover = std::mem::take(&mut self.calendar_popover);
-        calendar_popover.ui(ctx, self);
+        calendar_popover.ui(&ctx, self);
         self.calendar_popover = calendar_popover;
         let mut calendar_editor = std::mem::take(&mut self.calendar_event_editor);
-        calendar_editor.ui(ctx, self);
+        calendar_editor.ui(&ctx, self);
         self.calendar_event_editor = calendar_editor;
         let mut calendar_details = std::mem::take(&mut self.calendar_event_details);
-        calendar_details.ui(ctx, self);
+        calendar_details.ui(&ctx, self);
         self.calendar_event_details = calendar_details;
-        match self.confirm_modal.ui(ctx) {
-            ConfirmationResult::Confirmed => {
-                if self.pending_data_recovery.is_some() {
-                    self.resolve_data_recovery_confirmation(true);
-                } else {
-                    self.resolve_pending_confirmation(true);
+        let confirmation_result = self.confirm_modal.ui(&ctx);
+        if first_ui_pass {
+            match confirmation_result {
+                ConfirmationResult::Confirmed => {
+                    if self.pending_data_recovery.is_some() {
+                        self.resolve_data_recovery_confirmation(true);
+                    } else {
+                        self.resolve_pending_confirmation(true);
+                    }
                 }
-            }
-            ConfirmationResult::Cancelled => {
-                if self.pending_data_recovery.is_some() {
-                    self.resolve_data_recovery_confirmation(false);
-                } else {
-                    self.resolve_pending_confirmation(false);
+                ConfirmationResult::Cancelled => {
+                    if self.pending_data_recovery.is_some() {
+                        self.resolve_data_recovery_confirmation(false);
+                    } else {
+                        self.resolve_pending_confirmation(false);
+                    }
                 }
+                ConfirmationResult::None => {}
             }
-            ConfirmationResult::None => {}
         }
-        match self.snippet_prompt_dialog.show(ctx) {
-            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
-                let _ = self.submit_snippet_prompt();
+        let snippet_prompt_action = self.snippet_prompt_dialog.show(&ctx);
+        if first_ui_pass {
+            match snippet_prompt_action {
+                Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Submit) => {
+                    let _ = self.submit_snippet_prompt();
+                }
+                Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Cancel) => {
+                    let _ = self.cancel_snippet_prompt();
+                }
+                None => {}
             }
-            Some(super::snippet_prompt_dialog::SnippetPromptUiAction::Cancel) => {
-                let _ = self.cancel_snippet_prompt();
-            }
-            None => {}
         }
-        self.enforce_pinned();
-        self.update_panel_stack();
-        if !self.dashboard_initial_refresh_queued {
+        if first_ui_pass {
+            self.enforce_pinned();
+            self.update_panel_stack();
+        }
+        if first_ui_pass && !self.dashboard_initial_refresh_queued {
             self.dashboard_initial_refresh_queued = true;
             self.dashboard_data_cache
                 .request_refresh(DashboardRefreshRequest::All);
         }
         let note_close_snapshot = note_close_frame.map(|frame| frame.snapshot(&self.note_panels));
-        self.poll_radial_query_observation(ctx, note_close_snapshot);
-        self.show_ocr_surface(ctx);
+        if first_ui_pass {
+            self.poll_radial_query_observation(&ctx, note_close_snapshot);
+        }
+        self.show_ocr_surface(&ctx);
+
+        self.stage_ui_frame_receipt(
+            &frame_logic,
+            painted_root_generation,
+            painted_query_results,
+            true,
+        );
 
         #[cfg(test)]
         if std::mem::take(&mut self.track_c_test_provider_change_at_frame_end) {
@@ -3682,42 +3993,142 @@ impl LauncherApp {
                 },
             ]);
         }
+    }
 
-        if track_c_enabled {
-            let frame_eligible = painted_root_generation.is_some()
-                && self.pending_query.is_none()
-                && !self.background_query_refresh_pending
-                && !self.last_search_pending
-                && self.last_search_provider_revision == self.plugins.search_generation()
-                && self.last_search_result_catalog_versions_stable
-                && self.last_search_result_catalog_versions
-                    == Some(crate::radial::dynamic::MutableResultCatalogVersions::current())
-                && self.last_search_provider_deferral == search::ProviderSearchDeferral::None
-                && !self.radial_provider_search_capacity.is_occupied()
-                && self.coordinate_capture_parking.is_none()
-                && self.screen_draw_launcher_parking.is_none()
-                && !self.color_pick_owns_root()
-                && !self.ocr_owns_root()
-                && !self.ocr_surface_visible()
-                && !self.ocr_defers_launcher_query_refresh();
-            let current_generation = self.root_list_geometry.result_generation;
-            self.visibility_revision.complete_first_usable_frame(
-                visibility_request,
-                visibility_invocation_id,
+    fn stage_ui_frame_receipt(
+        &mut self,
+        frame_logic: &RootFrameLogic,
+        painted_root_generation: Option<u64>,
+        painted_query_results: bool,
+        painted_root_surface: bool,
+    ) {
+        let observer_enabled = self.track_c_query_observer.is_enabled()
+            && frame_logic.source_state_before_frame.is_some();
+        if !frame_logic.track_c_enabled && !observer_enabled {
+            self.pending_ui_frame_receipt = None;
+            return;
+        }
+
+        let provider_revision_at_paint = self.plugins.search_generation();
+        let catalog_versions_at_paint =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let query_root_gates_clear = painted_root_surface
+            && painted_query_results
+            && self.pending_query.is_none()
+            && !self.background_query_refresh_pending
+            && self.last_note_search_change.is_none()
+            && !self.radial_provider_search_capacity.is_occupied()
+            && !self.ocr_defers_launcher_query_refresh()
+            && !self.ocr_owns_root()
+            && !self.ocr_surface_visible()
+            && !self.color_pick_owns_root()
+            && self.coordinate_capture_parking.is_none()
+            && self.screen_draw_launcher_parking.is_none()
+            && !self.action_sheet.is_open()
+            && !self.snippet_prompt_dialog.is_open()
+            && !self.confirm_modal.is_open()
+            && !self.file_search_dialog.open
+            && !self.any_panel_open()
+            && !self.should_show_dashboard(self.query.as_str());
+        let frame_eligible = painted_root_surface
+            && painted_root_generation.is_some()
+            && self.pending_query.is_none()
+            && !self.background_query_refresh_pending
+            && !self.last_search_pending
+            && self.last_search_provider_revision == provider_revision_at_paint
+            && self.last_search_result_catalog_versions_stable
+            && self.last_search_result_catalog_versions == Some(catalog_versions_at_paint)
+            && self.last_search_provider_deferral == search::ProviderSearchDeferral::None
+            && !self.radial_provider_search_capacity.is_occupied()
+            && self.coordinate_capture_parking.is_none()
+            && self.screen_draw_launcher_parking.is_none()
+            && !self.color_pick_owns_root()
+            && !self.ocr_owns_root()
+            && !self.ocr_surface_visible()
+            && !self.ocr_defers_launcher_query_refresh();
+
+        self.pending_ui_frame_receipt = Some(UiFrameReceiptCandidate {
+            track_c_enabled: frame_logic.track_c_enabled,
+            visibility_request: frame_logic.visibility_request,
+            visibility_invocation_id: frame_logic.visibility_invocation_id,
+            should_be_visible: frame_logic.should_be_visible,
+            painted_root_generation,
+            frame_eligible,
+            generation_at_paint: self.root_list_geometry.result_generation,
+            query: observer_enabled.then(|| self.query.clone()),
+            root_visible_at_paint: self.visible_flag.load(Ordering::Relaxed),
+            query_root_gates_clear,
+            provider_revision_at_paint,
+            catalog_versions_at_paint,
+            completed_at: Some(Instant::now()),
+        });
+    }
+
+    fn finish_ui_frame_receipt(&mut self) {
+        let Some(candidate) = self.pending_ui_frame_receipt.take() else {
+            let observer_frame_open = self
+                .root_frame_logic
+                .as_ref()
+                .is_some_and(|logic| logic.source_state_before_frame.is_some());
+            if observer_frame_open {
+                // Visibility may change after `logic` began the observer frame
+                // but before UI decides to paint ROOT. Close that boundary as
+                // an unpainted/hidden frame, preserving the observer's normal
+                // cancellation semantics without reporting a usable paint.
+                self.track_c_query_observer.finish_frame_at(
+                    &self.query,
+                    false,
+                    false,
+                    false,
+                    self.plugins.search_generation(),
+                    crate::radial::dynamic::MutableResultCatalogVersions::current(),
+                    None,
+                    Instant::now(),
+                );
+                self.track_c_query_observer.end_frame_boundary();
+            }
+            self.root_frame_logic = None;
+            return;
+        };
+
+        let current_provider_revision = self.plugins.search_generation();
+        let current_catalog_versions =
+            crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let current_generation = self.root_list_geometry.result_generation;
+        let visible_now = self.visible_flag.load(Ordering::Relaxed);
+        let visibility_current = self.visibility_revision.current() == candidate.visibility_request;
+        let paint_sources_current = current_provider_revision
+            == candidate.provider_revision_at_paint
+            && current_catalog_versions == candidate.catalog_versions_at_paint
+            && current_generation == candidate.generation_at_paint;
+        let first_usable_eligible = candidate.frame_eligible
+            && candidate.should_be_visible
+            && candidate.root_visible_at_paint
+            && visible_now
+            && visibility_current
+            && paint_sources_current;
+
+        if candidate.track_c_enabled
+            && let Some(completed_at) = candidate.completed_at
+        {
+            self.visibility_revision.complete_first_usable_frame_at(
+                candidate.visibility_request,
+                candidate.visibility_invocation_id,
                 &self.visible_flag,
-                should_be_visible,
-                frame_eligible,
-                painted_root_generation,
+                candidate.should_be_visible && candidate.root_visible_at_paint,
+                first_usable_eligible,
+                candidate.painted_root_generation,
                 current_generation,
-                track_c_enabled,
+                candidate.track_c_enabled,
+                completed_at,
             );
         }
 
-        if self.track_c_query_observer.is_enabled() {
-            let root_visible = self.visible_flag.load(Ordering::Relaxed);
-            let root_owned = should_be_visible;
-            let query_root_gates_clear = painted_query_results
-                && self.pending_query.is_none()
+        if self.track_c_query_observer.is_enabled()
+            && let (Some(query), Some(completed_at)) =
+                (candidate.query.as_deref(), candidate.completed_at)
+        {
+            let root_gates_still_clear = self.pending_query.is_none()
                 && !self.background_query_refresh_pending
                 && self.last_note_search_change.is_none()
                 && !self.radial_provider_search_capacity.is_occupied()
@@ -3733,17 +4144,25 @@ impl LauncherApp {
                 && !self.file_search_dialog.open
                 && !self.any_panel_open()
                 && !self.should_show_dashboard(self.query.as_str());
-            self.track_c_query_observer.finish_frame(
-                &self.query,
+            let query_matches = self.query == query;
+            let root_visible = visible_now && candidate.root_visible_at_paint;
+            let root_owned = candidate.should_be_visible && visibility_current;
+            self.track_c_query_observer.finish_frame_at(
+                query,
                 root_visible,
                 root_owned,
-                query_root_gates_clear,
-                self.plugins.search_generation(),
-                crate::radial::dynamic::MutableResultCatalogVersions::current(),
-                painted_root_generation,
+                candidate.query_root_gates_clear
+                    && root_gates_still_clear
+                    && query_matches
+                    && paint_sources_current,
+                current_provider_revision,
+                current_catalog_versions,
+                candidate.painted_root_generation,
+                completed_at,
             );
+            self.track_c_query_observer.end_frame_boundary();
         }
-        self.track_c_query_observer.end_frame_boundary();
+        self.root_frame_logic = None;
     }
 }
 
@@ -3783,8 +4202,28 @@ fn persist_launcher_close_preferences(
 }
 
 impl eframe::App for LauncherApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        self.render_root_frame(ctx, Some(frame));
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.begin_root_frame_logic(ctx, frame);
+    }
+
+    fn logic_only(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.run_hidden_logic_tick(ctx, frame);
+    }
+
+    fn discard_input_after_logic_only(&self) -> bool {
+        true
+    }
+
+    fn needs_root_ui_when_hidden(&self) -> bool {
+        self.needs_viewport_bootstrap()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render_root_ui(ui);
+    }
+
+    fn on_ui_frame_complete(&mut self, _ctx: &egui::Context) {
+        self.finish_ui_frame_receipt();
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -3799,7 +4238,13 @@ impl eframe::App for LauncherApp {
         self.shutdown_ocr_selection();
         self.root_window_bridge.clear();
         self.close_screen_draw_for_exit();
+        self.macro_prompt.bootstrap_pending = false;
+        if let Some(pending) = self.macro_prompt.pending.take() {
+            pending.respond(crate::mkmacro::PromptResponse::Cancelled);
+        }
+        self.macro_prompt.text.clear();
         self.macro_parameter_prompt.shutdown();
+        self.radial_placement_viewport.mark_viewport_closed();
         self.snippet_prompt_dialog.shutdown(&self.egui_ctx);
         self.data_recovery_dialog.shutdown();
         self.clipboard_modify_dialog.cleanup_after_close();
@@ -3829,6 +4274,44 @@ impl eframe::App for LauncherApp {
             (dialog_width, dialog_height),
         );
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
+    }
+}
+
+#[cfg(test)]
+impl LauncherApp {
+    /// Runs the same lifecycle owners as native eframe and finalizes only after
+    /// egui has selected its retained pass.
+    fn run_root_frame_for_test(
+        &mut self,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        force_discard_first_pass: bool,
+    ) -> (egui::FullOutput, usize) {
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut passes = 0;
+        let output = ctx.run_ui(input, |ui| {
+            self.begin_root_frame_logic(ui.ctx(), &mut frame);
+            self.render_root_ui(ui);
+            if force_discard_first_pass && passes == 0 {
+                ui.ctx().request_discard("forced M1-B lifecycle test pass");
+            }
+            passes += 1;
+        });
+        self.finish_ui_frame_receipt();
+        (output, passes)
+    }
+
+    /// Exercises the actual no-paint owner with one egui input pass. There is
+    /// deliberately no UI callback or frame-receipt completion in this path.
+    fn run_hidden_logic_tick_for_test(
+        &mut self,
+        ctx: &egui::Context,
+        input: egui::RawInput,
+    ) -> egui::FullOutput {
+        let mut frame = eframe::Frame::_new_kittest();
+        ctx.begin_pass(input);
+        self.run_hidden_logic_tick(ctx, &mut frame);
+        ctx.end_pass()
     }
 }
 
@@ -5650,6 +6133,489 @@ mod tests {
         app.visibility_revision
             .arm_first_usable_frame_for_test(revision, Some(invocation_id));
         revision
+    }
+
+    #[test]
+    fn forced_discard_dispatches_the_root_action_and_history_once() {
+        let ctx = egui::Context::default();
+        let action = Action {
+            label: "Help".into(),
+            desc: "Open help".into(),
+            action: "help:show".into(),
+            args: None,
+        };
+        let (workspace, mut app) = root_list_test_app(&ctx, vec![action]);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.test_skip_history_persistence = true;
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_input")));
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            focused: true,
+            events: vec![key_press(egui::Key::Enter, egui::Modifiers::NONE)],
+            ..Default::default()
+        };
+        let (output, passes) = app.run_root_frame_for_test(&ctx, input, true);
+        output.drop_without_applying_deltas();
+
+        assert!(passes >= 2, "the integration test adapter forced a discard");
+        assert!(app.help_window.open);
+        assert_eq!(app.usage.get("help:show"), Some(&1));
+        assert_eq!(app.test_recorded_history_queries.len(), 1);
+        assert_eq!(app.test_activation_trace.len(), 1);
+        assert!(app.root_frame_logic.is_none());
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn hidden_macro_prompt_bootstraps_child_without_moving_or_focusing_root() {
+        use crate::mkmacro::{PromptBackend, PromptRequest};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.window_size = (777, 555);
+        app.window_pos = (123, 234);
+
+        let broker = Arc::new(crate::mkmacro::PromptBroker::default());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        broker.set_repaint(Arc::new(move || {
+            let _ = ready_tx.send(());
+        }));
+        let control = Arc::new(RunControl::default());
+        control.reset();
+        let worker_broker = Arc::clone(&broker);
+        let worker_control = Arc::clone(&control);
+        let worker = thread::spawn(move || {
+            PromptBackend::prompt(
+                worker_broker.as_ref(),
+                PromptRequest {
+                    id: crate::mkmacro::next_request_id(),
+                    title: "Test prompt".into(),
+                    prompt: "Value".into(),
+                    default_value: "initial".into(),
+                },
+                worker_control.as_ref(),
+            )
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("macro worker published a pending prompt");
+
+        app.acquire_macro_prompt_from(&ctx, broker.as_ref());
+        assert!(app.needs_viewport_bootstrap());
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            events: vec![
+                key_press(egui::Key::Enter, egui::Modifiers::NONE),
+                key_press(egui::Key::Escape, egui::Modifiers::NONE),
+            ],
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        let child = egui::ViewportId::from_hash_of("mkmacro_prompt");
+        assert!(output.viewport_output.contains_key(&child));
+        assert!(root_commands(&output).iter().all(|command| !matches!(
+            command,
+            egui::ViewportCommand::Focus
+                | egui::ViewportCommand::OuterPosition(_)
+                | egui::ViewportCommand::InnerSize(_)
+        )));
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        assert_eq!(app.window_size, (777, 555));
+        assert_eq!(app.window_pos, (123, 234));
+        assert!(app.macro_prompt.pending.is_some());
+        assert!(!app.needs_viewport_bootstrap());
+        output.drop_without_applying_deltas();
+
+        drop(app);
+        drop(workspace);
+        assert!(worker.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn hidden_macro_prompt_acquisition_schedules_root_before_child_ui() {
+        use crate::mkmacro::{PromptBackend, PromptRequest};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        let broker = Arc::new(crate::mkmacro::PromptBroker::default());
+        app.macro_prompt_broker = Arc::clone(&broker);
+
+        // The hidden runtime tick installs the same repaint callback used by
+        // production before the worker publishes its request.
+        app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default())
+            .drop_without_applying_deltas();
+        assert!(!app.needs_viewport_bootstrap());
+
+        let (wake_tx, wake_rx) = std::sync::mpsc::channel();
+        ctx.set_request_repaint_callback(move |info| {
+            if info.viewport_id == egui::ViewportId::ROOT {
+                let _ = wake_tx.send(());
+            }
+        });
+        let worker_broker = Arc::clone(&broker);
+        let worker = thread::spawn(move || {
+            let result = PromptBackend::prompt(
+                worker_broker.as_ref(),
+                PromptRequest {
+                    id: crate::mkmacro::next_request_id(),
+                    title: "Hidden bootstrap prompt".into(),
+                    prompt: "Value".into(),
+                    default_value: "initial".into(),
+                },
+                &RunControl::default(),
+            );
+            result
+        });
+        // The broker wake reaches the hidden native path first. Acquisition in
+        // that path must schedule ROOT again because native show_ui was already
+        // decided before this logic-only callback ran.
+        wake_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker prompt wakes the hidden root");
+        for _ in 0..8 {
+            let output = ctx.run(egui::RawInput::default(), |_| {});
+            output.drop_without_applying_deltas();
+            if !ctx.has_requested_repaint() {
+                break;
+            }
+        }
+        assert!(!ctx.has_requested_repaint(), "the worker wake was consumed");
+
+        let output = app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default());
+        assert!(app.needs_viewport_bootstrap());
+        assert!(ctx.requested_repaint_last_pass_for(&egui::ViewportId::ROOT));
+        output.drop_without_applying_deltas();
+
+        let (output, _) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(
+            output
+                .viewport_output
+                .contains_key(&egui::ViewportId::from_hash_of("mkmacro_prompt"))
+        );
+        assert!(!app.needs_viewport_bootstrap());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        output.drop_without_applying_deltas();
+
+        drop(app);
+        drop(workspace);
+        assert!(worker.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn hidden_parameter_notice_bootstraps_child_without_root_activation() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.window_size = (777, 555);
+        app.window_pos = (123, 234);
+
+        let broker = Arc::new(crate::mkmacro::invocation_prompt::InvocationPromptBroker::default());
+        app.macro_parameter_prompt =
+            crate::gui::mkmacro_dialog::parameter_prompt::ParameterPromptUi::with_broker(
+                &ctx,
+                broker.clone(),
+            );
+        broker.report_error("test parameter prompt notice".into());
+
+        let (output, _) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            false,
+        );
+        let child = egui::ViewportId::from_hash_of("mkmacro_invocation_parameters");
+        assert!(output.viewport_output.contains_key(&child));
+        assert!(root_commands(&output).iter().all(|command| !matches!(
+            command,
+            egui::ViewportCommand::Focus
+                | egui::ViewportCommand::OuterPosition(_)
+                | egui::ViewportCommand::InnerSize(_)
+        )));
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        assert_eq!(app.window_size, (777, 555));
+        assert_eq!(app.window_pos, (123, 234));
+        assert!(!app.needs_viewport_bootstrap());
+        output.drop_without_applying_deltas();
+
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn hidden_logic_ticks_progress_requests_without_replaying_keys_or_drops() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.window_size = (777, 555);
+        app.query = "before hidden request".into();
+        app.pending_query = Some("first hidden request".into());
+        let dropped = egui::DroppedFile {
+            path: Some(workspace.root().join("must-not-open.txt")),
+            ..Default::default()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1200.0, 800.0),
+            )),
+            time: Some(42.0),
+            events: vec![
+                key_press(egui::Key::Escape, egui::Modifiers::NONE),
+                key_press(
+                    egui::Key::Enter,
+                    egui::Modifiers {
+                        ctrl: true,
+                        ..Default::default()
+                    },
+                ),
+                key_press(egui::Key::Tab, egui::Modifiers::NONE),
+            ],
+            dropped_files: vec![dropped.clone()],
+            ..Default::default()
+        };
+
+        app.run_hidden_logic_tick_for_test(&ctx, input.clone())
+            .drop_without_applying_deltas();
+        assert_eq!(app.query, "first hidden request");
+        assert!(app.pending_query.is_none());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.show_editor);
+        assert_eq!(app.window_size, (777, 555));
+        assert!(app.root_frame_logic.is_none());
+        assert!(app.pending_ui_frame_receipt.is_none());
+
+        app.pending_query = Some("second hidden request".into());
+        app.run_hidden_logic_tick_for_test(&ctx, input)
+            .drop_without_applying_deltas();
+        assert_eq!(app.query, "second hidden request");
+        assert!(app.pending_query.is_none());
+        assert!(!app.show_editor);
+        assert_eq!(app.window_size, (777, 555));
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn hidden_root_ui_runs_background_watch_owner_once_and_keeps_root_unpainted() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.event_tx
+            .send(crate::gui::state::WatchEvent::RadialMigrationNotice(
+                "hidden background owner ran".into(),
+            ))
+            .unwrap();
+        app.event_tx
+            .send(
+                crate::gui::state::WatchEvent::RadialSubmenuPlacementFailure(
+                    crate::gui::state::RadialPlacementFailureNotice {
+                        session_id: crate::radial::model::SessionId::new("session-a"),
+                        parent_frame_id: crate::radial::session::FrameId(7),
+                        parent_menu_id: crate::radial::model::MenuId::new("parent"),
+                        child_menu_id: crate::radial::model::MenuId::new("child"),
+                        parent_presentation: crate::radial::model::SubmenuPresentation::SameCenter,
+                        message: "fixed center does not fit".into(),
+                    },
+                ),
+            )
+            .unwrap();
+
+        let (output, passes) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            true,
+        );
+
+        assert!(passes >= 2, "the test adapter forced a discarded UI pass");
+        assert_eq!(app.test_toast_messages, ["hidden background owner ran"]);
+        assert!(app.root_frame_logic.is_none());
+        assert!(output.shapes.is_empty(), "the hidden ROOT is not painted");
+        let retained_notice_title = ctx
+            .viewport_for(super::super::radial_placement_viewport_id(), |viewport| {
+                viewport.builder.title.clone()
+            });
+        assert_eq!(
+            retained_notice_title.as_deref(),
+            Some("Radial submenu placement"),
+            "the immediate child must be registered again in the retained pass"
+        );
+        output.drop_without_applying_deltas();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn hidden_root_ui_registers_independent_screen_draw_toolbar() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.screen_draw_controller.open_toolbar();
+        assert!(app.needs_viewport_bootstrap());
+
+        let (output, passes) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            true,
+        );
+        let toolbar = super::super::screen_draw_toolbar::viewport_id();
+        assert!(passes >= 2, "the test adapter forced a discarded UI pass");
+        assert!(output.viewport_output.contains_key(&toolbar));
+        assert!(app.screen_draw_toolbar.was_open);
+        assert!(!app.needs_viewport_bootstrap());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(root_commands(&output).iter().all(|command| !matches!(
+            command,
+            egui::ViewportCommand::Focus
+                | egui::ViewportCommand::OuterPosition(_)
+                | egui::ViewportCommand::InnerSize(_)
+        )));
+        output.drop_without_applying_deltas();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn already_hidden_ticks_cancel_pending_observer_without_opening_a_frame() {
+        use crate::gui::track_c_query_observer::{Cause, Origin, Terminal};
+
+        for logic_only in [true, false] {
+            let ctx = egui::Context::default();
+            let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+            app.visible_flag.store(true, Ordering::SeqCst);
+            app.last_visible = true;
+            app.track_c_query_observer.enable_for_test();
+            app.track_c_query_observer.begin_from(
+                app.track_c_query_observer.tentative_start(),
+                Origin::TextEdit,
+                &app.query,
+            );
+            let frame_count = app.track_c_query_observer.snapshot().frame_count;
+
+            // The transition predates the next callback: both hidden native
+            // logic and the logical-hidden UI dispatch must cancel explicitly.
+            app.visible_flag.store(false, Ordering::SeqCst);
+            app.last_visible = false;
+            if logic_only {
+                app.run_hidden_logic_tick_for_test(&ctx, egui::RawInput::default())
+                    .drop_without_applying_deltas();
+            } else {
+                let (output, _) = app.run_root_frame_for_test(
+                    &ctx,
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(960.0, 640.0),
+                        )),
+                        ..Default::default()
+                    },
+                    false,
+                );
+                output.drop_without_applying_deltas();
+            }
+
+            let snapshot = app.track_c_query_observer.snapshot();
+            assert_eq!(snapshot.frame_count, frame_count);
+            assert_eq!(snapshot.completed_count, 0);
+            assert_eq!(snapshot.cancelled_count, 1);
+            let receipt = snapshot.receipts[0].expect("hidden root cancels the pending intent");
+            assert_eq!(receipt.terminal, Terminal::Cancelled);
+            assert_eq!(receipt.cause, Cause::RootHidden);
+            drop(app);
+            drop(workspace);
+        }
+    }
+
+    #[test]
+    fn hidden_transition_closes_observer_frame_without_usable_paint_completion() {
+        use crate::gui::track_c_query_observer::{Cause, Origin, Terminal};
+
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        app.track_c_query_observer.enable_for_test();
+        app.track_c_query_observer.begin_from(
+            app.track_c_query_observer.tentative_start(),
+            Origin::TextEdit,
+            &app.query,
+        );
+
+        let mut frame = eframe::Frame::_new_kittest();
+        app.begin_root_frame_logic(&ctx, &mut frame);
+        assert_eq!(app.track_c_query_observer.snapshot().frame_count, 1);
+        assert!(
+            app.root_frame_logic
+                .as_ref()
+                .is_some_and(|logic| logic.should_be_visible)
+        );
+
+        // Model a visibility request admitted by logic before its UI callback.
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.root_frame_logic.as_mut().unwrap().should_be_visible = false;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(960.0, 640.0),
+            )),
+            ..Default::default()
+        };
+        let (output, _) = app.run_root_frame_for_test(&ctx, input, false);
+        output.drop_without_applying_deltas();
+
+        let snapshot = app.track_c_query_observer.snapshot();
+        assert_eq!(snapshot.completed_count, 0);
+        assert_eq!(snapshot.cancelled_count, 1);
+        let receipt = snapshot.receipts[0].expect("the hidden boundary terminates the intent");
+        assert_eq!(receipt.terminal, Terminal::Cancelled);
+        assert_eq!(receipt.cause, Cause::RootHidden);
+        assert!(app.root_frame_logic.is_none());
+        drop(app);
+        drop(workspace);
     }
 
     struct TrackCRootListState {

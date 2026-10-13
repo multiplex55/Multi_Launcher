@@ -8,6 +8,13 @@
 
 use std::time::{Duration, Instant};
 
+fn elapsed_ns(started: Instant, ended: Instant) -> u64 {
+    ended
+        .saturating_duration_since(started)
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
 use crate::radial::dynamic::MutableResultCatalogVersions;
 
 const RECEIPT_CAPACITY: usize = 8;
@@ -536,6 +543,31 @@ impl Observer {
         current_catalog_versions: MutableResultCatalogVersions,
         painted_root_generation: Option<u64>,
     ) {
+        self.finish_frame_at(
+            query,
+            root_visible,
+            root_owned,
+            root_gates_clear,
+            current_provider_revision,
+            current_catalog_versions,
+            painted_root_generation,
+            Instant::now(),
+        );
+    }
+
+    /// Completes a painted candidate using the timestamp captured after its
+    /// final retained UI pass, rather than the later integration callback.
+    pub(crate) fn finish_frame_at(
+        &mut self,
+        query: &str,
+        root_visible: bool,
+        root_owned: bool,
+        root_gates_clear: bool,
+        current_provider_revision: u64,
+        current_catalog_versions: MutableResultCatalogVersions,
+        painted_root_generation: Option<u64>,
+        completed_at: Instant,
+    ) {
         if !self.enabled {
             return;
         }
@@ -592,10 +624,11 @@ impl Observer {
         {
             self.finish_pending(Terminal::Cancelled, Cause::ExternalSourceChange, None);
         } else if root_gates_clear && search_sources_current && paint_matches {
-            self.finish_pending(
+            self.finish_pending_at(
                 Terminal::Completed,
                 Cause::FirstUsableRootFrame,
                 Some(painted_generation),
+                completed_at,
             );
         }
     }
@@ -612,6 +645,16 @@ impl Observer {
         cause: Cause,
         painted_generation: Option<u64>,
     ) {
+        self.finish_pending_at(terminal, cause, painted_generation, Instant::now());
+    }
+
+    fn finish_pending_at(
+        &mut self,
+        terminal: Terminal,
+        cause: Cause,
+        painted_generation: Option<u64>,
+        completed_at: Instant,
+    ) {
         let Some(intent) = self.pending.take() else {
             return;
         };
@@ -622,9 +665,9 @@ impl Observer {
         let frames = terminal_frame
             .saturating_sub(intent.started_frame)
             .saturating_add(u64::from(self.in_frame));
-        let completion_latency_ns = (terminal == Terminal::Completed)
-            .then(|| intent.started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
-        let terminal_elapsed_ns = intent.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+        let completion_latency_ns =
+            (terminal == Terminal::Completed).then(|| elapsed_ns(intent.started, completed_at));
+        let terminal_elapsed_ns = elapsed_ns(intent.started, completed_at);
         match terminal {
             Terminal::Completed => {
                 self.snapshot.completed_count = self.snapshot.completed_count.saturating_add(1);

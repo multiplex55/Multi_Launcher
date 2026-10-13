@@ -734,6 +734,33 @@ impl VisibilityRevision {
         current_generation: u64,
         tracking_enabled: bool,
     ) -> bool {
+        self.complete_first_usable_frame_at(
+            revision,
+            invocation_id,
+            visible_flag,
+            visible_at_start,
+            eligible,
+            painted_generation,
+            current_generation,
+            tracking_enabled,
+            Instant::now(),
+        )
+    }
+
+    /// Complete the correlated CPU-side receipt at the retained UI paint's
+    /// timestamp after the integration has resolved all discarded passes.
+    pub(crate) fn complete_first_usable_frame_at(
+        &self,
+        revision: u64,
+        invocation_id: Option<u64>,
+        visible_flag: &AtomicBool,
+        visible_at_start: bool,
+        eligible: bool,
+        painted_generation: Option<u64>,
+        current_generation: u64,
+        tracking_enabled: bool,
+        completed_at: Instant,
+    ) -> bool {
         if !tracking_enabled {
             return false;
         }
@@ -757,7 +784,7 @@ impl VisibilityRevision {
             eligible,
             painted_generation,
             current_generation,
-            Instant::now(),
+            completed_at,
         ) else {
             return false;
         };
