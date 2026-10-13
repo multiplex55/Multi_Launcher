@@ -314,6 +314,14 @@ Build directly with verified stable rustc: `--edition=2024 -C opt-level=0 -C deb
 
 Decision/done: production patch remains unauthorized. Reuse savings must plausibly explain a substantial part of727ms layout using explicit run counts; a merely positive small change is insufficient. If plan cost is material and complete shaping parity passes, next prepare narrowly instrumented actual epaint-run evidence (an ignored source archive may then be justified) before proposing bounded per-face production cache with correct keys/lifetime/eviction tests. If not material, retain evidence and investigate remaining shaping/glyph emission. No engine duplication, approximate geometry, full-catalog galley retention, shaping/hinting disablement or font swaps. Planner verified Ubuntu/Hack/NotoEmoji asset bytes match old/current; font-name equality alone does not identify fallback faces.
 
+### M2-A warm-owner follow-up packet
+
+Source-backed planner packet, queued after the standalone cold probe: add one ignored test-only100-row warm-frame diagnostic using the prepared warm state and existing run_root_list_frame_with_pass_count adapter. No production changes. Optional adapter clocks must preserve call order and original owner stopwatch boundaries; measure begin_root_frame_logic, render_root_ui accumulated across actual passes, finish_ui_frame_receipt, whole owner and residual egui/framework time. Validation and output disposal remain outside timing.
+
+Snapshot existing Metric::LauncherRowsBuilt before/after: its timer spans geometry ensure plus visible result-widget construction. Assert zero warm rebuilds/measured rows, unchanged geometry/IDs, positive bounded painted rows and actual pass count. Emit paired durations, metric calls/work units, painted rows and passes with the established small diagnostic sample protocol. Existing Track C phases do not separately time root logic/finalizer. No duplicate production telemetry owner.
+
+Decision: dominant rows timer means inspect visible result widgets/text; dominant remaining UI means inspect other root UI; dominant logic/finalizer means inspect that owner; large residual means inspect egui begin/end-pass work. Do not revisit the176ns mock-frame/guard probe or unsupported native-handle speculation. This supplements Small control and never replaces Full81 acceptance. Parent authorizes source ownership only after the current writer releases the cold probe; bounded independent review and affected scoped checks remain required.
+
 ## M2-B concrete Windows native parity handoff (read-only planning)
 
 Objective: validate migrated native windows, activation, input and overlays; correct demonstrated migration defects at their existing owners. Execute after M2-A, with M1-C compilation and M1-B lifecycle tests accepted. Keep explicit Glow; backend comparison belongs to M2-C. Confirm completed M1-C viewport callback signatures before editing. This packet is planning evidence, not executed acceptance.
