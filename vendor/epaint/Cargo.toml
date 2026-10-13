@@ -114,7 +114,7 @@ features = ["std"]
 default-features = false
 
 [dependencies.harfrust]
-version = "0.12.0"
+version = "0.13.3"
 
 [dependencies.log]
 version = "0.4.33"
@@ -147,7 +147,7 @@ features = [
 optional = true
 
 [dependencies.skrifa]
-version = "0.44.0"
+version = "0.46.2"
 features = [
     "std",
     "autohint_shaping",

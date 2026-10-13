@@ -4,7 +4,7 @@ Independent source, dependency, build, parity and timing reviews accepted this e
 
 ## Scope and compatibility
 
-Fresh paired archives under `target/egui-modernization/m2a/released-text-stack-candidate/` preserve the accepted earlier archive. Baseline uses released HarfRust 0.12.0 / Skrifa 0.44.0; candidate uses HarfRust 0.13.3 / Skrifa 0.46.2 / read-fonts 0.43.3. Their reader types align. Existing font-types 0.12.6 and once_cell 1.21.4 remain unchanged. Other consumers retain the old Fontations versions. The only graph changes are the required text stack and dependency-reference disambiguation; features and default font bytes are preserved.
+Fresh paired archives under `target/egui-modernization/m2a/released-text-stack-candidate/` preserve the accepted earlier archive. Baseline uses released HarfRust 0.12.0 / Skrifa 0.44.0; candidate uses HarfRust 0.13.3 / Skrifa 0.46.2 / read-fonts 0.43.3. Their reader types align. Existing font-types 0.12.6 and once_cell 1.21.4 remain unchanged. The lock retains the old Fontations versions for other-platform or optional paths; they are absent from the active Windows reverse tree. The only graph changes are the required text stack and dependency-reference disambiguation; features and default font bytes are preserved.
 
 Both copies remove the earlier residual HarfRust timing bridge, feature activation and path patch. They retain identical epaint observers, retained-plan behavior, preparation and owner timers. Candidate compilation required no API source adjustments. Exact downloaded package checksums match their lock entries; metadata downloaded the three new packages, so an earlier statement that they were not fetched was corrected. No profile, renderer, production source or fixture changes.
 
