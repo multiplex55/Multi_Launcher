@@ -1,0 +1,20 @@
+# M2-A production plan reuse: accepted partial correction
+
+Vendor epaint0.36.2 from its exact released package, with source checksum/licenses/prototype references/removal condition in vendor/epaint/PATCH.md. Only font.rs and text_layout.rs differ from stock. FontFace owns at most eight ShapePlans with FIFO replacement and public ShapePlanKey matching; actual per-run instance/flags/buffer reuse remain unchanged. Variation matching follows HarfRust's feature-variation selection,not an invented axis-coordinate key. Field-split shaping releases face borrows before glyph emission. No experimental clocks,modes,reexports or shared test hooks entered production. Root dependency diff substitutes only epaint source/checksum,same version/dependency graph. List rows pass the same inherited style Arc at construction,avoiding an immediately overwritten global-style fetch; no isolated speedup claim.
+
+Independent source/final-result review accepted without findings. Parent inspected the root diff and independently parsed20 geometry+five warm records. Private tests compare every GlyphInfo/Position field via their complete derived Debug representations,including multilingual/default fonts and Bahnschrift wght300/700; FIFO hits,capacity,eviction,face isolation/recreation and key components are covered.
+
+| Verification | Actual result |
+|---|---|
+| Private vendored cache/glyph tests | 4/4 PASS,Nextest0.076s,command3.398s,native0 |
+| Root locked/offline all-target check | PASS,native0,111.415s |
+| Existing list/grid/font/Notes/query/output-disposal filter | 20/20 PASS,native0,command9.061s |
+| Geometry diagnostic100/1,000 cold/warm | 20 retained samples,two warmups/five per cell,PASS,native0,21.290s |
+| Separate100-row warm owner | Five samples/two warmups,PASS,native0,3.694s |
+| Root/vendor formatting and diff | PASS |
+
+Private ignored test manifest targets actual vendor src/lib.rs,pins root production versions/features and resolves genuine similar-asserts2 test-only. Root lock remains unchanged by harness resolution. Initial metadata attempts lacked the cached test dependency or attempted a foreign-target unpack; scoped fetch and Windows-filtered metadata corrected them. The first broad harness also fetched unused optional integrations into local cache; final narrowed private manifest/lock excludes them. No production dependency/stub/test suppression. Initial root regex selected zero tests (exit4); corrected explicit OR-filter executes20. All failed receipts retained. Removing one introduced stale import was the only compiler-warning cleanup; upstream warnings remain.
+
+Production cold owner p50:100 rows30.9910ms,1,000 rows381.5606ms; geometry phase28.866/378.836ms. Warm owners2.0970/2.1822ms with zero geometry work. Every sample one pass/25 painted rows,exact cold measured counts/one rebuild,warm0/0,stable identities,eager oracle passes. Separate warm phases:owner2.1163/UI1.9589/RowsBuilt1.4154ms (RowsBuilt inclusive). Material cold savings match the accepted archive prototype. Five-sample diagnostic series do not establish original parity or isolated style savings; warm and remaining cold gaps persist. M2-A remains in progress; Full81 stays queued.
+
+Raw evidence: ignored target/egui-modernization/m2a/production-plan-reuse-validation/receipts. Final source manifest003 SHA256 `f389905bc41fd208b73301d5ac4df27c30ba5d0587ecbdb0acdd3228b6c7372a`,all live hashes independently checked. Earlier source counts corrected by preserved addenda:44 cached files including marker,43 retained stock files plus licenses/PATCH. Parent identified the actual root binary via cached Cargo Nextest JSON listing (no tests executed) and preserved production-root-libtest-001.exe,138617344 bytes SHA256 `6F934EBB65B7B6DC497C55E3ADE6FE78F2ED243B49B12DC35D4AAB6D2C568D57`. Private test binary/manifest/lock,compiler hashes,all commands/exits/wall times,arrays and source inventories retained separately. All checkpoints local; next bounded step is reviewed archive-only retained-plan HarfRust phase attribution.

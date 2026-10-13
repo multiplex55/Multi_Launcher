@@ -3441,13 +3441,13 @@ impl LauncherApp {
                                         row_widget_id,
                                         egui::UiBuilder::new()
                                             .layer_id(ui.layer_id())
+                                            .style(ui.style().clone())
                                             .max_rect(row_rect)
                                             .layout(egui::Layout::centered_and_justified(
                                                 ui.layout().main_dir(),
                                             )),
                                     );
                                     row_ui.set_clip_rect(ui.clip_rect());
-                                    row_ui.set_style(ui.style().clone());
                                     if !ui.is_enabled() {
                                         row_ui.disable();
                                     }
