@@ -174,3 +174,7 @@ opt-level = 2
 codegen-units = 64
 lto = "off"
 incremental = true
+
+# Local lifecycle seam for hidden-root prompt viewport bootstrapping.
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }
