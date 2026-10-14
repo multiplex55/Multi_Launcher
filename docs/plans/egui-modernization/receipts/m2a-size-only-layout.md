@@ -65,3 +65,13 @@ Receipts are in the outer candidate `receipts` directory: input SHA `4c49dc24950
 Default-font asset supplement `bcca2955e6d6e26c071671574144b730a899832de0bf24578574c0b598c1d609` is explicitly observed during the live build, not pre-launch; all four assets and cached crate bytes match the accepted baseline. Immutable input was not rewritten. Parent independently observed the owned root rustc36512 during build with `--test`, `-C opt-level=3`, `-C strip=debuginfo`; canonical release/MSVC/default-feature/override-free provenance was accepted. This compile evidence is not parity or performance acceptance.
 
 Actual candidate Trace parity is the next separate gate. No timing/control/production body has run for this candidate.
+
+## Actual candidate Trace parity gate
+
+The single candidate parity-only invocation passed native0 in2.3192638s (Nextest556b9174-5e7e-4397-8651-23354719d738; one passed/5238 skipped; summary0.210s). The complete4,964,373-byte snapshot is byte-identical84BDA and the complete8,632-byte classified diff is byte-identical075EF/status=pass. Existing assertions and cross-profile adapter were unchanged.
+
+Actual work is one rebuild,1,000 measured rows,25 painted rows, one adapter pass,4,047 ordered runs/face runs and103,830 glyphs. Plans975/975/0, native shape calls975, rawlookups/hits/misses4047/3072/975. All55 diagnostic fields are retained; parent independently compared all41 non-timing fields to the accepted prior parity output and found exact equality. Release identities remain `adfb11ee80438eab` / `18c853161fe60dfc` / `89195c4b0382794f`. Parity timing fields are not a performance series.
+
+Parent verified29 unique linked file bindings and both full byte comparisons. Independent parity review accepted without findings. ArchiveF62C/exeEBBB, final source bindings, separately unchanged `text/font.rs` EBE (distinct from modified `text/fonts.rs`0ADA), and reference66D before/after are unchanged; fresh extracted executable matches. Start receipt SHA `1eb4e3f923f1b45122f3eef587e9bc7a605ba904447f6b15cd567c766a3163a3`, result `aa05e68c07343f266fca32268c9e2c123c1ab10037160431fafc58794981d721`, direct stderr `bb05276a41d3fec3092e6657c2b194ed62501d466fc958bbec12bfb5fa09d2e5`. Complete files are retained in `size-only-layout-001/raw-hit-parity-only-output-001`.
+
+No warmup/timing/control series, baseline/original body, production port or performance waiver followed this parity-only invocation. The next separate gate is one fresh matched baseline/candidate existing observer-control pair, with all samples retained.
