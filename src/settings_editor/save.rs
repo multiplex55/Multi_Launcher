@@ -46,6 +46,7 @@ impl SettingsEditor {
         app: &mut LauncherApp,
         new_settings: Settings,
     ) {
+        crate::gui::theme::publish_committed(ctx, &new_settings.theme);
         crate::plugins::macros::configure_search_runtime(&new_settings, &app.actions_path);
         if let Err(error) = app
             .coordinate_tool

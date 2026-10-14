@@ -3813,6 +3813,38 @@ mod tests {
         assert_eq!(dialog.test_geometry_rebuilds, active_rebuilds);
         assert_eq!(dialog.test_geometry_rows_measured, active_rows_measured);
 
+        let mut palette_theme = crate::settings::ThemeSettings {
+            mode: crate::settings::ThemeMode::Custom,
+            ..crate::settings::ThemeSettings::default()
+        };
+        palette_theme.custom_scheme = crate::settings::ColorScheme::dark();
+        palette_theme.custom_scheme.text = crate::settings::ThemeColor {
+            r: 189,
+            g: 211,
+            b: 237,
+            a: 255,
+        };
+        assert!(crate::gui::theme::publish_committed(&ctx, &palette_theme));
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.22);
+        assert_eq!(dialog.test_geometry_rebuilds, active_rebuilds);
+        assert_eq!(dialog.test_geometry_rows_measured, active_rows_measured);
+
+        let mut density_theme = palette_theme;
+        density_theme.preferences.density = crate::settings::ThemeDensity::Comfortable;
+        assert!(crate::gui::theme::publish_committed(&ctx, &density_theme));
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.24);
+        assert_eq!(dialog.test_geometry_rebuilds, active_rebuilds + 1);
+        assert_eq!(
+            dialog.test_geometry_rows_measured - active_rows_measured,
+            entries.len() as u64,
+            "density changes rebuild each Notes row once"
+        );
+        let density_rebuilds = dialog.test_geometry_rebuilds;
+        let density_rows_measured = dialog.test_geometry_rows_measured;
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.26);
+        assert_eq!(dialog.test_geometry_rebuilds, density_rebuilds);
+        assert_eq!(dialog.test_geometry_rows_measured, density_rows_measured);
+
         let oracle_ctx = egui::Context::default();
         crate::gui::font_revision::install(&oracle_ctx, changed_definitions);
         let viewport_size = dialog

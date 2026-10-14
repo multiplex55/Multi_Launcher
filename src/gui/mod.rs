@@ -1845,6 +1845,7 @@ impl LauncherApp {
         // egui snapshots context plugins when a UI run begins, so install the
         // font-revision owner before the first eframe pass can begin.
         crate::gui::font_revision::register(ctx);
+        crate::gui::theme::initialize_runtime(ctx, &settings.theme);
         crate::plugins::macros::configure_search_runtime(&settings, &actions_path);
         let desired_index_config = crate::indexer::coordinator::IndexConfig::new(
             index_paths.unwrap_or_default(),

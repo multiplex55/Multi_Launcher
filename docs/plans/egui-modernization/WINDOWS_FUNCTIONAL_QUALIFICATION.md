@@ -25,7 +25,7 @@ The broad stabilization run retained6463run/6242pass/221fail/45skip. Scoped corr
 
 ## Environment and decision
 
-Current CUA supports browser surfaces only; native computer APIs are disabled, and no callable Sky desktop connector is present in the active tool inventory. Earlier unchanged desktop capture/elevation/profiling failures are retained. No repeated failed capture, new profiler, unsupported input injection or backend competition is required to establish synthetic equivalence.
+At M2-D closeout, CUA exposed browser surfaces only and no callable Sky connector had been identified. During M3-B orchestration, deferred-tool discovery found `mcp__node_repl__js`; the Computer Use skill initialized `@oai/sky` successfully and `list_windows()` returned native windows. No launcher window was running in that inventory. This restores a supported route to attempt bounded later native review; it does not verify capture, input, focus or any launcher behavior yet. Earlier capture/elevation/profiling failures remain retained. Avoid unchanged retries, new profilers or unsupported input injection.
 
 Existing native framebuffer screenshots prove their specific rendered output; they do not establish OS composition, physical chords, hotkey-to-visible latency or focus ownership. Broader physical/hardware/DPI/RDP observations remain explicit release-qualification gaps. Use available supported checks and continue safe implementation; correct any demonstrated critical defect before claiming its functionality stable.
 

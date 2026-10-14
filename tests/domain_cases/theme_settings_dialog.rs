@@ -14,7 +14,12 @@ fn save_updates_settings_and_clears_dirty_flag() {
     state.draft.mode = ThemeMode::Light;
     state.dirty = true;
 
-    state.save_to_path(settings_path.to_str().unwrap()).unwrap();
+    state
+        .save_to_path(
+            &eframe::egui::Context::default(),
+            settings_path.to_str().unwrap(),
+        )
+        .unwrap();
 
     let updated = Settings::load(settings_path.to_str().unwrap()).unwrap();
     assert_eq!(updated.theme.mode, ThemeMode::Light);
@@ -32,7 +37,14 @@ fn failed_save_keeps_draft_dirty_and_returns_before_publication() {
     state.draft.mode = ThemeMode::Light;
     state.dirty = true;
 
-    assert!(state.save_to_path(settings_path.to_str().unwrap()).is_err());
+    assert!(
+        state
+            .save_to_path(
+                &eframe::egui::Context::default(),
+                settings_path.to_str().unwrap()
+            )
+            .is_err()
+    );
     assert!(state.dirty);
     assert_eq!(state.draft.mode, ThemeMode::Light);
     assert_eq!(std::fs::read_to_string(blocker).unwrap(), "unchanged");

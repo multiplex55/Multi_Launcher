@@ -41,15 +41,17 @@ impl ThemeSettingsDialogState {
         }
     }
 
-    pub fn save_to_path(&mut self, settings_path: &str) -> Result<(), String> {
+    pub fn save_to_path(&mut self, ctx: &egui::Context, settings_path: &str) -> Result<(), String> {
         self.last_error = None;
         let draft = self.draft.clone();
-        Settings::update(settings_path, |settings| {
+        let committed = Settings::update(settings_path, |settings| {
             settings.theme = draft;
             Ok(())
         })
         .map_err(|err| format!("Failed to save settings: {err}"))?;
+        self.draft = committed.theme.clone();
         self.dirty = false;
+        crate::gui::theme::publish_committed(ctx, &committed.theme);
         Ok(())
     }
 }
@@ -136,7 +138,7 @@ pub fn ui(
                     .add_enabled(state.dirty, egui::Button::new("Apply"))
                     .clicked()
                 {
-                    match state.save_to_path(&app.settings_path) {
+                    match state.save_to_path(ctx, &app.settings_path) {
                         Ok(_) => {
                             if app.enable_toasts {
                                 app.add_toast(Toast {
@@ -168,7 +170,7 @@ pub fn ui(
                     .add_enabled(state.dirty, egui::Button::new("Save"))
                     .clicked()
                 {
-                    match state.save_to_path(&app.settings_path) {
+                    match state.save_to_path(ctx, &app.settings_path) {
                         Ok(_) => {
                             if app.enable_toasts {
                                 app.add_toast(Toast {
@@ -427,6 +429,7 @@ fn to_egui(c: ThemeColor) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn defaults_for_mode_returns_expected_scheme() {
@@ -434,6 +437,76 @@ mod tests {
         assert_eq!(defaults_for_mode(ThemeMode::Dark), ColorScheme::dark());
         assert_eq!(defaults_for_mode(ThemeMode::Light), ColorScheme::light());
         assert_eq!(defaults_for_mode(ThemeMode::Custom), ColorScheme::dark());
+    }
+
+    #[test]
+    fn successful_theme_save_publishes_the_committed_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let mut stored = Settings::default();
+        stored.theme.mode = ThemeMode::Dark;
+        stored.save(settings_path.to_str().unwrap()).unwrap();
+
+        let ctx = egui::Context::default();
+        crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
+        let mut state = ThemeSettingsDialogState::default();
+        state.draft = stored.theme.clone();
+        state.draft.mode = ThemeMode::Light;
+        state.dirty = true;
+
+        state
+            .save_to_path(&ctx, settings_path.to_str().unwrap())
+            .unwrap();
+
+        assert!(!state.dirty);
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert_eq!(state.draft.mode, ThemeMode::Light);
+        assert_eq!(
+            Settings::load(settings_path.to_str().unwrap())
+                .unwrap()
+                .theme
+                .mode,
+            ThemeMode::Light
+        );
+    }
+
+    #[test]
+    fn unsaved_or_failed_theme_edits_do_not_publish() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = Settings::default();
+        stored.theme.mode = ThemeMode::Dark;
+        let ctx = egui::Context::default();
+        crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
+        // Establish genuine idle after egui's startup repaint, before edits.
+        for _ in 0..4 {
+            if !ctx.has_requested_repaint_for(&egui::ViewportId::ROOT) {
+                break;
+            }
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .drop_without_applying_deltas();
+        }
+        assert!(!ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
+        let dark_style = ctx.style_of(egui::Theme::Dark);
+        let light_style = ctx.style_of(egui::Theme::Light);
+
+        let mut state = ThemeSettingsDialogState::default();
+        state.draft = stored.theme.clone();
+        state.draft.mode = ThemeMode::Light;
+        state.dirty = true;
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert!(Arc::ptr_eq(&dark_style, &ctx.style_of(egui::Theme::Dark)));
+        assert!(Arc::ptr_eq(&light_style, &ctx.style_of(egui::Theme::Light)));
+
+        assert!(
+            state
+                .save_to_path(&ctx, directory.path().to_str().unwrap())
+                .is_err()
+        );
+        assert!(state.dirty);
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert!(Arc::ptr_eq(&dark_style, &ctx.style_of(egui::Theme::Dark)));
+        assert!(Arc::ptr_eq(&light_style, &ctx.style_of(egui::Theme::Light)));
+        assert!(!ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
     }
 
     #[test]

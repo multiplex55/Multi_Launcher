@@ -15599,6 +15599,87 @@ mod tests {
             after_grid_activation,
             "the next unchanged grid frame reuses the activated geometry"
         );
+        frame += 1;
+
+        let mut palette_theme = crate::settings::ThemeSettings {
+            mode: crate::settings::ThemeMode::Custom,
+            ..crate::settings::ThemeSettings::default()
+        };
+        palette_theme.custom_scheme = crate::settings::ColorScheme::dark();
+        palette_theme.custom_scheme.text = crate::settings::ThemeColor {
+            r: 233,
+            g: 221,
+            b: 201,
+            a: 255,
+        };
+        let before_palette_change = app.root_list_geometry.test_observation();
+        assert!(crate::gui::theme::publish_committed(&ctx, &palette_theme));
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            before_palette_change,
+            "palette-only updates reuse grid geometry"
+        );
+
+        let mut density_theme = palette_theme.clone();
+        density_theme.preferences.density = crate::settings::ThemeDensity::Comfortable;
+        assert!(crate::gui::theme::publish_committed(&ctx, &density_theme));
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        let after_density_change = app.root_list_geometry.test_observation();
+        assert_eq!(
+            after_density_change.rebuild_count,
+            before_palette_change.rebuild_count + 1,
+            "density changes rebuild grid geometry once"
+        );
+        assert_eq!(
+            after_density_change.measured_cells - before_palette_change.measured_cells,
+            action_count
+        );
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            after_density_change,
+            "unchanged density reuses the rebuilt grid geometry"
+        );
+
+        app.query_results_layout.enabled = false;
+        app.recompute_query_results_layout();
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        let before_typography_change = app.root_list_geometry.test_observation();
+        let mut typography_theme = density_theme;
+        typography_theme.preferences.typography_scale = 1.25;
+        assert!(crate::gui::theme::publish_committed(
+            &ctx,
+            &typography_theme
+        ));
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        let after_typography_change = app.root_list_geometry.test_observation();
+        assert_eq!(
+            after_typography_change.rebuild_count,
+            before_typography_change.rebuild_count + 1,
+            "typography changes rebuild list geometry once"
+        );
+        assert_eq!(
+            after_typography_change.measured_rows - before_typography_change.measured_rows,
+            action_count
+        );
+        run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        assert_eq!(
+            app.root_list_geometry.test_observation(),
+            after_typography_change,
+            "unchanged typography reuses the rebuilt list geometry"
+        );
 
         drop(app);
         drop(workspace);
