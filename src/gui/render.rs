@@ -3807,11 +3807,13 @@ impl LauncherApp {
         let mut mouse_settings_dlg = std::mem::take(&mut self.mouse_settings_dialog);
         mouse_settings_dlg.ui(&ctx, &mut self.coordinate_tool);
         self.mouse_settings_dialog = mouse_settings_dlg;
-        let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
-        let mut theme_open = self.theme_settings_dialog_open;
-        crate::gui::theme_settings_dialog::ui(&ctx, self, &mut theme_open, &mut theme_state);
-        self.theme_settings_dialog_open = theme_open;
-        self.theme_settings_dialog = theme_state;
+        if self.theme_settings_dialog_open {
+            let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
+            let mut theme_open = self.theme_settings_dialog_open;
+            crate::gui::theme_settings_dialog::ui(&ctx, self, &mut theme_open, &mut theme_state);
+            self.theme_settings_dialog_open = theme_open;
+            self.theme_settings_dialog = theme_state;
+        }
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(&ctx, self);
         self.fav_dialog = fav_dlg;
@@ -3894,14 +3896,16 @@ impl LauncherApp {
         let mut cb_dlg = std::mem::take(&mut self.clipboard_dialog);
         cb_dlg.ui(&ctx, self);
         self.clipboard_dialog = cb_dlg;
-        let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
-        cm_dlg.ui(
-            &ctx,
-            &crate::clipboard_modify::runtime::clipboard_service(),
-            self.clipboard_modify_runtime.catalog_snapshot(),
-            Some(&self.clipboard_modify_runtime.store),
-        );
-        self.clipboard_modify_dialog = cm_dlg;
+        if self.clipboard_modify_dialog.open {
+            let mut cm_dlg = std::mem::take(&mut self.clipboard_modify_dialog);
+            cm_dlg.ui(
+                &ctx,
+                &crate::clipboard_modify::runtime::clipboard_service(),
+                self.clipboard_modify_runtime.catalog_snapshot(),
+                Some(&self.clipboard_modify_runtime.store),
+            );
+            self.clipboard_modify_dialog = cm_dlg;
+        }
         self.json_utility_dialog.show(&ctx);
         self.regex_tester_dialog.show(&ctx);
         #[cfg(feature = "qa-framebuffer-capture")]

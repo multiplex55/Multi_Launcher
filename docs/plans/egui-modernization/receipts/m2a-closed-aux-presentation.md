@@ -1,6 +1,6 @@
 # M2-A closed auxiliary presentation candidate
 
-Status: v3 artifact, repaired contract and single timing evidence independently accepted. Useful tail signal; whole-owner benefit unproved. No production port yet. Live production source remains79653eca and Full ROOT performance remains FAIL.
+Status: reviewed guards and fixture are provisionally ported to live source. Live artifact/contract and production performance qualification remain pending; whole-owner benefit unproved. Live production source remains79653eca and Full ROOT performance remains FAIL.
 
 Plan checkpointf8c7f745. The existing ignored warm-ui-regions-001/root now holds the candidate. Its pre-edit render63DA and radial source753452, baseline executableC60C and accepted diagnostic3c147aa1 are preserved/bound under `target/egui-modernization/m2a/closed-aux-presentation-001/receipts/source-preparation-001/`. Prior probe receipts are historical, not a claim that the mutable archive remains unchanged.
 
@@ -74,3 +74,10 @@ Ordered candidate sample arrays (nanoseconds):
 Historical baseline versus candidate: enabled-tail p50/p95us66.7/94.6 to42.9/51.7; all five candidate tail values35.8-51.7us are below the baseline55.8-94.6us range. Enabled owner329.9/476.1 to264.9/327.2us, but disabled owner275.4/434.4 to304.8/466.5us worsened; disabled nested rows also varied materially. Do not add independent medians or claim causal savings, precise observer overhead, overall improvement or production acceptance from these unpaired runs.
 
 Review considers the tail a useful local signal for a separately reviewed provisional guard port; whole-owner benefit remains unproved. The fixture repair is independently warranted by the inherited failure and passing strict repaired contract. No production source port is yet activated. Production796/Full ROOT FAIL and both mission tracks remain required.
+
+
+## Provisional live source port accepted
+
+Reviewed port packete8ed4e4e applied only actual src/gui/render.rs and src/gui/radial_editor/mod.rs. Pre-edit files matched796; final render `83ebc4975c5812de1268bb38c2989020bad5cc6fa0192002ec997f278b2ac909`, radial `6a422d76ce351f05b412ff318e3505d1ada29f9eaf00a883682fef098b6d57c5`. Exact patch `d970b00a56d0fb0f2ed7b6467d0bf218689c0573359460b36f89ab914a343f46`; provenance `b0cd9216fe4d87405b00edec723cb6a5bf41bf9c28d296a416a321864e6e5a9e`, under closed-aux-live-port-001/receipts. Scopedformat0/LFbaseline preserved. Parent actual diff and independent review confirm only intended guards, obsolete tuple removal and strict fixture setup; affected blocks match the passing archive. Whole radial source also matches after known EOL normalization. No probe carriers/wrappers/owner/clocks, vendors, theme styling or unrelated paths copied.
+
+This is a provisional source integration checkpoint. Archived candidate evidence supports it, but actual live compilation and the repaired exact radial contract are pending on the next canonical production artifact and must pass before any Full body. Latest actual production Full qualification remains796 FAIL. Whole-owner benefit and M2-A acceptance remain unproved; both tracks remain required.

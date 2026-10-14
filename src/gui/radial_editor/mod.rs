@@ -2588,7 +2588,6 @@ impl RadialEditorState {
     pub(crate) fn show_deferred(shared: &Arc<Mutex<Self>>, ctx: &egui::Context, app: &LauncherApp) {
         let (
             open,
-            viewport_close_pending,
             viewport_restore_pending,
             viewport_focus_pending,
             preferences,
@@ -2597,22 +2596,23 @@ impl RadialEditorState {
             require_confirm,
             launcher_always_on_top,
         ) = match shared.lock() {
-            Ok(editor) => (
-                editor.open,
-                editor.viewport_close_pending,
-                editor.viewport_restore_pending,
-                editor.viewport_focus_pending,
-                editor.preferences.clone().normalized(),
-                app.radial_feature_settings.clone(),
-                app.radial_expected_diagnostics.iter().cloned().collect(),
-                app.require_confirm_destructive,
-                app.always_on_top,
-            ),
+            Ok(editor) => {
+                if !editor.open && !editor.viewport_close_pending {
+                    return;
+                }
+                (
+                    editor.open,
+                    editor.viewport_restore_pending,
+                    editor.viewport_focus_pending,
+                    editor.preferences.clone().normalized(),
+                    app.radial_feature_settings.clone(),
+                    app.radial_expected_diagnostics.iter().cloned().collect(),
+                    app.require_confirm_destructive,
+                    app.always_on_top,
+                )
+            }
             Err(_) => return,
         };
-        if !open && !viewport_close_pending {
-            return;
-        }
         let action_catalog = if open {
             app.cached_universal_action_catalog_snapshot()
         } else {
@@ -16083,6 +16083,19 @@ mod tests {
                 ..Default::default()
             },
         );
+        let initial_child_output = ctx.run_ui(child_input.clone(), |_| {});
+        let initial_child_commands = &initial_child_output.viewport_output[&viewport_id].commands;
+        assert!(
+            matches!(
+                initial_child_commands.as_slice(),
+                [egui::ViewportCommand::SetTheme(_)]
+            ),
+            "{:?}",
+            initial_child_commands
+        );
+        assert!(shared.lock().unwrap().viewport_close_pending);
+        initial_child_output.drop_without_applying_deltas();
+
         let drained = ctx.run_ui(child_input, |child| callback(child));
         {
             let editor = shared.lock().unwrap();
