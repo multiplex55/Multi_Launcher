@@ -62,6 +62,7 @@ mod snippet_prompt_dialog;
 mod state;
 mod tempfile_alias_dialog;
 mod tempfile_dialog;
+pub mod theme;
 mod theme_settings_dialog;
 mod timer_dialog;
 mod toast_log_dialog;

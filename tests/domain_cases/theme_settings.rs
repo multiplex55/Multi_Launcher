@@ -9,6 +9,7 @@ fn theme_settings_round_trip_serialization() {
             ColorScheme::light(),
         )]),
         custom_scheme: ColorScheme::dark(),
+        preferences: Default::default(),
     };
 
     let json = serde_json::to_string(&theme).expect("theme settings should serialize");

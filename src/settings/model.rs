@@ -375,7 +375,7 @@ impl Default for ColorScheme {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThemeSettings {
     #[serde(default)]
     pub mode: ThemeMode,
@@ -383,6 +383,8 @@ pub struct ThemeSettings {
     pub named_presets: std::collections::HashMap<String, ColorScheme>,
     #[serde(default = "ThemeSettings::default_custom_scheme")]
     pub custom_scheme: ColorScheme,
+    #[serde(default)]
+    pub preferences: ThemePreferences,
 }
 impl ThemeSettings {
     pub fn default_dark() -> Self {
@@ -393,6 +395,7 @@ impl ThemeSettings {
                 ("light".to_string(), ColorScheme::light()),
             ]),
             custom_scheme: ColorScheme::dark(),
+            preferences: ThemePreferences::default(),
         }
     }
     pub fn default_light() -> Self {
@@ -403,6 +406,7 @@ impl ThemeSettings {
                 ("light".to_string(), ColorScheme::light()),
             ]),
             custom_scheme: ColorScheme::light(),
+            preferences: ThemePreferences::default(),
         }
     }
     fn default_custom_scheme() -> ColorScheme {
@@ -412,6 +416,57 @@ impl ThemeSettings {
 impl Default for ThemeSettings {
     fn default() -> Self {
         Self::default_dark()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeDensity {
+    #[default]
+    Compact,
+    Comfortable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemePreferences {
+    /// The selected preset name is retained even when no matching preset exists.
+    pub active_preset: Option<String>,
+    /// A new accent token override; saved hyperlink and selection colors remain independent.
+    pub accent: Option<ThemeColor>,
+    pub density: ThemeDensity,
+    /// Normalized by the semantic resolver, not by deserialization or serialization.
+    pub typography_scale: f32,
+}
+
+impl Default for ThemePreferences {
+    fn default() -> Self {
+        Self {
+            active_preset: None,
+            accent: None,
+            density: ThemeDensity::Compact,
+            typography_scale: 1.0,
+        }
+    }
+}
+
+impl ThemePreferences {
+    pub const MIN_TYPOGRAPHY_SCALE: f32 = 0.75;
+    pub const MAX_TYPOGRAPHY_SCALE: f32 = 2.0;
+
+    pub fn normalized(&self) -> Self {
+        let typography_scale = if self.typography_scale.is_finite() {
+            self.typography_scale
+                .clamp(Self::MIN_TYPOGRAPHY_SCALE, Self::MAX_TYPOGRAPHY_SCALE)
+        } else {
+            1.0
+        };
+        Self {
+            active_preset: self.active_preset.clone(),
+            accent: self.accent,
+            density: self.density,
+            typography_scale,
+        }
     }
 }
 
@@ -933,7 +988,8 @@ impl Settings {
 mod tests {
     use super::{
         CoordinateToolPreferences, MultiManagerSettings, NoteSettings, NoteViewMode,
-        QueryResultsLayoutSettings, Settings,
+        QueryResultsLayoutSettings, Settings, ThemeColor, ThemeDensity, ThemeMode,
+        ThemePreferences, ThemeSettings,
     };
     use crate::radial::model::RadialFeatureSettings;
 
@@ -955,6 +1011,55 @@ mod tests {
         assert_eq!(
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
+        );
+    }
+
+    #[test]
+    fn theme_preferences_preserve_legacy_defaults_maps_and_color_alpha() {
+        let default = ThemeSettings::default();
+        assert_eq!(default.preferences, ThemePreferences::default());
+        assert!(default.named_presets.contains_key("dark"));
+        assert!(default.named_presets.contains_key("light"));
+
+        let missing_presets: ThemeSettings = serde_json::from_str(
+            r#"{
+                "mode":"custom",
+                "custom_scheme":{"selection_bg":{"r":12,"g":34,"b":56,"a":73}}
+            }"#,
+        )
+        .expect("legacy theme without new preferences remains compatible");
+        assert!(missing_presets.named_presets.is_empty());
+        assert_eq!(missing_presets.preferences, ThemePreferences::default());
+        assert_eq!(missing_presets.custom_scheme.selection_bg.a, 73);
+
+        let explicitly_empty: ThemeSettings =
+            serde_json::from_str(r#"{"mode":"custom","named_presets":{},"custom_scheme":{}}"#)
+                .expect("an explicitly empty preset map remains empty");
+        assert!(explicitly_empty.named_presets.is_empty());
+        assert!(!default.named_presets.is_empty());
+
+        let mut round_trip = default;
+        round_trip.mode = ThemeMode::Custom;
+        round_trip.custom_scheme.selection_bg.a = 91;
+        round_trip.preferences = ThemePreferences {
+            active_preset: Some("not-yet-installed".into()),
+            accent: Some(ThemeColor {
+                r: 1,
+                g: 2,
+                b: 3,
+                a: 47,
+            }),
+            density: ThemeDensity::Comfortable,
+            typography_scale: 1.25,
+        };
+        let serialized = serde_json::to_string(&round_trip).unwrap();
+        let restored: ThemeSettings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored, round_trip);
+        assert_eq!(restored.custom_scheme.selection_bg.a, 91);
+        assert_eq!(restored.preferences.accent.unwrap().a, 47);
+        assert_eq!(
+            restored.preferences.active_preset.as_deref(),
+            Some("not-yet-installed")
         );
     }
 
