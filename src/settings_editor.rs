@@ -31,9 +31,17 @@ mod tests {
 
     #[test]
     fn settings_content_height_has_sane_floor() {
-        assert_eq!(SettingsEditor::settings_content_height(20.0), 180.0);
-        assert_eq!(SettingsEditor::settings_content_height(320.0), 264.0);
-        assert_eq!(SettingsEditor::settings_content_height(700.0), 644.0);
+        assert_eq!(SettingsEditor::settings_content_height(20.0, 56.0), 0.0);
+        assert_eq!(SettingsEditor::settings_content_height(320.0, 56.0), 264.0);
+        assert_eq!(SettingsEditor::settings_content_height(320.0, 80.0), 240.0);
+        assert_eq!(SettingsEditor::settings_content_height(700.0, 56.0), 644.0);
+
+        for (available, footer) in [(20.0, 56.0), (320.0, 80.0), (700.0, 56.0)] {
+            let body = SettingsEditor::settings_content_height(available, footer);
+            if available >= footer {
+                assert!(body + footer <= available);
+            }
+        }
     }
 
     #[test]

@@ -108,8 +108,6 @@ impl SettingsEditor {
     pub(crate) const SETTINGS_WINDOW_DEFAULT_WIDTH: f32 = 640.0;
     pub(crate) const SETTINGS_WINDOW_MAX_DEFAULT_HEIGHT: f32 = 720.0;
     pub(crate) const SETTINGS_WINDOW_MIN_HEIGHT: f32 = 360.0;
-    pub(crate) const SETTINGS_CONTENT_MIN_HEIGHT: f32 = 180.0;
-    pub(crate) const SETTINGS_FOOTER_RESERVED_HEIGHT: f32 = 56.0;
 
     pub(crate) fn normalized_static_settings(
         follow_mouse: bool,
@@ -147,9 +145,11 @@ impl SettingsEditor {
         ]
     }
 
-    pub(crate) fn settings_content_height(available_height: f32) -> f32 {
-        (available_height - Self::SETTINGS_FOOTER_RESERVED_HEIGHT)
-            .max(Self::SETTINGS_CONTENT_MIN_HEIGHT)
+    pub(crate) fn settings_content_height(
+        available_height: f32,
+        footer_reserved_height: f32,
+    ) -> f32 {
+        (available_height - footer_reserved_height).max(0.0)
     }
 
     pub(crate) fn validate_before_save(&mut self) -> Result<(), &'static str> {

@@ -53,6 +53,18 @@ impl TopLevelSettingsSection {
         }
     }
 
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Hotkeys => "Set the launcher shortcut and optional quit/help shortcuts.",
+            Self::LauncherWindow => "Choose window placement behavior and query/list text scales.",
+            Self::SearchResults => "Tune matching and the way search results are presented.",
+            Self::ActionsFeedback => "Control action completion, safety prompts, and feedback.",
+            Self::Dashboard => "Configure the empty-query dashboard and its refresh behavior.",
+            Self::Radial => "Set radial timing, input scope, safety, and menu defaults.",
+            Self::Plugins => "Configure settings for enabled plugins.",
+        }
+    }
+
     const fn default_open(self) -> bool {
         matches!(
             self,
@@ -83,7 +95,10 @@ fn show_settings_section(
         .show_header(ui, |ui| {
             ui.heading(section.title());
         })
-        .body(add_contents);
+        .body(|ui| {
+            crate::gui::theme::widgets::secondary_help(ui, section.description());
+            add_contents(ui);
+        });
 }
 
 fn set_all_settings_sections_open(ui: &egui::Ui, open: bool) {
@@ -98,6 +113,38 @@ fn set_all_settings_sections_open(ui: &egui::Ui, open: bool) {
     }
 }
 
+fn settings_footer_reserved_height(ui: &egui::Ui) -> f32 {
+    let spacing = ui.spacing();
+    let style = ui.style();
+    let font_id = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(style))
+        })
+        .unwrap_or_else(|| egui::TextStyle::Body.resolve(style));
+    let text_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + spacing.extra_text_line_spacing;
+    let button_frame = style
+        .button_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Inactive,
+        )
+        .frame;
+    let button_height =
+        (text_height + button_frame.total_margin().sum().y).max(spacing.interact_size.y);
+    let separator_height = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    button_height + 2.0 * spacing.item_spacing.y + separator_height
+}
+
 impl SettingsEditor {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_settings;
@@ -107,8 +154,12 @@ impl SettingsEditor {
             .min_height(Self::SETTINGS_WINDOW_MIN_HEIGHT)
             .open(&mut open)
             .show(ctx, |ui| {
-                let settings_content_height = Self::settings_content_height(ui.available_height());
+                let settings_content_height = Self::settings_content_height(
+                    ui.available_height(),
+                    settings_footer_reserved_height(ui),
+                );
                 egui::ScrollArea::vertical()
+                    .min_scrolled_height(0.0)
                     .max_height(settings_content_height)
                     .show(ui, |ui| {
                         let top_level_expand_request = ui
@@ -173,8 +224,15 @@ impl SettingsEditor {
                     });
 
                 ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                ui.horizontal_wrapped(|ui| {
+                    let save = ui.button("Save");
+                    if crate::gui::theme::widgets::with_button_emphasis(
+                        ui,
+                        save,
+                        crate::gui::theme::widgets::ButtonEmphasis::Primary,
+                    )
+                    .clicked()
+                    {
                         self.save_settings(ctx, app);
                     }
                 });
@@ -211,12 +269,14 @@ impl SettingsEditor {
                 "Share the launcher hotkey between tap and hold",
             );
             if self.radial_shared_tap_hold {
-                ui.small(RADIAL_TAP_HOLD_EXPLANATION);
+            crate::gui::theme::widgets::secondary_help(ui, RADIAL_TAP_HOLD_EXPLANATION);
             } else {
-                ui.small(RADIAL_LEGACY_TIMING_EXPLANATION);
+            crate::gui::theme::widgets::secondary_help(ui, RADIAL_LEGACY_TIMING_EXPLANATION);
             }
-            ui.horizontal(|ui| {
-                ui.label("Hold threshold (ms)");
+        crate::gui::theme::widgets::labeled_form_row(
+            ui,
+            "Hold threshold (ms)",
+            |ui| {
                 ui.add(
                     egui::DragValue::new(&mut self.radial_hold_threshold_ms)
                         .range(
@@ -224,8 +284,9 @@ impl SettingsEditor {
                                 ..=crate::radial::settings::MAX_HOLD_THRESHOLD_MS,
                         )
                         .speed(10),
-                );
-            });
+                )
+            },
+        );
             egui::ComboBox::from_label("Full-label tooltip scope")
                 .selected_text(match self.radial_tooltip_scope {
                     TooltipScope::Off => "Off",
@@ -249,18 +310,20 @@ impl SettingsEditor {
                         "All cells",
                     );
                 });
-            ui.horizontal(|ui| {
-                ui.label("Tooltip delay (ms)");
-                ui.add(
+        crate::gui::theme::widgets::labeled_form_row(ui, "Tooltip delay (ms)", |ui| {
+            ui.add(
                     egui::DragValue::new(&mut self.radial_tooltip_delay_ms)
                         .range(
                             crate::radial::settings::MIN_TOOLTIP_DELAY_MS
                                 ..=crate::radial::settings::MAX_TOOLTIP_DELAY_MS,
                         )
                         .speed(25),
-                );
-            });
-            ui.small("Tooltip delay is independent of the launcher hold threshold and item dwell delay.");
+            )
+        });
+        crate::gui::theme::widgets::secondary_help(
+            ui,
+            "Tooltip delay is independent of the launcher hold threshold and item dwell delay.",
+        );
             ui.checkbox(
                 &mut self.radial_show_expected_layout_diagnostics,
                 "Show expected label-layout diagnostics",
@@ -311,7 +374,8 @@ impl SettingsEditor {
                         "Hold and click",
                     );
                 });
-            ui.small(
+        crate::gui::theme::widgets::secondary_help(
+            ui,
                 "Sticky click keeps the tree available for repeated choices; release-to-select activates on release, and hold-and-click requires an explicit click.",
             );
             egui::ComboBox::from_label("New-menu default submenu behavior")
@@ -375,7 +439,7 @@ impl SettingsEditor {
                     });
                 });
 
-            ui.small(format!(
+        crate::gui::theme::widgets::secondary_help(ui, &format!(
                 "Current shared trigger: {} ({})",
                 self.hotkey,
                 if self.radial_shared_tap_hold {
@@ -383,16 +447,27 @@ impl SettingsEditor {
                 } else {
                     "legacy launcher timing"
                 }
-            ));
+        ));
             let issues = self.radial_validation_issues(&document);
             if issues.is_empty() {
-                ui.small("No conflicts with launcher, quit, help, Screen Draw, or global radial inputs.");
+            crate::gui::theme::widgets::secondary_help(
+                ui,
+                "No conflicts with launcher, quit, help, Screen Draw, or global radial inputs.",
+            );
             } else {
                 for issue in issues {
-                    ui.colored_label(egui::Color32::YELLOW, issue.message);
+                crate::gui::theme::widgets::semantic_status(
+                    ui,
+                    crate::gui::theme::widgets::StatusTone::Warning,
+                    "Warning",
+                    Some(&issue.message),
+                );
                 }
             }
-            ui.small("Back returns from a submenu; Esc or `radial close` closes the radial tree.");
+        crate::gui::theme::widgets::secondary_help(
+            ui,
+            "Back returns from a submenu; Esc or `radial close` closes the radial tree.",
+        );
         });
         ui.horizontal(|ui| {
             if ui.button("Edit menus...").clicked() {
@@ -405,25 +480,38 @@ impl SettingsEditor {
         if let Some(receipt) = app.radial_migration_receipt.as_ref() {
             match receipt.state {
                 crate::settings::SubmenuMigrationState::Applied => {
-                    ui.small("Existing submenu presentations were converted to Same center.");
+                    crate::gui::theme::widgets::secondary_help(
+                        ui,
+                        "Existing submenu presentations were converted to Same center.",
+                    );
                     if ui.button("Restore previous submenu presentation").clicked() {
                         app.request_radial_submenu_migration_restore();
                     }
                 }
                 crate::settings::SubmenuMigrationState::Prepared
                 | crate::settings::SubmenuMigrationState::UndoPrepared => {
-                    ui.small("Radial submenu migration recovery is pending.");
+                    crate::gui::theme::widgets::secondary_help(
+                        ui,
+                        "Radial submenu migration recovery is pending.",
+                    );
                 }
                 crate::settings::SubmenuMigrationState::Undone => {
-                    ui.small("The one-time radial submenu migration has been restored.");
+                    crate::gui::theme::widgets::secondary_help(
+                        ui,
+                        "The one-time radial submenu migration has been restored.",
+                    );
                 }
                 crate::settings::SubmenuMigrationState::Failed => {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        receipt
-                            .failure
-                            .as_deref()
-                            .unwrap_or("Radial migration failed."),
+                    crate::gui::theme::widgets::semantic_status(
+                        ui,
+                        crate::gui::theme::widgets::StatusTone::Error,
+                        "Error",
+                        Some(
+                            receipt
+                                .failure
+                                .as_deref()
+                                .unwrap_or("Radial migration failed."),
+                        ),
                     );
                 }
             }
@@ -484,9 +572,8 @@ impl SettingsEditor {
         ui.label(egui::RichText::new("Notifications and errors").strong());
         ui.checkbox(&mut self.show_toasts, "Enable toast notifications");
         if self.show_toasts {
-            ui.horizontal(|ui| {
-                ui.label("Toast duration (s)");
-                ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""));
+            crate::gui::theme::widgets::labeled_form_row(ui, "Toast duration (s)", |ui| {
+                ui.add(egui::Slider::new(&mut self.toast_duration, 0.1..=5.0).text(""))
             });
         }
         ui.horizontal_wrapped(|ui| {
@@ -511,25 +598,28 @@ impl SettingsEditor {
             &mut self.disable_timer_updates,
             "Disable timer auto refresh",
         );
-        ui.horizontal(|ui| {
-            ui.label("Timer refresh rate (s)");
+        crate::gui::theme::widgets::labeled_form_row(ui, "Timer refresh rate (s)", |ui| {
             ui.add_enabled_ui(!self.disable_timer_updates, |ui| {
                 ui.add(
                     egui::DragValue::new(&mut self.timer_refresh)
                         .range(0.1..=60.0)
                         .speed(0.1),
-                );
-            });
+                )
+            })
+            .inner
         });
     }
 
     fn render_launcher_window_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
         ui.checkbox(&mut self.always_on_top, "Always on top");
-        ui.horizontal(|ui| {
-            ui.label("Off-screen X");
-            ui.add(egui::DragValue::new(&mut self.offscreen_x));
-            ui.label("Y");
-            ui.add(egui::DragValue::new(&mut self.offscreen_y));
+        crate::gui::theme::widgets::labeled_form_row(ui, "Off-screen position", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("X");
+                ui.add(egui::DragValue::new(&mut self.offscreen_x));
+                ui.label("Y");
+                ui.add(egui::DragValue::new(&mut self.offscreen_y))
+            })
+            .inner
         });
         let follow_mouse_resp = ui.checkbox(&mut self.follow_mouse, "Follow mouse");
         if follow_mouse_resp.changed() && self.follow_mouse {
@@ -539,30 +629,33 @@ impl SettingsEditor {
             ui.checkbox(&mut self.static_enabled, "Use static position");
         });
         if !self.follow_mouse && self.static_enabled {
-            ui.horizontal(|ui| {
-                ui.label("X");
-                ui.add(egui::DragValue::new(&mut self.static_x));
-                ui.label("Y");
-                ui.add(egui::DragValue::new(&mut self.static_y));
-                ui.label("W");
-                ui.add(egui::DragValue::new(&mut self.static_w));
-                ui.label("H");
-                ui.add(egui::DragValue::new(&mut self.static_h));
-                if ui.button("Snapshot").clicked() {
-                    self.static_x = app.window_pos.0;
-                    self.static_y = app.window_pos.1;
-                    self.static_w = app.window_size.0;
-                    self.static_h = app.window_size.1;
-                }
+            crate::gui::theme::widgets::labeled_form_row(ui, "Static X / Y / W / H", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("X");
+                    ui.add(egui::DragValue::new(&mut self.static_x));
+                    ui.label("Y");
+                    ui.add(egui::DragValue::new(&mut self.static_y));
+                    ui.label("W");
+                    ui.add(egui::DragValue::new(&mut self.static_w));
+                    ui.label("H");
+                    ui.add(egui::DragValue::new(&mut self.static_h));
+                    let snapshot = ui.button("Snapshot");
+                    if snapshot.clicked() {
+                        self.static_x = app.window_pos.0;
+                        self.static_y = app.window_pos.1;
+                        self.static_w = app.window_size.0;
+                        self.static_h = app.window_size.1;
+                    }
+                    snapshot
+                })
+                .inner
             });
         }
-        ui.horizontal(|ui| {
-            ui.label("Query scale");
-            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""));
+        crate::gui::theme::widgets::labeled_form_row(ui, "Query scale", |ui| {
+            ui.add(egui::Slider::new(&mut self.query_scale, 0.5..=5.0).text(""))
         });
-        ui.horizontal(|ui| {
-            ui.label("List scale");
-            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""));
+        crate::gui::theme::widgets::labeled_form_row(ui, "List scale", |ui| {
+            ui.add(egui::Slider::new(&mut self.list_scale, 0.5..=5.0).text(""))
         });
         if ui.button("Open Theme Settings...").clicked() {
             app.open_theme_settings_dialog();
@@ -571,41 +664,41 @@ impl SettingsEditor {
 
     fn render_search_results_section(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.query_autocomplete, "Enable query autocomplete");
-        ui.horizontal(|ui| {
-            ui.label("Fuzzy weight");
-            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""));
+        crate::gui::theme::widgets::labeled_form_row(ui, "Fuzzy weight", |ui| {
+            ui.add(egui::Slider::new(&mut self.fuzzy_weight, 0.0..=5.0).text(""))
         });
-        ui.horizontal(|ui| {
-            ui.label("Usage weight");
-            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""));
+        crate::gui::theme::widgets::labeled_form_row(ui, "Usage weight", |ui| {
+            ui.add(egui::Slider::new(&mut self.usage_weight, 0.0..=5.0).text(""))
         });
         ui.checkbox(&mut self.match_exact, "Match exact");
-        ui.horizontal(|ui| {
-            ui.label("Page jump");
+        crate::gui::theme::widgets::labeled_form_row(ui, "Page jump", |ui| {
             ui.add(
                 egui::DragValue::new(&mut self.page_jump)
                     .range(1..=100)
                     .speed(1),
-            );
+            )
         });
         ui.checkbox(
             &mut self.query_results_layout_enabled,
             "Display results in grid layout",
         );
         ui.add_enabled_ui(self.query_results_layout_enabled, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Grid rows");
-                ui.add(
-                    egui::DragValue::new(&mut self.query_results_layout_rows)
-                        .range(1..=100)
-                        .speed(1),
-                );
-                ui.label("Columns");
-                ui.add(
-                    egui::DragValue::new(&mut self.query_results_layout_cols)
-                        .range(1..=100)
-                        .speed(1),
-                );
+            crate::gui::theme::widgets::labeled_form_row(ui, "Grid size", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Rows");
+                    ui.add(
+                        egui::DragValue::new(&mut self.query_results_layout_rows)
+                            .range(1..=100)
+                            .speed(1),
+                    );
+                    ui.label("Columns");
+                    ui.add(
+                        egui::DragValue::new(&mut self.query_results_layout_cols)
+                            .range(1..=100)
+                            .speed(1),
+                    )
+                })
+                .inner
             });
             self.query_results_layout_rows = self.query_results_layout_rows.max(1);
             self.query_results_layout_cols = self.query_results_layout_cols.max(1);
@@ -993,4 +1086,96 @@ fn hotkey_indicator(ui: &mut egui::Ui, valid: bool) {
         (crate::gui::theme::widgets::StatusTone::Error, "Invalid")
     };
     crate::gui::theme::widgets::semantic_status(ui, tone, label, None);
+}
+
+#[cfg(test)]
+mod settings_shell_tests {
+    use super::*;
+
+    fn draw_sections(ctx: &egui::Context, expand_all: Option<bool>) -> (Vec<bool>, Vec<egui::Id>) {
+        let mut open_states = Vec::new();
+        let mut ids = Vec::new();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 520.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                if let Some(open) = expand_all {
+                    set_all_settings_sections_open(ui, open);
+                }
+                for section in TopLevelSettingsSection::ALL {
+                    let id = section.egui_id(ui);
+                    show_settings_section(ui, section, None, |ui| {
+                        ui.label("section content");
+                    });
+                    open_states.push(
+                        egui::collapsing_header::CollapsingState::load_with_default_open(
+                            ctx,
+                            id,
+                            section.default_open(),
+                        )
+                        .is_open(),
+                    );
+                    ids.push(id);
+                }
+            },
+        );
+        output.drop_without_applying_deltas();
+        (open_states, ids)
+    }
+
+    #[test]
+    fn settings_sections_keep_ids_and_collapse_state_while_footer_reserves_space() {
+        let ctx = egui::Context::default();
+        let (defaults, ids) = draw_sections(&ctx, None);
+        assert_eq!(
+            defaults,
+            vec![true, true, true, false, false, false, false],
+            "the seven established default-open states remain intact"
+        );
+
+        let (expanded, expanded_ids) = draw_sections(&ctx, Some(true));
+        assert!(expanded.iter().all(|open| *open));
+        assert_eq!(expanded_ids, ids, "expand-all keeps persistent section IDs");
+
+        let (collapsed, collapsed_ids) = draw_sections(&ctx, Some(false));
+        assert!(collapsed.iter().all(|open| !open));
+        assert_eq!(
+            collapsed_ids, ids,
+            "collapse-all keeps persistent section IDs"
+        );
+
+        let mut save_rect = egui::Rect::NOTHING;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 240.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let content_height = SettingsEditor::settings_content_height(
+                    ui.available_height(),
+                    settings_footer_reserved_height(ui),
+                );
+                egui::ScrollArea::vertical()
+                    .min_scrolled_height(0.0)
+                    .max_height(content_height)
+                    .show(ui, |ui| ui.add_space(600.0));
+                ui.separator();
+                save_rect = ui.button("Save").rect;
+            },
+        );
+        output.drop_without_applying_deltas();
+        assert!(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 240.0))
+                .contains_rect(save_rect),
+            "the Save control remains inside a short viewport"
+        );
+    }
 }

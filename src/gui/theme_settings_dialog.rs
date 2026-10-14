@@ -1,7 +1,7 @@
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::theme::{
-    ChromeIcon, ResolvedTheme, SystemAppearance, TextRole, chrome_icon_button,
-    chrome_small_icon_button, effective_color_scheme, resolve_theme, text_style_for_role,
+    chrome_icon_button, chrome_small_icon_button, effective_color_scheme, resolve_theme,
+    text_style_for_role, ChromeIcon, ResolvedTheme, SystemAppearance, TextRole,
 };
 use crate::settings::{ColorScheme, Settings, ThemeColor, ThemeMode, ThemeSettings};
 use eframe::egui;
@@ -219,14 +219,16 @@ pub fn ui(
     egui::Window::new("Theme settings")
         .open(&mut keep_open)
         .resizable(true)
+        .max_width(ctx.content_rect().width())
+        .max_height(ctx.content_rect().height())
+        .vscroll(false)
         .default_width(980.0)
         .show(ctx, |ui| {
-            if let Some(err) = &state.last_error {
-                widgets::semantic_status(ui, StatusTone::Error, "Error", Some(err));
-                ui.separator();
-            }
-
             if !state.can_edit() {
+                if let Some(err) = &state.last_error {
+                    widgets::semantic_status(ui, StatusTone::Error, "Error", Some(err));
+                    ui.separator();
+                }
                 ui.label(
                     egui::RichText::new(
                         "Theme settings could not be loaded. Retry before editing or saving.",
@@ -253,163 +255,96 @@ pub fn ui(
                 return;
             }
 
-            if state.is_conflicted() {
-                ui.horizontal(|ui| {
-                    widgets::semantic_status(
-                        ui,
-                        StatusTone::Warning,
-                        "Warning",
-                        Some("The saved theme changed while this draft was open."),
-                    );
-                    if chrome_icon_button(
-                        ui,
-                        ChromeIcon::Reset,
-                        "theme.reload-saved",
-                        "Reload saved theme",
-                    )
-                    .clicked()
-                    {
-                        reload_requested = true;
-                    }
-                });
-                ui.separator();
-            }
-
-            widgets::secondary_help(ui, "Customize launcher colors and theme mode.");
-            ui.separator();
-
+            let footer_layout = theme_footer_layout(ui);
+            let body_max_height =
+                theme_content_height(ui.available_height(), footer_layout.reserved_height);
             let mut changed = false;
-            ui.columns(2, |columns| {
-                changed |= section_base_mode(&mut columns[0], &mut state.draft.mode);
-                columns[0].separator();
-                changed |= section_presets(&mut columns[0], state);
-
-                let appearance = system_appearance(ctx);
-                let mut scheme = state.effective_scheme(appearance);
-                let mode = state.draft.mode;
-                let mut scheme_changed = false;
-                scheme_changed |= section_core_surfaces(&mut columns[0], &mut scheme, mode);
-                columns[0].separator();
-                scheme_changed |= section_text_and_links(&mut columns[0], &mut scheme, mode);
-                columns[0].separator();
-                scheme_changed |= section_widgets(&mut columns[1], &mut scheme, mode);
-                columns[1].separator();
-                scheme_changed |= section_selection(&mut columns[1], &mut scheme, mode);
-                columns[1].separator();
-                scheme_changed |= section_semantic(&mut columns[1], &mut scheme, mode);
-                if scheme_changed {
-                    state.apply_manual_scheme(scheme.clone());
-                    changed = true;
-                }
-
-                changed |= section_accent(
-                    &mut columns[1],
-                    &mut state.draft.preferences.accent,
-                    scheme.widget_active_fill,
-                );
-                columns[1].separator();
-                preview(&mut columns[1], resolve_theme(&state.draft, appearance));
-            });
+            egui::ScrollArea::vertical()
+                .min_scrolled_height(0.0)
+                .max_height(body_max_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let (body_changed, body_reload_requested, _) =
+                        render_theme_body(ui, state, system_appearance(ctx));
+                    changed = body_changed;
+                    reload_requested = body_reload_requested;
+                });
 
             if changed {
                 state.dirty = true;
                 draft_changed = true;
             }
 
-            ui.separator();
-            ui.horizontal(|ui| {
-                let reset = chrome_icon_button(
-                    ui,
-                    ChromeIcon::Reset,
-                    "theme.reset-all",
-                    "Reset all to default",
-                );
-                if widgets::with_button_emphasis(ui, reset, ButtonEmphasis::Destructive).clicked() {
-                    let presets = state.draft.named_presets.clone();
-                    state.draft = ThemeSettings::default();
-                    state.draft.named_presets = presets;
-                    state.dirty = true;
-                    draft_changed = true;
-                }
-                let cancel = chrome_icon_button(ui, ChromeIcon::Cancel, "theme.cancel", "Cancel");
-                if widgets::with_button_emphasis(ui, cancel, ButtonEmphasis::Ordinary).clicked() {
-                    *open = false;
-                }
-                if ui
-                    .add_enabled_ui(state.dirty && state.can_commit(), |ui| {
-                        let apply =
-                            chrome_icon_button(ui, ChromeIcon::Apply, "theme.apply", "Apply");
-                        widgets::with_button_emphasis(ui, apply, ButtonEmphasis::Ordinary)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    match state.save_to_path(ctx, &app.settings_path) {
-                        Ok(_) => {
-                            if app.enable_toasts {
-                                app.add_toast(Toast {
-                                    text: "Theme settings applied".into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(app.toast_duration as f64),
+            let (footer_action, _) = render_theme_footer(ui, state, &footer_layout);
+            if footer_action == Some(ThemeFooterAction::Reset) {
+                let presets = state.draft.named_presets.clone();
+                state.draft = ThemeSettings::default();
+                state.draft.named_presets = presets;
+                state.dirty = true;
+                draft_changed = true;
+            }
+            if footer_action == Some(ThemeFooterAction::Cancel) {
+                *open = false;
+            }
+            if footer_action == Some(ThemeFooterAction::Apply) {
+                match state.save_to_path(ctx, &app.settings_path) {
+                    Ok(_) => {
+                        if app.enable_toasts {
+                            app.add_toast(Toast {
+                                text: "Theme settings applied".into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(app.toast_duration as f64),
 
-                                    style: Default::default(),
-                                });
-                            }
+                                style: Default::default(),
+                            });
                         }
-                        Err(err) => {
-                            state.last_error = Some(err.clone());
-                            if app.enable_toasts {
-                                app.add_toast(Toast {
-                                    text: err.into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(app.toast_duration as f64),
+                    }
+                    Err(err) => {
+                        state.last_error = Some(err.clone());
+                        if app.enable_toasts {
+                            app.add_toast(Toast {
+                                text: err.into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(app.toast_duration as f64),
 
-                                    style: Default::default(),
-                                });
-                            }
+                                style: Default::default(),
+                            });
                         }
                     }
                 }
-                if ui
-                    .add_enabled_ui(state.dirty && state.can_commit(), |ui| {
-                        let save = chrome_icon_button(ui, ChromeIcon::Save, "theme.save", "Save");
-                        widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary)
-                    })
-                    .inner
-                    .clicked()
-                {
-                    match state.save_to_path(ctx, &app.settings_path) {
-                        Ok(_) => {
-                            if app.enable_toasts {
-                                app.add_toast(Toast {
-                                    text: "Theme settings saved".into(),
-                                    kind: ToastKind::Success,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(app.toast_duration as f64),
+            }
+            if footer_action == Some(ThemeFooterAction::Save) {
+                match state.save_to_path(ctx, &app.settings_path) {
+                    Ok(_) => {
+                        if app.enable_toasts {
+                            app.add_toast(Toast {
+                                text: "Theme settings saved".into(),
+                                kind: ToastKind::Success,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(app.toast_duration as f64),
 
-                                    style: Default::default(),
-                                });
-                            }
-                            *open = false;
+                                style: Default::default(),
+                            });
                         }
-                        Err(err) => {
-                            state.last_error = Some(err.clone());
-                            if app.enable_toasts {
-                                app.add_toast(Toast {
-                                    text: err.into(),
-                                    kind: ToastKind::Error,
-                                    options: ToastOptions::default()
-                                        .duration_in_seconds(app.toast_duration as f64),
+                        *open = false;
+                    }
+                    Err(err) => {
+                        state.last_error = Some(err.clone());
+                        if app.enable_toasts {
+                            app.add_toast(Toast {
+                                text: err.into(),
+                                kind: ToastKind::Error,
+                                options: ToastOptions::default()
+                                    .duration_in_seconds(app.toast_duration as f64),
 
-                                    style: Default::default(),
-                                });
-                            }
+                                style: Default::default(),
+                            });
                         }
                     }
                 }
-            });
+            }
         });
 
     *open = keep_open && *open;
@@ -418,6 +353,290 @@ pub fn ui(
     } else if draft_changed && *open {
         crate::gui::theme::publish_preview(ctx, &state.draft);
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThemeFooterAction {
+    Reset,
+    Cancel,
+    Apply,
+    Save,
+}
+
+impl ThemeFooterAction {
+    const ALL: [Self; 4] = [Self::Reset, Self::Cancel, Self::Apply, Self::Save];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Reset => "Reset all to default",
+            Self::Cancel => "Cancel",
+            Self::Apply => "Apply",
+            Self::Save => "Save",
+        }
+    }
+}
+
+fn render_theme_footer(
+    ui: &mut egui::Ui,
+    state: &ThemeSettingsDialogState,
+    layout: &ThemeFooterLayout,
+) -> (Option<ThemeFooterAction>, [egui::Rect; 4]) {
+    let mut action = None;
+    let mut action_rects = [egui::Rect::NOTHING; 4];
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        // Keep each button's label at its measured, unwrapped width. The
+        // wrapped row then moves whole buttons onto the next line, matching
+        // the widths used to build this shared footer layout plan.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+        for (index, footer_action) in ThemeFooterAction::ALL.into_iter().enumerate() {
+            if layout.break_before[index] {
+                // Keep all buttons in this one UI scope so their automatic
+                // and icon IDs remain stable as the row plan changes.
+                ui.end_row();
+            }
+
+            let response = match footer_action {
+                ThemeFooterAction::Reset => {
+                    let response = chrome_icon_button(
+                        ui,
+                        ChromeIcon::Reset,
+                        "theme.reset-all",
+                        "Reset all to default",
+                    );
+                    widgets::with_button_emphasis(ui, response, ButtonEmphasis::Destructive)
+                }
+                ThemeFooterAction::Cancel => {
+                    let response =
+                        chrome_icon_button(ui, ChromeIcon::Cancel, "theme.cancel", "Cancel");
+                    widgets::with_button_emphasis(ui, response, ButtonEmphasis::Ordinary)
+                }
+                ThemeFooterAction::Apply => {
+                    ui.add_enabled_ui(state.dirty && state.can_commit(), |ui| {
+                        let response =
+                            chrome_icon_button(ui, ChromeIcon::Apply, "theme.apply", "Apply");
+                        widgets::with_button_emphasis(ui, response, ButtonEmphasis::Ordinary)
+                    })
+                    .inner
+                }
+                ThemeFooterAction::Save => {
+                    ui.add_enabled_ui(state.dirty && state.can_commit(), |ui| {
+                        let response =
+                            chrome_icon_button(ui, ChromeIcon::Save, "theme.save", "Save");
+                        widgets::with_button_emphasis(ui, response, ButtonEmphasis::Primary)
+                    })
+                    .inner
+                }
+            };
+            action_rects[index] = response.rect;
+            if response.clicked() {
+                action = Some(footer_action);
+            }
+        }
+    });
+    (action, action_rects)
+}
+
+fn render_theme_body(
+    ui: &mut egui::Ui,
+    state: &mut ThemeSettingsDialogState,
+    appearance: SystemAppearance,
+) -> (bool, bool, [egui::Rect; 3]) {
+    let mut notice_rects = [egui::Rect::NOTHING; 3];
+    if let Some(err) = &state.last_error {
+        notice_rects[0] = widgets::semantic_status(ui, StatusTone::Error, "Error", Some(err)).rect;
+        ui.separator();
+    }
+
+    let mut reload_requested = false;
+    if state.is_conflicted() {
+        let (warning_rect, reload) = ui
+            .horizontal_wrapped(|ui| {
+                let warning = widgets::semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    "Warning",
+                    Some("The saved theme changed while this draft was open."),
+                );
+                let reload = chrome_icon_button(
+                    ui,
+                    ChromeIcon::Reset,
+                    "theme.reload-saved",
+                    "Reload saved theme",
+                );
+                (warning.rect, reload)
+            })
+            .inner;
+        notice_rects[1] = warning_rect;
+        notice_rects[2] = reload.rect;
+        reload_requested = reload.clicked();
+        ui.separator();
+    }
+
+    widgets::secondary_help(ui, "Customize launcher colors and theme mode.");
+    ui.separator();
+    let changed = render_theme_sections(ui, state, appearance);
+    (changed, reload_requested, notice_rects)
+}
+
+const THEME_TWO_COLUMN_MIN_WIDTH: f32 = 760.0;
+
+fn theme_editor_uses_two_columns(available_width: f32) -> bool {
+    available_width >= THEME_TWO_COLUMN_MIN_WIDTH
+}
+
+fn theme_content_height(available_height: f32, footer_reserved_height: f32) -> f32 {
+    (available_height - footer_reserved_height).max(0.0)
+}
+
+#[derive(Clone, Copy)]
+struct ThemeFooterLayout {
+    break_before: [bool; 4],
+    reserved_height: f32,
+}
+
+fn theme_footer_layout(ui: &egui::Ui) -> ThemeFooterLayout {
+    let spacing = ui.spacing();
+    let style = ui.style();
+    let button_font = style
+        .override_font_id
+        .clone()
+        .unwrap_or_else(|| text_style_for_role(TextRole::Button).resolve(style));
+    let button_frame_margin = style
+        .button_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Inactive,
+        )
+        .frame
+        .total_margin()
+        .sum();
+    let icon_width = spacing.icon_width.max(12.0);
+    let button_sizes = ThemeFooterAction::ALL.map(|action| {
+        let text_size = ui
+            .painter()
+            .layout_no_wrap(
+                action.label().to_owned(),
+                button_font.clone(),
+                ui.visuals().text_color(),
+            )
+            .size();
+        egui::vec2(
+            text_size.x + icon_width + spacing.icon_spacing + button_frame_margin.x,
+            (text_size.y.max(icon_width) + button_frame_margin.y).max(spacing.interact_size.y),
+        )
+    });
+
+    let available_width = ui.available_width().max(1.0);
+    let mut break_before = [false; ThemeFooterAction::ALL.len()];
+    let mut row_width = 0.0;
+    for (index, button_size) in button_sizes.iter().enumerate() {
+        let button_width = button_size.x;
+        let gap = if row_width == 0.0 {
+            0.0
+        } else {
+            spacing.item_spacing.x
+        };
+        if row_width + gap + button_width > available_width && row_width > 0.0 {
+            break_before[index] = true;
+            row_width = button_width;
+        } else {
+            row_width += gap + button_width;
+        }
+    }
+
+    let mut action_height = 0.0;
+    let mut row_height = 0.0f32;
+    for (index, button_size) in button_sizes.iter().enumerate() {
+        if break_before[index] {
+            action_height += row_height + spacing.item_spacing.y;
+            row_height = 0.0;
+        }
+        row_height = row_height.max(button_size.y);
+    }
+    action_height += row_height.max(spacing.interact_size.y);
+    let separator_height = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    ThemeFooterLayout {
+        break_before,
+        reserved_height: action_height + 2.0 * spacing.item_spacing.y + separator_height,
+    }
+}
+
+fn render_theme_sections(
+    ui: &mut egui::Ui,
+    state: &mut ThemeSettingsDialogState,
+    appearance: SystemAppearance,
+) -> bool {
+    if theme_editor_uses_two_columns(ui.available_width()) {
+        let mut changed = false;
+        ui.columns(2, |columns| {
+            let (primary_changed, scheme, mode, scheme_changed) =
+                render_theme_primary_sections(&mut columns[0], state, appearance);
+            changed = primary_changed
+                | render_theme_secondary_sections(
+                    &mut columns[1],
+                    state,
+                    appearance,
+                    scheme,
+                    mode,
+                    scheme_changed,
+                );
+        });
+        changed
+    } else {
+        let (mut changed, scheme, mode, scheme_changed) =
+            render_theme_primary_sections(ui, state, appearance);
+        changed |=
+            render_theme_secondary_sections(ui, state, appearance, scheme, mode, scheme_changed);
+        changed
+    }
+}
+
+fn render_theme_primary_sections(
+    ui: &mut egui::Ui,
+    state: &mut ThemeSettingsDialogState,
+    appearance: SystemAppearance,
+) -> (bool, ColorScheme, ThemeMode, bool) {
+    let mut changed = section_base_mode(ui, &mut state.draft.mode);
+    ui.separator();
+    changed |= section_presets(ui, state);
+
+    let mut scheme = state.effective_scheme(appearance);
+    let mode = state.draft.mode;
+    let mut scheme_changed = section_core_surfaces(ui, &mut scheme, mode);
+    ui.separator();
+    scheme_changed |= section_text_and_links(ui, &mut scheme, mode);
+    changed |= scheme_changed;
+    (changed, scheme, mode, scheme_changed)
+}
+
+fn render_theme_secondary_sections(
+    ui: &mut egui::Ui,
+    state: &mut ThemeSettingsDialogState,
+    appearance: SystemAppearance,
+    mut scheme: ColorScheme,
+    mode: ThemeMode,
+    mut scheme_changed: bool,
+) -> bool {
+    scheme_changed |= section_widgets(ui, &mut scheme, mode);
+    ui.separator();
+    scheme_changed |= section_selection(ui, &mut scheme, mode);
+    ui.separator();
+    scheme_changed |= section_semantic(ui, &mut scheme, mode);
+
+    let mut changed = scheme_changed;
+    let accent_default = scheme.widget_active_fill;
+    if scheme_changed {
+        state.apply_manual_scheme(scheme);
+    }
+    changed |= section_accent(ui, &mut state.draft.preferences.accent, accent_default);
+    ui.separator();
+    preview(ui, resolve_theme(&state.draft, appearance));
+    changed
 }
 
 fn system_appearance(ctx: &egui::Context) -> SystemAppearance {
@@ -445,7 +664,7 @@ fn section_base_mode(ui: &mut egui::Ui, mode: &mut ThemeMode) -> bool {
         "Base mode",
         Some("Follow the system setting or choose a fixed appearance."),
     );
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         changed |= ui
             .selectable_value(mode, ThemeMode::System, "System")
             .changed();
@@ -608,7 +827,7 @@ fn section_accent(
 ) -> bool {
     section_heading(ui, "Accent", None);
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let mut enabled = accent.is_some();
         if ui.checkbox(&mut enabled, "Override accent").changed() {
             *accent = enabled.then_some(palette_accent);
@@ -722,11 +941,11 @@ fn section_semantic(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode
 }
 
 fn color_row(ui: &mut egui::Ui, label: &str, color: &mut ThemeColor) -> bool {
-    const LABEL_WIDTH: f32 = 150.0;
+    let label_width = (ui.available_width() * 0.42).clamp(92.0, 150.0);
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.set_min_height(22.0);
-        ui.add_sized([LABEL_WIDTH, 0.0], egui::Label::new(label));
+        ui.add_sized([label_width, 0.0], egui::Label::new(label));
         ui.spacing_mut().item_spacing.x = 6.0;
         let mut rgba = [color.r, color.g, color.b, color.a];
         if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
@@ -789,7 +1008,7 @@ fn preview(ui: &mut egui::Ui, resolved: ResolvedTheme) {
                 "https://example.com",
             );
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 swatch(ui, "Inactive", palette.control_fill, palette.control_border);
                 swatch(
                     ui,
@@ -805,7 +1024,7 @@ fn preview(ui: &mut egui::Ui, resolved: ResolvedTheme) {
                 );
             });
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 swatch(
                     ui,
                     "Selection",
@@ -855,6 +1074,118 @@ mod tests {
         let path = directory.path().join("settings.json");
         settings.save(path.to_str().unwrap()).unwrap();
         path.to_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn theme_editor_reflows_without_mutating_the_draft_and_keeps_actions_visible() {
+        assert!(theme_editor_uses_two_columns(THEME_TWO_COLUMN_MIN_WIDTH));
+        assert!(!theme_editor_uses_two_columns(
+            THEME_TWO_COLUMN_MIN_WIDTH - 1.0
+        ));
+
+        let ctx = egui::Context::default();
+        let mut state = ThemeSettingsDialogState::default();
+        let original_draft = state.draft.clone();
+        for (width, two_columns) in [(640.0, false), (900.0, true)] {
+            let mut changed = false;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 460.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_width(width);
+                    assert_eq!(
+                        theme_editor_uses_two_columns(ui.available_width()),
+                        two_columns
+                    );
+                    changed = render_theme_sections(ui, &mut state, SystemAppearance::Dark);
+                },
+            );
+            output.drop_without_applying_deltas();
+            assert!(!changed, "presentation alone does not edit the draft");
+            assert_eq!(state.draft, original_draft);
+            assert!(!state.dirty);
+        }
+
+        let ctx = egui::Context::default();
+        ctx.set_theme(egui::Theme::Dark);
+        let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
+        style.override_font_id = Some(egui::FontId::proportional(31.0));
+        ctx.set_style_of(egui::Theme::Dark, style);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 600.0));
+        let mut state = ThemeSettingsDialogState::default();
+        state.persisted_baseline = Some(state.draft.clone());
+        state.conflicted = true;
+        state.last_error = Some("Failed to save settings: access denied.".to_owned());
+        let mut open = true;
+        let mut action_rects = [egui::Rect::NOTHING; 4];
+        let mut notice_rects = [egui::Rect::NOTHING; 3];
+        let mut body_clip = egui::Rect::NOTHING;
+        let mut window_rect = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |_| {
+                    let rendered_window = egui::Window::new("Theme settings")
+                        .open(&mut open)
+                        .resizable(true)
+                        .max_width(ctx.content_rect().width())
+                        .max_height(ctx.content_rect().height())
+                        .vscroll(false)
+                        .default_width(420.0)
+                        .show(&ctx, |ui| {
+                            let footer_layout = theme_footer_layout(ui);
+                            let body_height = theme_content_height(
+                                ui.available_height(),
+                                footer_layout.reserved_height,
+                            );
+                            egui::ScrollArea::vertical()
+                                .min_scrolled_height(0.0)
+                                .max_height(body_height)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    body_clip = ui.clip_rect();
+                                    let (_, _, notices) =
+                                        render_theme_body(ui, &mut state, SystemAppearance::Dark);
+                                    notice_rects = notices;
+                                });
+                            let (_, rects) = render_theme_footer(ui, &state, &footer_layout);
+                            action_rects = rects;
+                        });
+                    window_rect = rendered_window
+                        .map(|window| window.response.rect)
+                        .unwrap_or(egui::Rect::NOTHING);
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+        assert!(open, "the dialog remains open during layout-only frames");
+        assert!(
+            action_rects.iter().all(|rect| screen.contains_rect(*rect)),
+            "all theme actions stay visible inside the actual constrained window; \
+             actions={action_rects:?}, screen={screen:?}, window={window_rect:?}, \
+             body_clip={body_clip:?}, notices={notice_rects:?}"
+        );
+        let footer_top = action_rects
+            .iter()
+            .map(|rect| rect.min.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            notice_rects.iter().all(|rect| {
+                rect.is_positive() && body_clip.intersects(*rect) && rect.min.y < footer_top
+            }),
+            "error, conflict warning, and reload stay in the scrollable body before the footer; \
+             notices={notice_rects:?}, body_clip={body_clip:?}, footer_top={footer_top}"
+        );
+        assert_eq!(state.draft, ThemeSettings::default());
+        assert!(!state.dirty);
     }
 
     #[test]
@@ -922,11 +1253,9 @@ mod tests {
         let bad_path = directory.path().join("not-a-settings-file");
         std::fs::create_dir(&bad_path).unwrap();
 
-        assert!(
-            state
-                .save_to_path(&ctx, bad_path.to_str().unwrap())
-                .is_err()
-        );
+        assert!(state
+            .save_to_path(&ctx, bad_path.to_str().unwrap())
+            .is_err());
         assert!(state.dirty);
         assert_eq!(state.draft, draft);
         assert_eq!(state.persisted_baseline, baseline);

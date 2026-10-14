@@ -128,6 +128,16 @@ No new QA framework/bootstrap extension is needed. For one panel per isolated st
 
 Use SURFACE_COVERAGE.md for the actual presentation-owner ledger and inspected M5-B1 Notes handoff after M4-C/M5-A. It is an inventory, not completed visual qualification. Group related surfaces in coherent checkpoints, preserve domain-specific content/native overlays, and mark actual evidence and manual gaps as each group lands. Later group packets inspect actual helpers/source at activation; no extra benchmark or generic framework.
 
+## M5-B1 refreshed Notes packet (after M5-A release)
+
+Sole writer owns src/gui/notes_dialog.rs and src/gui/note_panel.rs. Actual pre-shell framebuffer confirms narrow one-line title/slug/backlink clipping. Stack secondary metadata below primary title, bounded wrapping at row width; migrate measure_notes_geometry, paint and independent eager oracle together. Preserve explicit wrap overrides, slug quick-notes-row scope, one combined clickable header Response/context menu/hover preview/separator, filtered projection/menu owner/virtualization/scroll anchors/warm reuse. Palette does not enter geometry key.
+
+Quick Notes editor reserves actual themed footer before scrollbody instead of consuming available_height; preserve ten-row editing, Enter/timestamp handling, PendingNoteSave and failed-save draft retention/Cancel. Existing Save primary emphasis; browse toolbar compactwrap, no addedcontrols/defaultsize enlargement. Note-panel toolbar wraps existing ordered/conditional Save/externalopen/view/details/font/sections/outline controls; body follows actualheight. Keep note font controls independent from app typography and all popup/content/transaction/slug identities.
+
+Shared headings/help/status in template/editor/confirmation chrome; Name-required becomes semanticwarning. Clickable missing/ambiguous wikilinks remain nativeclickable Label/Response/text, only resolved warning/error colors. Markdown/code/callouts/images/taskcontent unchanged. No parser/storage/theme/cachepolicy redesign.
+
+Extend existing eagergeometry narrow longtitle+metadata case with matching measured/paintedrects insidewidth, stableID/warmreuse. One editlayout test: longtext scrolls, Save/Cancel visible at existingdefaultsize, renderdoesnotmutatedraft. Reuse quick_notes_browsing_virtualizes_rows_and_reuses_geometry; quick_notes_geometry_follows_consumer_font_activation; failed_quick_notes_edit_retains_dialog_and_committed_note; split_view_allows_narrow_dialog_without_forcing_pane_minimums; markdown_title_change_keeps_note_window_rect; discard_prompt_actions_have_explicit_transitions. Dispose headlessoutputs; targetedlockedofflinefastdevlibNextest/scopedfmt/diff/review, nobenchmark/broadsuite. Correct toolbar-bodyallocation only if reproduced; no note-layout rewrite. Done: readable exactgeometry/header, reachableeditfooter, sharedchrome, passing affectedcontracts.
+
 ## Historical handoffs — superseded, reference only
 
 All prior assignments, gates, source/build activation wording and accepted experiment packets below are historical. They do not authorize another optimization, backend competition, benchmark matrix or parity blocker. Raw findings and prior dispositions remain preserved; consult the future backlog for adopted/deferred/rejected status.

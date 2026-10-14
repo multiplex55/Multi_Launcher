@@ -79,3 +79,14 @@ Recovery-surface follow-up: retained invalid-fixture Dark001 defaults400x220 cap
 ### Theme editor pre-shell observation
 
 Existing immutable M4-B QA binary C95E, isolated run-m4b-theme-before-001, ROOT852x460 capture saved and visually inspected. Color sections extend below visible bounds and Apply/Save/Cancel footer is not visible. M5-A already owns adaptive scrolling body and reserved footer correction; this is retained adverse evidence, not final acceptance. Capture: target/egui-modernization/native-themed/run-m4b-theme-before-001/framebuffer-output/framebuffer.png with source/build/process receipt. Fixture PID31952 exited after normal Alt-F4; no source or settings save action performed. Native screenshot/focus coverage remains distinct from framebuffer pixels.
+
+### General Settings and Quick Notes pre-shell observations
+
+Same immutable M4-B C95E QA binary, separate isolated startup pin fixtures, ROOT852x460 saved receipts with no failure; processes35324/26904 closed normally and exit confirmed. General Settings default640x320 shell has reachable Save and scrolling sections; native accessibility lists all seven sections/control states. Preserve default sizing while improving actual metric reservation/alignment in M5-A. Quick Notes default narrow shell has reachable toolbar/Search, but one-line title/slug/backlink metadata clips at its right boundary; M5-B1 owns readable narrow hierarchy with matching measurement/paint geometry. No Save, note mutation, or native click action was performed. These are pre-change framebuffer/accessibility observations, not final visual/native acceptance.
+
+- Settings: target/egui-modernization/native-themed/run-m4b-settings-before-001/framebuffer-output/framebuffer.png, SHA256417cd0550cac69c25e81566d0da19776695a35364c0db2b963dd42a3245a837e.
+- Notes: target/egui-modernization/native-themed/run-m4b-notes-before-001/framebuffer-output/framebuffer.png, SHA2568efe1102331e3deed556dc11f88ced2d589fc7fdb8ee8afcb135920fd5edc310.
+
+### M5-A accepted rendered states
+
+Settings/theme-editor local shell work complete with21 targeted contracts, reviewed source and Dark/Light theme+DarkSettings852x460 after-images; see receipts/m5a-settings-theme-shells.md for source/build/capture identities. Theme footer nowvisible comparedwithretainedpre-shellclipping. Physicalfocus/hotkey/DPI remains separate QA gap. Notes/plugin work remains pending.
