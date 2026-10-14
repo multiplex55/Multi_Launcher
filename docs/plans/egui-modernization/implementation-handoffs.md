@@ -16,6 +16,24 @@ Correctness/data/function, stable practical response and completing BOTH tracks 
 
 No source writer/build/test is active at policy handoff. Parent owns Git and native process completion, one implementer owns a coupled source milestone; planner/reviewer use bounded read-only work. Commit meaningful coherent changes, not each receipt/listing/parser/document append. Publication remains local-only.
 
+## M3-A implementer-ready model handoff (starts after M2-D)
+
+**Objective/ownership:** pure resolution from persisted theme preferences plus supplied system appearance to typed semantic tokens and separate palette/metric identities. Persisted data stays in settings; derived GUI values live in new `src/gui/theme/mod.rs`, declared in `src/gui/mod.rs`. Runtime application/revision ownership is M3-B, not this milestone.
+
+**Actual state:** `src/settings/model.rs` owns ThemeMode/ThemeColor/ColorScheme/ThemeSettings. Theme JSON has mode, named_presets map and custom_scheme. Missing named_presets deserializes empty, while ThemeSettings::default creates dark/light entries; preserve this distinction. Theme dialog loads/saves the entire theme; preview is local. Settings editor mapping preserves current.theme.clone(). No central theme module exists; actual font installation remains owned by font_revision.
+
+**Scope/required changes:** retain existing fields/enum spelling/saved RGBA and named presets. Add a small defaulted preference group for active preset, optional accent, compact/comfortable density and typography scale, not every derived token. Normalize new metric preferences at model/resolution boundary: finite scale, default1.0, clamp0.75–2.0. Never rewrite existing colors/alpha/maps merely by resolving.
+
+ThemeMode is authoritative: Dark/Light use their built-in schemes and ignore active_preset; System follows supplied OS appearance (unknown→dark), ignoring active_preset; Custom uses a valid active named preset, otherwise unchanged custom_scheme. Preserve inactive/unknown preset names. Later preset selection explicitly chooses Custom; manual custom-color editing clears active preset. No Context/filesystem/OS query in the resolver.
+
+Map existing colors to a small coherent palette: semantic surfaces/text/borders/accent/focus/hover/selection/status. Optional accent overrides new accent/focus tokens without overwriting saved custom selection/hyperlink values. Derive compact-default typography/spacing/padding/radius/stroke/static-shadow/icon metrics; existing query/list scales remain independent. Expose deterministic value-based identities from resolved values, independent of map order/unused presets/aliases. Palette-only changes preserve metric identity; no pointer identity/randomized hashes/global counters or competing font revision.
+
+**Tests:** focused legacy JSON/default/roundtrip preserving alpha/maps; missing versus explicitly empty preset map; all modes and System OS transition; valid preset cannot override System/Dark/Light; Custom valid/unknown/empty fallback without mutation; invalid/extreme internal metric normalization; palette-only identity stability, density/typography identity changes, equivalent resolved values/reordered or inactive maps stable. Existing theme-dialog reset tests stay applicable. Add only compilation-required callers for new fields.
+
+**Non-goals:** rendering/style application, font replacement, preview transaction/editor redesign, asset/backend/cache-invalidation work or isolated performance candidates. Keep existing dialog Apply/Save/Cancel semantics.
+
+**Verification/done:** targeted locked/offline fast-dev lib Nextest for new gui::theme/model tests plus existing theme-dialog tests, scoped formatting/diff review. Compatible persistence/pure typed resolution/deterministic split identities/tests pass, no runtime styling path. Commit coherent M3-A, then directly M3-B. Broaden only for concrete failure; no screenshot/native/benchmark gate for a pure model.
+
 ## Historical handoffs — superseded, reference only
 
 All prior assignments, gates, source/build activation wording and accepted experiment packets below are historical. They do not authorize another optimization, backend competition, benchmark matrix or parity blocker. Raw findings and prior dispositions remain preserved; consult the future backlog for adopted/deferred/rejected status.

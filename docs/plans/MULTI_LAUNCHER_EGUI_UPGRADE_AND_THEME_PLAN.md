@@ -160,7 +160,7 @@ These initial tasks are retained as project context. Reuse their completed evide
 
 ### M2-D — Functional migration acceptance before theming
 
-- Establish adequate chosen-source Windows compilation and targeted correctness evidence. Keep broad automated regression at this meaningful stabilization or final gate, not after each small edit; classify preexisting/environment failures without deleting coverage.
+- Establish adequate chosen-source Windows compilation and targeted correctness evidence. Run relevant formatting and Clippy checks under repository standards, with broad automated regression at this meaningful stabilization or final gate, not after each small edit; classify preexisting/environment failures without deleting coverage.
 - Review existing functionality and available smoke checks, including persistence/plugins/input/child lifecycle. Fix known critical defects. Document missing environmental/manual coverage honestly and continue safe work.
 - Accepted benchmark regressions are documented debt. Do not require original parity, new large matrices or profiling before proceeding.
 - Preserve an identifiable migration-only rollback source checkpoint before theme changes. Reviewer assesses THIS revised policy.

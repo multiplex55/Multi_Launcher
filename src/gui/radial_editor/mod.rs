@@ -16025,6 +16025,7 @@ mod tests {
                 app.authoring_catalog_build_count.load(Ordering::SeqCst),
                 initial_builds
             );
+            output.drop_without_applying_deltas();
         }
 
         shared.lock().unwrap().open_test_snapshot();
@@ -16038,8 +16039,11 @@ mod tests {
             app.authoring_catalog_build_count.load(Ordering::SeqCst),
             initial_builds + 1
         );
+        opened.drop_without_applying_deltas();
         for _ in 0..8 {
-            assert!(root_frame().viewport_output.contains_key(&viewport_id));
+            let output = root_frame();
+            assert!(output.viewport_output.contains_key(&viewport_id));
+            output.drop_without_applying_deltas();
         }
         assert_eq!(
             app.authoring_catalog_build_count.load(Ordering::SeqCst),
@@ -16072,6 +16076,7 @@ mod tests {
             app.authoring_catalog_build_count.load(Ordering::SeqCst),
             initial_builds + 1
         );
+        closing.drop_without_applying_deltas();
         let mut child_input = egui::RawInput {
             viewport_id,
             ..Default::default()
@@ -16107,6 +16112,7 @@ mod tests {
         assert_eq!(cleared_identity.0, 0);
         assert!(cleared_identity.1 > prior_identity.1);
         assert!(drained.viewport_output[&viewport_id].commands.is_empty());
+        drained.drop_without_applying_deltas();
         for _ in 0..32 {
             let output = root_frame();
             assert!(!output.viewport_output.contains_key(&viewport_id));
@@ -16122,6 +16128,8 @@ mod tests {
                 app.root_window_bridge.designer_identity_for_test(),
                 cleared_identity
             );
+            drop(editor);
+            output.drop_without_applying_deltas();
         }
     }
 
