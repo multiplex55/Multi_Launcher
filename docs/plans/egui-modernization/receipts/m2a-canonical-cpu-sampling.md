@@ -1,6 +1,6 @@
 # M2-A canonical CPU sampling
 
-Status: decoder prerequisite accepted; initial WPR start failed before recording/body because the available token lacks system-profile privilege. Normal elevated attempt002 is in controller preparation/review, not launched. No attribution result yet. M2-A performance remains FAIL; both mission tracks remain open.
+Status: decoder prerequisite accepted; WPR start failed for the available token and normal RunAs002 ended with Windows-reported user cancellation before the elevated runner. No recording, benchmark body or attribution result exists. The ETW route is closed without a repeat; bounded nonadmin attribution planning is next. M2-A performance remains FAIL; both mission tracks remain open.
 
 Existing production executable3bacc38ceb7f4b2fa1a24dc7a382b9af215a9e04580ac9faed5f5185148127ba and matching PDBF8C579131E14124154E7428EE899E13FA7DAE0CC30996D8269F8D719BC6F91E4 are reused; no source, build, dependency or observer changes. Planner verified RSDS/PDB GUID CFF0DCB3-73FB-4C7F-82F6-114B1FD608A2, age1. PDB copied into ignored profiling symbols storage.
 
@@ -22,3 +22,19 @@ Evidence root `target/egui-modernization/m2a/cpu-sampling-phase2-001/receipts/`;
 Normal Windows RunAs elevation is the proposed next context change, with no security-policy/registry change or synthetic consent. A single elevated controller/test child is acceptable for this attribution-only invocation, with the token difference explicit and no qualification timing claim. Multiple UAC prompts or a privileged broker are unnecessary. Original failed attempt remains immutable; no application body budget was consumed. No UAC prompt or elevated capture has yet been launched; controller review precedes launch.
 
 Parent independently parsed/rehashed capture-result.json (`27364f1187d01227aa1cf9698fbf7713bc72daa155c503a621ab9e4a9a3e931e`) and privilege gateFA6E, checked raw status/start hashes and empty capture directory. Before elevated002, reviewer additionally requires acquisition state be assigned from native success before any receipt I/O, plus terminate/wait only the retained owned child before recorder cleanup. Fresh002 preparation is the sole writer activity; parent documents/Git remain separate. No unchanged privilege-context retry or new application body has occurred.
+
+
+## Fresh002 controller safety gate closed
+
+Fresh scripts under `target/egui-modernization/m2a/cpu-sampling-phase2-002/receipts/`: phase2_capture_002.py SHA-256A851585CB940CC0C19BAD48B52894112348433729007C0BC41AF499EAACFFC46; elevated_runner_002.ps1 SHA-256828611C993D0070C97CCE7C3150F140373C5AA3641F23F9B3B79A236A656CE4E; launch_runas_002.ps1 SHA-256536DCF424D1C587315A8FE542DB91295901C30546A07E66FFB3036367830357A. Python/PowerShell AST checks pass; parent independently rehashed allthree and parsed Python. Reviewer found no remaining substantive issue.
+
+Acquisition now precedes receipt I/O; acquired work is protected by finally, reaping only its retained application child before named stop/cancel. Final capture success requires clear named status. Default status is default-recorder-scope evidence, not host-wide recording absence. NormalRunAs uses Hidden and explicit WindowsPowerShell outer entrypoint `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` (wrapper's PSHOME/powershell.exe assumes this version). Parent authorized exactly one launch after review; Windows may require human UAC consent. No synthetic consent or security policy change. At authorization, scripts remained unexecuted and no body/trace was claimed; actual launch outcome remains pending.
+
+
+## RunAs002 terminal outcome — no elevated runner or capture
+
+The initial outer invocation had a PowerShell parser error before execution; the corrected call used the explicit WindowsPowerShell executable and call operator. Owned exec21097 was observed live, with wrapperPID31080 and consentPID33368, then completed exit1. Actual launch receipt spans2026-10-14T09:01:29.1549429Z–09:03:31.6171060Z and reports “The operation was canceled by the user.” This is Windows' returned result; no inference about the user's overall task intent is made.
+
+`receipts/runas-launch-result-002.json` SHA-256 `0a495ba578b9f6148fd414f2f3a1f26d0d60edca23735f7f8a52b7511a700861` records no elevated-runnerPID/native exit. No elevated preflight, application body, recording or ETL was produced. Parent independently parsed/rehashed receipt and checked absence of elevated preflight/ETL. No security-policy change, synthetic consent, recorder cleanup or automatic retry. Controller source review/syntax evidence remains valid; runtime attribution is unproven. PerfView and matching symbols remain available locally.
+
+Next: bounded read-only planner investigation of a ready nonadmin purpose-built sampling route, or one source-backed attribution packet reusing existing ignored observer infrastructure if no suitable ready tool exists. No custom native sampling framework, per-glyph clock cascade, new scalar optimization, app build or test body is activated. Mission remains active; the original/current performance failure still gates Track B.
