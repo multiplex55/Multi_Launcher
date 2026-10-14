@@ -31,3 +31,21 @@ Interpretation is bounded: ROOT comparison measures compact measurement and warm
 Canonical compact build completed native0/454.1563378s; result `939333cf102f0c309480e66a8d9afd302baed93c597b5f33abb25c74136a1906`, rawstdout99886C42/stderr881E5ECD. CargoJSON confirms epaint/root fresh=false at correct candidate paths, root canonical release/defaultfeatures. Preserved actual compact ROOT libtest `6e7a84f537e64cf120c8f6eb262eb28e46982f4e9c446763b20718d5d542f02b`,86,830,592bytes; selectionf78330382d76ec111db2a0c2d12023ea9389beadab6e794c8300de9865804c51. Source/pins/fixtures/tools/fonts and all four preserved executable copies remain exact. Exactly one Full-owner no-body listing native0, resultf54c33cd63fcc0620275c534df41e53de051493974dc8780e25194a1db610bd8; no timing body ran. Independent completed artifact/listing review pending. Prepared direct pair runner binds the exact completed gate and executable; activation still awaits review/local checkpoint.
 
 Compact canonical artifact/listing independently ACCEPTED withoutfindings: actual6E7A84F5/86830592, native0/454.156s, freshcandidateepaint/root/canonicalprofile/defaultfeatures, bytepreservingtimestampinvalidation/source/pins/fontassets/copies and one exactFullowner no-bodylistingverified. Localartifactcheckpoint precedes separatelyactivatedsingleF26baseline→compactpair. No adoption/productionqualification.
+
+
+## Single contemporaneous compact Full ROOT comparison
+
+After artifact checkpoint7e2a19b4, parent ran exactly one F26D/source796 baseline body then one compact6E7/source796+patch5302 body. Native exits0/0; wall37.6483858s/35.1921797s. No source/compiler/benchmark concurrency, retry or exclusion. Direct evidence in compact-measurement-001/body-runs/full-baseline-001 and full-candidate-001. Offline index `matched-full-compact-001.json` SHA `7f30fc1f8fc4fd7fab757f2e91e1b79a912d65bd3ff487af6f82757bc814a7b1` retains all12records/240timings/seven aligned vectors. Exact cross-arm output/structural/revision/viewport/work identities and within-case stability pass; cold one rebuild/allNmeasured, warm zero geometry work,25paint. Source/executables unchanged.
+
+Milliseconds; p50/p95 from sorted copies at indices9/18, raw order retained.
+
+|Rows/state|Baseline p50/p95|Compact p50/p95|
+|---|---|---|
+|100 cold|1.2887 / 1.7121|1.0165 / 1.2614|
+|100 warm|0.2721 / 0.3505|0.2457 / 0.2997|
+|1,000 cold|15.8193 / 18.3386|13.5169 / 16.5348|
+|1,000 warm|0.2927 / 0.3808|0.2960 / 0.4934|
+|10,000 cold|161.3453 / 176.8390|135.6845 / 151.3537|
+|10,000 warm|0.3097 / 0.3875|0.3234 / 0.4079|
+
+Independent actual-evidence review accepted without findings: bindings/protocol/allvectors/quantiles/output/work verified. Disposition: useful descriptive cold signal (~14.6%1k/~15.9%10k), HOLD adoption. At10k candidatep95 is below baseline minimum157.0224ms, but full ranges still overlap (candidate max165.9882ms); retain baseline max281.6345ms without exclusion. Warm results are mixed:100improves,1k median nearlyflat but tailhigher,10k modestlyhigher. One fixed baseline-first pair/host variation cannot establish causal savings or a reproducible warm regression. No original-parity or production pass follows. Cold full-Galley finalization remains unqualified; existing Grid/Notes later evidence must prove actual fresh full work. Planner investigates the narrowest existing-owner follow-up using alreadybuilt artifacts; no newtimer/build/body/sourceport activated. ActualproductionFullFAIL and both mission tracks remain required.
