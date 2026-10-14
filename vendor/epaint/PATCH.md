@@ -155,3 +155,21 @@ Remove this local line when an upstream epaint release provides equivalent
 per-segment capacity reservation and the locked egui stack passes focused glyph
 and geometry parity. The broader local override still follows the removal
 condition stated in the preceding sections.
+
+## Provisional exact text measurement
+
+`src/text/text_layout.rs` now shares shaping, row construction, alignment,
+positioning, and logical-rectangle calculation between full `Galley` layout
+and a size-only path. The full path still finalizes every mesh and visual range;
+the measurement path returns only the logical size. Both paths use the same
+GUI-rounding and wrap-width clamp. `src/text/fonts.rs` consults the existing
+complete-galley cache with the same normalized key and generation bookkeeping;
+ordinary measurement misses do not add cache entries, and paragraph-composition
+jobs continue through the full path. The released `egui` WidgetText preparation
+and ROOT list geometry caller are vendored locally so ROOT requests this exact
+measurement while visible full-layout consumers remain unchanged.
+
+This source port is provisional and does not establish a release performance
+result. Remove the measurement delta only after an upstream epaint/egui release
+provides the same shared geometry, cache semantics, WidgetText behavior, and
+focused full-output and size contracts.

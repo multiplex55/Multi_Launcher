@@ -108,19 +108,61 @@ pub fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<LayoutJob>)
 
     if job.wrap.max_rows == 0 {
         // Early-out: no text
-        return Galley {
-            job,
-            rows: Default::default(),
-            rect: Rect::ZERO,
-            mesh_bounds: Rect::NOTHING,
-            num_vertices: 0,
-            num_indices: 0,
-            pixels_per_point,
-            elided: true,
-            intrinsic_size: Vec2::ZERO,
-        };
+        return empty_galley(job, pixels_per_point);
     }
 
+    galley_from_positioned_rows(layout_to_positioned_rows(fonts, pixels_per_point, job))
+}
+
+/// Measure the exact logical size without finalizing row visuals or mesh data.
+pub(super) fn measure(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<LayoutJob>) -> Vec2 {
+    profiling::function_scope!();
+
+    job.debug_sanity_check();
+
+    if job.wrap.max_rows == 0 {
+        return Vec2::ZERO;
+    }
+
+    let positioned = layout_to_positioned_rows(fonts, pixels_per_point, job);
+    let mut rect = positioned.rect;
+    if positioned.job.round_output_to_gui {
+        super::text_layout_types::round_output_rect_to_gui(
+            &mut rect,
+            positioned.job.wrap.max_width,
+        );
+    }
+    rect.size()
+}
+
+fn empty_galley(job: Arc<LayoutJob>, pixels_per_point: f32) -> Galley {
+    Galley {
+        job,
+        rows: Default::default(),
+        rect: Rect::ZERO,
+        mesh_bounds: Rect::NOTHING,
+        num_vertices: 0,
+        num_indices: 0,
+        pixels_per_point,
+        elided: true,
+        intrinsic_size: Vec2::ZERO,
+    }
+}
+
+struct PositionedLayout {
+    point_scale: PointScale,
+    job: Arc<LayoutJob>,
+    rows: Vec<PlacedRow>,
+    elided: bool,
+    intrinsic_size: Vec2,
+    rect: Rect,
+}
+
+fn layout_to_positioned_rows(
+    fonts: &mut FontsImpl,
+    pixels_per_point: f32,
+    job: Arc<LayoutJob>,
+) -> PositionedLayout {
     // For most of this we ignore the y coordinate:
 
     let mut paragraphs = vec![Paragraph::from_section_index(0)];
@@ -174,7 +216,16 @@ pub fn layout(fonts: &mut FontsImpl, pixels_per_point: f32, job: Arc<LayoutJob>)
     }
 
     // Calculate the Y positions and tessellate the text:
-    galley_from_rows(point_scale, job, rows, elided, intrinsic_size)
+    let (rows, rect) = position_rows(point_scale, &job, rows);
+
+    PositionedLayout {
+        point_scale,
+        job,
+        rows,
+        elided,
+        intrinsic_size,
+        rect,
+    }
 }
 
 /// Shared context for emitting shaped glyphs into a [`Paragraph`].
@@ -960,14 +1011,12 @@ fn halign_and_justify_row(
     row.size.x = target_max_x - target_min_x;
 }
 
-/// Calculate the Y positions and tessellate the text.
-fn galley_from_rows(
+/// Position every row and calculate the exact logical bounds shared by full layout and measure.
+fn position_rows(
     point_scale: PointScale,
-    job: Arc<LayoutJob>,
+    job: &LayoutJob,
     mut rows: Vec<PlacedRow>,
-    elided: bool,
-    intrinsic_size: Vec2,
-) -> Galley {
+) -> (Vec<PlacedRow>, Rect) {
     let mut first_row_min_height = job.first_row_min_height;
     let mut cursor_y = 0.0;
 
@@ -1004,16 +1053,31 @@ fn galley_from_rows(
         cursor_y = point_scale.round_to_pixel(cursor_y); // TODO(emilk): it would be better to do the calculations in pixels instead.
     }
 
+    let mut rect = Rect::ZERO;
+    for placed_row in &rows {
+        rect |= placed_row.rect();
+    }
+
+    (rows, rect)
+}
+
+/// Tessellate positioned rows and build the complete visual Galley result.
+fn galley_from_positioned_rows(positioned: PositionedLayout) -> Galley {
+    let PositionedLayout {
+        point_scale,
+        job,
+        mut rows,
+        elided,
+        intrinsic_size,
+        rect,
+    } = positioned;
     let format_summary = format_summary(&job);
 
-    let mut rect = Rect::ZERO;
     let mut mesh_bounds = Rect::NOTHING;
     let mut num_vertices = 0;
     let mut num_indices = 0;
 
     for placed_row in &mut rows {
-        rect |= placed_row.rect();
-
         let row = Arc::make_mut(&mut placed_row.row);
         row.visuals = tessellate_row(point_scale, &job, &format_summary, row);
 
@@ -1904,5 +1968,362 @@ mod tests {
         let glyphs = &galley.rows[0].row.glyphs;
         let details: Vec<_> = glyphs.iter().map(|g| (g.chr, g.advance_width)).collect();
         (galley.size().x, glyphs.len(), details)
+    }
+
+    fn stock_oracle_jobs() -> [(&'static str, LayoutJob); 2] {
+        let mut mixed = LayoutJob::default();
+        mixed.wrap.max_width = 122.0;
+        mixed.wrap.max_rows = 4;
+        mixed.halign = Align::Center;
+        mixed.append(
+            "alpha ",
+            2.25,
+            TextFormat {
+                font_id: FontId::proportional(18.0),
+                color: Color32::from_rgb(203, 41, 59),
+                background: Color32::from_rgb(23, 31, 47),
+                italics: true,
+                underline: Stroke::new(1.25, Color32::from_rgb(42, 196, 142)),
+                line_height: Some(25.0),
+                valign: Align::Min,
+                ..Default::default()
+            },
+        );
+        mixed.append(
+            "BETA ",
+            0.0,
+            TextFormat {
+                font_id: FontId::proportional(24.0),
+                color: Color32::from_rgb(65, 98, 211),
+                background: Color32::from_rgb(77, 45, 31),
+                strikethrough: Stroke::new(0.75, Color32::from_rgb(239, 176, 57)),
+                line_height: Some(30.5),
+                valign: Align::Center,
+                ..Default::default()
+            },
+        );
+        mixed.append(
+            "gamma words\nfinal row",
+            0.0,
+            TextFormat {
+                font_id: FontId::proportional(11.0),
+                color: Color32::from_rgb(244, 231, 189),
+                italics: true,
+                underline: Stroke::new(0.5, Color32::from_rgb(231, 88, 126)),
+                strikethrough: Stroke::new(1.0, Color32::from_rgb(88, 175, 223)),
+                line_height: Some(15.25),
+                valign: Align::Max,
+                ..Default::default()
+            },
+        );
+
+        let mut emoji = LayoutJob::simple(
+            "e\u{301} \u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466} \u{1f1fa}\u{1f1f3} \u{1f469}\u{1f3fd}\u{200d}\u{1f680} \u{6f22}\u{5b57}\n\u{1f642} overflow words".to_owned(),
+            FontId::proportional(16.0),
+            Color32::from_rgb(224, 236, 250),
+            96.0,
+        );
+        emoji.wrap.max_rows = 3;
+        emoji.wrap.break_anywhere = true;
+        [
+            ("mixed_sections", mixed),
+            ("combining_emoji_fallback", emoji),
+        ]
+    }
+
+    fn stock_f32(value: f32) -> String {
+        format!("{:08x}", value.to_bits())
+    }
+
+    fn stock_vec2(value: Vec2) -> String {
+        format!("{},{}", stock_f32(value.x), stock_f32(value.y))
+    }
+
+    fn stock_pos2(value: Pos2) -> String {
+        format!("{},{}", stock_f32(value.x), stock_f32(value.y))
+    }
+
+    fn stock_rect(value: Rect) -> String {
+        format!("{}:{}", stock_pos2(value.min), stock_pos2(value.max))
+    }
+
+    fn stock_color(value: Color32) -> String {
+        value
+            .to_array()
+            .iter()
+            .map(|channel| format!("{channel:02x}"))
+            .collect()
+    }
+
+    fn stock_bytes(value: &[u8]) -> String {
+        value.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn stock_texture_id(value: crate::TextureId) -> String {
+        match value {
+            crate::TextureId::Managed(id) => format!("managed:{id}"),
+            crate::TextureId::User(id) => format!("user:{id}"),
+        }
+    }
+
+    fn stock_font_family(value: &FontFamily) -> String {
+        match value {
+            FontFamily::Proportional => "proportional".to_owned(),
+            FontFamily::Monospace => "monospace".to_owned(),
+            FontFamily::Name(name) => format!("name:{}", stock_bytes(name.as_bytes())),
+        }
+    }
+
+    fn stock_stroke(value: Stroke) -> String {
+        format!("{}:{}", stock_f32(value.width), stock_color(value.color))
+    }
+
+    fn stock_format(value: &TextFormat) -> String {
+        let line_height = value
+            .line_height
+            .map_or_else(|| "none".to_owned(), stock_f32);
+        let coords = value
+            .coords
+            .as_ref()
+            .iter()
+            .map(|(tag, coordinate)| format!("{:?}={}", tag, stock_f32(*coordinate)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "font={}:{}|letter_spacing={}|line_height={}|color={}|background={}|expand_bg={}|coords={}|italics={}|underline={}|strikethrough={}|valign={:?}",
+            stock_font_family(&value.font_id.family),
+            stock_f32(value.font_id.size),
+            stock_f32(value.extra_letter_spacing),
+            line_height,
+            stock_color(value.color),
+            stock_color(value.background),
+            stock_f32(value.expand_bg),
+            coords,
+            value.italics,
+            stock_stroke(value.underline),
+            stock_stroke(value.strikethrough),
+            value.valign,
+        )
+    }
+
+    fn serialize_stock_galley(galley: &Galley) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        writeln!(
+            out,
+            "galley|rect={}|mesh_bounds={}|ppp={}|intrinsic={}|elided={}|num_vertices={}|num_indices={}",
+            stock_rect(galley.rect),
+            stock_rect(galley.mesh_bounds),
+            stock_f32(galley.pixels_per_point),
+            stock_vec2(galley.intrinsic_size),
+            galley.elided,
+            galley.num_vertices,
+            galley.num_indices,
+        ).unwrap();
+        writeln!(
+            out,
+            "job|text={}|wrap_width={}|max_rows={}|break_anywhere={}|overflow={}|first_row_min_height={}|break_on_newline={}|halign={:?}|justify={}|round_output_to_gui={}|keep_trailing_whitespace={}",
+            stock_bytes(galley.job.text.as_bytes()),
+            stock_f32(galley.job.wrap.max_width),
+            galley.job.wrap.max_rows,
+            galley.job.wrap.break_anywhere,
+            galley.job.wrap.overflow_character.map_or_else(|| "none".to_owned(), |ch| format!("{:x}", ch as u32)),
+            stock_f32(galley.job.first_row_min_height),
+            galley.job.break_on_newline,
+            galley.job.halign,
+            galley.job.justify,
+            galley.job.round_output_to_gui,
+            galley.job.keep_trailing_whitespace,
+        ).unwrap();
+        for (section_index, section) in galley.job.sections.iter().enumerate() {
+            writeln!(
+                out,
+                "section|index={section_index}|start={}|end={}|leading_space={}|format={}",
+                section.byte_range.start.0,
+                section.byte_range.end.0,
+                stock_f32(section.leading_space),
+                stock_format(&section.format),
+            )
+            .unwrap();
+        }
+        for (row_index, placed_row) in galley.rows.iter().enumerate() {
+            let row = &placed_row.row;
+            let visuals = &row.visuals;
+            writeln!(
+                out,
+                "row|index={row_index}|pos={}|ends_with_newline={}|size={}|section_index_at_start={}|glyph_count={}|mesh_bounds={}|glyph_index_start={}|glyph_vertex_range={}:{}|texture={}|vertex_count={}|index_count={}",
+                stock_pos2(placed_row.pos),
+                placed_row.ends_with_newline,
+                stock_vec2(row.size),
+                row.section_index_at_start,
+                row.glyphs.len(),
+                stock_rect(visuals.mesh_bounds),
+                visuals.glyph_index_start,
+                visuals.glyph_vertex_range.start,
+                visuals.glyph_vertex_range.end,
+                stock_texture_id(visuals.mesh.texture_id),
+                visuals.mesh.vertices.len(),
+                visuals.mesh.indices.len(),
+            ).unwrap();
+            for (glyph_index, glyph) in row.glyphs.iter().enumerate() {
+                writeln!(
+                    out,
+                    "glyph|row={row_index}|index={glyph_index}|chr={:x}|pos={}|advance={}|line_height={}|font_ascent={}|font_height={}|face_ascent={}|face_height={}|uv_offset={}|uv_size={}|uv_min={},{}|uv_max={},{}|section_index={}|first_vertex={}",
+                    glyph.chr as u32,
+                    stock_pos2(glyph.pos),
+                    stock_f32(glyph.advance_width),
+                    stock_f32(glyph.line_height),
+                    stock_f32(glyph.font_ascent),
+                    stock_f32(glyph.font_height),
+                    stock_f32(glyph.font_face_ascent),
+                    stock_f32(glyph.font_face_height),
+                    stock_vec2(glyph.uv_rect.offset),
+                    stock_vec2(glyph.uv_rect.size),
+                    glyph.uv_rect.min[0],
+                    glyph.uv_rect.min[1],
+                    glyph.uv_rect.max[0],
+                    glyph.uv_rect.max[1],
+                    glyph.section_index,
+                    glyph.first_vertex,
+                ).unwrap();
+            }
+            for (vertex_index, vertex) in visuals.mesh.vertices.iter().enumerate() {
+                writeln!(
+                    out,
+                    "vertex|row={row_index}|index={vertex_index}|pos={}|uv={}|rgba={}",
+                    stock_pos2(vertex.pos),
+                    stock_pos2(vertex.uv),
+                    stock_color(vertex.color),
+                )
+                .unwrap();
+            }
+            writeln!(
+                out,
+                "indices|row={row_index}|values={}",
+                visuals
+                    .mesh
+                    .indices
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .unwrap();
+        }
+        out
+    }
+
+    #[test]
+    fn positioned_row_measurement_matches_full_size_bits() {
+        for (name, job) in stock_oracle_jobs() {
+            assert_measured_size_matches_full(name, job, 1.25);
+        }
+
+        let mut empty = LayoutJob::simple(
+            String::new(),
+            FontId::proportional(13.5),
+            Color32::WHITE,
+            f32::INFINITY,
+        );
+        empty.wrap.max_width = f32::INFINITY;
+        assert_measured_size_matches_full("empty extend", empty, 1.0);
+
+        let mut wrapped = LayoutJob::simple(
+            "fractional wrap with a longer trailing word".to_owned(),
+            FontId::proportional(17.25),
+            Color32::WHITE,
+            63.37,
+        );
+        wrapped.halign = Align::Center;
+        assert_measured_size_matches_full("fractional wrapped", wrapped, 1.25);
+
+        let mut unrounded = LayoutJob::simple(
+            "subpixel dimensions and explicit newline\nsecond row".to_owned(),
+            FontId::proportional(15.75),
+            Color32::WHITE,
+            81.23,
+        );
+        unrounded.round_output_to_gui = false;
+        assert_measured_size_matches_full("unrounded newline", unrounded, 1.414_213_5);
+
+        let mut truncated = LayoutJob::simple(
+            "overflow words continue after the first visual row".to_owned(),
+            FontId::proportional(16.0),
+            Color32::WHITE,
+            42.25,
+        );
+        truncated.wrap.max_rows = 1;
+        truncated.wrap.break_anywhere = true;
+        assert_measured_size_matches_full("truncated", truncated, 1.25);
+
+        let mut too_narrow = LayoutJob::simple(
+            "W".to_owned(),
+            FontId::proportional(18.0),
+            Color32::WHITE,
+            0.0,
+        );
+        too_narrow.wrap.max_rows = 1;
+        too_narrow.wrap.break_anywhere = true;
+        assert_measured_size_matches_full("overflow wider than wrap", too_narrow, 1.0);
+
+        let mut max_rows_zero = LayoutJob::simple(
+            "not emitted".to_owned(),
+            FontId::default(),
+            Color32::WHITE,
+            20.0,
+        );
+        max_rows_zero.wrap.max_rows = 0;
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let measured = measure(&mut fonts, 1.25, Arc::new(max_rows_zero));
+        assert_eq!(measured.x.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(measured.y.to_bits(), 0.0_f32.to_bits());
+    }
+
+    fn assert_measured_size_matches_full(name: &str, job: LayoutJob, pixels_per_point: f32) {
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let full = layout(&mut fonts, pixels_per_point, Arc::new(job.clone()));
+        let measured = measure(&mut fonts, pixels_per_point, Arc::new(job));
+        assert_eq!(
+            measured.x.to_bits(),
+            full.size().x.to_bits(),
+            "width bits differ for {name}: measured={:?}, full={:?}",
+            measured.x.to_bits(),
+            full.size().x.to_bits(),
+        );
+        assert_eq!(
+            measured.y.to_bits(),
+            full.size().y.to_bits(),
+            "height bits differ for {name}: measured={:?}, full={:?}",
+            measured.y.to_bits(),
+            full.size().y.to_bits(),
+        );
+    }
+
+    #[test]
+    fn full_layout_preserves_input_job_arc_identity() {
+        let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+        let input_job = Arc::new(LayoutJob::single_section(
+            "Arc identity".into(),
+            TextFormat::default(),
+        ));
+        let galley = layout(&mut fonts, 1.25, Arc::clone(&input_job));
+        assert!(Arc::ptr_eq(&input_job, &galley.job));
+    }
+
+    #[test]
+    fn full_layout_matches_frozen_stock_output() {
+        // Lossless output captured from accepted epaint source C115... before refactoring.
+        for (name, job) in stock_oracle_jobs() {
+            let mut fonts = FontsImpl::new(TextOptions::default(), FontDefinitions::default());
+            let galley = layout(&mut fonts, 1.25, Arc::new(job));
+            let actual = serialize_stock_galley(&galley);
+            let expected = match name {
+                "mixed_sections" => include_str!("mixed_sections.txt"),
+                "combining_emoji_fallback" => include_str!("combining_emoji_fallback.txt"),
+                _ => unreachable!("all frozen oracle jobs have a fixture"),
+            };
+            assert_eq!(actual, expected, "stock full-layout output for {name}");
+        }
     }
 }

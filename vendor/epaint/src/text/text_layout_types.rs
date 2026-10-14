@@ -1001,6 +1001,21 @@ impl PlacedRow {
     }
 }
 
+/// Apply the exact logical-rectangle rounding and wrap-width clamp used by a full Galley.
+pub(crate) fn round_output_rect_to_gui(rect: &mut Rect, max_width: f32) {
+    let did_exceed_wrap_width_by_a_lot = rect.width() > max_width + 1.0;
+
+    *rect = rect.round_ui();
+
+    if did_exceed_wrap_width_by_a_lot {
+        // If the user picked a too aggressive wrap width (e.g. more narrow than any individual glyph),
+        // we should let the user know by reporting that our width is wider than the wrap width.
+    } else {
+        // Make sure we don't report being wider than the wrap width the user picked:
+        rect.max.x = rect.max.x.at_most(rect.min.x + max_width).floor_ui();
+    }
+}
+
 impl Galley {
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -1042,23 +1057,7 @@ impl Galley {
             }
         }
 
-        let rect = &mut self.rect;
-
-        let did_exceed_wrap_width_by_a_lot = rect.width() > self.job.wrap.max_width + 1.0;
-
-        *rect = rect.round_ui();
-
-        if did_exceed_wrap_width_by_a_lot {
-            // If the user picked a too aggressive wrap width (e.g. more narrow than any individual glyph),
-            // we should let the user know by reporting that our width is wider than the wrap width.
-        } else {
-            // Make sure we don't report being wider than the wrap width the user picked:
-            rect.max.x = rect
-                .max
-                .x
-                .at_most(rect.min.x + self.job.wrap.max_width)
-                .floor_ui();
-        }
+        round_output_rect_to_gui(&mut self.rect, self.job.wrap.max_width);
     }
 
     /// Append each galley under the previous one.

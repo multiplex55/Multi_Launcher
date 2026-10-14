@@ -518,7 +518,7 @@ impl RootListGeometryCache {
             row_widths.push(content_width);
 
             let text = root_list_display_text(action, folder_aliases, show_full_paths);
-            let galley = egui::WidgetText::from(text).into_galley_impl(
+            let size = egui::WidgetText::from(text).measure_size_impl(
                 ui.ctx(),
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
@@ -528,8 +528,8 @@ impl RootListGeometryCache {
                 egui::FontSelection::Style(egui::TextStyle::Button),
                 egui::Align::Center,
             );
-            let row_height = (galley.size().y + 2.0 * padding.y).max(interaction_height);
-            let response_width = content_width.max(galley.size().x + 2.0 * padding.x);
+            let row_height = (size.y + 2.0 * padding.y).max(interaction_height);
+            let response_width = content_width.max(size.x + 2.0 * padding.x);
             row_response_x_offsets.push(content_x_offset - (response_width - content_width) * 0.5);
             row_response_widths.push(response_width);
             content_x_offset -= (response_width - content_width) * 0.5;

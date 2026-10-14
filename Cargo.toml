@@ -197,6 +197,7 @@ incremental = true
 # Local lifecycle seam for hidden-root prompt viewport bootstrapping.
 [patch.crates-io]
 epaint = { path = "vendor/epaint" }
+egui = { path = "vendor/egui" }
 eframe = { path = "vendor/eframe" }
 # Align image 0.25 DDS capability reporting with its existing decoder.
 image = { path = "vendor/image" }

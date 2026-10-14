@@ -8,7 +8,7 @@ use crate::{
         font::{Font, FontFace},
     },
 };
-use emath::{NumExt as _, OrderedFloat, Rangef};
+use emath::{NumExt as _, OrderedFloat, Rangef, Vec2};
 
 #[cfg(feature = "default_fonts")]
 use epaint_default_fonts::{EMOJI_ICON, HACK_REGULAR, NOTO_EMOJI_REGULAR, UBUNTU_LIGHT};
@@ -897,6 +897,14 @@ impl FontsView<'_> {
         )
     }
 
+    /// Return the exact logical size for a layout job without finalizing visual meshes when possible.
+    #[doc(hidden)]
+    #[inline]
+    pub fn measure_job_size(&mut self, job: LayoutJob) -> Vec2 {
+        self.galley_cache
+            .measure(self.fonts, self.pixels_per_point, job)
+    }
+
     pub fn num_galleys_in_cache(&self) -> usize {
         self.galley_cache.num_galleys_in_cache()
     }
@@ -1066,13 +1074,7 @@ struct GalleyCache {
 }
 
 impl GalleyCache {
-    fn layout_internal(
-        &mut self,
-        fonts: &mut FontsImpl,
-        mut job: LayoutJob,
-        pixels_per_point: f32,
-        allow_split_paragraphs: bool,
-    ) -> (u64, Arc<Galley>) {
+    fn normalize_job_and_hash(mut job: LayoutJob, pixels_per_point: f32) -> (LayoutJob, u64) {
         if job.wrap.max_width.is_finite() {
             // Protect against rounding errors in egui layout code.
 
@@ -1099,28 +1101,44 @@ impl GalleyCache {
         }
 
         let hash = crate::util::hash((&job, OrderedFloat(pixels_per_point))); // TODO(emilk): even faster hasher?
+        (job, hash)
+    }
+
+    fn finish_cache_hit(
+        &mut self,
+        galley: Arc<Galley>,
+        children: Option<Arc<[u64]>>,
+    ) -> Arc<Galley> {
+        if let Some(children) = children {
+            // Keep the paragraph galleys alive while the parent galley is alive.
+            for child_hash in children.iter() {
+                if let Some(cached_child) = self.cache.get_mut(child_hash) {
+                    cached_child.last_used = self.generation;
+                }
+            }
+        }
+
+        galley
+    }
+
+    fn layout_internal(
+        &mut self,
+        fonts: &mut FontsImpl,
+        job: LayoutJob,
+        pixels_per_point: f32,
+        allow_split_paragraphs: bool,
+    ) -> (u64, Arc<Galley>) {
+        let (job, hash) = Self::normalize_job_and_hash(job, pixels_per_point);
 
         let galley = match self.cache.entry(hash) {
             std::collections::hash_map::Entry::Occupied(entry) => {
                 // The job was found in cache - no need to re-layout.
-                let cached = entry.into_mut();
-                cached.last_used = self.generation;
-
-                let galley = Arc::clone(&cached.galley);
-                if let Some(children) = &cached.children {
-                    // The point of `allow_split_paragraphs` is to split large jobs into paragraph,
-                    // and then cache each paragraph individually.
-                    // That way, if we edit a single paragraph, only that paragraph will be re-layouted.
-                    // For that to work we need to keep all the child/paragraph
-                    // galleys alive while the parent galley is alive:
-                    for child_hash in Arc::clone(children).iter() {
-                        if let Some(cached_child) = self.cache.get_mut(child_hash) {
-                            cached_child.last_used = self.generation;
-                        }
-                    }
-                }
-
-                galley
+                let (galley, children) = {
+                    let cached = entry.into_mut();
+                    cached.last_used = self.generation;
+                    (Arc::clone(&cached.galley), cached.children.clone())
+                };
+                self.finish_cache_hit(galley, children)
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let job = Arc::new(job);
@@ -1157,6 +1175,25 @@ impl GalleyCache {
         };
 
         (hash, galley)
+    }
+
+    fn measure(&mut self, fonts: &mut FontsImpl, pixels_per_point: f32, job: LayoutJob) -> Vec2 {
+        if should_cache_each_paragraph_individually(&job) {
+            // Paragraph concatenation has its own geometry and mesh composition. Until its
+            // size-only equivalent is proven, reuse the complete existing cached composition.
+            return self.layout(fonts, pixels_per_point, job, true).size();
+        }
+
+        let (job, hash) = Self::normalize_job_and_hash(job, pixels_per_point);
+        let cached = self.cache.get_mut(&hash);
+        let Some(cached) = cached else {
+            return super::text_layout::measure(fonts, pixels_per_point, Arc::new(job));
+        };
+
+        cached.last_used = self.generation;
+        let (galley, children) = (Arc::clone(&cached.galley), cached.children.clone());
+        let galley = self.finish_cache_hit(galley, children);
+        galley.size()
     }
 
     fn layout(
@@ -1520,5 +1557,100 @@ mod tests {
 
         let width = view.glyph_width(&FontId::new(12.0, FontFamily::Proportional), ' ');
         assert_eq!(width, 0.0);
+    }
+
+    #[test]
+    fn measurement_miss_leaves_no_meshless_cache_entry() {
+        let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::default());
+        let job = LayoutJob::simple(
+            "a complete visual layout follows a size-only miss".to_owned(),
+            FontId::proportional(17.0),
+            Color32::WHITE,
+            96.2,
+        );
+
+        let measured = fonts
+            .with_pixels_per_point(1.25)
+            .measure_job_size(job.clone());
+        assert_eq!(fonts.num_galleys_in_cache(), 0);
+
+        let mut full_job = job.clone();
+        full_job.wrap.max_width = 96.4; // The shared cache normalization maps both widths to 96.
+        let full = fonts.with_pixels_per_point(1.25).layout_job(full_job);
+        assert_eq!(measured.x.to_bits(), full.size().x.to_bits());
+        assert_eq!(measured.y.to_bits(), full.size().y.to_bits());
+        assert_eq!(fonts.num_galleys_in_cache(), 1);
+        let (_, full_hash) = GalleyCache::normalize_job_and_hash(job.clone(), 1.25);
+        assert!(full.num_vertices > 0);
+        assert!(full.num_indices > 0);
+        assert_eq!(
+            full.num_vertices,
+            full.rows
+                .iter()
+                .map(|row| row.row.visuals.mesh.vertices.len())
+                .sum::<usize>(),
+        );
+
+        fonts.galley_cache.flush_cache();
+        let measurement_generation = fonts.galley_cache.generation;
+        let mut hit_job = job;
+        hit_job.wrap.max_width = 95.8;
+        let cache_hit_size = fonts.with_pixels_per_point(1.25).measure_job_size(hit_job);
+        assert_eq!(cache_hit_size.x.to_bits(), full.size().x.to_bits());
+        assert_eq!(cache_hit_size.y.to_bits(), full.size().y.to_bits());
+        assert_eq!(fonts.num_galleys_in_cache(), 1);
+        assert_eq!(
+            fonts.galley_cache.cache.get(&full_hash).unwrap().last_used,
+            measurement_generation,
+        );
+    }
+
+    #[test]
+    fn split_cache_hit_updates_parent_and_child_generation_on_measurement() {
+        let mut fonts = Fonts::new(TextOptions::default(), FontDefinitions::default());
+        let job = LayoutJob::simple(
+            "first paragraph\nsecond paragraph\nthird paragraph".to_owned(),
+            FontId::proportional(15.0),
+            Color32::WHITE,
+            100.4,
+        );
+        let full = fonts.with_pixels_per_point(1.25).layout_job(job.clone());
+        let (_, parent_hash) = GalleyCache::normalize_job_and_hash(job.clone(), 1.25);
+        let child_hashes = fonts
+            .galley_cache
+            .cache
+            .get(&parent_hash)
+            .and_then(|cached| cached.children.as_ref())
+            .expect("eligible paragraph layout is cached as a parent with children")
+            .to_vec();
+        assert!(child_hashes.len() >= 2);
+
+        fonts.galley_cache.flush_cache();
+        let measurement_generation = fonts.galley_cache.generation;
+        let mut cache_hit_job = job;
+        cache_hit_job.wrap.max_width = 100.1; // Same normalized cache key as the full layout.
+        let measured = fonts
+            .with_pixels_per_point(1.25)
+            .measure_job_size(cache_hit_job);
+        assert_eq!(measured.x.to_bits(), full.size().x.to_bits());
+        assert_eq!(measured.y.to_bits(), full.size().y.to_bits());
+        assert_eq!(
+            fonts
+                .galley_cache
+                .cache
+                .get(&parent_hash)
+                .unwrap()
+                .last_used,
+            measurement_generation,
+        );
+        for child_hash in &child_hashes {
+            assert_eq!(
+                fonts.galley_cache.cache.get(child_hash).unwrap().last_used,
+                measurement_generation,
+            );
+        }
+
+        fonts.galley_cache.flush_cache();
+        assert_eq!(fonts.num_galleys_in_cache(), child_hashes.len() + 1);
     }
 }
