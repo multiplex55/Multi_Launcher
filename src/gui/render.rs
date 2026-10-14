@@ -2938,11 +2938,26 @@ impl LauncherApp {
                 return;
             }
             let mut deferred_activation: Option<DeferredActivation> = None;
-            ui.heading("🚀 Multi Lnchr");
+            ui.horizontal(|ui| {
+                crate::gui::theme::paint_brand_badge(ui);
+                ui.label(
+                    egui::RichText::new("Multi Launcher")
+                        .text_style(crate::gui::theme::text_style_for_role(
+                            crate::gui::theme::TextRole::SectionHeading,
+                        ))
+                        .strong(),
+                );
+            });
             if self.should_render_inline_error()
                 && let Some(err) = &self.error
             {
-                ui.colored_label(Color32::RED, err);
+                ui.label(
+                    egui::RichText::new(err)
+                        .text_style(crate::gui::theme::text_style_for_role(
+                            crate::gui::theme::TextRole::Error,
+                        ))
+                        .color(Color32::RED),
+                );
             }
 
             scale_ui(ui, self.query_scale, |ui| {
@@ -2962,11 +2977,16 @@ impl LauncherApp {
                 };
 
                 let text_edit_started = self.track_c_query_observer.tentative_start();
-                let mut query_output = egui::TextEdit::singleline(&mut self.query)
-                    .id(input_id)
-                    .interactive(!action_sheet_blocks_launcher_input)
-                    .desired_width(f32::INFINITY)
-                    .show(ui);
+                let mut query_output = ui
+                    .horizontal(|ui| {
+                        crate::gui::theme::paint_search_icon(ui);
+                        egui::TextEdit::singleline(&mut self.query)
+                            .id(input_id)
+                            .interactive(!action_sheet_blocks_launcher_input)
+                            .desired_width(f32::INFINITY)
+                            .show(ui)
+                    })
+                    .inner;
                 if self.move_cursor_end
                     && !action_sheet_blocks_launcher_input
                     && query_output.response.enabled()

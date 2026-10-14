@@ -32,3 +32,11 @@ Existing native framebuffer screenshots prove their specific rendered output; th
 Renderer decision: actual Cargo features and NativeOptions explicitly select Glow. Existing renderer retained; comparative performance study deferred to POST_MODERNIZATION_PERFORMANCE_BACKLOG.md. No new backend variant or renderer change.
 
 M2-B/M2-D acceptance uses actual automated results, supported observations, documented accepted debt and these limits. It must not claim complete native verification or unconditional release readiness. After the functional migration checkpoint, immediately continue M3-A through the full visual rollout.
+
+## M3-D bounded normal-build observation
+
+Normal fast-dev themed executable C53EE78341816314196B833C91191F55E5368EC964E81B4078841DF4D0C40F64 built successfully; source/log bindings in m3d/resources-002/build. Isolated synthetic run native-themed/run-m3d-001 launchedPID35608. Supported Sky returned the actual window; capture failed FrameArrived and one refreshed foreground retry failed window-capture timeout. Stop unchanged retries. No screenshot/visual claim.
+
+Accessibility-only checks observed focused query typing, Ctrl+A, local `app M0-B fixture action 00000` result, and Return changing the query to `fixture-enter-00000`. Escape removed exposed launcher content. Indexed Settings click failed because coordinate geometry is unavailable; Shift+Tab retained query focus. Synthetic Ctrl+Alt+F10 did not restore exposed content in two observations; physical hotkey restoration remains unverified and requires manual QA. Do not reinterpret it as a verified hotkey pass. No current native dialogs/theme preview/grid scrolling/IME/DPI/monitor proof.
+
+One10.039s post-Escape sample recorded CPUdelta0.0625s, working set128643072→128643072bytes, Responding=true. This bounded sample showed no sustained busy behavior/growth; it is not comprehensive true-idle/GPU/native latency qualification. Normal Alt+F4 closed the fixture and subsequent process inventory confirmed exit. Raw process/provenance/observation/idle/log receipts are retained under target/egui-modernization/native-themed/run-m3d-001. No performance/instrumentation flags were enabled.

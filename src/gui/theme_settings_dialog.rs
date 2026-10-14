@@ -1,4 +1,7 @@
-use crate::gui::theme::{ResolvedTheme, SystemAppearance, effective_color_scheme, resolve_theme};
+use crate::gui::theme::{
+    ChromeIcon, ResolvedTheme, SystemAppearance, TextRole, chrome_icon_button,
+    chrome_small_icon_button, effective_color_scheme, resolve_theme, text_style_for_role,
+};
 use crate::settings::{ColorScheme, Settings, ThemeColor, ThemeMode, ThemeSettings};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -218,17 +221,35 @@ pub fn ui(
         .default_width(980.0)
         .show(ctx, |ui| {
             if let Some(err) = &state.last_error {
-                ui.colored_label(egui::Color32::RED, err);
+                ui.label(
+                    egui::RichText::new(err)
+                        .text_style(text_style_for_role(TextRole::Error))
+                        .color(egui::Color32::RED),
+                );
                 ui.separator();
             }
 
             if !state.can_edit() {
-                ui.label("Theme settings could not be loaded. Retry before editing or saving.");
+                ui.label(
+                    egui::RichText::new(
+                        "Theme settings could not be loaded. Retry before editing or saving.",
+                    )
+                    .text_style(text_style_for_role(TextRole::Body)),
+                );
                 ui.horizontal(|ui| {
-                    if ui.button("Retry loading").clicked() {
+                    if chrome_icon_button(
+                        ui,
+                        ChromeIcon::Reset,
+                        "theme.retry-loading",
+                        "Retry loading",
+                    )
+                    .clicked()
+                    {
                         reload_requested = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if chrome_icon_button(ui, ChromeIcon::Cancel, "theme.cancel-load", "Cancel")
+                        .clicked()
+                    {
                         *open = false;
                     }
                 });
@@ -241,14 +262,24 @@ pub fn ui(
                         egui::Color32::YELLOW,
                         "The saved theme changed while this draft was open.",
                     );
-                    if ui.button("Reload saved theme").clicked() {
+                    if chrome_icon_button(
+                        ui,
+                        ChromeIcon::Reset,
+                        "theme.reload-saved",
+                        "Reload saved theme",
+                    )
+                    .clicked()
+                    {
                         reload_requested = true;
                     }
                 });
                 ui.separator();
             }
 
-            ui.label("Customize launcher colors and theme mode.");
+            ui.label(
+                egui::RichText::new("Customize launcher colors and theme mode.")
+                    .text_style(text_style_for_role(TextRole::Metadata)),
+            );
             ui.separator();
 
             let mut changed = false;
@@ -291,21 +322,28 @@ pub fn ui(
 
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Reset all to default").clicked() {
+                if chrome_icon_button(
+                    ui,
+                    ChromeIcon::Reset,
+                    "theme.reset-all",
+                    "Reset all to default",
+                )
+                .clicked()
+                {
                     let presets = state.draft.named_presets.clone();
                     state.draft = ThemeSettings::default();
                     state.draft.named_presets = presets;
                     state.dirty = true;
                     draft_changed = true;
                 }
-                if ui.button("Cancel").clicked() {
+                if chrome_icon_button(ui, ChromeIcon::Cancel, "theme.cancel", "Cancel").clicked() {
                     *open = false;
                 }
                 if ui
-                    .add_enabled(
-                        state.dirty && state.can_commit(),
-                        egui::Button::new("Apply"),
-                    )
+                    .add_enabled_ui(state.dirty && state.can_commit(), |ui| {
+                        chrome_icon_button(ui, ChromeIcon::Apply, "theme.apply", "Apply")
+                    })
+                    .inner
                     .clicked()
                 {
                     match state.save_to_path(ctx, &app.settings_path) {
@@ -337,7 +375,10 @@ pub fn ui(
                     }
                 }
                 if ui
-                    .add_enabled(state.dirty && state.can_commit(), egui::Button::new("Save"))
+                    .add_enabled_ui(state.dirty && state.can_commit(), |ui| {
+                        chrome_icon_button(ui, ChromeIcon::Save, "theme.save", "Save")
+                    })
+                    .inner
                     .clicked()
                 {
                     match state.save_to_path(ctx, &app.settings_path) {
@@ -387,6 +428,14 @@ fn system_appearance(ctx: &egui::Context) -> SystemAppearance {
     }
 }
 
+fn section_heading(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .text_style(text_style_for_role(TextRole::SectionHeading))
+            .strong(),
+    );
+}
+
 fn defaults_for_mode(mode: ThemeMode) -> ColorScheme {
     match mode {
         ThemeMode::Light => ColorScheme::light(),
@@ -396,7 +445,7 @@ fn defaults_for_mode(mode: ThemeMode) -> ColorScheme {
 
 fn section_base_mode(ui: &mut egui::Ui, mode: &mut ThemeMode) -> bool {
     let mut changed = false;
-    ui.heading("Base mode");
+    section_heading(ui, "Base mode");
     ui.horizontal(|ui| {
         changed |= ui
             .selectable_value(mode, ThemeMode::System, "System")
@@ -422,7 +471,7 @@ const CURATED_PRESETS: [(&str, &str); 6] = [
 ];
 
 fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> bool {
-    ui.heading("Palettes");
+    section_heading(ui, "Palettes");
     let active_name = if state.draft.mode == ThemeMode::Custom {
         state
             .draft
@@ -554,7 +603,7 @@ fn section_accent(
     accent: &mut Option<ThemeColor>,
     palette_accent: ThemeColor,
 ) -> bool {
-    ui.heading("Accent");
+    section_heading(ui, "Accent");
     let mut changed = false;
     ui.horizontal(|ui| {
         let mut enabled = accent.is_some();
@@ -571,10 +620,17 @@ fn section_accent(
 
 fn section_core_surfaces(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    ui.heading("Core surfaces");
+    section_heading(ui, "Core surfaces");
     changed |= color_row(ui, "Window background", &mut scheme.window_fill);
     changed |= color_row(ui, "Panel background", &mut scheme.panel_fill);
-    if ui.small_button("Reset section defaults").clicked() {
+    if chrome_small_icon_button(
+        ui,
+        ChromeIcon::Reset,
+        "theme.reset.core-surfaces",
+        "Reset section defaults",
+    )
+    .clicked()
+    {
         reset_core_surfaces_to_mode_defaults(scheme, mode);
         changed = true;
     }
@@ -583,10 +639,17 @@ fn section_core_surfaces(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: Them
 
 fn section_text_and_links(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    ui.heading("Text and links");
+    section_heading(ui, "Text and links");
     changed |= color_row(ui, "Text", &mut scheme.text);
     changed |= color_row(ui, "Hyperlink", &mut scheme.hyperlink);
-    if ui.small_button("Reset section defaults").clicked() {
+    if chrome_small_icon_button(
+        ui,
+        ChromeIcon::Reset,
+        "theme.reset.text-and-links",
+        "Reset section defaults",
+    )
+    .clicked()
+    {
         reset_text_and_links_to_mode_defaults(scheme, mode);
         changed = true;
     }
@@ -595,14 +658,21 @@ fn section_text_and_links(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: The
 
 fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    ui.heading("Interactive widgets");
+    section_heading(ui, "Interactive widgets");
     changed |= color_row(ui, "Inactive fill", &mut scheme.widget_inactive_fill);
     changed |= color_row(ui, "Inactive stroke", &mut scheme.widget_inactive_stroke);
     changed |= color_row(ui, "Hovered fill", &mut scheme.widget_hovered_fill);
     changed |= color_row(ui, "Hovered stroke", &mut scheme.widget_hovered_stroke);
     changed |= color_row(ui, "Active fill", &mut scheme.widget_active_fill);
     changed |= color_row(ui, "Active stroke", &mut scheme.widget_active_stroke);
-    if ui.small_button("Reset section defaults").clicked() {
+    if chrome_small_icon_button(
+        ui,
+        ChromeIcon::Reset,
+        "theme.reset.widgets",
+        "Reset section defaults",
+    )
+    .clicked()
+    {
         reset_widgets_to_mode_defaults(scheme, mode);
         changed = true;
     }
@@ -611,10 +681,17 @@ fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode)
 
 fn section_selection(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    ui.heading("Selection and highlight");
+    section_heading(ui, "Selection and highlight");
     changed |= color_row(ui, "Selection background", &mut scheme.selection_bg);
     changed |= color_row(ui, "Selection stroke", &mut scheme.selection_stroke);
-    if ui.small_button("Reset section defaults").clicked() {
+    if chrome_small_icon_button(
+        ui,
+        ChromeIcon::Reset,
+        "theme.reset.selection",
+        "Reset section defaults",
+    )
+    .clicked()
+    {
         reset_selection_to_mode_defaults(scheme, mode);
         changed = true;
     }
@@ -623,11 +700,18 @@ fn section_selection(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMod
 
 fn section_semantic(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    ui.heading("Semantic accents");
+    section_heading(ui, "Semantic accents");
     changed |= color_row(ui, "Success", &mut scheme.success_accent);
     changed |= color_row(ui, "Warning", &mut scheme.warn_accent);
     changed |= color_row(ui, "Error", &mut scheme.error_accent);
-    if ui.small_button("Reset section defaults").clicked() {
+    if chrome_small_icon_button(
+        ui,
+        ChromeIcon::Reset,
+        "theme.reset.semantic",
+        "Reset section defaults",
+    )
+    .clicked()
+    {
         reset_semantic_to_mode_defaults(scheme, mode);
         changed = true;
     }
@@ -687,12 +771,16 @@ fn reset_semantic_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
 
 fn preview(ui: &mut egui::Ui, resolved: ResolvedTheme) {
     let palette = resolved.palette;
-    ui.heading("Live preview");
+    section_heading(ui, "Live preview");
     egui::Frame::NONE
         .fill(to_egui(palette.window_surface))
         .stroke(egui::Stroke::new(1.0_f32, to_egui(palette.control_border)))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new("Window text").color(to_egui(palette.primary_text)));
+            ui.label(
+                egui::RichText::new("Window text")
+                    .text_style(text_style_for_role(TextRole::Body))
+                    .color(to_egui(palette.primary_text)),
+            );
             ui.hyperlink_to(
                 egui::RichText::new("Link sample").color(to_egui(palette.hyperlink)),
                 "https://example.com",
@@ -742,7 +830,7 @@ fn swatch(ui: &mut egui::Ui, label: &str, fill: ThemeColor, stroke: ThemeColor) 
         rect.center(),
         egui::Align2::CENTER_CENTER,
         label,
-        egui::TextStyle::Small.resolve(ui.style()),
+        text_style_for_role(TextRole::Metadata).resolve(ui.style()),
         to_egui(ThemeColor {
             r: 255,
             g: 255,

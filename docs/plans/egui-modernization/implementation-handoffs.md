@@ -120,6 +120,10 @@ Theme editor integrates ACTUAL M3-C session, not today's needs_reload shape: cle
 
 Focused settings_window_sizing_policy_uses_expected_defaults; settings_content_height_has_sane_floor; to_settings_preserves_static_values_when_follow_mouse_disabled; to_settings_disables_static_when_follow_mouse_enabled; radial_threshold_and_scope_validation_explain_the_invalid_field; tap_hold_language_states_release_crossing_and_legacy_semantics. Change sizing expectations only with intentional calculation change; one shell stable-collapse/reachable-footer test and theme editor reflow/no-draft-mutation test. Reuse M3-C transaction tests. Targeted locked/offline fast-dev Nextest/appropriate compile/scoped fmt/diff/review, no benchmark/native campaign; record unavailable manual QA. Planner pauses until implementation catches up.
 
+## M5-B/C surface rollout inventory
+
+Use SURFACE_COVERAGE.md for the actual presentation-owner ledger and inspected M5-B1 Notes handoff after M4-C/M5-A. It is an inventory, not completed visual qualification. Group related surfaces in coherent checkpoints, preserve domain-specific content/native overlays, and mark actual evidence and manual gaps as each group lands. Later group packets inspect actual helpers/source at activation; no extra benchmark or generic framework.
+
 ## Historical handoffs — superseded, reference only
 
 All prior assignments, gates, source/build activation wording and accepted experiment packets below are historical. They do not authorize another optimization, backend competition, benchmark matrix or parity blocker. Raw findings and prior dispositions remain preserved; consult the future backlog for adopted/deferred/rejected status.

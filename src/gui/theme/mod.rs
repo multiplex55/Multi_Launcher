@@ -80,6 +80,37 @@ pub struct ResolvedTheme {
     pub metrics_identity: MetricsIdentity,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextRole {
+    PrimaryQuery,
+    Result,
+    Metadata,
+    SectionHeading,
+    Body,
+    Button,
+    Error,
+    Code,
+}
+
+pub(crate) fn text_style_for_role(role: TextRole) -> egui::TextStyle {
+    match role {
+        TextRole::PrimaryQuery | TextRole::Body | TextRole::Error => egui::TextStyle::Body,
+        TextRole::Result | TextRole::Button => egui::TextStyle::Button,
+        TextRole::Metadata => egui::TextStyle::Small,
+        TextRole::SectionHeading => egui::TextStyle::Heading,
+        TextRole::Code => egui::TextStyle::Monospace,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChromeIcon {
+    Search,
+    Apply,
+    Save,
+    Cancel,
+    Reset,
+}
+
 pub fn resolve_theme(
     settings: &ThemeSettings,
     system_appearance: SystemAppearance,
@@ -230,6 +261,7 @@ struct AppliedThemeSlot {
 struct ThemeRuntimePlugin {
     committed: ThemeSettings,
     preview: Option<ThemeSettings>,
+    brand_texture: Option<egui::TextureHandle>,
     dark_baseline: Arc<Style>,
     light_baseline: Arc<Style>,
     dark: Option<AppliedThemeSlot>,
@@ -246,6 +278,7 @@ impl ThemeRuntimePlugin {
         Self {
             committed: committed.clone(),
             preview: None,
+            brand_texture: load_brand_texture(ctx),
             dark_baseline: ctx.style_of(Theme::Dark),
             light_baseline: ctx.style_of(Theme::Light),
             dark: None,
@@ -429,6 +462,148 @@ pub(crate) fn resolved_for_current_context(ctx: &egui::Context) -> Option<Resolv
         .flatten()
 }
 
+pub(crate) fn brand_texture_id(ctx: &egui::Context) -> Option<egui::TextureId> {
+    ctx.with_plugin::<ThemeRuntimePlugin, _>(|runtime| {
+        runtime.brand_texture.as_ref().map(egui::TextureHandle::id)
+    })
+    .flatten()
+}
+
+fn load_brand_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let rgba =
+        image::load_from_memory(include_bytes!("../../../Resources/Green_MultiLauncher.png"))
+            .ok()?
+            .into_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+    Some(ctx.load_texture(
+        "Multi Launcher brand badge",
+        image,
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
+pub(crate) fn paint_brand_badge(ui: &mut egui::Ui) {
+    let Some(texture_id) = brand_texture_id(ui.ctx()) else {
+        return;
+    };
+    let heading_height = ui.text_style_height(&text_style_for_role(TextRole::SectionHeading));
+    let size = (heading_height * 1.55).clamp(26.0, 34.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter().image(
+        texture_id,
+        rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
+}
+
+pub(crate) fn paint_search_icon(ui: &mut egui::Ui) {
+    let height = ui.spacing().interact_size.y;
+    let icon_size = ui.spacing().icon_width.min(height).max(12.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(icon_size, height), egui::Sense::hover());
+    paint_chrome_icon(
+        ui.painter(),
+        ChromeIcon::Search,
+        rect,
+        ui.visuals().text_color(),
+    );
+}
+
+pub(crate) fn chrome_icon_button(
+    ui: &mut egui::Ui,
+    icon: ChromeIcon,
+    id_salt: &str,
+    label: &str,
+) -> egui::Response {
+    chrome_icon_button_with_size(ui, icon, id_salt, label, false)
+}
+
+pub(crate) fn chrome_small_icon_button(
+    ui: &mut egui::Ui,
+    icon: ChromeIcon,
+    id_salt: &str,
+    label: &str,
+) -> egui::Response {
+    chrome_icon_button_with_size(ui, icon, id_salt, label, true)
+}
+
+fn chrome_icon_button_with_size(
+    ui: &mut egui::Ui,
+    icon: ChromeIcon,
+    id_salt: &str,
+    label: &str,
+    small: bool,
+) -> egui::Response {
+    let icon_id = ui.id().with(("multi-launcher-chrome-icon", id_salt));
+    let icon_size = ui.spacing().icon_width.max(12.0);
+    let mut button = egui::Button::new((
+        egui::Atom::custom(icon_id, egui::vec2(icon_size, icon_size)),
+        egui::RichText::new(label).text_style(text_style_for_role(TextRole::Button)),
+    ));
+    if small {
+        button = button.small();
+    }
+    let button = button.atom_ui(ui);
+    if let Some(rect) = button.rect(icon_id) {
+        let color = ui.style().interact(&button.response).text_color();
+        paint_chrome_icon(ui.painter(), icon, rect, color);
+    }
+    button.response
+}
+
+fn paint_chrome_icon(
+    painter: &egui::Painter,
+    icon: ChromeIcon,
+    bounds: egui::Rect,
+    color: egui::Color32,
+) {
+    let size = bounds.width().min(bounds.height());
+    let rect = egui::Rect::from_center_size(bounds.center(), egui::vec2(size, size));
+    let stroke = egui::Stroke::new((size * 0.075).max(1.25), color);
+    let p = |x: f32, y: f32| {
+        egui::pos2(
+            rect.left() + rect.width() * x,
+            rect.top() + rect.height() * y,
+        )
+    };
+    match icon {
+        ChromeIcon::Search => {
+            painter.circle_stroke(p(0.42, 0.42), size * 0.23, stroke);
+            painter.line_segment([p(0.59, 0.59), p(0.84, 0.84)], stroke);
+        }
+        ChromeIcon::Apply => {
+            painter.line_segment([p(0.16, 0.52), p(0.40, 0.76)], stroke);
+            painter.line_segment([p(0.40, 0.76), p(0.85, 0.24)], stroke);
+        }
+        ChromeIcon::Save => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.18, 0.14), p(0.82, 0.86)),
+                egui::CornerRadius::same(2),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.32, 0.17), p(0.32, 0.43)], stroke);
+            painter.line_segment([p(0.68, 0.17), p(0.68, 0.43)], stroke);
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.32, 0.57), p(0.68, 0.82)),
+                egui::CornerRadius::same(1),
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+        }
+        ChromeIcon::Cancel => {
+            painter.line_segment([p(0.23, 0.23), p(0.77, 0.77)], stroke);
+            painter.line_segment([p(0.77, 0.23), p(0.23, 0.77)], stroke);
+        }
+        ChromeIcon::Reset => {
+            painter.circle_stroke(p(0.5, 0.5), size * 0.32, stroke);
+            painter.line_segment([p(0.17, 0.34), p(0.17, 0.12)], stroke);
+            painter.line_segment([p(0.17, 0.12), p(0.40, 0.12)], stroke);
+        }
+    }
+}
+
 fn apply_resolved_theme(style: &mut Style, resolved: ResolvedTheme) {
     let metrics = resolved.metrics;
     let palette = resolved.palette;
@@ -545,8 +720,10 @@ fn to_color32(color: ThemeColor) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedAppearance, SystemAppearance, clear_preview, initialize_runtime, publish_committed,
-        publish_preview, resolve_theme, resolved_for_current_context, to_color32,
+        ChromeIcon, ResolvedAppearance, SystemAppearance, TextRole, brand_texture_id,
+        chrome_icon_button, clear_preview, initialize_runtime, paint_brand_badge,
+        publish_committed, publish_preview, resolve_theme, resolved_for_current_context,
+        text_style_for_role, to_color32,
     };
     use crate::settings::{
         ColorScheme, ThemeColor, ThemeDensity, ThemeMode, ThemePreferences, ThemeSettings,
@@ -758,6 +935,7 @@ mod tests {
         let ctx = egui::Context::default();
         let initial = ThemeSettings::default();
         initialize_runtime(&ctx, &initial);
+        let brand_id = brand_texture_id(&ctx).expect("bundled brand texture is available");
         let secondary = egui::ViewportId::from_hash_of("theme-runtime-secondary");
         let mut viewports = egui::ViewportIdMap::default();
         viewports.insert(egui::ViewportId::ROOT, Default::default());
@@ -775,15 +953,20 @@ mod tests {
                 viewports,
                 ..Default::default()
             },
-            |ui| assert_eq!(ui.ctx().viewport_id(), secondary),
+            |ui| {
+                assert_eq!(ui.ctx().viewport_id(), secondary);
+                paint_brand_badge(ui);
+            },
         );
         output.drop_without_applying_deltas();
+        assert_eq!(brand_texture_id(&ctx), Some(brand_id));
 
         let committed = ThemeSettings {
             mode: ThemeMode::Light,
             ..initial
         };
         assert!(publish_committed(&ctx, &committed));
+        assert_eq!(brand_texture_id(&ctx), Some(brand_id));
         assert!(ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
         assert!(ctx.has_requested_repaint_for(&secondary));
         assert_eq!(ctx.theme(), Theme::Light);
@@ -813,6 +996,162 @@ mod tests {
             Some(to_color32(ColorScheme::light().window_fill)),
             "the child viewport uses the single Context's committed style without a root pass"
         );
+        assert_eq!(brand_texture_id(&ctx), Some(brand_id));
+    }
+
+    #[test]
+    fn semantic_text_roles_reuse_existing_styles_without_reinstalling_fonts_or_compounding() {
+        let ctx = egui::Context::default();
+        initialize_runtime(&ctx, &ThemeSettings::default());
+        let output = ctx.run_ui(Default::default(), |_| {});
+        output.drop_without_applying_deltas();
+        for (role, expected) in [
+            (TextRole::PrimaryQuery, egui::TextStyle::Body),
+            (TextRole::Result, egui::TextStyle::Button),
+            (TextRole::Metadata, egui::TextStyle::Small),
+            (TextRole::SectionHeading, egui::TextStyle::Heading),
+            (TextRole::Body, egui::TextStyle::Body),
+            (TextRole::Button, egui::TextStyle::Button),
+            (TextRole::Error, egui::TextStyle::Body),
+            (TextRole::Code, egui::TextStyle::Monospace),
+        ] {
+            assert_eq!(text_style_for_role(role), expected);
+        }
+
+        let initial_style = ctx.style_of(Theme::Dark);
+        let initial_text_styles = initial_style.text_styles.clone();
+        let initial_font_definitions = ctx.fonts(|fonts| fonts.definitions().clone());
+
+        let mut palette_only = ThemeSettings {
+            mode: ThemeMode::Custom,
+            ..ThemeSettings::default()
+        };
+        palette_only.custom_scheme.text = ThemeColor {
+            r: 93,
+            g: 151,
+            b: 213,
+            a: 255,
+        };
+        assert!(publish_committed(&ctx, &palette_only));
+        let palette_style = ctx.style_of(Theme::Dark);
+        assert_eq!(palette_style.text_styles, initial_text_styles);
+        assert_eq!(
+            ctx.fonts(|fonts| fonts.definitions().clone()),
+            initial_font_definitions
+        );
+
+        let mut scaled = palette_only.clone();
+        scaled.preferences.typography_scale = 1.4;
+        assert!(publish_committed(&ctx, &scaled));
+        let scaled_style = ctx.style_of(Theme::Dark);
+        for role in [
+            TextRole::PrimaryQuery,
+            TextRole::Result,
+            TextRole::Metadata,
+            TextRole::SectionHeading,
+            TextRole::Body,
+            TextRole::Button,
+            TextRole::Error,
+            TextRole::Code,
+        ] {
+            let text_style = text_style_for_role(role);
+            assert_eq!(
+                scaled_style.text_styles[&text_style].family,
+                initial_style.text_styles[&text_style].family,
+                "theme typography preserves the existing font family for {role:?}"
+            );
+        }
+        assert_eq!(
+            scaled_style.text_styles[&text_style_for_role(TextRole::Body)].size,
+            14.0_f32 * 1.4
+        );
+        assert_eq!(
+            scaled_style.text_styles[&text_style_for_role(TextRole::SectionHeading)].size,
+            18.0_f32 * 1.4
+        );
+        assert_eq!(
+            ctx.fonts(|fonts| fonts.definitions().clone()),
+            initial_font_definitions
+        );
+
+        assert!(publish_committed(&ctx, &ThemeSettings::default()));
+        assert_eq!(
+            ctx.style_of(Theme::Dark).text_styles[&egui::TextStyle::Body].size,
+            initial_text_styles[&egui::TextStyle::Body].size,
+            "returning to the baseline does not compound the typography scale"
+        );
+    }
+
+    #[test]
+    fn chrome_icon_buttons_keep_accessible_names_and_native_activation() {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 160.0));
+        let mut apply_rect = egui::Rect::NOTHING;
+        let output = ctx.run_ui(
+            RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                ui.horizontal(|ui| {
+                    chrome_icon_button(ui, ChromeIcon::Search, "search", "Search");
+                    apply_rect = chrome_icon_button(ui, ChromeIcon::Apply, "apply", "Apply").rect;
+                    chrome_icon_button(ui, ChromeIcon::Save, "save", "Save");
+                    chrome_icon_button(ui, ChromeIcon::Cancel, "cancel", "Cancel");
+                    chrome_icon_button(ui, ChromeIcon::Reset, "reset", "Reset");
+                });
+            },
+        );
+        let update = output
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("icon buttons produce an AccessKit update");
+        for label in ["Search", "Apply", "Save", "Cancel", "Reset"] {
+            assert!(update.nodes.iter().any(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
+            }));
+        }
+        output.drop_without_applying_deltas();
+
+        let point = apply_rect.center();
+        let pointer_input = |time, pressed| RawInput {
+            screen_rect: Some(screen_rect),
+            time: Some(time),
+            events: vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            ..Default::default()
+        };
+        let output = ctx.run_ui(pointer_input(1.0, true), |ui| {
+            ui.horizontal(|ui| {
+                chrome_icon_button(ui, ChromeIcon::Search, "search", "Search");
+                chrome_icon_button(ui, ChromeIcon::Apply, "apply", "Apply");
+                chrome_icon_button(ui, ChromeIcon::Save, "save", "Save");
+                chrome_icon_button(ui, ChromeIcon::Cancel, "cancel", "Cancel");
+                chrome_icon_button(ui, ChromeIcon::Reset, "reset", "Reset");
+            });
+        });
+        output.drop_without_applying_deltas();
+        let mut applied = false;
+        let output = ctx.run_ui(pointer_input(1.02, false), |ui| {
+            ui.horizontal(|ui| {
+                chrome_icon_button(ui, ChromeIcon::Search, "search", "Search");
+                applied = chrome_icon_button(ui, ChromeIcon::Apply, "apply", "Apply").clicked();
+                chrome_icon_button(ui, ChromeIcon::Save, "save", "Save");
+                chrome_icon_button(ui, ChromeIcon::Cancel, "cancel", "Cancel");
+                chrome_icon_button(ui, ChromeIcon::Reset, "reset", "Reset");
+            });
+        });
+        output.drop_without_applying_deltas();
+        assert!(applied, "the icon-enhanced Apply button remains clickable");
     }
 
     fn settings_for(mode: ThemeMode) -> ThemeSettings {
