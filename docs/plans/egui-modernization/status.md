@@ -486,3 +486,5 @@ Parenttookartifactexecutionafterrepeatprelaunchdirectorycollision; nativewarmv3r
 Closedaux repairedartifact gate ACCEPTED: parentnative0/423.243s, A438releaseexe87045632B/profilepass, exactradialcontract0confirmsinitialSetTheme+strictdrain, exactdiagnosticlisting0/no body; source8A2B/9DC4/baselineC60C unchanged. Onecandidatewarmbody isnext, historicalcomparisonlimited; no productionpass/adoption.
 
 Closedaux singlecandidate evidence ACCEPTED: native0/14records/noexclusions, source/exeunchanged. Enabledtail35.8-51.7us belowhistorical55.8-94.6us, usefullocalsignal; offownermedianworsened whileonimproved, so overallgainunproved/unpaired. Provisionalguardportneedsseparatepacket; fixturefixindependentlywarranted. Production796/FullFAIL unchanged. See receipts/m2a-closed-aux-presentation.md.
+
+ASCII source/harness gate ACCEPTED: isolated796copy/exacttwofiles1CDE+ACC8/patch50448/provenanceE887, exclusiveASCII/nonASCII andnegative/reset contracts; sourceformat0/pinnedharnesslibpathonly. FourapprovedprivateNextesttests next; arraybytes/performancepending, noROOT/body/adoption. See receipts/m2a-ascii-face-resolution.md.
