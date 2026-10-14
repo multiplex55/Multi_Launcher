@@ -1,6 +1,6 @@
 # M2-A archive-only warm UI regions
 
-Status: v3 incremental release artifact and exact no-body listing independently accepted. No diagnostic body has run. Live application source remains79653eca; production Full ROOT performance remains FAIL.
+Status: v3 release artifact, exact no-body listing and single diagnostic evidence independently accepted. Live application source remains79653eca; production Full ROOT performance remains FAIL.
 
 Plan checkpoint:f34d10db. Fresh ignored candidate: `target/egui-modernization/m2a/warm-ui-regions-001/root`, copied from the accepted frozen79653eca root. Only archived `src/gui/render.rs` differs. Manifests, lockfile, vendors and font policy remain unchanged.
 
@@ -52,3 +52,27 @@ The preserved instrumented executable is `receipts/current-release-multi_launche
 
 
 Independent completed-artifact review accepted without findings: source63DA, gate9039, actual release executableC60C, single exact no-body listing and preserved first failure. The next action is the separately activated single counterbalanced diagnostic body under the accepted packet; no production performance acceptance follows from artifact success.
+
+
+## Single diagnostic result
+
+The single authorized body ran from `production-warm-ui-regions-001/body-runs/warm-ui-regions-body-002`, native0/0.8050994s, one passed owner. It retained14records: four warmups and ten measured observations in the reviewed counterbalanced order. Instrumented render63DA and executableC60C matched before/after. Preparation attempt001 stopped before invocation on a pre-created output directory; its failure remains preserved and consumed no body.
+
+Evidence hashes: input `cc301e2e94c5a62ccbc363eb0eeccc89a2082d166c06650f9f3c65088fec76be`; native result `92e13548c737ca772db0dba0576d389ad657710a2dff61cb2c5bca2c69bb73e4`; stdout `a0aee59d133d78427d4237260c9995e7543a388508a33524167209efe8d8e5bf`; stderr `383b456263df6482653d3359a839747a8d754764224e7e39be0e9f93db96be92`; parsed `cc68a7ae24e585be5d90867f442b1840e367591a181f84f832787bd16d33ac36`; validation `191e7d47ebb3c761bc9e72d13380734f31e2cc4b0c4d20384983673812298fe5`; sibling runner `d9f1e6fe3934ead71ac96a733d67ce0498457bb05da8ffe8e59d005ad0eb263e`. Parent independently parsed raw14records, exact order, IDs/fixture,0rebuild/0measure/25paint/onepass, metric1call25work, before/after deltas, phase/residual and region/gap arithmetic, enabled containment and disabled unavailable sentinel. All pass; independent actual-result review pending.
+
+Ordered five-sample arrays in nanoseconds:
+
+| Interval | Clocks disabled | Clocks enabled | Enabled p50/p95 |
+|---|---|---|---|
+| Owner |434400,293500,275400,254400,270100|423900,282300,476100,329900,279600|329900/476100|
+| UI |369900,255500,243600,218200,229900|376900,242200,401300,279000,233700|279000/401300|
+| Prelude |0,0,0,0,0|36500,36700,71700,46100,36900|36900/71700|
+| Central panel |0,0,0,0,0|245200,138400,252500,168400,140400|168400/252500|
+| Auxiliary tail |0,0,0,0,0|94600,66700,76100,64100,55800|66700/94600|
+| Central minus nested rows |unavailable zero sentinel|37900,27800,46700,38700,30600|37900/46700|
+| Nested rows |205200,109700,107500,108000,111400|207300,110600,205800,129700,109800|129700/207300|
+
+The tail is a material current UI responsibility for bounded source inspection. These are descriptive values with all outliers retained; do not add independent medians, double-count nested rows, claim global observer overhead or original phase parity, or accept production performance. Live source796 and Full ROOT FAIL remain unchanged.
+
+
+Independent actual-result review accepted without findings: all14ordered records/every raw field, env/bindings, work/IDs and arithmetic pass. Enabled median prelude36.9us/central168.4us/tail66.7us/central-minus-rows37.9us are descriptive partitions, never additive medians. Variation prevents precise observer-overhead attribution. Planner activated only bounded read-only post-panel closed-dialog/overlay lifecycle inspection, including original corresponding tail; no repair or new measurement is yet authorized.
