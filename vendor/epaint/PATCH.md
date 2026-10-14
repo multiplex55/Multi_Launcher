@@ -135,3 +135,23 @@ raw-result reuse, and these compatible dependency bounds. Remove this patch
 only after an upstream epaint release supplies equivalent bounded face-owned
 plan and raw-result reuse and the locked egui stack can use it with focused
 glyph/geometry parity passing.
+
+## Provisional paragraph glyph capacity hint
+
+`src/text/text_layout.rs::layout_section` reserves additional slots in the
+current paragraph glyph vector once for each nonempty newline-delimited
+segment, using `segment.chars().count()` as the capacity hint. This is a hint
+based on Unicode scalar count, not a limit or a promise of one output glyph per
+character; the vector grows normally when shaping emits more glyphs.
+
+This local delta was evaluated in the archived experiment at checkpoint
+`829dbac6`; see
+`../../docs/plans/egui-modernization/receipts/m2a-paragraph-glyph-capacity-experiment.md`.
+The result is provisional: the baseline ran first, the observed ranges overlap,
+and timing drift prevents attributing a causal production gain. No quantified
+production savings are claimed from that experiment or from this source port.
+
+Remove this local line when an upstream epaint release provides equivalent
+per-segment capacity reservation and the locked egui stack passes focused glyph
+and geometry parity. The broader local override still follows the removal
+condition stated in the preceding sections.

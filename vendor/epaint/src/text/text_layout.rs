@@ -483,6 +483,8 @@ fn layout_section(
             continue;
         }
 
+        paragraph.glyphs.reserve(segment.chars().count());
+
         segment_into_runs(font, segment, &mut runs);
 
         let num_runs = runs.len();

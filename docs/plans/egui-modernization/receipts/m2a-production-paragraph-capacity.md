@@ -1,0 +1,11 @@
+# M2-A provisional production paragraph capacity
+
+Status: live source port prepared and reviewed; production compilation and performance acceptance pending. No production-private test execution or performance pass is claimed. M2-A and both mission tracks remain open.
+
+The one-line port in `vendor/epaint/src/text/text_layout.rs::layout_section` reserves additional current-paragraph glyph capacity using `segment.chars().count()` after the empty-segment guard. Ordinary growth remains available. No instrumented candidate file was copied; no cache/key/font/shaping/renderer/observer changes. `vendor/epaint/PATCH.md` documents the provisional delta, evidence, drift limits, lack of quantified production savings and upstream-removal condition.
+
+Evidence checkpoint `829dbac6` contains the accepted candidate's six text-layout tests, complete Trace parity and fresh matched control pair. All five corresponding candidate samples were lower, but fixed ordering/drift/overlap prevent a causal percentage claim. Those private tests ran against the isolated candidate, not live production. The operation is identical; review accepted reusing that evidence without duplicating the six tests or ROOT20.
+
+Live text-layout SHA-256: `f0ffa47a304954ef4dd4f382f45e1fc6a5eefda43879641eb832add4a85d604f`. PATCH SHA-256: `16d02980a766df1d9ab7db499d031dfe0b4af8ea57cb2e5961791c9f907cc8e6`. Parent inspected the exact runtime diff and independently ran file-scoped `rustfmt --check --edition 2024` and `git diff --check`. Cargo manifests/lock/features/assets have no changes. A documentation-only directional reference was corrected; no runtime correction was needed.
+
+Next: local source-only provisional commit, a fresh Git archive of that commit, canonical-release no-run compilation of the actual production closure and exact executable metadata/listing review. Only after that gate may one preserved-original and one current Full ROOT invocation run, each six cases/five warmups/20 samples. Retain all12records/240values and aligned arrays; original26/current25 painted rows stay explicit. No original rebuild, QA/observer build, exclusions, automatic repeats, unrelated tests or performance waiver. Actual original/current results must decide acceptance.
