@@ -295,3 +295,19 @@ Release layout attribution independently accepted without findings: source/artif
 Release attribution evidence checkpointcd2fe206 saved locally; only unrelated Workspaces/ remained. Planner proposes one ignored-copy glyph allocation map experiment: retain existing prehashed key/IsEnabled/equality but use existing nohash IntMap to avoid secondhash. No claimed production savings or key/cache policy change. Privatecontracts+realallocationtest, candidateparity thenfreshmatchedrelease pair; preimplementationreview/plancheckpointpending, NOTactivated.
 
 Glyph allocation prehash experiment independently accepted as implementer-ready:existingone-u64Hash/IsEnabled contract supports IntMap; no key/equality/cache-policy change. Private9+1realallocationtest and separately reviewed releaseparity/matchedpair required. Benefit unknown/no productionadoption. Localplancheckpointnext.
+
+Local plan4c1ff27e saved; sole writer activated ignored-copy IntMap candidate plus real allocation test and ten private contracts only. First stop is focused source/private-evidence review before candidate release build. Production3a10 unchanged; M2-A performance FAIL/noTrackB, both mission tracks remain active.
+
+Ignored prehash candidate source9530085E…BF4E85 and10private tests complete, native0/6.2568036s with real Bahnschrift markers. Three new-test review findings closed; parent bindings/names/asset audit passed. Final private-index06E0…E7B4C review pending before candidate release build. Production unchanged; no performance benefit claimed.
+
+Combined prehash source/private gate independently accepted without findings at06E0…E7B4C. One candidate release archive preparation authorized from953font/C511render in newisolatedtarget; baseline preserved. Completedartifact/owner review required before ROOTparity; no timing/productionadoption cleared.
+
+Prehash candidate release build82541 is live, parent-confirmed Cargo33916/9396 and Nextest16456 against actual05:19:52UTC start. Source953/C511, focused equality input181F…449E, fresh target/archive, no overrides/QA. Wait for actual native completion and reviewed metadata/executable/listing; parity/timing remain gated. Production3a10 unchanged; M2-A performance FAIL and both tracks remain required.
+
+Candidate prehash release build82541 completed once native0/723.227914s; archive0219A6BC…D877A/30591923bytes, frozenfont953unchanged. Parentcheckedactualreleaseoptimized/native/archive-source hashes and focusedinputs. Completedartifact/executable/ownerlistingreview underway; no candidateparity/timing cleared.
+
+Prehash candidate artifact gate accepted without findings:0219archive/352Cbuilt-extractedexe, release/MSVC5238listing. Receipt-only sourcebuildalias correctionF6C2 accepted; failures preserved/no native reruns. Parent cleared one candidateparity-only body withfontSHA953 descriptive binding andacceptedsourcechain; actualsnapshotmustmatch84BDA beforematchedtiming. Productionunchanged/performancegateopen.
+
+Candidate actual parity independently accepted native0/2.4651184s, fullbyteidentical84BDA/075EF andall55bindings. Parent separately cleared freshbaselineEC190 then candidate0219 timing pair, oneeach2warm+5samples/allvectors, sameobserver/workload andexplicitQAabsentenv. No repeats/exclusions/productionadoption; awaitmatchedresultsreview.
+
+Prehash prototype rejected after independently accepted matched evidence:ownerp50 30.9320→35.3300ms,emission9.2382→9.9939ms; all16vectors/fullbytes/bindings pass. Singlepair/wideoverlap cannotprove causalregression, but no supportedbenefit; no repeat/adoption. IndexEC147…AE630, production3a10unchanged. Parent evidencecheckpoint next; plannerboundedroot-cause reassessment requested,no newoptimizationactivated.
