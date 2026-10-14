@@ -190,3 +190,6 @@ Current is slower in5/6medians;10kcold+30.345% and10kwarm+58.313% descriptive in
 Artifacts: matchedindex5e41fec2f480d5282ccd66b9d4511402ebec72e830690430c7df590a688c8f9b; originalparsedf642e79e8213a0397cd64498043beead235706b9926c97b67369db8c8247814c; currentparsedaeffbb924bcc09408afcd46c58f875ad0db2339858a1cbaa5991a2d47c0833e0. Directrunnerbcf3c0733e7780e7f43d1afd182ec873c18200c9407942d1fd7d2724a73d9dfe. Rawlogs/preflight/native/results preserved under release-full-root-size-only-001/body-runs. No source/build/body repeats.
 
 Independent actual-result review accepted the Full ROOT measurement evidence without integrity findings and retained performance FAIL. No repeat/exclusion/automatic optimization or Track B acceptance. Source79653eca remains provisional.
+
+
+Current production warm-owner diagnostic (onebody,2warmups/5samples) accepted: ownerp50/p95us265.2/368.6,UI231.8/317.5,logic12.2/17.1,finalizer0.9/1.8,residual19.7/32.2. Nestedrowmetric109.5/132.3 is included inUI; do notaddmedians. SameFull100fixture/0rebuild0measure25paint1diagnosticpass. No originalphasecomparison/overhead/productionparity claimed; FullperformanceFAIL remains. See receipts/m2a-production-warm-owner.md for allorderedvalues/bindings/limits.

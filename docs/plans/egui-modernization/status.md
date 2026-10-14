@@ -440,3 +440,9 @@ Actual production Full ROOT pair independently accepted as measurement evidence;
 
 
 Next bounded plan: reuse existing track_c_diagnostic_root_list_warm_owner_breakdown in accepted production F26D/source79653eca. Independent packet review accepted without blockers;100actions,2warmups/5samples, phase/residual and nested row-metric arithmetic, no source/build/new clock. First exact no-body owner listing and binding review, then separately activate one diagnostic body. Cold section work remains unresolved, actual Full performance FAIL and both tracks stay required.
+
+
+Existing production warm diagnostic listing gate independently ACCEPTED without findings:49A1267/F26D/actualsource79653eca, one ignored owner/native0/no body, accepted chain and clean childenv. Solewriter activated exactlyONE direct diagnostic body100actions/2warmups/5samples, everyfield/protocol retained, lifecycle/residual/nestedrowmetric/work/identity arithmetic; no newbuild/source/clocks/repeats. Actualresultreview pending before any repair. ProductionFullFAIL and both mission tracks remain. See receipts/m2a-production-warm-owner.md.
+
+
+Existing production warm attribution independently ACCEPTED without findings: exactlyonebody/native0/412.0748ms,8completeprotocol+recordlines/2warmups5samples, allphase/metric/identity/work/bindings verified. CurrentUI p50/p95us231.8/317.5 withinowner265.2/368.6; nestedrows109.5/132.3, neveraddagain. Logic12.2us/finalizer0.9us/residual19.7us smaller. SameFull100catalog/signature/25currentpaint; noFullpassinference. Planneractive read-only on currentUI branches; no newsource/bodyactivated. Coldrawhitpropertycontracttrap retained, no candidatejustified. ProductionFullFAIL/fullmissionactive. Local evidencecheckpointnext; see receipts/m2a-production-warm-owner.md.
