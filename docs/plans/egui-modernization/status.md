@@ -449,3 +449,12 @@ Existing production warm attribution independently ACCEPTED without findings: ex
 
 
 Next archive-only warmUI3region attribution plan independently accepted: render.rs test-only local optional carrier, samebinary coarse clocks-off/on counterbalanced2warm5samples/state, preserving allUI work and existing outer/nested metrics. Basecommit/probe-source/exe provenance separate. First source/diff preparation only; canonicalartifact and onebody gates remain pending. Actualproduction/source79653eca unchanged; performanceFAIL/bothtracksrequired. Plancheckpointnext.
+
+
+Reviewed warm UI regions plan saved locallyf34d10db. Sole implementer_measurement activated archive-only SOURCE PREPARATION: fresh ignored warm-ui-regions-001 based on frozen79653eca, archived render.rs test-only intervals/derived owner only. Parent owns tracked docs/Git; live source/vendor/manifests unchanged. Stop source/diff/format/provenance review before any canonical build or body. Production performance FAIL and both mission tracks remain required.
+
+
+Archive-only warm UI regions source prepared at warm-ui-regions-001/root; only archivedrender.rs differs from frozen796. Independent source review requires two bounded corrections before build: explicit unavailable off sentinel for central-minus-rows and exact row-metric work=25paint. Initial52C/0F80/A4F3 source/patch/provenance retained; parent source/base/5dependency bindings pass, scopedformat0. Writer active only on those corrections/v2bindings; no live source/build/body. Font-revision warm lookup checked as storedscalar, no per-frame font-data hashing. See receipts/m2a-warm-ui-regions.md.
+
+
+Archive-only warmUI3region SOURCEgate independently ACCEPTED after offsentinel/exact25work corrections: finalrender4D722C7A, v2patchB0CB0349, provenanceA3887E25; v1historyretained. Parentfinalhash/unchanged5bindings pass, scopedformat0, onlyarchivedrender.rs changes. Sourcewriterstopped. Canonicalinstrumented no-runartifact/listing is next separately activated gate; no body/sourceadoption. Base796/proberender/exe provenance remains distinct. Production performanceFAIL/bothmissiontracksopen. See receipts/m2a-warm-ui-regions.md.

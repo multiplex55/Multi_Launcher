@@ -1172,3 +1172,12 @@ Done means distinguishing prelude/menu, central query/scroll wrappers and auxili
 
 
 Preimplementation review accepted this experiment without substantive findings. Clarifications: retain base commit79653eca separately from the instrumented render.rs digest and resulting executable; never label this probe as an actual unmodified production artifact. Coarse-clock modes alone change; outer lifecycle and RowsBuilt clocks stay enabled. Use the established counterbalanced order: disabled warmup0,enabled warmup0,enabled warmup1,disabled warmup1; then disabled sample0,enabled sample0,enabled sample1,disabled sample1,disabled sample2,enabled sample2,enabled sample3,disabled sample3,disabled sample4,enabled sample4. All14observations retained,10measured records used for descriptive summaries. Source preparation/diff review is the first activation only; canonical build and body remain separately gated. No additional owner, test matrix or profiler is required.
+
+
+Reviewed warm UI regions plan saved locallyf34d10db. Sole implementer_measurement activated archive-only SOURCE PREPARATION: fresh ignored warm-ui-regions-001 based on frozen79653eca, archived render.rs test-only intervals/derived owner only. Parent owns tracked docs/Git; live source/vendor/manifests unchanged. Stop source/diff/format/provenance review before any canonical build or body. Production performance FAIL and both mission tracks remain required.
+
+
+Archive-only warm UI regions source prepared at warm-ui-regions-001/root; only archivedrender.rs differs from frozen796. Independent source review requires two bounded corrections before build: explicit unavailable off sentinel for central-minus-rows and exact row-metric work=25paint. Initial52C/0F80/A4F3 source/patch/provenance retained; parent source/base/5dependency bindings pass, scopedformat0. Writer active only on those corrections/v2bindings; no live source/build/body. Font-revision warm lookup checked as storedscalar, no per-frame font-data hashing. See receipts/m2a-warm-ui-regions.md.
+
+
+Archive-only warmUI3region SOURCEgate independently ACCEPTED after offsentinel/exact25work corrections: finalrender4D722C7A, v2patchB0CB0349, provenanceA3887E25; v1historyretained. Parentfinalhash/unchanged5bindings pass, scopedformat0, onlyarchivedrender.rs changes. Sourcewriterstopped. Canonicalinstrumented no-runartifact/listing is next separately activated gate; no body/sourceadoption. Base796/proberender/exe provenance remains distinct. Production performanceFAIL/bothmissiontracksopen. See receipts/m2a-warm-ui-regions.md.
