@@ -151,3 +151,16 @@ Matched originalf45e3773 against production3a10f1de using the same direct libtes
 | 10,000 | 126.1726 | 235.4586 | 0.2057 | 0.3284 |
 
 [Full results, p95/spread, artifact bindings and limitations](receipts/m2a-release-full-root-control.md). All240 measurements and aligned arrays remain available. Original26/current25 painted rows, owner-boundary labels and emoji-icon font differences are disclosed; no cross-version output identity was forced. These CPU-owner results do not establish native/display/GPU or Full81 acceptance. Historical baseline results above remain unchanged.
+
+
+## Provisional paragraph-capacity production comparison
+
+Fresh matched originalf45/currentfcd4 canonical-release Full ROOT pair: both one-shot invocations passed correctness; all12records/240values and aligned work/identity vectors retained, zero exclusions. Performance remains **FAIL**.
+
+| Rows | Original cold p50 ms | Current cold p50 ms | Original warm p50 ms | Current warm p50 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 1.2654 | 1.8155 | 0.1545 | 0.2627 |
+| 1,000 | 11.6476 | 19.6725 | 0.1775 | 0.2984 |
+| 10,000 | 126.1575 | 212.1170 | 0.2122 | 0.3310 |
+
+[Actual p95/ranges, invocation/artifact bindings and limitations](receipts/m2a-production-paragraph-capacity.md). The10,000cold ranges are disjoint. Original26/current25 painted rows and version-specific owner boundaries remain disclosed. Historical3a10 differences are unpaired and do not quantify a causal reserve benefit. These CPU results do not waive native/display/GPU, fast-dev, remaining owners or Track B prerequisites.
