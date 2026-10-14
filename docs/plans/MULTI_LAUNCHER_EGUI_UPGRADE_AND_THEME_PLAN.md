@@ -365,20 +365,22 @@ For the separate future benchmark task, use existing Track C PowerShell recipes 
 
 ## 10. Execution checklist
 
-- [ ] M0-A preflight and branch
+Current evidence and ownership are authoritative in `egui-modernization/status.md`; checked migration gates retain the documented native/manual QA gaps and accepted performance debt.
+
+- [x] M0-A preflight and branch
 - [ ] M0-B golden baseline and screenshots
-- [ ] M0-C API/dependency worklist
-- [ ] M1-A dependency graph
+- [x] M0-C API/dependency worklist
+- [x] M1-A dependency graph
 - [ ] M1-B lifecycle and startup
-- [ ] M1-C widget APIs
-- [ ] M1-D toast/markdown/texture integrations
-- [ ] M2-A cache migration and Track C compatibility
-- [ ] M2-B Win32 / viewport behavior
-- [ ] M2-C retain working renderer; comparison deferred
-- [ ] M2-D **migration-only gate** accepted
-- [ ] M3-A semantic theme model
-- [ ] M3-B actual runtime application
-- [ ] M3-C live preview and presets
+- [x] M1-C widget APIs
+- [x] M1-D toast/markdown/texture integrations
+- [x] M2-A cache migration and Track C compatibility
+- [x] M2-B Win32 / viewport behavior
+- [x] M2-C retain working renderer; comparison deferred
+- [x] M2-D **migration-only gate** accepted
+- [x] M3-A semantic theme model
+- [x] M3-B actual runtime application
+- [x] M3-C live preview and presets
 - [ ] M3-D typography and icons
 - [ ] M4-A root search polish
 - [ ] M4-B list/grid polish

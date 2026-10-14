@@ -12,7 +12,8 @@ Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.
 - **M2-B/M2-D accepted with documented QA gaps:** local migration-only checkpointaf9d1183. Broad failure evidence retained and repaired via scoped passing chain; final00617/17,globalfmt/libClippy0 and005all-targetClippy0. Coherent review accepted without unresolved findings. See receipts/m2d-functional-stabilization.md; all native handles terminal.
 - **M3-A complete:** compatible persisted preferences, pure semantic resolution and separate structural palette/metric identities. Targeted Windows locked/offline fast-dev Nextest model-001 passed18/18, native0, unchanged source bindings; scoped formatting/diff and coherent source review accepted. Writer released; verification process terminal. See receipts/m3a-theme-model.md.
 - **M3-B complete:** Context-owned runtime applies dual style slots before first Ui and publishes successful committed saves only. runtime-004 targeted Windows Nextest20/20/native0, unchanged source bindings, scoped fmt/diff and source review accepted. Earlier compile/test failures retained; no assertion weakened. All verification processes terminal. See receipts/m3b-runtime-theme.md.
-- **NEXT ACTION M3-C:** sole sequential writer implements one transactional dialog session and runtime preview overlay, presets/accents and all Cancel/close rollback routes. Parent owns docs/Git/native verification.
+- **M3-C complete:** transactional dialog baseline/draft, one runtime preview overlay, atomic conflict-checked Apply/Save, latest-committed Cancel rollback, pinned/repeated focus/all close routes and collision-safe curated presets/accents. preview-00331/31/native0, source bindings unchanged; scoped fmt/diff and coherent review accepted. Earlier failures retained. See receipts/m3c-transactional-preview.md.
+- **NEXT ACTION M3-D:** shared compact typography and cached brand/vector chrome resources with initial root/theme-editor consumers, followed by root/list/grid and settings/plugin surface rollout.
 - Native desktop access/physical chord/focus/DPI gaps remain qualification limits; use available evidence, record manual follow-up and continue safe work. Observed critical correctness or severe usability/idle/resource defects still block affected stability claims.
 - Planner, implementer and reviewer explicitly notified: no inherited parity/no-regression checklist may override this policy. Review coherent milestones; no separate receipt/parser/listing/doc approval cycles.
 
@@ -33,7 +34,7 @@ Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.
 | M2-D — functional migration acceptance | `complete_with_qa_gaps` | Actual Windows compilation, scoped failure corrections, formatting/Clippy and coherent final review pass. Migration-only checkpoint carries receipts/m2d-functional-stabilization.md. Accepted debt/native gaps retained; immediately M3-A. |
 | M3-A — semantic theme model | `complete` | Model/resolution/persistence and existing dialog tests18/18 pass; compatible serde, pure normalization and split value identities; coherent review accepted. |
 | M3-B — runtime theme application | `complete` | Runtime/publication/cache consumer tests20/20 pass; source review/scoped formatting accepted. |
-| M3-C — presets and transactional live theme preview | `pending` | Not started. |
+| M3-C — presets and transactional live theme preview | `complete` | Preview/session/close/preset/conflict/cache contracts31/31 pass; review findings resolved. |
 | M3-D — typography, icons and lightweight rendering assets | `pending` | Not started. |
 | M4-A — root launcher search field polish | `pending` | Not started. |
 | M4-B — result list and grid visual polish | `pending` | Not started. |

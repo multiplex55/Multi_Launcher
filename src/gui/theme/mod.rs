@@ -84,27 +84,8 @@ pub fn resolve_theme(
     settings: &ThemeSettings,
     system_appearance: SystemAppearance,
 ) -> ResolvedTheme {
-    let (appearance, scheme) = match settings.mode {
-        ThemeMode::System => match system_appearance {
-            SystemAppearance::Light => (ResolvedAppearance::Light, ColorScheme::light()),
-            SystemAppearance::Dark | SystemAppearance::Unknown => {
-                (ResolvedAppearance::Dark, ColorScheme::dark())
-            }
-        },
-        ThemeMode::Dark => (ResolvedAppearance::Dark, ColorScheme::dark()),
-        ThemeMode::Light => (ResolvedAppearance::Light, ColorScheme::light()),
-        ThemeMode::Custom => {
-            let selected = settings
-                .preferences
-                .active_preset
-                .as_deref()
-                .and_then(|name| settings.named_presets.get(name))
-                .unwrap_or(&settings.custom_scheme);
-            // Custom palettes retain their chosen colors. The appearance only
-            // supplies a deterministic base preference for later runtime use.
-            (ResolvedAppearance::Dark, selected.clone())
-        }
-    };
+    let appearance = resolved_appearance(settings.mode, system_appearance);
+    let scheme = effective_color_scheme(settings, system_appearance);
 
     let mut palette = palette_from_scheme(&scheme);
     if let Some(accent) = settings.preferences.accent {
@@ -120,6 +101,38 @@ pub fn resolve_theme(
         metrics,
         palette_identity,
         metrics_identity,
+    }
+}
+
+pub(crate) fn effective_color_scheme(
+    settings: &ThemeSettings,
+    system_appearance: SystemAppearance,
+) -> ColorScheme {
+    match settings.mode {
+        ThemeMode::System => match system_appearance {
+            SystemAppearance::Light => ColorScheme::light(),
+            SystemAppearance::Dark | SystemAppearance::Unknown => ColorScheme::dark(),
+        },
+        ThemeMode::Dark => ColorScheme::dark(),
+        ThemeMode::Light => ColorScheme::light(),
+        ThemeMode::Custom => settings
+            .preferences
+            .active_preset
+            .as_deref()
+            .and_then(|name| settings.named_presets.get(name))
+            .unwrap_or(&settings.custom_scheme)
+            .clone(),
+    }
+}
+
+fn resolved_appearance(mode: ThemeMode, system_appearance: SystemAppearance) -> ResolvedAppearance {
+    match mode {
+        ThemeMode::System => match system_appearance {
+            SystemAppearance::Light => ResolvedAppearance::Light,
+            SystemAppearance::Dark | SystemAppearance::Unknown => ResolvedAppearance::Dark,
+        },
+        ThemeMode::Dark | ThemeMode::Custom => ResolvedAppearance::Dark,
+        ThemeMode::Light => ResolvedAppearance::Light,
     }
 }
 
@@ -216,6 +229,7 @@ struct AppliedThemeSlot {
 /// captured baseline, so repeated publications never compound scaling.
 struct ThemeRuntimePlugin {
     committed: ThemeSettings,
+    preview: Option<ThemeSettings>,
     dark_baseline: Arc<Style>,
     light_baseline: Arc<Style>,
     dark: Option<AppliedThemeSlot>,
@@ -231,6 +245,7 @@ impl ThemeRuntimePlugin {
         known_viewports.dedup();
         Self {
             committed: committed.clone(),
+            preview: None,
             dark_baseline: ctx.style_of(Theme::Dark),
             light_baseline: ctx.style_of(Theme::Light),
             dark: None,
@@ -240,21 +255,37 @@ impl ThemeRuntimePlugin {
         }
     }
 
-    fn apply_committed(&mut self, ctx: &egui::Context, committed: &ThemeSettings) -> bool {
+    fn publish_committed(&mut self, ctx: &egui::Context, committed: &ThemeSettings) -> bool {
         // Preserve inactive or unknown preference values even when they do not
         // change either resolved style slot.
         self.committed = committed.clone();
+        self.apply_effective(ctx)
+    }
 
-        let preference = theme_preference(self.committed.mode);
+    fn publish_preview(&mut self, ctx: &egui::Context, preview: &ThemeSettings) -> bool {
+        self.preview = Some(preview.clone());
+        self.apply_effective(ctx)
+    }
+
+    fn clear_preview(&mut self, ctx: &egui::Context) -> bool {
+        if self.preview.take().is_none() {
+            return false;
+        }
+        self.apply_effective(ctx)
+    }
+
+    fn apply_effective(&mut self, ctx: &egui::Context) -> bool {
+        let effective = self.preview.as_ref().unwrap_or(&self.committed);
+        let preference = theme_preference(effective.mode);
         let mut changed = self.theme_preference != Some(preference);
         if changed {
             ctx.set_theme(preference);
             self.theme_preference = Some(preference);
         }
 
-        let dark = resolve_theme(&self.committed, SystemAppearance::Dark);
+        let dark = resolve_theme(effective, SystemAppearance::Dark);
+        let light = resolve_theme(effective, SystemAppearance::Light);
         changed |= self.apply_slot(ctx, Theme::Dark, dark);
-        let light = resolve_theme(&self.committed, SystemAppearance::Light);
         changed |= self.apply_slot(ctx, Theme::Light, light);
         changed
     }
@@ -334,7 +365,7 @@ fn ensure_runtime(ctx: &egui::Context, initial: &ThemeSettings) {
 pub(crate) fn initialize_runtime(ctx: &egui::Context, committed: &ThemeSettings) {
     ensure_runtime(ctx, committed);
     ctx.with_plugin::<ThemeRuntimePlugin, _>(|runtime| {
-        runtime.apply_committed(ctx, committed);
+        runtime.publish_committed(ctx, committed);
     });
 }
 
@@ -343,13 +374,47 @@ pub(crate) fn initialize_runtime(ctx: &egui::Context, committed: &ThemeSettings)
 pub(crate) fn publish_committed(ctx: &egui::Context, committed: &ThemeSettings) -> bool {
     ensure_runtime(ctx, committed);
     let Some((changed, viewports)) = ctx.with_plugin::<ThemeRuntimePlugin, _>(|runtime| {
-        let changed = runtime.apply_committed(ctx, committed);
-        let viewports = runtime.known_viewports.clone();
+        let changed = runtime.publish_committed(ctx, committed);
+        let viewports = changed.then(|| runtime.known_viewports.clone());
         (changed, viewports)
     }) else {
         return false;
     };
-    if changed {
+    if let Some(viewports) = viewports {
+        for viewport_id in viewports {
+            ctx.request_repaint_of(viewport_id);
+        }
+    }
+    changed
+}
+
+/// Apply a draft over the latest committed settings without mutating either.
+pub(crate) fn publish_preview(ctx: &egui::Context, preview: &ThemeSettings) -> bool {
+    let Some((changed, viewports)) = ctx.with_plugin::<ThemeRuntimePlugin, _>(|runtime| {
+        let changed = runtime.publish_preview(ctx, preview);
+        let viewports = changed.then(|| runtime.known_viewports.clone());
+        (changed, viewports)
+    }) else {
+        return false;
+    };
+    if let Some(viewports) = viewports {
+        for viewport_id in viewports {
+            ctx.request_repaint_of(viewport_id);
+        }
+    }
+    changed
+}
+
+/// Remove the temporary draft overlay and reveal the latest committed theme.
+pub(crate) fn clear_preview(ctx: &egui::Context) -> bool {
+    let Some((changed, viewports)) = ctx.with_plugin::<ThemeRuntimePlugin, _>(|runtime| {
+        let changed = runtime.clear_preview(ctx);
+        let viewports = changed.then(|| runtime.known_viewports.clone());
+        (changed, viewports)
+    }) else {
+        return false;
+    };
+    if let Some(viewports) = viewports {
         for viewport_id in viewports {
             ctx.request_repaint_of(viewport_id);
         }
@@ -480,8 +545,8 @@ fn to_color32(color: ThemeColor) -> egui::Color32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedAppearance, SystemAppearance, initialize_runtime, publish_committed, resolve_theme,
-        resolved_for_current_context, to_color32,
+        ResolvedAppearance, SystemAppearance, clear_preview, initialize_runtime, publish_committed,
+        publish_preview, resolve_theme, resolved_for_current_context, to_color32,
     };
     use crate::settings::{
         ColorScheme, ThemeColor, ThemeDensity, ThemeMode, ThemePreferences, ThemeSettings,
@@ -632,6 +697,14 @@ mod tests {
         assert!(!publish_committed(&ctx, &inactive_edit));
         assert!(Arc::ptr_eq(&initial_dark, &ctx.style_of(Theme::Dark)));
         assert!(Arc::ptr_eq(&initial_light, &ctx.style_of(Theme::Light)));
+        assert!(!ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
+
+        assert!(!publish_preview(&ctx, &inactive_edit));
+        assert!(Arc::ptr_eq(&initial_dark, &ctx.style_of(Theme::Dark)));
+        assert!(Arc::ptr_eq(&initial_light, &ctx.style_of(Theme::Light)));
+        assert!(!ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
+        assert!(!clear_preview(&ctx));
+        assert!(Arc::ptr_eq(&initial_dark, &ctx.style_of(Theme::Dark)));
         assert!(!ctx.has_requested_repaint_for(&egui::ViewportId::ROOT));
 
         let mut palette_edit = inactive_edit.clone();

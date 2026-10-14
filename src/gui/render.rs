@@ -3811,8 +3811,7 @@ impl LauncherApp {
             let mut theme_state = std::mem::take(&mut self.theme_settings_dialog);
             let mut theme_open = self.theme_settings_dialog_open;
             crate::gui::theme_settings_dialog::ui(&ctx, self, &mut theme_open, &mut theme_state);
-            self.theme_settings_dialog_open = theme_open;
-            self.theme_settings_dialog = theme_state;
+            self.finish_theme_settings_dialog_ui(theme_open, theme_state);
         }
         let mut fav_dlg = std::mem::take(&mut self.fav_dialog);
         fav_dlg.ui(&ctx, self);

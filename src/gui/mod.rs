@@ -1640,8 +1640,14 @@ impl LauncherApp {
     }
 
     pub fn open_theme_settings_dialog(&mut self) {
+        if self.theme_settings_dialog_open {
+            return;
+        }
         self.theme_settings_dialog_open = true;
-        self.theme_settings_dialog.request_reload();
+        let ctx = self.egui_ctx.clone();
+        let settings_path = self.settings_path.clone();
+        self.theme_settings_dialog
+            .begin_session(&ctx, &settings_path);
     }
 
     pub fn is_theme_settings_dialog_open(&self) -> bool {
@@ -1649,8 +1655,35 @@ impl LauncherApp {
     }
 
     pub fn close_theme_settings_dialog(&mut self) {
+        if self.pinned_panels.contains(&Panel::ThemeSettingsDialog) {
+            self.theme_settings_dialog_open = true;
+            self.panel_states.theme_settings_dialog = true;
+            if !self.panel_stack.contains(&Panel::ThemeSettingsDialog) {
+                self.panel_stack.push(Panel::ThemeSettingsDialog);
+            }
+            return;
+        }
         self.theme_settings_dialog_open = false;
+        self.theme_settings_dialog.end_session(&self.egui_ctx);
+        self.panel_states.theme_settings_dialog = false;
+        self.panel_stack
+            .retain(|panel| *panel != Panel::ThemeSettingsDialog);
         self.update_panel_stack();
+    }
+
+    pub(crate) fn finish_theme_settings_dialog_ui(
+        &mut self,
+        open: bool,
+        state: ThemeSettingsDialogState,
+    ) {
+        self.theme_settings_dialog = state;
+        let pinned_close = !open && self.pinned_panels.contains(&Panel::ThemeSettingsDialog);
+        self.theme_settings_dialog_open = open || pinned_close;
+        if pinned_close {
+            self.update_panel_stack();
+        } else if !open {
+            self.close_theme_settings_dialog();
+        }
     }
     pub fn update_paths(
         &mut self,
@@ -3307,8 +3340,7 @@ impl LauncherApp {
                 self.panel_states.mouse_settings_dialog = false;
             }
             Panel::ThemeSettingsDialog => {
-                self.theme_settings_dialog_open = false;
-                self.panel_states.theme_settings_dialog = false;
+                self.close_theme_settings_dialog();
             }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
@@ -3528,8 +3560,7 @@ impl LauncherApp {
                 self.panel_states.mouse_settings_dialog = false;
             }
             Panel::ThemeSettingsDialog => {
-                self.theme_settings_dialog_open = false;
-                self.panel_states.theme_settings_dialog = false;
+                self.close_theme_settings_dialog();
             }
             Panel::FavDialog => {
                 self.fav_dialog.open = false;
@@ -5697,6 +5728,163 @@ mod tests {
         assert!(!app.regex_tester_dialog.open);
         assert!(!app.panel_stack.contains(&Panel::RegexTesterDialog));
         assert_eq!(app.regex_tester_dialog.session.draft, draft);
+    }
+
+    #[test]
+    fn theme_settings_dialog_apply_save_cancel_and_close_routes_restore_committed_theme() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let directory = tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let mut persisted = Settings::default();
+        persisted.theme.mode = crate::settings::ThemeMode::Dark;
+        persisted.save(settings_path.to_str().unwrap()).unwrap();
+
+        let mut app = new_app(&ctx);
+        app.settings_path = settings_path.to_string_lossy().into_owned();
+        app.open_theme_settings_dialog();
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+
+        app.theme_settings_dialog.draft.mode = crate::settings::ThemeMode::Light;
+        app.theme_settings_dialog.dirty = true;
+        crate::gui::theme::publish_preview(&ctx, &app.theme_settings_dialog.draft);
+        app.focus_panel(Panel::ThemeSettingsDialog);
+        assert_eq!(
+            app.theme_settings_dialog.draft.mode,
+            crate::settings::ThemeMode::Light,
+            "refocusing an open dialog keeps its current draft"
+        );
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+
+        let mut state = std::mem::take(&mut app.theme_settings_dialog);
+        state
+            .save_to_path(&ctx, &app.settings_path)
+            .expect("Apply commits the current draft");
+        app.finish_theme_settings_dialog_ui(true, state);
+        assert!(
+            app.is_theme_settings_dialog_open(),
+            "Apply keeps the editor open"
+        );
+        assert!(!app.theme_settings_dialog.dirty);
+        assert!(app.theme_settings_dialog.can_edit());
+
+        app.theme_settings_dialog.draft.mode = crate::settings::ThemeMode::Custom;
+        app.theme_settings_dialog.dirty = true;
+        crate::gui::theme::publish_preview(&ctx, &app.theme_settings_dialog.draft);
+        let state = std::mem::take(&mut app.theme_settings_dialog);
+        app.finish_theme_settings_dialog_ui(false, state);
+        assert!(!app.is_theme_settings_dialog_open());
+        assert_eq!(
+            ctx.theme(),
+            egui::Theme::Light,
+            "Cancel keeps the applied theme"
+        );
+        assert_eq!(
+            Settings::load(&app.settings_path).unwrap().theme.mode,
+            crate::settings::ThemeMode::Light
+        );
+
+        app.focus_panel(Panel::ThemeSettingsDialog);
+        app.theme_settings_dialog.draft.mode = crate::settings::ThemeMode::Dark;
+        app.theme_settings_dialog.dirty = true;
+        crate::gui::theme::publish_preview(&ctx, &app.theme_settings_dialog.draft);
+        let mut state = std::mem::take(&mut app.theme_settings_dialog);
+        state
+            .save_to_path(&ctx, &app.settings_path)
+            .expect("Save commits the current draft");
+        app.finish_theme_settings_dialog_ui(false, state);
+        assert!(
+            !app.is_theme_settings_dialog_open(),
+            "Save ends the session"
+        );
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+
+        app.focus_panel(Panel::ThemeSettingsDialog);
+        app.theme_settings_dialog.draft.mode = crate::settings::ThemeMode::Light;
+        app.theme_settings_dialog.dirty = true;
+        crate::gui::theme::publish_preview(&ctx, &app.theme_settings_dialog.draft);
+        assert!(
+            app.close_front_dialog(),
+            "Escape/close-front cancels the session"
+        );
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+
+        app.focus_panel(Panel::ThemeSettingsDialog);
+        app.theme_settings_dialog.draft.mode = crate::settings::ThemeMode::Light;
+        app.theme_settings_dialog.dirty = true;
+        crate::gui::theme::publish_preview(&ctx, &app.theme_settings_dialog.draft);
+        app.force_close_panel(Panel::ThemeSettingsDialog);
+        assert!(
+            !app.is_theme_settings_dialog_open(),
+            "forced close cancels the session"
+        );
+        assert_eq!(ctx.theme(), egui::Theme::Dark);
+
+        app.focus_panel(Panel::ThemeSettingsDialog);
+        app.theme_settings_dialog.draft.mode = crate::settings::ThemeMode::Light;
+        app.theme_settings_dialog.dirty = true;
+        crate::gui::theme::publish_preview(&ctx, &app.theme_settings_dialog.draft);
+        app.close_theme_settings_dialog();
+        app.close_theme_settings_dialog();
+        assert!(!app.is_theme_settings_dialog_open());
+        assert!(!app.theme_settings_dialog.can_edit());
+        assert_eq!(
+            ctx.theme(),
+            egui::Theme::Dark,
+            "explicit close is idempotent"
+        );
+    }
+
+    #[test]
+    fn theme_settings_dialog_pinned_close_refusal_retains_draft_and_preview() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let ctx = egui::Context::default();
+        let directory = tempdir().unwrap();
+        let settings_path = directory.path().join("settings.json");
+        let mut persisted = Settings::default();
+        persisted.theme.mode = crate::settings::ThemeMode::Dark;
+        persisted.save(settings_path.to_str().unwrap()).unwrap();
+
+        let mut app = new_app(&ctx);
+        app.settings_path = settings_path.to_string_lossy().into_owned();
+        app.open_theme_settings_dialog();
+        app.theme_settings_dialog.draft.mode = crate::settings::ThemeMode::Light;
+        app.theme_settings_dialog.dirty = true;
+        crate::gui::theme::publish_preview(&ctx, &app.theme_settings_dialog.draft);
+        app.pinned_panels.push(Panel::ThemeSettingsDialog);
+        app.focus_panel(Panel::ThemeSettingsDialog);
+
+        assert!(!app.close_front_dialog(), "pinned close-front is refused");
+        let state = std::mem::take(&mut app.theme_settings_dialog);
+        app.finish_theme_settings_dialog_ui(false, state);
+        assert!(
+            app.is_theme_settings_dialog_open(),
+            "pinned window close is refused"
+        );
+        assert!(app.theme_settings_dialog.can_edit());
+        assert!(app.theme_settings_dialog.dirty);
+        assert_eq!(
+            app.theme_settings_dialog.draft.mode,
+            crate::settings::ThemeMode::Light
+        );
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+        assert!(app.panel_stack.contains(&Panel::ThemeSettingsDialog));
+        app.close_theme_settings_dialog();
+        assert!(
+            app.is_theme_settings_dialog_open(),
+            "explicit pinned close is refused"
+        );
+        assert_eq!(ctx.theme(), egui::Theme::Light);
+
+        app.toggle_pin(Panel::ThemeSettingsDialog);
+        assert!(!app.pinned_panels.contains(&Panel::ThemeSettingsDialog));
+        assert!(!app.is_theme_settings_dialog_open());
+        assert!(!app.theme_settings_dialog.can_edit());
+        assert_eq!(
+            ctx.theme(),
+            egui::Theme::Dark,
+            "unpin force-close cancels preview"
+        );
     }
 
     #[test]
