@@ -446,3 +446,6 @@ Existing production warm diagnostic listing gate independently ACCEPTED without 
 
 
 Existing production warm attribution independently ACCEPTED without findings: exactlyonebody/native0/412.0748ms,8completeprotocol+recordlines/2warmups5samples, allphase/metric/identity/work/bindings verified. CurrentUI p50/p95us231.8/317.5 withinowner265.2/368.6; nestedrows109.5/132.3, neveraddagain. Logic12.2us/finalizer0.9us/residual19.7us smaller. SameFull100catalog/signature/25currentpaint; noFullpassinference. Planneractive read-only on currentUI branches; no newsource/bodyactivated. Coldrawhitpropertycontracttrap retained, no candidatejustified. ProductionFullFAIL/fullmissionactive. Local evidencecheckpointnext; see receipts/m2a-production-warm-owner.md.
+
+
+Next archive-only warmUI3region attribution plan independently accepted: render.rs test-only local optional carrier, samebinary coarse clocks-off/on counterbalanced2warm5samples/state, preserving allUI work and existing outer/nested metrics. Basecommit/probe-source/exe provenance separate. First source/diff preparation only; canonicalartifact and onebody gates remain pending. Actualproduction/source79653eca unchanged; performanceFAIL/bothtracksrequired. Plancheckpointnext.
