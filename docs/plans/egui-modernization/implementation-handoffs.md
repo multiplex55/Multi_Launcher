@@ -723,3 +723,49 @@ Live adoption ROOT source/artifact gate CLOSED without findings at indexB98F6D6D
 Live adoption scoped bodies verified: ROOT20 passed20/20 native0/10.8163615s; unchanged diagnostic passed1/1 native0/16.4117121s and all20 records. Parent/reviewer recomputed owner medians100cold16.1288/warm3.5598,1000cold202.9620/warm2.2417ms; IDs/work/cold1N/warm00/25paint/1pass/errors0 valid. All records retained, no matched-before/original performance claim. Final execution index0D19D30C1E33A21F9D479A2FECB3A546A2636E442F833C789E40293527B82EC5 binds44 artifacts verified against actual logs/files. One receipt-only null base_head field needs append-only clarification; underlying accepted source index/receipts correctly bind4380aae55c5ad7a80f6d337c57d674a4bc22f0e5. No rerun/source correction needed; writer preparing clarification before final adoption acceptance.
 
 Live earlier raw-hit adoption COMPLETE and independently ACCEPTED for checkpointing, no unresolved findings. Reviewer verified private9/ROOT20/all-target/fmt/diff and all20 unchanged geometry records, source/archive/extracted binaries and44 artifact bindings. Index0D19D30C1E33A21F9D479A2FECB3A546A2636E442F833C789E40293527B82EC5 plus base-HEAD correction184A525203CF21DA217E95E0A94A27B7366CFAF8E63DE7955D0BD0387928C018 accepted; no source changes or reruns. Current unpaired medians100cold/warm16.1288/3.5598ms,1000cold/warm202.9620/2.2417ms, no original/performance waiver. Writer released. Parent preparing coherent local source checkpoint; see receipts/m2a-production-earlier-raw-hit-return.md. Next proposed direct canonical-release original/current comparison is read-only and not activated yet; M2-A and both mission phases remain required.
+
+## M2-A matched release Full ROOT control — NOT activated
+
+Production adoption checkpoint3a10f1de is the current source. Measure it directly against accepted originalf45e377390284cc1ba6cf474fcd23e008514318e before further instrumentation. This is a CPU-owner comparison, not display/GPU/native acceptance. M2-A, fast-dev and eventual81-case requirements remain open.
+
+### Inputs and ownership
+
+One writer owns only fresh ignored archive/build/executable/receipt outputs for this measurement. Parent owns tracked documentation/Git. No source, dependency, feature, font, profile, renderer, cache or observer changes.
+
+Original frozen source is target/egui-modernization/m2a/release-small-control/original/. Preserve and reuse receipts/original-release-small-002.exe in that control directory:80087552bytes/SHA256990081b657ce1a270690bf29c9178f576f8c75e8a9289afea6f8aa2937de4f6d. Its accepted source, manifest/lock, canonical-release and stable1.99MSVC bindings remain authoritative; revalidate actual hashes. Full mode selects sizes at runtime, so no original rebuild is needed.
+
+No saved Nextest archive or Cargo/binary metadata exists for that original executable. Installed Nextest archive cannot package it directly. Use the same direct libtest runner for both versions, clearly labeled; do not invent metadata or let Cargo rediscover the original through a mutable target.
+
+### Preparation and artifact gate
+
+Create a fresh ignored Git archive of committed3a10f1de, retaining all tracked manifests/lock/vendor packages. Record commit/tree/archive/source inventories and verify extracted relevant sources against Git blobs with EOL presentation explicitly distinguished. Bind actual manifests, lock, vendor/text-stack versions and font asset identities. Keep each version's actual assets; do not force fonts to match.
+
+Use explicit stable Cargo/rustc1.99.0/MSVC paths and verify compiler hashes against the original provenance. Use actual frozen current cwd and a new isolated release target. Canonical release defaults remain unchanged, with no RUSTFLAGS/CARGO_PROFILE overrides or QA feature/request. Build only current libtest:
+
+    cargo test --manifest-path <frozen-current>/Cargo.toml --locked --offline --profile release --lib --no-run --message-format=json --target-dir <fresh-current-release-target>
+
+Retain JSON/stdout, stderr and true native exit/wall. Select the executable only from the successful compiler-artifact for this workspace's multi_launcher library test target, profile.test=true and executable present, followed by successful build-finished. Preserve exact executable bytes/hash; never guess a filename or use directory timestamps.
+
+Rehash the preserved original and list both bound executables without bodies:
+
+    <bound-exe> --list --ignored --exact gui::render::tests::track_c_benchmark_root_list_frame_geometry
+
+Require the exact ignored owner in both successful listings. Independent source/profile/artifact/Cargo-selection/owner review precedes ANY benchmark body. Stop for parent timing authorization after that gate. No other tests or rebuilds.
+
+### Execution after separate authorization
+
+Run original once, then current once, sequentially with no competing owned compiler or benchmark workload. Each receives a fresh child environment/evidence directory and its own frozen source cwd; existing TrackCWorkspace creates the isolated fixture. Use the same runner arguments:
+
+    <bound-exe> --exact gui::render::tests::track_c_benchmark_root_list_frame_geometry --ignored --test-threads 1 --no-capture
+
+Set MULTI_LAUNCHER_PERF=1,ML_SKIP_CLIPBOARD_SYNC=1,ML_TRACK_C_BENCH_MODE=full,ML_TRACK_C_PROFILE=release and ML_TRACK_C_SOURCE_SHA to that executable's actual committed source. QA requests remain absent. Record exact argv/environment, source/executable hashes before/after, immediate native exit, wall envelope and all stdout/stderr. Restore process-local environment. No exclusions, tuning or automatic reruns.
+
+### Results and done criteria
+
+Each invocation must emit six existing cases in order:100cold/warm,1000cold/warm,10000cold/warm. Each case uses five warmups and20 measured samples. Existing measure_owner excludes preparation/validation. emit_samples preserves measurement order; retain all aligned elapsed/identity/receipt/work arrays. Compute nearest-rank quantiles on a separate sorted copy: p50=10th,p95=19th,max=20th of20; do not average middle values or reorder retained evidence.
+
+Join versions by fixture signature/count/viewport/scale/settings/cold type, preserving actual owner labels and every field. Validate existing assertions and cold/warm work contracts. Disclose original26 versus current25 painted rows; never force output identities or labels across versions to equality. Preserve all failures and unexpected records.
+
+Done requires independent review of source/artifact bindings, both native exits,12 records/240 retained measurements and aligned arrays, quantiles, fixture/work fields and disclosed differences. This packet neither waives the original fast-dev failure nor accepts Full81/M2-A/release-native parity automatically. Current release performance is unknown. NOT activated pending preimplementation review and local plan checkpoint.
+
+Matched release Full ROOT proposal preimplementation review accepted: implementer-ready, no substantive corrections. Both existing owners support six cases/five warmups/twenty samples and preserve measurement-order arrays with nearest-rank quantiles from separate sorted copies. Setup/validation/output disposal remain outside timing. Preserved original hash verified; same direct-libtest runner and Cargo-JSON current executable selection are appropriate. Original26/current25 paint rows and per-version output identities stay explicit. No build or body performed; activation still pending local plan checkpoint.

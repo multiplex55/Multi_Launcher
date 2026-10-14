@@ -249,3 +249,5 @@ Reviewed adoption plan4380aae5 saved locally and activated for sole implementer_
 Live adoption source/PATCH/private-binary review passed. Parent cleared nine selected private tests only; ROOT isolated archive is compiling and ROOT bodies remain gated on artifact review. No new performance acceptance claimed.
 
 Live earlier raw-hit production adoption accepted without unresolved findings:9private/20ROOT/all-target/fmt/diff/20diagnostic records and44 bindings verified. Final index0D19…82EC5 plus184A…8C018 correction accepted. Current unpaired100cold/warm16.1288/3.5598ms,1000cold/warm202.9620/2.2417ms. Writer released; parent local source checkpoint next. Original performance/M2-A stillopen; later releasepair proposal notactivated.
+
+Local production adoption checkpoint3a10f1de saved; only unrelated Workspaces/ remained. Planner's matched canonical-release Full ROOT comparison against preserved originalf45 uses same direct-libtest runner for both, unchanged owners/source/profiles and separately reviewed artifacts before bodies. Proposal persisted and under review, NOTactivated. Both mission tracks and remainingM2 gates stillrequired.
