@@ -437,3 +437,6 @@ Artifact saved locally3c16ee845479703976a2def0ef59fa56cd0cff31. Solewriter activ
 
 
 Actual production Full ROOT pair independently accepted as measurement evidence; performance remains FAIL. Original/current each native0, exactly one body, all12records/240values/seven aligned vectors and work/identity/bindings verified. Cold p50 at1k11.2742→15.8411ms;10k127.5695→166.2805ms; warm medians also higher. Full10k ranges overlap; no disjoint-range or causal historical-gain claim. Index5e41fec2f480d5282ccd66b9d4511402ebec72e830690430c7df590a688c8f9b. Source79653eca remains provisional; no repeat/automaticoptimization/TrackB/performancewaiver. Planner active read-only on remaining cold-layout and warm-frame owners; no new source/body authorized. Local evidence checkpoint follows. See receipts/m2a-production-exact-measurement.md.
+
+
+Next bounded plan: reuse existing track_c_diagnostic_root_list_warm_owner_breakdown in accepted production F26D/source79653eca. Independent packet review accepted without blockers;100actions,2warmups/5samples, phase/residual and nested row-metric arithmetic, no source/build/new clock. First exact no-body owner listing and binding review, then separately activate one diagnostic body. Cold section work remains unresolved, actual Full performance FAIL and both tracks stay required.
