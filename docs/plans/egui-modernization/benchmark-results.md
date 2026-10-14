@@ -164,3 +164,9 @@ Fresh matched originalf45/currentfcd4 canonical-release Full ROOT pair: both one
 | 10,000 | 126.1575 | 212.1170 | 0.2122 | 0.3310 |
 
 [Actual p95/ranges, invocation/artifact bindings and limitations](receipts/m2a-production-paragraph-capacity.md). The10,000cold ranges are disjoint. Original26/current25 painted rows and version-specific owner boundaries remain disclosed. Historical3a10 differences are unpaired and do not quantify a causal reserve benefit. These CPU results do not waive native/display/GPU, fast-dev, remaining owners or Track B prerequisites.
+
+## M2-A exact-measurement candidate control experiment (not Full qualification)
+
+Accepted source/private11fd6663, releaseartifact405a5cb4 and completeTraceparity0aded75e precede exactly one fresh baseline48B2/5D87 then candidateF62C/EBBB observer-control body. Bothnative0;1000cold/nineprep/two warmups+five samples perstate, all28records/N55 retained. Disabled owner p50/p95ms25.3959/34.2486→16.4733/19.6152, ranges24.4816–34.2486 vs15.2652–19.6152 disjoint; every corresponding candidate sample lower. Enabled supporting p50/p95ms31.6263/33.5289→16.3410/25.7514. Full ordered samples, bindings, record checks and limitations are in `receipts/m2a-size-only-layout.md`.
+
+This is descriptive single fixed-arm-order diagnostic evidence, not a causalpercentage, old0.27comparison, production adoption or performance gate waiver. Actual production Full ROOT remains FAIL. Evidence supports separately reviewed live port and then actual original/current Full qualification; no theme rollout yet.

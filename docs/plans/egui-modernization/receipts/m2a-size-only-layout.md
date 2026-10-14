@@ -75,3 +75,22 @@ Actual work is one rebuild,1,000 measured rows,25 painted rows, one adapter pass
 Parent verified29 unique linked file bindings and both full byte comparisons. Independent parity review accepted without findings. ArchiveF62C/exeEBBB, final source bindings, separately unchanged `text/font.rs` EBE (distinct from modified `text/fonts.rs`0ADA), and reference66D before/after are unchanged; fresh extracted executable matches. Start receipt SHA `1eb4e3f923f1b45122f3eef587e9bc7a605ba904447f6b15cd567c766a3163a3`, result `aa05e68c07343f266fca32268c9e2c123c1ab10037160431fafc58794981d721`, direct stderr `bb05276a41d3fec3092e6657c2b194ed62501d466fc958bbec12bfb5fa09d2e5`. Complete files are retained in `size-only-layout-001/raw-hit-parity-only-output-001`.
 
 No warmup/timing/control series, baseline/original body, production port or performance waiver followed this parity-only invocation. The next separate gate is one fresh matched baseline/candidate existing observer-control pair, with all samples retained.
+
+## Matched control evidence and experiment disposition
+
+The bounded experiment is complete and independently accepted. Exactly one fresh reserved-capacity baseline body then one size-only candidate body ran: native0/4.2362672s and native0/4.1772109s; each one owner passed/5238 skipped,14 records. No explicit Nextest UUID line was emitted; actual commands, PIDs, native summaries and direct logs are retained rather than inventing IDs. There were no repetitions, exclusions, source changes or rebuilds in this pair.
+
+| Observer state | Baseline owner p50/p95 ms | Candidate owner p50/p95 ms | Interpretation |
+|---|---:|---:|---|
+| Disabled | 25.3959 / 34.2486 | 16.4733 / 19.6152 | Primary benefit signal |
+| Counters enabled | 31.6263 / 33.5289 | 16.3410 / 25.7514 | Supporting instrumented data only |
+
+Disabled ordered samples: baseline `[34.2486,24.9338,25.7314,25.3959,24.4816]` ms; candidate `[16.4733,17.3381,19.6152,15.4585,15.2652]`. Ranges24.4816–34.2486 vs15.2652–19.6152ms are disjoint; all five corresponding candidate samples are lower. Enabled ordered samples: baseline `[33.5289,32.7177,26.5378,31.6263,25.4895]`; candidate `[16.3410,25.7514,18.5684,16.2942,16.0595]`. Nearest-rank p50/p95 for five measured values are the third/fifth sorted values; all samples, including the baseline34.2486ms value, remain included.
+
+All28 raw records (eight warmups/twenty measured samples), all55 diagnostic vectors, state order/protocol and ordered arrays were retained and independently checked. Work `[1,1000,25]`, revisions `[2,1,1000]`, one adapter/geometry call/completion, zero error/abandoned outcomes, eager/typed-ID checks, identities and all41 non-NS diagnostic fields match across arms. Disabled vectors are allzero; enabled count/storage invariants pass. Parent/reviewer independently verified50 unique actual file bindings and raw-log hashes. Internal controls remain counterbalanced as in the existing owner; arm order remains fixed baseline first.
+
+Arm result SHAs: baseline `afc8044dbee0b7f56a591787811e93c5a8bd0962e330cdbcf63363324d49b6c5`; candidate `ebb031b34615275f4ddef0b9f46249c533ffe963f12e9ec93f04ac3dd26e0c71`; matched review `f3d7dfd90332398955e0346f6f4a9bec5c2d1d78a346b79ac5c64eaba9771f69`. Direct stderr SHAs: baseline `3a5d9daf78f2c98ba01f9bce0dad16711a5eb3346f18376fc1d5f412d2685916`; candidate `7c957f3f9f3aff94e3487203fe6e5f0586673e2a1610f97804e94007ad172e2c`. These files remain in outer candidate `receipts`.
+
+Append-only clarification `5ef0c7ee8a200c22e70acb09ac0dcb6ee6edece88f4afac97c9d76e20394dd94` preserves the original matched index and corrects its clock-field label: ATLAS_FILL_BEFORE/AFTER_MICROS are atlas state measurements, not elapsed clocks. Both fields match at9277 in every enabled record and0 in disabled records; they were included in parent non-NS parity checks. No rerun or parity gap resulted.
+
+This single fixed-arm-order pair is descriptive, not a causal percentage or production performance qualification. Nested enabled clocks are nonadditive and are not subtracted from production medians. Review supports a separately reviewed provisional production port followed by actual original/current Full ROOT qualification. Live source remains unported, production Full performance remains FAIL, and Track B is still gated. A read-only planner is preparing that bounded next packet; no live write or extra benchmark is authorized by this evidence report.
