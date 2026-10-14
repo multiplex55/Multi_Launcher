@@ -1,3 +1,9 @@
+# Historical QA plan — revised policy2026-10-14
+
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). This earlier framebuffer plan is historical reference, not a new gate or authorization to repeat unavailable capture attempts. Use current supported QA and record gaps under the addendum.
+
+## Historical record — unchanged, not operative
+
 # Opt-in framebuffer evidence probe — implementation packet
 
 Planner packet,2026-10-13. Execute sequentially after M1-D source ownership releases. This is a bounded QA prerequisite for actual screenshot evidence after repeated Windows.Graphics.Capture transport failures, not a rendering redesign. User authorizes app launch/use/screenshots. Current implementation is in progress; no successful native capture has occurred.

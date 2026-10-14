@@ -1,3 +1,9 @@
+# Current validation scope — revised policy2026-10-14
+
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). Current scope is live compilation/affected tests, bounded functional and responsiveness/true-idle checks, plus broad regression at a meaningful stabilization/final gate. Physical/native/DPI gaps are manual QA follow-up; no exhaustive parity matrix is required. The historical running/queued rows below are not live processes or new assignments.
+
+## Historical record — unchanged, not operative
+
 # M0-B test and interaction matrix
 
 Status: **PARTIAL; all five full-mode CPU benchmark owners passed (84 cases).** Fixture generation roundtrips passed for the earlier runs, with their serializer-artifact provenance limitation retained. No visual/native interaction passed.

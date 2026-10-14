@@ -1,3 +1,9 @@
+# Current defect and performance classification — revised policy2026-10-14
+
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). Documented synthetic ROOT/list performance differences are accepted debt, not current release blockers by themselves. Preserve original failures below. Actual crashes/data loss/input/focus/lifecycle defects, repeated visible freezes, sustained true-idle work or unbounded resources still require correction; unavailable observations remain explicit QA gaps.
+
+## Historical record — unchanged, not operative
+
 # Baseline failures and migration regressions
 
 No dependency or application implementation changes have been made at the time of

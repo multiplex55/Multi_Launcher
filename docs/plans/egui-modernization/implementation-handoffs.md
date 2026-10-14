@@ -1,4 +1,26 @@
-# Planner handoffs and execution boundaries
+# Implementation handoffs — current authority
+
+The user directive2026-10-14 and PERFORMANCE_ACCEPTANCE_ADDENDUM.md supersede every inherited performance-parity gate. Use the CURRENT STATUS / NEXT ACTION in status.md. The original architecture/behavior contracts remain useful; all earlier handoffs below are historical, not active work assignments.
+
+## Active coherent pipeline
+
+1. **M2-A live correctness closeout.** Keep integrated6527ddc1/796 source; do not port isolated compact/row/ASCII/shaping candidates. Actual live guards are already reviewed but compilation/affected contracts pending. Parent runs one locked/offline fast-dev lib Nextest filter for:
+   - `gui::radial_editor::tests::closed_show_deferred_frames_skip_catalog_and_real_retained_callback_drains_close`
+   - `gui::clipboard_modify_dialog::tests::close_cleanup_clears_transient_data`
+   - `gui::clipboard_modify_dialog::tests::failed_save_preserves_active_catalog_and_draft`
+   Then `cargo check --locked --offline --profile fast-dev --all-targets`. Fix concrete failures only; reuse valid unchanged lifecycle/input/cache/layout/dependency evidence. No benchmark/private-vendor campaign. Done: actual chosen source compiles and affected contracts pass; parity blocker closes as accepted_with_documented_regression.
+2. **M2-B/M2-C/M2-D functional stabilization.** Review available query/action/dialog/hidden-root lifecycle/input evidence, use bounded supported smoke checks and document exact native/manual gaps. Do not retry unchanged unavailable capture/elevation/profiling. Retain explicit Glow; Wgpu competition deferred. Broad automated regression belongs at a meaningful stabilization/final gate, not every small edit. Fix known critical defects; record accepted debt and QA gaps. Save identifiable migration-only source checkpoint, then immediately proceed.
+3. **M3-A semantic theme model.** One writer, central derived theme owner and compatible persisted settings; preserve ThemeMode/ThemeColor/ColorScheme/ThemeSettings/named_presets. Separate palette and metrics identities, meaningful legacy/roundtrip/clamping/System tests. Model-only first; then runtime application, preview/presets, typography/icons and full root/settings/plugin surface rollout sequentially. Follow the existing amended M3–M6 milestones without another approval request.
+
+Correctness/data/function, stable practical response and completing BOTH tracks outrank recovering historical percentiles. Extra bounded rendering work is allowed; event-driven theme/resource caching/virtualization/true-idle safeguards remain. New blockers need observed severity. Missing native coverage is not a fabricated pass or an automatic implementation stop.
+
+No source writer/build/test is active at policy handoff. Parent owns Git and native process completion, one implementer owns a coupled source milestone; planner/reviewer use bounded read-only work. Commit meaningful coherent changes, not each receipt/listing/parser/document append. Publication remains local-only.
+
+## Historical handoffs — superseded, reference only
+
+All prior assignments, gates, source/build activation wording and accepted experiment packets below are historical. They do not authorize another optimization, backend competition, benchmark matrix or parity blocker. Raw findings and prior dispositions remain preserved; consult the future backlog for adopted/deferred/rejected status.
+
+### Planner handoffs and execution boundaries
 
 The execution contract remains `../MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`.
 This records the project planner's inspected handoffs, not completed implementation.
@@ -6,7 +28,7 @@ One implementer owns one checkpoint at a time; parent owns Git and review gates.
 All checkpoints preserve command, persistence, window, hotkey and plugin semantics.
 No source changes precede original baseline evidence. No styling precedes M2-D.
 
-## M0-A / M0-B / M0-C
+#### M0-A / M0-B / M0-C
 
 M0-A owns immutable Git/toolchain/lock/dependency receipts. Original source is
 `72a01bd5451060d3f6b640b83acd081d7db76e77`; application paths match its parent
@@ -37,7 +59,7 @@ Official downloaded metadata confirms eframe 0.36.2 (MSRV 1.95), toast 0.22.0
 parity, once-only side effects, semantic layout revisions and exact test seams.
 These are read-only inventory checkpoints; no theme or dependency edits.
 
-## M1-A: dependency graph
+#### M1-A: dependency graph
 
 Scope Cargo.toml/Cargo.lock and graph receipts. Align eframe/extras 0.36.2 and
 released wrappers, retain a single UI egui family, edition 2024, rdev pinned revision,
@@ -48,7 +70,7 @@ duplicates and features, then Windows all-target compiler backlog. This checkpoi
 may inventory API errors under the contract; never call it a runnable accepted
 migration or push broken code as validated. No aesthetic changes.
 
-## M1-B: lifecycle and startup
+#### M1-B: lifecycle and startup
 
 Owners: render.rs LauncherApp orchestration, main.rs startup, visibility.rs and
 window_manager.rs native frame handles. `render_root_frame` combines background
@@ -89,7 +111,7 @@ visible logic-to-UI once-only effects, and existing prompt/focus/visibility/quer
 observer contracts. Verify supported Windows focused/hidden toggle and prompt Esc.
 No native focus workaround or style changes.
 
-## M1-C / M1-D: mechanical APIs and integrations
+#### M1-C / M1-D: mechanical APIs and integrations
 
 M1-C owns changed widget/paint/UiBuilder/Frame/Margin/CornerRadius/menu/text APIs
 across gui and settings_editor. Use diagnostics, preserve points/pixels, geometry,
@@ -106,7 +128,7 @@ existing PNG/JPEG/BMP/ICO/GIF/TIFF loader coverage: direct image0.24 features do
 not unify with extras image0.25. Retain lazy decode/upload and picker ownership.
 Run touched notes, toast_log, crop/QR/file-preview tests and supported native smoke.
 
-## M2-A: semantic geometry/cache identity
+#### M2-A: semantic geometry/cache identity
 
 Owners: existing RootListGeometryCache and NotesGeometry plus a small shared
 font/layout revision boundary. Root keys already include generation/count, width,
@@ -137,7 +159,7 @@ width transition oracle. Compare full matched cold/warm owners including
 `track_c2d_benchmark_root_list_cold_geometry_recipes`,
 `track_c2e_benchmark_cold_root_grid_geometry` and notes/query owners. No theming yet.
 
-## M2-B / M2-C / M2-D: migration gates
+#### M2-B / M2-C / M2-D: migration gates
 
 M2-B owns native compatibility and real Windows checks: HWND generation, parking,
 activation, secondary viewport creation/close, negative origins/DPI, focus, hooks,
@@ -154,7 +176,7 @@ supported Windows matrix and reviewer behavioral/performance signoff. Record all
 unrun checks and rendering deltas. This is the migration-only rollback checkpoint;
 failed critical behavior or performance gates prevent Track B.
 
-## Track B handoffs
+#### Track B handoffs
 
 Each row is a sequential checkpoint with the contract's acceptance/verification
 requirements. Existing model and behavioral tests remain the source of truth.
@@ -174,7 +196,7 @@ requirements. Existing model and behavioral tests remain the source of truth.
 | M6-A | Prefer explicit justified omission of optional effects. Any accepted effect is measured, default off, bounded and ceases idle repaint; no native acrylic/blur. |
 | M6-B | Original vs M2-D vs themed matched distributions, required final suites/native checks/persistence/rollback and independent review. Deliver versions/backend/SHAs/surface ledger/screenshots/unrun checks/rollback commits with honest limits. |
 
-## Checkpoint commits and compilation dependencies
+#### Checkpoint commits and compilation dependencies
 
 The planner clarified the single-crate compilation dependency. Preserve the exact checkpoint commit cadence, while recording acceptance separately. A coherent local commit may remain validation-pending until later required API adapters permit execution; never label it runnable or accepted prematurely.
 
@@ -186,7 +208,7 @@ The planner clarified the single-crate compilation dependency. Preserve the exac
 
 Use the actual requested/active font-revision boundary with existing layout keys. Never use constant generations, borrowed atlas addresses, unconditional invalidation or full-font hashing as disposable adapters. After M1-C compiles, run pending M1-B targeted tests and record both the implementing and enabling commits without rewriting historical receipts. Each checkpoint records actual checks, remaining compiler/acceptance dependencies and reviewer disposition. M2-D remains the integrated migration gate; styling waits for it.
 
-## M1-B next writer packet: LauncherApp extraction
+#### M1-B next writer packet: LauncherApp extraction
 
 Dependency: finish and review the focused vendor hidden-input correction first. Reuse the existing partial source edits; do not restart the migration. This is a substep of M1-B, not a new checkpoint. Scope: `src/gui/render.rs`, `src/gui/mod.rs`, `src/gui/mkmacro_dialog/parameter_prompt.rs`, `src/main.rs`, and directly necessary receipt owner methods/tests. Parent owns status/Git/native QA. One source writer.
 
@@ -205,7 +227,7 @@ Test adapter: compose the SAME logic/UI owners, finalize outside run_ui after it
 
 Required focused behavior: forced discarded pass executes broker/watch/action/persist once; hidden ticks progress requests without paint/stale Escape/CtrlEnter/Tab/drop replay; hidden simple/parameter prompt arms bootstrap without moving/focusing ROOT; existing snippet multiline/tab/Escape and CtrlEnter ownership assertions remain; macro one-shot handoff remains; Track C empty-browse/provider/catalog frame eligibility revalidates final candidate; OCR early exit closes observer once. Source checkpoint may remain implemented/validation-pending until M1-C enables those tests. No styling, cache migration, vendor redesign or full suite.
 
-## M1-C next writer packet: compiler closure
+#### M1-C next writer packet: compiler closure
 
 Planner prepared this read-only packet while M1-B remained the sole source writer. Start only after that writer releases ownership and M1-B review corrections are resolved. Objective: all-target compilation on 0.36.2 with equivalent identities, geometry and input semantics. Read the actual current diagnostics and M1-B owner signatures; do not redesign lifecycle or the accepted vendor patch. The M1-A inventory's 621 library / 1,269 library-test errors include duplicates, not unique callsite totals.
 
@@ -228,7 +250,7 @@ M1-C font-boundary design review: distinguish staged requests, input-hook submis
 
 Interim actual-source review found registration in App::logic too late: run_ui captures its ordered plugin list before app logic. A first-frame font request plus discard can activate fonts on pass two while the captured begin callback list omits the owner, leaving revision stale. Register during LauncherApp construction before the first run_ui and at standalone context setup, remove per-frame registration, and cover first-frame request+discard through the actual setup contract. TypeId idempotence preserves plugin state but repeated add_plugin still allocates discarded handles. Other requested/submitted/active transitions in the inspected draft were sound; this is interim source evidence, not final acceptance or an executed test.
 
-## M1-D — integration parity packet (read-only planning; execute after M1-C)
+#### M1-D — integration parity packet (read-only planning; execute after M1-C)
 
 Objective: accept CommonMark, toast and image behavior after compilation closes, retaining the existing parsing, delivery and texture-cache owners. M1-C supplies compiler-required CommonMark scoped IDs, Toast defaults/UI call and test harnesses; these do not establish parity. M2-A retains font/cache correctness and performance acceptance. No styling, lifecycle redesign, broad image migration or full-suite expansion.
 
@@ -247,7 +269,7 @@ Add missing migration protection only: two identical markdown fragments retain d
 
 Verification/done: filtered Nextest for touched behavior, all-target check after dependency changes, image0.25 feature-tree inspection, diff inspection, and focused native smoke for rich preview/link/code/selection/scroll, toast/error, images/drop and note/QR picker cancel/return focus. Record actual evidence and unrun native checks. Genuine uncertainty: picker ownership/focus requires actual OS observation; existing rfd calls lack explicit parents, so add plumbing only for a demonstrated migration defect through the existing native owner. Planner performed source/cache inspection only, no builds/tests/edits.
 
-## M2-A — cache acceptance packet (read-only planning; execute after M1-D)
+#### M2-A — cache acceptance packet (read-only planning; execute after M1-D)
 
 Objective/ownership: accept migrated `RootListGeometryCache` and `NotesGeometry` correctness, cheap warm reuse, semantic font invalidation and bounded storage. Reuse the reviewed M1-C context font owner; do not introduce a second tracker. Planner rechecked final M1-C state2026-10-13: `src/gui/font_revision.rs::{register, install, active_revision}` is established, including hidden run_logic deferring activation. M1-D retains CommonMark/integration acceptance.
 
@@ -279,7 +301,7 @@ cargo nextest run --success-output final --locked --offline --profile default --
 Then separately run grid, Quick Notes and query owners. Preserve100/1,000/10,000 actions,100/1,000/5,000 notes, grid columns1/2/3/5/6, width transitions, five warmups/twenty samples. Baseline: tracked receipts/cpu-original-summary.json and ignored baseline/{owner-list.log,track_c_benchmark_root_grid_frame_geometry.log,track_c_benchmark_quick_notes_dialog_geometry.log,track_c_benchmark_root_query_to_usable_cpu_frame.log,cpu-original-results.json}. Attribute production72a01bd5 and test runnerf45e3773 accurately. Match profile/settings/viewport identities; retain outliers; report p50/p95 deltas plus rebuild/work/storage receipts. Failed oracles invalidate timings. Investigate regressions without reducing fixtures/instrumentation. These are CPU-only measurements.
 
 Done: semantic/oracle tests pass, warm reuse/storage bounds demonstrated, affected comparisons recorded and regressions resolved or explicitly explained. No styling, renderer selection, lifecycle redesign, native campaign or unrelated full suite. Planner performed source/test/recipe inspection only, no builds/tests/edits. Evolving M1-C signatures and already-migrated assertions must be confirmed from the final reviewed code.
-### M2-A measured-regression diagnostic/correction substep
+##### M2-A measured-regression diagnostic/correction substep
 
 Trigger: accepted source df27da17 passed list6 oracles but cold medians rose10.8–14.4x and warm2.3–2.5x. Full raw samples and exact binary are preserved; see receipts/m2a-verification.md. Grid/Notes/query comparisons are queued. This substep stays within M2-A; no theme/backend/profile changes.
 
@@ -300,7 +322,7 @@ Fix boundary: if repeated invariant metric resolution/context access dominates, 
 
 Verification: small explicitly labelled fast-dev diagnostic; affected list eager/invalidation/font/spacing/wrap tests; appropriate check/format/diff and bounded review. After an evidence-backed fix, parent reruns unchanged full list6 against original arrays, then the remaining75 cases. Diagnostic counts/sample protocol supplement and do not replace full acceptance. Done requires demonstrated dominant cost, correction tied to it, retained meaningful assertions, passing scoped checks and honest full list comparison. No extra broad suite or styling.
 
-### M2-A layout-dominant branch: standalone shape-plan control
+##### M2-A layout-dominant branch: standalone shape-plan control
 
 Trigger/evidence: reviewed test-only checkpoint5b58ff7d localizes >97% of the decomposed1,000-row cost to layout; invariant metric/batching variants are inadequate. No production fix. Planner source inspection found epaint0.36 shape_text uses `shaper.shape(buffer, ShapeOptions::new())`; locked HarfRust0.12 constructs ShapePlan when options.plan is absent. FontFace already caches ShaperData and FontsImpl pools buffers. Public reuse is `ShapeOptions::new().plan(Some(&plan))`; shape_with_plan is private. Font-face ownership is separate from ShapePlanKey matching.
 
@@ -314,7 +336,7 @@ Build directly with verified stable rustc: `--edition=2024 -C opt-level=0 -C deb
 
 Decision/done: production patch remains unauthorized. Reuse savings must plausibly explain a substantial part of727ms layout using explicit run counts; a merely positive small change is insufficient. If plan cost is material and complete shaping parity passes, next prepare narrowly instrumented actual epaint-run evidence (an ignored source archive may then be justified) before proposing bounded per-face production cache with correct keys/lifetime/eviction tests. If not material, retain evidence and investigate remaining shaping/glyph emission. No engine duplication, approximate geometry, full-catalog galley retention, shaping/hinting disablement or font swaps. Planner verified Ubuntu/Hack/NotoEmoji asset bytes match old/current; font-name equality alone does not identify fallback faces.
 
-### M2-A warm-owner follow-up packet
+##### M2-A warm-owner follow-up packet
 
 Source-backed planner packet, queued after the standalone cold probe: add one ignored test-only100-row warm-frame diagnostic using the prepared warm state and existing run_root_list_frame_with_pass_count adapter. No production changes. Optional adapter clocks must preserve call order and original owner stopwatch boundaries; measure begin_root_frame_logic, render_root_ui accumulated across actual passes, finish_ui_frame_receipt, whole owner and residual egui/framework time. Validation and output disposal remain outside timing.
 
@@ -322,7 +344,7 @@ Snapshot existing Metric::LauncherRowsBuilt before/after: its timer spans geomet
 
 Decision: dominant rows timer means inspect visible result widgets/text; dominant remaining UI means inspect other root UI; dominant logic/finalizer means inspect that owner; large residual means inspect egui begin/end-pass work. Do not revisit the176ns mock-frame/guard probe or unsupported native-handle speculation. This supplements Small control and never replaces Full81 acceptance. Parent authorizes source ownership only after the current writer releases the cold probe; bounded independent review and affected scoped checks remain required.
 
-### M2-A actual-layout attribution packet
+##### M2-A actual-layout attribution packet
 
 Execute after the warm source writer releases and its accepted checkpoint is saved. One writer owns only ignored target/egui-modernization/m2a/actual-layout-probe/{root/,epaint/,receipts/}; parent owns live docs/Git. Create a ROOT archive of that accepted checkpoint and copy exact cached epaint0.36.2. Patch only the archived root manifest to archived epaint, preserving all existing vendor patches/features/profiles/dependency versions. Live checkout and registry remain unchanged. Offline-resolve archive lock once if needed, inspect that only intended source substitution occurred, then locked/offline commands. Record base/archive/source/lock hashes; preserve original/df27 binaries. Reuse root target cache serially where compatible.
 
@@ -338,7 +360,7 @@ Aggregate observations are thread-local to the measured UI owner. Avoid global a
 
 Command shape: verified Cargo nextest run --manifest-path <archive>/root/Cargo.toml --locked --offline --cargo-profile fast-dev --lib --run-ignored ignored-only -E 'test(track_c_diagnostic_root_list_geometry_cost_breakdown)' --success-output final; Stage2 exact derived test only. Perf enabled,QA feature/request absent,base+patch hashes/native exits/wall times persisted. No full81/grid/backend/application launch. Done: isolate actual cost among cache,plan,shaping,fallback/emission/raster with parity and bounded independent review; production correction requires separate scoped packet.
 
-### M2-A next decision: matched release Small control, then bounded reuse
+##### M2-A next decision: matched release Small control, then bounded reuse
 
 Stage2 accepted attribution:1,000 cold rows4,047 runs,plan construction333.9284ms/shaping218.6790ms;zero allocation-cache misses/atlas recreation. Warm cases30 galley hits/no shaping. No production patch. First perform canonical-release Small control of the existing root-list owner on original f45e377390284cc1ba6cf474fcd23e008514318e and accepted current source, serially. Original archive under a fresh ignored release-control directory; current live source may compile only while no live source writer is active. No manifest/profile edits; both existing Cargo.toml files use identical canonical release defaults (iteration is separate and is not used). Same100 actions,960x640,scale1000,five warmups/twenty samples,perf1/skipclipboard1,ML_TRACK_C_PROFILE=release,ML_TRACK_C_BENCH_MODE=small,actual SHA,no QA feature/request. Exact ignored track_c_benchmark_root_list_frame_geometry only. Preserve executable/source/lock/compiler hashes,commands,native exits/build and owner wall times,all arrays/outliers; join fixtures rather than owner labels. This supplements rather than replaces Full81 acceptance and cannot waive fast-dev failure or establish native latency.
 
@@ -346,7 +368,7 @@ After release control/review, next independently scoped prototype may reuse plan
 
 Prototype verification: fresh equivalent stock/reuse100/1,000 cold/warm owners,complete ordered run/glyph and eager geometry parity,hits/misses/builds,max entries/run counts,lookup/replacement overhead; incompatible keys,face isolation,eviction/font replacement,valid available variation-instance fixture. Keep unavailable fixtures explicit rather than invent coordinates. No Full81 repeat or production vendoring until actual material savings,bounded ownership and parity are demonstrated and reviewed. Remaining cold shaping and warm UI costs remain visible; theoretical45% plan share is not acceptance.
 
-### M2-A queued warm-row attribution after bounded plan reuse
+##### M2-A queued warm-row attribution after bounded plan reuse
 
 Read-only planner inspection identifies changed visible-row paths: original SelectableLabel directly lays out/allocates/paints; current Button::selectable traverses AtomLayout, previous-response lookup, class/style resolution, Frame preparation and an owned text copy for widget information. Row scopes use UiBuilder. These are source facts, not measured causes. Accepted warm cases have no layout misses/shaping; avoid repeating cold attribution.
 
@@ -356,7 +378,7 @@ Independent review: scope/with_layout timing can enclose Button timing. Make sta
 
 Use the resulting dominant boundary for a focused correction. No legacy hand-painted widget substitution, accessibility removal, retained catalog galleys or styling changes to obtain speed. This packet is queued planning only; no source edits/builds/tests yet and no authorization for overlapping writers.
 
-### M2-A queued production integration: bounded HarfRust plan reuse
+##### M2-A queued production integration: bounded HarfRust plan reuse
 
 Objective: integrate proven per-face plan reuse as a disclosed epaint0.36.2 vendor patch, preserving shaping output/font lifecycle. Partial correction only; no M2-A performance acceptance. Start from stock cached released epaint, never copy the instrumented archive wholesale. Port only capacity8, matching/FIFO helpers, FontFace-owned initially empty Vec<ShapePlan>, field-split shaping method and actual layout caller migration. Public ShapePlanKey uses actual script,direction,language,features,variation instance; misses construct the same plan, oldest evicted at capacity, hits do not reorder. Plans own data/drop with face; no global tracker,text/galley cache,unsafe or app-facing cache API.
 
@@ -368,7 +390,7 @@ Standalone upstream tests previously resolve uncached benchmark dev-dependencies
 
 Verification: focused vendor cache/parity tests; root all-target check; directly relevant existing list/grid cache/invalidation/font-activation tests; Notes eager/width transition and track_c2f_oracle_quick_notes_recipe_contract; scoped100/1,000 actual owner diagnostic with QA absent verifies geometry/bound/savings; inspect diff for excluded experimental code. Narrow exact filters chosen from current source. No Full81 yet. Prototype accepted735.5561→385.8893ms cold1,000-row median; remaining shaping211ms/segment27/emission61 and warm gap unresolved. Current writer owns archive warm attribution; this packet is independently reviewed/implementer-ready after the test-only dependency amendment, queued until archive writer release, not concurrent implementation authorization.
 
-### M2-A bounded caller extension: inherit row style at construction
+##### M2-A bounded caller extension: inherit row style at construction
 
 Planner/reviewer source inspection accepts a routine caller correction: in src/gui/render.rs::LauncherApp::render_root_ui pass ui.style().clone() via existing row UiBuilder::style and remove the immediate row_ui.set_style of that same Arc. Ui::new otherwise fetches ctx.global_style,which is immediately overwritten. Pre-return Placer/UiStack/widget/AccessKit container registration does not read Style; clipping before the old overwrite is likewise style-independent. Preserve row ID,with_layout,automatic Button ID,clipping,disabled order,response handling and geometry/text. Do not remove nested layout scopes. Existing eager geometry/viewport/identity/local-style coverage plus matched warm-owner check are proportionate; no extra prototype/egui vendor patch or trivial API test. This targets redundant setup work,not the entire measured0.2905ms setup or0.6879ms Button cost; no saving claimed. Parent explicitly assigned this extension to the same sole live writer before first source freeze/build.
 
@@ -376,7 +398,7 @@ The earlier Button eager label copy is real but not safely deferred as a one-lin
 
 Additional bounded read-only check rules out a parent style-cache reuse hypothesis: released0.36.2 Ui/Style/AtomLayout have no reusable UiStyleCache to inherit; style values/layout atoms are recomputed,text caching remains font/context-owned. Ui::new_child changes automatic-ID seed,parent counter,stack/AccessKit ancestry,sizing/invisibility and registration,with no identified reusable cost benefit or public seed override. Keep current constructor/nested layout. Source inspection is not warm performance evidence.
 
-### M2-A residual cold cost: reviewed archive-only attribution
+##### M2-A residual cold cost: reviewed archive-only attribution
 
 Current activation: after accepted production checkpoint87e08b32 and writer release, parent explicitly assigned this bounded archive-only packet to sole implementer_m2a. Live production source remains frozen. After accepted plan reuse, recorded shaping remains211.552ms/1,000 rows. Planner inspected cached HarfRust0.12: Shaper::shape_with_plan constructs Scale/FontFuncsDispatch inside the shaping timer, then calls OtShapeContext::shape_internal; Shaper construction is outside that timer. ShaperData already retains tables/cmap,nominal mapping uses cached cmap,horizontal advances use batched metrics,ASCII properties and map_glyphs_fast already have fast paths. No supported switch bypasses normalization/GSUB/GPOS with general output parity. BuiltinFontFuncs lazily initializes per-call charmap/metrics, but source alone does not establish material cost; custom FontFuncs would replace an existing cached/batched path and is unjustified now.
 
@@ -388,11 +410,11 @@ Exact functions: src/hb/face.rs::Shaper::shape_with_plan complete call,count and
 
 One derived ignored test track_c_diagnostic_root_list_residual_shaping_attribution: only1,000 cold rows,two warmups/five samples per HarfRust off/on mode,fresh equal real nine-pass preparation,unchanged existing owner timer. Full untimed ordered run/glyph and eager parity also compares retained-plan clocks off/on; no snapshots in timed samples. Preserve all ten records/phase arrays/arithmetic/preparation/source/binary/command/environment receipts; compare owner/epaint-shape off/on overhead. Prior4047 runs/103830 glyphs are controls to verify,never forced values. Exact filtered locked/offline fast-dev Nextest with existing perf/skipclipboard/source/profile attribution,QA feature/request absent and explicit existing target settings. No app/full81/unrelated/upstream suite. Done means bounded passing owner/parity/provenance,clear partition/nested-labels and a concrete responsible phase or honest no-dominant-candidate result; it never automatically authorizes production optimization.
 
-## M2-B concrete Windows native parity handoff (read-only planning)
+#### M2-B concrete Windows native parity handoff (read-only planning)
 
 Objective: validate migrated native windows, activation, input and overlays; correct demonstrated migration defects at their existing owners. Execute after M2-A, with M1-C compilation and M1-B lifecycle tests accepted. Keep explicit Glow; backend comparison belongs to M2-C. Confirm completed M1-C viewport callback signatures before editing. This packet is planning evidence, not executed acceptance.
 
-### Ownership and invariants
+##### Ownership and invariants
 
 | Behavior | Existing owner |
 | --- | --- |
@@ -409,7 +431,7 @@ Windows root presentation deliberately uses `SW_SHOWNOACTIVATE`; ordered native 
 
 Inspection found no tray implementation or root `with_transparent` configuration. Record tray as absent and root opacity as existing behavior; do not add features to satisfy generic checklist wording. Static inspection identified no justified new windowing abstraction.
 
-### Required execution and focused tests
+##### Required execution and focused tests
 
 1. Confirm root handle capture/clear, secondary identity/close/reopen and designer identity invalidation still traverse existing owners. Hidden child bootstrap must work with a parked root.
 2. Run exact Nextest `test(...)` filters for the existing contracts below. State tests do not prove OS behavior. If these paths change, relevant injected-event integration targets are `gui_visibility`, `focus_visibility`, `trigger_visibility`, `hotkey_events`, `quit_hotkey`; do not label them real-hook evidence.
@@ -431,13 +453,13 @@ Inspection found no tray implementation or root `with_transparent` configuration
 
 4. Fix only reproduced failures at the first responsible owner; add focused regression coverage for corrected invariants.
 
-### Acceptance evidence and genuine gaps
+##### Acceptance evidence and genuine gaps
 
 Keep separate receipts for automated state/oracles; native HWND identity/generation/bounds/focus/visibility; real input; actual desktop composition/screenshots; hardware/OS availability. Earlier original Sky desktop capture attempts failed. Accessibility-only query/Enter proves that interaction only,not visual/DPI/overlay/GPU parity. Update2026-10-13: M1-D now has accepted renderer-owned ROOT and actual Immediate QR child PNGs, including QR Escape/ROOT-query-focus return; see visual-qa.md and qa-secondary-framebuffer-plan.md. Reuse these scoped owners/evidence; do not create duplicate screenshot infrastructure. Framebuffer pixels still cannot prove desktop composition,click-through or OS focus; native receipt/UIA observations are distinct evidence. QA builds/requests must remain absent from performance runs.
 
 The applied computer-use skill prohibits synthetic Windows-key input; exact chord acceptance needs human/manual evidence. Report mixed-DPI, negative-origin topology, Win11 and remote-session coverage according to actual availability. Mark unsupported cases unavailable and required unobserved behavior pending, never passed. Finish when focused tests pass, available native checks have actual evidence, reproduced defects are resolved and environmental gaps are explicit. Planner performed no edits/builds/tests/native actions.
 
-## M2-C concrete renderer comparison handoff —read-only planning2026-10-13
+#### M2-C concrete renderer comparison handoff —read-only planning2026-10-13
 
 Execute after M2-A/M2-B acceptance. Objective: choose the fastest compatible measured backend on the available host, preserve native behavior and explicit selection, no styling/cache redesign. Contract requires at least five matched runs per native scenario,prefer ten when variance is substantial.
 
@@ -460,7 +482,7 @@ Focused verification: default and Wgpu-enabled all-target checks; small selector
 
 Done: retain comparable samples/p50/p95,investigate meaningful reproducible regressions,select fastest measured compatible backend with ties/uncertainty explicit,commit decision with renderer explicit. Hardware preparation recheck is recorded in benchmark-results.md; controller properties do not prove actual GL adapter,DPI/topology. Record unsupported mixed-DPI,Win11,remote-session,GPU/display measurements honestly. This packet is source-backed planning only; no backend feature/selector/build/measurement has run.
 
-## M1-D required DDS capability correction
+#### M1-D required DDS capability correction
 
 The failing image parity test exposed a concrete upstream admission regression. Both image0.24.9 and0.25.6 hardcode DDS capability reporting false despite their feature-gated DdsDecoder dispatch. Extras0.27 accepts non-SVG URI/MIME and delegates decode; extras0.36 gates file extensions and MIME using reading_enabled, rejecting DDS before the existing decoder. Planner verified the latest released image0.25.10 still has this mismatch; upgrading does not resolve it.
 
@@ -470,7 +492,7 @@ Verify DDS enabled/disabled reporting with focused package unit filters. Add val
 
 Toast source clarification: RIGHT_TOP anchors area right/top at screen right/top then adds offset; existing positive [10,10] extends beyond right edge and default Area constraint clamps right to viewport edge. The800x600 controlled fixture therefore expects right800/top10, not right790. Preserve production offset/stacking/lifetime behavior; do not change appearance to fit the test.
 
-## M2-A isolated released text-stack candidate — planning packet
+#### M2-A isolated released text-stack candidate — planning packet
 
 Objective: determine whether released HarfRust0.13.3 reduces the retained-plan actual1,000-cold-row owner before extending positioning instrumentation. This is candidate evidence only; production adoption and M2-A acceptance remain separate reviewed decisions.
 
@@ -491,7 +513,7 @@ Preimplementation reviewer accepted with two required refinements: compare compl
 
 Read-only follow-up (no cache authorization): identical-run raw shaping reuse is correct only within unchanged font face/engine and all effective inputs. ShapePlanKey instance is GSUB/GPOS feature-variation selection,not normalized coordinates; different coordinates may share plans but differ glyph positioning. Existing trace lacks explicit normalized instance coords/presence,typed variation bits,font collection index and fixed scale/point-size/font-function/buffer policy declarations. Fixture-specific duplicate-input analysis may use independently verified absent instances and default configurations; canonical traces omitting process-local face keys must not merge collection faces by asset hash alone. Current path has empty features/default scale/point size/custom functions,empty pre/postcontext/defaultcluster policy,raw font-unit outputs. Font size/DPI/rasterization are downstream. This defines a correctness boundary only; no shape-result cache/probe or production implementation authorized.
 
-## M2-A partial production adoption of the reviewed released text stack
+#### M2-A partial production adoption of the reviewed released text stack
 
 Objective: adopt the accepted aligned release stack as a partial correction; M2-A remains incomplete. Evidence checkpoint a36547bf preserves the isolated full glyph/exact geometry parity and five-sample cold timing comparison. One sequential writer owns vendor/epaint/Cargo.toml, root Cargo.lock, vendor/epaint/PATCH.md and a fresh ignored private harness/verification directory. No Rust source edits are expected. Parent owns other tracked docs/Git.
 
@@ -512,7 +534,7 @@ Required verification:
 
 Done: required checks pass,minimal graph matches,production remains diagnostic-free,provenance accurate. Commit as partial adoption only. Isolated cold owner390.704→370.182ms does not establish original/warm/release/native parity or pass M2-A. Genuine remaining uncertainties are live build and actual private variable-font execution; routine compiler corrections remain within packet,architectural source changes require reporting to parent before expansion. Planner source inspection complete; writer may execute this bounded packet.
 
-## M2-A next archive-only raw shaping reuse prototype — NOT activated
+#### M2-A next archive-only raw shaping reuse prototype — NOT activated
 
 Hold until released-stack production adoption completes, its source writer releases and checkpoint is saved. This is planning only; no production cache authorized. Accepted baseline trace has3,046 repeated executions/76,260 repeated glyphs among4,047 runs,with identical outputs; these counts are not measured savings.
 
@@ -549,7 +571,7 @@ Raw-result owner review: no-run002 passed (native0,175.549s),but final source mu
 
 Raw-result final adapter source/protocol review: both owner findings independently closed at root4039af65…a439/font6a8c35a1…a79f. Phase defaults parity and rejects other values; empty output directory required; parity uses no outer owner clock and returns before warmups/samples. Timing regenerates full canonical gate and every warmup/sample checks the accepted parity output/structural/viewport tuple. Test-only cfg fencing verified. No-run004 passed native0/58.142s (no bodies executed); exact binary/source freeze pending. Cancelled003 receipt records tool session6857 interrupt exit1,subsequent Get-Process cargo,rustc empty,no PID/ancestry/native Cargo completion claim. Source/protocol provisionally accepted; actual parity-only execution after binding review,and independent canonical parity review before timing still required.
 
-## M2-A partial production raw-result reuse proposal — NOT activated
+#### M2-A partial production raw-result reuse proposal — NOT activated
 
 Objective: integrate the accepted raw-result core as a partial correction; M2-A remains incomplete. Live source fc9edf1a already has the aligned0.13.3/0.46.2 stack and independent FIFO8 plans. Accepted archive freeze002 manifest4f4ce0c6092301d159edd33c0adaff436e563b012d30062eaa22f6f1c32cda44 binds prototypefont/text_layout and the completed private/fullcanonical/timing proof. Parent is checkpointing evidence; proposal review precedes writer activation.
 
@@ -575,7 +597,7 @@ Production raw-result integration accepted: both source findings closed at final
 
 Local production raw-result checkpoint9b7006cd saved after final acceptance. Only unrelated Workspaces/ remained untracked at commit; no push. Sole source writer released. Planner nextremainingcostproposal remains read-only/notactivated; M2-A open and all latergates/TrackBstillrequired.
 
-## M2-A archive post-section layout attribution proposal — NOT activated
+#### M2-A archive post-section layout attribution proposal — NOT activated
 
 Objective: identify the first still-unmeasured post-section responsibility in the remaining cold owner gap, without another cache or production optimization. Checkpoint9b7006cd is source of truth. Accepted raw experiment reduced native shaping to49.3760ms while owner remained227.9875ms; live normal-preparation diagnostic cold1000owner213.2354ms/warm2.1353ms still lacks original parity. Do not subtract historical medians to infer current phases.
 
@@ -607,7 +629,7 @@ Post-section actual parity accepted without a substantive gap: reviewer and pare
 
 Post-section experiment complete and independently accepted with no findings. Timing001 native0/16.8929477s retained regenerated full parity,4warmups and10samples. Index DE863083B2BE4CDCAA214CE6EA8D226B567999B540844EAE45C3CA062E7E80A7 binds unchanged source/binary. Parent/reviewer verified all records/arithmetic and full snapshots. Actual phase calls975; p50 inclusive35.9742ms/intrinsic2.3129/rows6.3209/galley26.7317/other0.5865. Owner off226.0966/on239.8295ms, all raw samples retained including303.3816ms on outlier across old stages. Observed6.1% difference is not a clean isolated-clock estimate. Existing off section177.2914ms/segmentation27.4047/native46.7807/emission61.3381 are nested current observations, not additive independent owners. Post-section does not dominate; no original-performance/M2-A acceptance. Archive writer released; parent preparing local evidence checkpoint. Planner read-only source investigation of remaining repeated work is separately requested, no next implementation or additional instrumentation activated. See receipts/m2a-post-section-layout-attribution.md.
 
-## M2-A earlier raw-hit return candidate — NOT activated
+#### M2-A earlier raw-hit return candidate — NOT activated
 
 Objective: measure the concrete unused setup at FontFace::shape_for_layout. Production9b7006cd currently resolves the instance, builds the HarfRust shaper, prepares the buffer/key, selects a plan, then looks for raw output. An accepted normal-preparation owner has3,072 raw hits among4,047 runs. A hit consumes neither shaper nor plan. Move only that hit boundary in an archive candidate; benefit remains unmeasured and original approximately52.58ms versus production213.24ms cold gap remains open.
 
@@ -669,15 +691,15 @@ Actualpairedparity independentlyCLOSED nofindings: index0020F33F5854078F9D45E8CB
 
 Earlier raw-hit archive experiment COMPLETE/independentlyaccepted withoutunresolvedfindings. Actualtiming native0baseline10.753454s/candidate9.806516s; bothregeneratedfullreferenceparity,4warmups+10samples/all55vectors retained. Ownerp50 227.9514→217.8085ms(4.45%),allrawsamples in receipts/m2a-earlier-raw-hit-setup-candidate.md; intendedplan4047→975/max2→1,allcommonraw/work/bounds/identitysame. Reviewerverified27bindings/index7965DE91EE341781F36DBAB1115CF3F712364ED2F5DF448E292CC5B82764D31C; sortedaggregatevsorderedrecords clarification35594692BCB746DC6E9AB1DC60CD6E2B3BB080C21EA8315E0C1639C94494019D accepted. Savingsincludeexistingplanobserverwork; five sequentialdiagnostics doNOTproveproductiongain/original/release/nativeparity orM2-Aacceptance. Writerreleased;noadoption/newoptimizationactivated. Parentpreparinglocalonlyevidencecheckpoint. Plannerread-onlysmallliveadoptionanddirectparityevidencestrategyrequested;noimplementationauthorizationyet.
 
-## M2-A live earlier raw-hit adoption proposal — NOT activated
+#### M2-A live earlier raw-hit adoption proposal — NOT activated
 
 Objective: port the accepted ownership correction after evidence checkpoint75a611d0. This is partial progress; the archive median227.9514→217.8085ms includes skipped observer work and does not quantify production gain. Production source remains9b7006cd.
 
-### Ownership and scope
+##### Ownership and scope
 
 One writer owns only vendor/epaint/src/text/font.rs, vendor/epaint/PATCH.md and fresh ignored harness/artifact/receipt outputs. Parent owns general documentation and Git. FontFace::shape_for_layout owns raw reuse: a valid hit needs neither a shaper nor a shape plan. No application, text_layout.rs, dependency, lockfile, font, profile or renderer changes. No archive observers, switches, clocks or public diagnostic exports enter production.
 
-### Required behavior
+##### Required behavior
 
 1. Preserve actual combined variation resolution and Some(instance) bypass, pre-mutation buffer eligibility, population, flags, guessed properties and complete raw key.
 2. Look up the existing raw result immediately. A hit returns the unchanged owned Cached carrier, exact glyph arrays and original buffer with recycling preserved.
@@ -686,13 +708,13 @@ One writer owns only vendor/epaint/src/text/font.rs, vendor/epaint/PATCH.md and 
 5. Port raw_hit_returns_before_repopulating_an_evicted_shape_plan. Use real distinct public ShapePlanKeys and FIFO helpers to retain the raw entry while evicting its plan. Verify bounded plan storage, exact cached glyphs/recycling, and unchanged actual plan order/content after the hit. Permit only necessary cfg(test) helper visibility adjustment.
 6. Update PATCH.md with ownership, accepted archive evidence, upstream provenance and removal condition, preserving existing raw/FIFO/version provenance. Do not claim quantified production savings.
 
-### Verification
+##### Verification
 
 Use a fresh ignored private harness derived from target/egui-modernization/m2a/production-adoption-validation/epaint-focused-005/Cargo.toml, pointing to live vendor source with the existing pinned dependencies, lock, features and genuine test dependencies. Run the existing eight plus the ninth contract. Preserve actual Bahnschrift format/face-tweak, allocation, unknown-policy and bounds coverage. Source and private compilation-only bindings must be reviewed before private test bodies.
 
 For the application, use the exact 20-test OR-filter from production-adoption-validation/receipts/root-focused-20-002.receipt.txt. Run locked/offline fast-dev all-target checking, formatting and diff checks. Execute unchanged track_c_diagnostic_root_list_geometry_cost_breakdown:100/1000 rows, cold/warm, two warmups and five samples per cell, all20 records, normal preparation with raw reuse active. No Full81, full suite, release or native testing belongs to this adoption packet.
 
-### Artifact and execution rules
+##### Artifact and execution rules
 
 Use a fresh isolated adoption target under ignored m2a; leave the shared target intact. Do not trust Fresh, executable filenames or metadata package IDs as source proof. Use explicit actual workspace cwd, stable Windows toolchain, profile/features, locked/offline settings and environment/QA exclusions.
 
@@ -702,7 +724,7 @@ Bind precommit HEAD plus actual source hashes/canonical diff, manifest/lock, fea
 
 Done requires the reviewed two-file production diff, private9/root20/check/fmt/diff and20 diagnostic records, actual artifact/receipt review, and a coherent local commit. Writer stops for parent before further work.
 
-### Later performance proposal — reference only
+##### Later performance proposal — reference only
 
 After adoption is checkpointed, prefer a direct existing canonical-release track_c_benchmark_root_list_frame_geometry comparison against accepted original f45e377390284cc1ba6cf474fcd23e008514318e before further instrumentation. This requires a separate reviewed packet for artifact/source binding, preserved original binary eligibility, matched six100/1000/10000 cold/warm cases with five warmups/20samples, and existing fixture/work/paint-row differences. It cannot replace fast-dev comparisons or eventual81cases, waive the original regression, or completeM2-A. Production benefit and the remaining release gap are unknown. Nothing in this later proposal is activated.
 
@@ -724,11 +746,11 @@ Live adoption scoped bodies verified: ROOT20 passed20/20 native0/10.8163615s; un
 
 Live earlier raw-hit adoption COMPLETE and independently ACCEPTED for checkpointing, no unresolved findings. Reviewer verified private9/ROOT20/all-target/fmt/diff and all20 unchanged geometry records, source/archive/extracted binaries and44 artifact bindings. Index0D19D30C1E33A21F9D479A2FECB3A546A2636E442F833C789E40293527B82EC5 plus base-HEAD correction184A525203CF21DA217E95E0A94A27B7366CFAF8E63DE7955D0BD0387928C018 accepted; no source changes or reruns. Current unpaired medians100cold/warm16.1288/3.5598ms,1000cold/warm202.9620/2.2417ms, no original/performance waiver. Writer released. Parent preparing coherent local source checkpoint; see receipts/m2a-production-earlier-raw-hit-return.md. Next proposed direct canonical-release original/current comparison is read-only and not activated yet; M2-A and both mission phases remain required.
 
-## M2-A matched release Full ROOT control — NOT activated
+#### M2-A matched release Full ROOT control — NOT activated
 
 Production adoption checkpoint3a10f1de is the current source. Measure it directly against accepted originalf45e377390284cc1ba6cf474fcd23e008514318e before further instrumentation. This is a CPU-owner comparison, not display/GPU/native acceptance. M2-A, fast-dev and eventual81-case requirements remain open.
 
-### Inputs and ownership
+##### Inputs and ownership
 
 One writer owns only fresh ignored archive/build/executable/receipt outputs for this measurement. Parent owns tracked documentation/Git. No source, dependency, feature, font, profile, renderer, cache or observer changes.
 
@@ -736,7 +758,7 @@ Original frozen source is target/egui-modernization/m2a/release-small-control/or
 
 No saved Nextest archive or Cargo/binary metadata exists for that original executable. Installed Nextest archive cannot package it directly. Use the same direct libtest runner for both versions, clearly labeled; do not invent metadata or let Cargo rediscover the original through a mutable target.
 
-### Preparation and artifact gate
+##### Preparation and artifact gate
 
 Create a fresh ignored Git archive of committed3a10f1de, retaining all tracked manifests/lock/vendor packages. Record commit/tree/archive/source inventories and verify extracted relevant sources against Git blobs with EOL presentation explicitly distinguished. Bind actual manifests, lock, vendor/text-stack versions and font asset identities. Keep each version's actual assets; do not force fonts to match.
 
@@ -752,7 +774,7 @@ Rehash the preserved original and list both bound executables without bodies:
 
 Require the exact ignored owner in both successful listings. Independent source/profile/artifact/Cargo-selection/owner review precedes ANY benchmark body. Stop for parent timing authorization after that gate. No other tests or rebuilds.
 
-### Execution after separate authorization
+##### Execution after separate authorization
 
 Run original once, then current once, sequentially with no competing owned compiler or benchmark workload. Each receives a fresh child environment/evidence directory and its own frozen source cwd; existing TrackCWorkspace creates the isolated fixture. Use the same runner arguments:
 
@@ -760,7 +782,7 @@ Run original once, then current once, sequentially with no competing owned compi
 
 Set MULTI_LAUNCHER_PERF=1,ML_SKIP_CLIPBOARD_SYNC=1,ML_TRACK_C_BENCH_MODE=full,ML_TRACK_C_PROFILE=release and ML_TRACK_C_SOURCE_SHA to that executable's actual committed source. QA requests remain absent. Record exact argv/environment, source/executable hashes before/after, immediate native exit, wall envelope and all stdout/stderr. Restore process-local environment. No exclusions, tuning or automatic reruns.
 
-### Results and done criteria
+##### Results and done criteria
 
 Each invocation must emit six existing cases in order:100cold/warm,1000cold/warm,10000cold/warm. Each case uses five warmups and20 measured samples. Existing measure_owner excludes preparation/validation. emit_samples preserves measurement order; retain all aligned elapsed/identity/receipt/work arrays. Compute nearest-rank quantiles on a separate sorted copy: p50=10th,p95=19th,max=20th of20; do not average middle values or reorder retained evidence.
 
@@ -784,7 +806,7 @@ Matched canonical-release Full bodies completed exactly once each: original nati
 
 Matched release Full ROOT measurement COMPLETE and independently accepted as bounded evidence, no evidence-integrity findings. Reviewer verified090AD1B0…BBEBA/12records/240values/seven aligned vectors/order/quantiles/fixtures/work/invocation/log/source/executable bindings. Performance gate remains FAIL: cold p50+52–87%,warm+60–71%,source3a10unchanged. Parent preparing local evidence checkpoint. Planner source inspection found no justified next cache/lookup rewrite: resolve_face already caches mapping; ordinary shaped glyph emission does not use charmap/advance_width_unscaled; placement/scale/variation-aware allocation keys cannot be replaced by old character-cache behavior. Next low-cost proposal is ONE existing release geometry_cost_breakdown diagnostic on preserved2339…123a9, no code/compile/new clocks, to establish per-sample owner vs actual last_rebuild responsibility. Proposal not activated yet; more detailed release attribution or source optimization only if later evidence justifies it.
 
-## M2-A existing release geometry boundary diagnostic
+#### M2-A existing release geometry boundary diagnostic
 
 Reviewed proposal: after evidence checkpointa6a02dba, reuse the preserved current release executable from source3a10f1de, SHA2339e81d937e812285b16ff0f3af7e200d7d6c5c5725bc58891a85a8697123a9. No source, instrumentation, dependency, profile, asset or compilation changes. This small existing-owner measurement and its results form one coherent evidence checkpoint; no separate plan-only commit is needed.
 
@@ -802,7 +824,7 @@ Parent verified fresh one-owner listing/native0 and independently rehashed prese
 
 Release geometry boundary actual-results review CLOSED without findings: indexB512DF2F…E194E,20ordered records/paired arithmetic/work/IDs/outcomes/receipt bindings accepted. Writer released; parent saving local evidence checkpoint. Planner next candidate-only canonical-release existing attribution proposal received, not activated. No M2-A performance waiver.
 
-## M2-A existing candidate attribution under canonical release — proposed
+#### M2-A existing candidate attribution under canonical release — proposed
 
 Dependency: reviewed release geometry evidence checkpointa6c656f7. Current1,000cold rebuild occupies98.6777–98.7815%of each measured owner. Goal is to distinguish existing nested text stages under optimized release before choosing a source fix. This does not measure exact production costs or accept performance parity.
 
@@ -830,7 +852,7 @@ Done: independent review of actual release parity and timing bindings/records es
 
 Preimplementation uncertainty discovered before any build: archived owner hardcodes fast-dev outputidentitybd4860c5d2427fa2/structural18c853161fe60dfc/viewport52001c291b514345 and compares fast-dev full canonical reference. Currentrelease1000outputidentityadfb11ee80438eab differs. Planner/reviewer investigating actual identity/canonical generation and profile-specific cause read-only. Reuse proposal remains NOTactivated; do not weaken assertions or normalize identities without explaining the boundary. Required plan correction may need release-specific correctness reference; no compiler/body/sourcewrite authorized.
 
-### Superseding archive-only profile adapter proposal
+##### Superseding archive-only profile adapter proposal
 
 Unchanged archive release reuse above is withdrawn: egui Id::Debug changes with cfg(debug_assertions), and both canonical text and viewport/output receipt hashes include that debug text. Structural geometry remains18c853161fe60dfc. This is an evidence-format boundary, not established layout drift.
 
@@ -864,7 +886,7 @@ Corrected actual parity gate CLOSED without findings: native0/2.613673600135371s
 
 Existing release layout attribution COMPLETE as descriptive evidence, independently accepted without findings. Reviewer verifiedparityplus2warm/5ordered55-vectors,source/archive/exe/env/native/snapshotbindings andnestedstage labels. Owner33.7573ms/section20.9049/emission10.3810/native3.3504/segment3.0892;all103830glyphalloccachehits0miss;raw975evictions/plan0. No cross-run subtraction/performancewaiver. Writerreleased; parent local evidencecheckpoint next. Planner boundedread-only emission/cache-hit ownershipproposal requested againstproduction3a10/original; no newoptimization/instrumentation activated. See receipts/m2a-release-layout-attribution.md.
 
-## M2-A glyph-allocation prehash map experiment — proposed
+#### M2-A glyph-allocation prehash map experiment — proposed
 
 Dependency: accepted instrumented release attribution checkpointcd2fe206. Production remains3a10. Five release samples each perform103830 glyph-allocation cache hits/zero misses; shaped-run emission median10.3810ms is descriptive instrumented evidence, not removable cost. Source inspection identifies a concrete redundant operation: GlyphCacheKey::new already hashes all allocation inputs into a u64 and implements nohash_hasher::IsEnabled, but FontFace::glyph_alloc_cache uses ahash::HashMap and hashes that numeric key again. Existing nohash-hasher dependency provides IntMap; no dependency addition is needed.
 
@@ -904,7 +926,7 @@ Candidate actual parity gate CLOSED without findings: native0/2.4651184s, fullsn
 
 Glyph-allocation prehash experiment COMPLETE as bounded evidence and REJECTED for production. Bothfreshmatchedbodiesnative0 (baseline3.5439509s,candidate3.3602086s), eachparity+2warm+5samples retained:all16vectors/logicalcounts/fullbytes/source-env-archive-exe bindings accepted withoutfindings. Ownerp50baseline30.9320ms versuscandidate35.3300ms; emission9.2382 versus9.9939ms. Wideoverlap/singlepair meansno causalregressionclaim, but no benefitsignal supports rejection perplan. IndexEC14722FA2C6FD40593A155E42DA3F13C057F6DC329639E6C25AEE36F2BAE630. No repeats/exclusions/productionadoption. Writerreleased; parent coherentlocal evidencecheckpoint next. Planner NEWread-only root-cause reassessment requested; no source/nextoptimization/newhooks/bodyactivated. Production3a10unchanged/M2-AFAIL/noTrackB. See receipts/m2a-glyph-allocation-prehash-experiment.md.
 
-## M2-A release observer contribution control — proposed
+#### M2-A release observer contribution control — proposed
 
 Dependency: rejected prehash experiment evidence checkpoint1fbc7e7c. Production remains3a10. Source reinspection found no per-glyph styled-metrics reconstruction: metrics are prepared per run, the key copies scalar fields, and subpixel binning remains position-dependent. The unresolved boundary is instrumentation:103830 hit-counter updates plus existing stage clocks/TLS bookkeeping are included in the10ms observed emission interval. Do not justify another key/metrics rewrite from that interval yet.
 
@@ -936,7 +958,7 @@ Observer-control Trace parity gate CLOSED without findings: native0/2.6422351s, 
 
 Observer-control evidence COMPLETE and independently accepted without findings. One control native0/4.5586105s retains all14 records/55vectors/work/IDs/bindings. Owner p50 disabled28.7389ms, enabled29.7435ms; paired median difference0.7639ms, all samples and both negative warmups retained. Wide variation prevents exact overhead/causal confidence claims; enabled observation is not supported as dominating emission. ResultB107316905C84E5E7198D8AE7F7FC5E189EB37311AD0E28CC638FF5E7A1D2F6A. Parent preparing local evidence checkpoint; planner bounded read-only next proposal pending. No repeat/optimization/adoption activated. Production3a10 unchanged/M2-A performanceFAIL; no Track B yet. See receipts/m2a-release-observer-control.md.
 
-## M2-A paragraph glyph capacity experiment — proposed
+#### M2-A paragraph glyph capacity experiment — proposed
 
 Dependency: independently accepted observer-control evidence checkpoint1761e9c4. Enabled observation is not supported as dominating the emission interval; exact production cost remains unknown. Production3a10 unchanged/M2-A performanceFAIL. No new source or body is activated by this proposal.
 
@@ -968,7 +990,7 @@ Paragraph-capacity candidate actual Trace parity gate CLOSED without findings: n
 
 Paragraph-capacity bounded experiment COMPLETE; actualmatched evidence independently accepted without findings: baseline0/4.8686992s,candidate0/4.2730402s,all28rawrecords/55vectors/order/work/IDs/bindings pass. Disabledp5031.2202→25.0066ms; enabled28.3603→27.3802ms. Allfivecorrespondingcandidate samples lower, butdrift/overlap/fixedbaselinefirst/singlepair preventcausal19.90%claim. Reviewersupports separatelyscopedprovisionalproductionport contingentproductionchecks+actualoriginal/currentFullreleasecomparison; no automaticadoption. BaselineCA16190E…E3AC/candidateAFC47A21…835D results retained. Parent evidencecheckpointnext/plannerboundedportplanrequested. Production3a10unchanged/M2-AperformanceFAIL/noTrackB.
 
-## M2-A provisional production paragraph capacity adoption — proposed
+#### M2-A provisional production paragraph capacity adoption — proposed
 
 Dependency: experiment evidence checkpoint829dbac6, private6/fullTrace parity/actual28matched records independently accepted. Review supports a credible provisional signal; fixedbaselinefirst/drift/overlap preventcausal19.90%claim. Production remains3a10. No source/body activated until reviewed local plan checkpoint.
 
@@ -1000,7 +1022,7 @@ Actualproductioncanonicalbuild completedCargo0/744.6027682s; onefreshCargolibtes
 Actual fcd4 production Full ROOT pair COMPLETE; independent measurement review ACCEPTED without findings. Original0/28.4301962s,current0/42.5134118s; all12 records/240 values/seven aligned vectors/nearest-rank stats/fixtures/work/IDs/source-env-exe bindings pass, no exclusions or repeats. Performance remains FAIL:10,000cold p50 126.1575→212.1170ms, ranges116.0275–183.5349 versus201.1034–245.1618ms disjoint; warm medians also regress. Indexfe06e84d69c6cb7b20692bde140be13a76880d1bc1cec1ddad4cc12feda1c588. Provisional reserve stays provisional; historical3a10 comparisons are unpaired, no causal production gain or TrackB waiver. Planner read-only tool-first CPU attribution proposal found matching canonical PDB and WPR stacks but missing ready ETL decoder; no recording/download/source/build activated. See receipts/m2a-production-paragraph-capacity.md.
 
 
-## M2-A canonical executable CPU sampling — reviewed bounded plan
+#### M2-A canonical executable CPU sampling — reviewed bounded plan
 
 Dependency: actual original/current Full ROOT evidence checkpoint11243332 independently accepted, performance FAIL. Objective: identify a material source responsibility from sampled CPU stacks of the unchanged canonical production executable, rather than activate another scalar optimization. Sole implementer owns ignored tooling/profiling artifacts only; parent owns tracked documentation/Git. No application source, dependencies, observer hooks or profiling build initially.
 
@@ -1024,7 +1046,7 @@ Fresh002 capturecontroller gate CLOSED atA851/8286/536D: syntax/hash/independent
 NormalRunAs002 TERMINALexit1: Windowsreturnedusercancellation09:01:29–09:03:31Z, no elevatedrunnerPID/preflight/body/ETL. Receipt0A495BA578B9F6148FD414F2F3A1F26D0D60EDCA23735F7F8A52B7511A700861 parentparse/hash/absencechecks pass. No promptrepeat/securitypolicychange; ETWrouteclosed. Boundednonadminexistingtool/sourceattributionplannerrequested, notactivated. PerformanceFAIL/sourceunchanged/fullmissionactive; see receipts/m2a-canonical-cpu-sampling.md.
 
 
-## M2-A existing release post-section attribution — reviewed plan
+#### M2-A existing release post-section attribution — reviewed plan
 
 Dependency: production Full ROOT remains FAIL; nonadmin ETW attempt and canceled RunAs outcome are retained at4997db8e. The accepted capacity control's five paired galley-minus-section intervals are10.8952,10.5675,9.6634,9.5688,10.4712ms versus emission4.43–4.98ms. Those differences include surrounding miss-path work and are not exact post-section measurements. They justify using the existing coarse post-section owner before another emission microprobe. No ready nonadmin sampler was found in the bounded installed-tool checks; no new installation/elevation attempt/custom sampler is authorized.
 
@@ -1043,7 +1065,7 @@ Post-section actual parity gate CLOSED: native0/2.5836761s, one passed/5238 skip
 Existing release post-section timing evidence complete: native0/4.8006583s, 4 warmup summaries+10 measured72-field records, complete84BDA regenerated parity, exact1pass/25paint/work/IDs/counters and checked post arithmetic pass. Descriptive on p50:post11.6077ms, intrinsic0.1745, rows1.9747, galley_from_rows9.2639 (positioning+tessellation). Correction7254 preserves viewport-parser failure; boundary clarificationE85 resolves owner scope, no rerun. Fixedorder/globalobservers/nonadditive limits explicit. Planner found size-only geometry consumer paying full meshes; archive-only shared measurement proposal under review, not activated. Production unchanged/performanceFAIL; parent evidencecheckpoint next. See receipts/m2a-release-post-section-attribution.md.
 
 
-## M2-A exact size-only layout experiment — final packet for review
+#### M2-A exact size-only layout experiment — final packet for review
 
 **Dependency and objective.** Accepted release attribution checkpoint `a9e06352` identifies `galley_from_rows` as the largest post-section child, including positioning and CPU tessellation. `RootListGeometryCache::ensure` constructs each full galley but consumes only its size. Prototype exact measurement through the shared layout engine, avoiding unused visual finalization. Original0.27 also built meshes; benefit and closure of the original gap are unknown. Productionfcd4 remains unchanged and performance FAIL.
 
@@ -1085,7 +1107,7 @@ Release parity saved locally0aded75ef204b699701b18f1c65b3d0b2cdb3a6a. Sole write
 
 Exact-measurement bounded experiment COMPLETE/independently accepted: onefreshbaseline0/4.2362672s thenonecandidate0/4.1772109s, all28records/N55/work/IDs/50bindings/arrays/quantiles pass, no exclusions/repeats. Disabledp50/p95ms25.3959/34.2486→16.4733/19.6152, rangesdisjoint/all5correspondinglower; enabledsupport31.6263/33.5289→16.3410/25.7514. Singlefixedarmorderpair notcausal/adoption/fullqualification. AtlasMICROSstate-label clarification5EF0 preservesindex/no rerun. Local evidence checkpoint next; planner preparing narrowly scoped productionport+actualoriginal/currentFull packet read-only. No livewriteauthorized, productionFAIL/TrackBgate remain. See receipts/m2a-size-only-layout.md.
 
-## M2-A provisional production exact measurement and actual Full ROOT qualification
+#### M2-A provisional production exact measurement and actual Full ROOT qualification
 
 Dependency: experiment evidence accepted at local `4b41ac83`; production remains paragraph-only fcd4 and Full ROOT FAIL. This packet permits a provisional source port only after independent packet review. Parent owns tracked execution docs/Git; one sequential implementer owns runtime source, vendor provenance and directly relevant tests. No automatic performance acceptance or Track B entry.
 
@@ -1127,7 +1149,7 @@ Artifact saved locally3c16ee845479703976a2def0ef59fa56cd0cff31. Solewriter activ
 
 Actual production Full ROOT pair independently accepted as measurement evidence; performance remains FAIL. Original/current each native0, exactly one body, all12records/240values/seven aligned vectors and work/identity/bindings verified. Cold p50 at1k11.2742→15.8411ms;10k127.5695→166.2805ms; warm medians also higher. Full10k ranges overlap; no disjoint-range or causal historical-gain claim. Index5e41fec2f480d5282ccd66b9d4511402ebec72e830690430c7df590a688c8f9b. Source79653eca remains provisional; no repeat/automaticoptimization/TrackB/performancewaiver. Planner active read-only on remaining cold-layout and warm-frame owners; no new source/body authorized. Local evidence checkpoint follows. See receipts/m2a-production-exact-measurement.md.
 
-## M2-A current production warm-frame attribution
+#### M2-A current production warm-frame attribution
 
 Dependency: actual Full ROOT evidence checkpoint0f02ce38 confirms a meaningful remaining cold regression and higher warm medians. Source79653eca and canonical executable F26D remain accepted only provisionally. No source repair is yet justified.
 
@@ -1149,7 +1171,7 @@ Warm attribution packet independently accepted without blockers. Additionally re
 
 Existing production warm diagnostic listing gate independently ACCEPTED without findings:49A1267/F26D/actualsource79653eca, one ignored owner/native0/no body, accepted chain and clean childenv. Solewriter activated exactlyONE direct diagnostic body100actions/2warmups/5samples, everyfield/protocol retained, lifecycle/residual/nestedrowmetric/work/identity arithmetic; no newbuild/source/clocks/repeats. Actualresultreview pending before any repair. ProductionFullFAIL and both mission tracks remain. See receipts/m2a-production-warm-owner.md.
 
-### Bounded cold-path source finding (read-only; no candidate activated)
+##### Bounded cold-path source finding (read-only; no candidate activated)
 
 Planner inspection identifies `vendor/epaint/src/text/font.rs::FontFace::shape_for_layout` as the preparation boundary: set flags, push_str into UnicodeBuffer, guess properties, then construct the existing resolved script/direction/language/text/flags raw key. A hit immediately clears the newly populated buffer. `layout_section` supplies a new-or-cleared layout-owned buffer, exact text and paragraph flags, but TextRun contains face+byte range rather than resolved properties.
 
@@ -1158,7 +1180,7 @@ A reorder-only skip is unsafe with the current interface: HarfRust guesses scrip
 
 Existing production warm attribution independently ACCEPTED without findings: exactlyonebody/native0/412.0748ms,8completeprotocol+recordlines/2warmups5samples, allphase/metric/identity/work/bindings verified. CurrentUI p50/p95us231.8/317.5 withinowner265.2/368.6; nestedrows109.5/132.3, neveraddagain. Logic12.2us/finalizer0.9us/residual19.7us smaller. SameFull100catalog/signature/25currentpaint; noFullpassinference. Planneractive read-only on currentUI branches; no newsource/bodyactivated. Coldrawhitpropertycontracttrap retained, no candidatejustified. ProductionFullFAIL/fullmissionactive. Local evidencecheckpointnext; see receipts/m2a-production-warm-owner.md.
 
-## M2-A proposed archive-only warm UI regions — pending review, not activated
+#### M2-A proposed archive-only warm UI regions — pending review, not activated
 
 Accepted warm evidence61082832 identifies current render_root_ui as dominant, with both nested rows and other UI work material. Planner source inspection found no justified behavior-preserving repair: the fixture still executes menu, heading/query TextEdit, ScrollArea and closed-dialog dispatch; original f45 also executed these surfaces, scale_ui and mem::take/dialog dispatch. Added numpad handling makes no native probes for empty fixture events; RootFrameLogic is small snapshot/scalar state. Do not skip these branches or redefine the owner.
 
@@ -1186,7 +1208,7 @@ Archive-only warmUI3region SOURCEgate independently ACCEPTED after offsentinel/e
 Corrected archive source gate saved locallyda8a02ff. Solewriter activated canonical INSTRUMENTED no-run artifact/listing only for warm-ui-regions-001: frozenrender4D722/v2patchB0CB/provenanceA388, base796 separate, freshisolatedrelease target/defaultfeatures/stableMSVC/directnativeCargoJSON. Source/compiler/exe/profile/exactderivedowner listing review precedes any off/on body. No live source/private11/Full/originalrepeat or productionadoption. Compilerfeedback, if any, must preservefailures and refreshsourcebindings before execution. Actual build start/result pending; no body. Bothmissiontracks/performanceFAIL unchanged.
 
 
-## M2-A closed auxiliary presentation admission candidate
+#### M2-A closed auxiliary presentation admission candidate
 
 Objective: evaluate whether avoiding three known closed-state preparation paths materially reduces current warm ROOT cost. Accepted evidence3c147aa1 places enabled auxiliary-tail samples at55.8-94.6us, median66.7us. The same source patterns exist in originalf45; they are not a demonstrated migration regression cause. No production adoption or performance waiver is implied.
 
@@ -1205,14 +1227,14 @@ Status: pending independent packet review; source implementation not activated.
 Packet independently accepted without substantive corrections: existing closed returns justify admission guards, radial pending-close registration/drain and separate intent/preferences owners remain required. The named radial test covers retained callbacks. Historical comparison supports only a limited candidate signal, not causal savings or adoption. Source preparation is the first activation only.
 
 
-### Read-only cold size-materialization finding
+##### Read-only cold size-materialization finding
 
 Current vendor/epaint/src/text/text_layout.rs::measure calls layout_to_positioned_rows and consumes only positioned.rect plus shared rounding. The shared pipeline still constructs Paragraph::glyphs/Vec<Glyph>, PlacedRow/Arc<Row>, copied wrapped glyph slices and per-glyph Y positions. Mesh vectors remain empty; no populated mesh allocation occurs in measurement. calculate_intrinsic_size flows only to full Galley metadata and is discarded by measure. Per-glyph Y assignments are not needed for final bounds, which union row positions/sizes; line heights, first-row minimum, rounding and accumulated Y remain necessary. These are feasible output-mode distinctions in the shared algorithm, not a demonstrated material repair. Accepted prior instrumentation places intrinsic work near0.1745ms/1000, so it cannot explain the remaining gap alone.
 
 Do not simply omit glyph allocation: it supplies snapped physical X and warms glyph/atlas state. Exact wrapping/alignment/truncation needs character classification, X/advance, line heights, section identity, whitespace/continuation behavior, and overflow metrics/snapping. Smaller records or removal of Arc<Row> would require a deliberate shared intermediate ownership change, not a second measurement algorithm. No vendor source, build, body, new timer or candidate is activated by these findings. Warm closed-admission candidate remains the sole active writer/build.
 
 
-### Read-only text engine and character-face lookup findings
+##### Read-only text engine and character-face lookup findings
 
 Pinned originalepaint0.27.2 text_layout::layout_section iterates chars, uses font_impl_and_glyph_info and ab_glyph pair_kerning, and emits one glyph per character. Current0.36 adds grapheme-preserving face runs, HarfRust whole-run OpenType substitution/positioning, cluster spacing/missing-mark handling and continuation glyphs for cursor/selection. This establishes different owner composition, not measured cause/magnitude or a parity waiver. Do not drop shaping semantics.
 
@@ -1221,7 +1243,7 @@ A distinct feasible lookup-only candidate is CachedFamily's ASCII face lookup. C
 The rejected glyph-allocation prehash experiment changed FontFace::glyph_alloc_cache's already-prehashed GlyphCacheKey map, not character-to-face lookup. This is a different boundary. Needed focused contract if later activated: all128ASCII cold/repeated resolution against the existing ordered resolver, no ASCII entries in non-ASCII map, non-ASCII fallback, empty-family negative caching and reconstruction reset; existing full glyph/geometry oracle remains integration evidence. Scope would be vendor/epaint/src/text/{fonts,font}.rs only. No grapheme/ASCII-shaping shortcut, new timers, capacities or source experiment is activated yet. Materiality remains unproved; current warm candidate/fixture is sole writer.
 
 
-## M2-A proposed archive-only ASCII face-resolution storage candidate
+#### M2-A proposed archive-only ASCII face-resolution storage candidate
 
 Status: pending packet review; not activated. Current warm candidate retains the sole writer. Objective is to evaluate a lookup-only boundary within CachedFamily, motivated by accepted segmentation cost near2.6ms/1000; material benefit remains unknown. This differs from rejected glyph-allocation prehash storage and preserves whole-run shaping.
 
@@ -1236,7 +1258,7 @@ Done means exclusive storage/unchanged resolution, bound harness and meaningful 
 ASCII face-resolution packet independently accepted without substantive corrections. This clears only source/private preparation after explicit activation; preserve exact negative-cache distinction, both constructors and exclusive storage, and report actual array bytes without hypothetical offsets. Current warm source writer has released ownership; its frozen archive is now compiling under parent-owned session94507. A separate fresh cold archive can have the sole source writer without modifying warm inputs; private tests/body remain separately gated.
 
 
-## M2-A proposed provisional closed auxiliary port
+#### M2-A proposed provisional closed auxiliary port
 
 Pending review, not activated. Accepted warm evidenceca1351fb supports a useful tail signal but not whole-owner improvement; repaired radial fixture independently passes and fixes an inherited migration failure. Port only the three reviewed admission changes and fixture setup to actual production source, keeping performance FAIL until actual production qualification.
 
@@ -1249,7 +1271,7 @@ The isolated ASCII candidate remains separate and frozen during its four parent-
 Provisional GUI port packet independently accepted without substantive corrections. Source implementation may activate only on the two named live GUI files, excluding archive probes and preserving all runtime owners. Live compilation and repaired exact radial contract remain required on the next production canonical artifact before any Full body; no production performance or milestone completion claim follows from the source checkpoint.
 
 
-## M2-A proposed ASCII Full ROOT materiality experiment
+#### M2-A proposed ASCII Full ROOT materiality experiment
 
 Pending review, not activated. Source/private gateb5c9dc9c passes four unique tests and records2,048bytes per family. Candidate ascii-face-resolution-001/root remains frozen796 plus ASCII patch50448DF6; fonts1CDE6124/fontACC8B2CC, unchanged manifests/lock/pins and exact canonical fixturesD75C/3AB. It excludes live guard6527ddc1 and warm probes. This experiment assesses lookup materiality; it cannot qualify live guards, establish original-version parity or authorize adoption.
 
@@ -1268,7 +1290,7 @@ ASCII Full ROOT experiment packet independently accepted without substantive cor
 Independent actual ASCII comparison review accepted without findings: both native0, all12records/240timings/sevenvectors, quantiles/bindings/exact crossarm output and work verified. HOLD/noadoption accepted: small cold gains relative to spread, all warm medians higher, fixed baseline-first causality limits and2KiB/family cost. No repeat, port or performance waiver. Production FullFAIL and both mission tracks remain. Parent saves evidence checkpoint; planner prepares a bounded shared measurement-materialization packet read-only.
 
 
-## M2-A proposed shared compact measurement materialization
+#### M2-A proposed shared compact measurement materialization
 
 Status: pending independent packet review; not activated. Dependency: reviewed ASCII comparison9363e2e7 is held without adoption. Actual production Full remainsFAIL. This is one archive-only source/private-contract milestone, with later performance/adoption gates separate.
 
@@ -1301,7 +1323,7 @@ Compact measurement SOURCE gate accepted after two narrow corrections (f32groupi
 Compact measurement SOURCE/PRIVATE completion independently accepted without findings: V3C2E5/patch5302/provenance71AD, sixexactcontractsPASS native0, full68B/compact20B, allbindingsunchanged, initialcompile101retained. No ROOT/performance/adoptionclearance. Parent evidencecheckpoint next; planner prepares bounded existingFullROOT comparison packet read-only. ProductionFullFAIL/bothmissiontracksrequired.
 
 
-## M2-A proposed compact measurement Full ROOT materiality experiment
+#### M2-A proposed compact measurement Full ROOT materiality experiment
 
 Pending packet review, not activated. Dependency: compact source/private correctness accepted atf5fc877d, sixcontractsPASS/fullGlyph68B/compact20B. Candidate compact-measurement-001/root is frozen796 plus V3 text_layout patch only, excluding ASCII/live GUI guards/probes. Base79653eca51c80c8777b1b7e9ddaf6fd9a826e823; patch5302d3e8776a4bd0f86b775d859d95fefd2f3c1c87f11415cb14bca9385df9fd; text_layout.rsC2E5E0EBDD8EE4B982F324687CC22666F16F1D5202C2F30718AAB92DF261CFCA. Canonical manifests/lock/pins/font assets/serialized fixtures unchanged.
 
@@ -1318,7 +1340,7 @@ Done: independently reviewed actual evidence informs later deliberate dispositio
 Independent packet review accepted artifact/isolation/labels/order/one-pair controls with the appended interpretation correction: measure benefit and warmROOT cost only, cold full-Galley finalization performance unresolved. No extra run requested at this bounded experiment; no source/build/body activation before localplancheckpoint.
 
 
-### Read-only full-materialization coverage finding
+##### Read-only full-materialization coverage finding
 
 Planner confirms existing required M2-A cold Grid/Notes owners cover fresh full-Galley materialization; no new owner/timer/matrix is needed merely to recognize the coverage. gui::render::tests::track_c_benchmark_root_grid_frame_geometry invalidates geometry after nine preparation frames; ensure_grid measures every cell via full WidgetText::into_galley_impl, including expired offscreen entries (multiline may compose cached paragraphs). gui::notes_dialog::tests::track_c_benchmark_quick_notes_dialog_geometry settles seven frames then clears only notes_geometry; measure_notes_geometry→galley_size uses full layout for title/metadata/preview, with fresh work for expired offscreen filtered notes; sparse projections may remain mostly warm. Independent eager oracles use separate Contexts and cannot warm timed state. Query-to-usable includes changed query editor full layout but is not a controlled bulk full-miss owner. Existing root_list_text_stage_costs has a WidgetText full variant but also three manual variants, so do not activate it automatically. Actual cold Grid/Notes performance remains unresolved and belongs to later required M2-A evidence, not this ROOT-list experiment. Source/private full oracles establish correctness only. No run or change follows from this finding.
 
@@ -1327,7 +1349,7 @@ Compact canonical artifact/listing independently ACCEPTED withoutfindings: actua
 Compact singleFullROOT pair independentlyaccepted: native0/0, all12records/240timings/7vectors/exactcrossarmoutputwork verified, index7f30fc1f8fc4fd7fab757f2e91e1b79a912d65bd3ff487af6f82757bc814a7b1. Usefulcoldsignal1k15.8193→13.5169ms/10k161.3453→135.6845ms, warmmixed/1kp95higher. HOLDadoption/fullmaterializationunqualified/fixedordercausalitylimits; retain281.6345msbaselinemax/coldrangesoverlap. No repeat/productionparity/TrackBclearance. Plannerread-onlyonexistingfullpathownerfollowup; no newbuild/timer/body/sourceport.
 
 
-## M2-A proposed compact full-materialization Grid comparison
+#### M2-A proposed compact full-materialization Grid comparison
 
 Pending packet review, not activated. Dependency8d494553: compactROOT evidence accepted/usefulcoldsignal, adoptionHOLD due mixedwarm/fullpathunqualified. Use ONE existing Full Grid owner comparison to address directly changed full output. Notes need not run for this narrow decision; required M2-A Notes/query/originalparity/liveguard gates remain outstanding.
 
@@ -1348,7 +1370,7 @@ Compact Grid LISTING gate independentlyacceptedwithoutfindings: F26D/6E7 eachnat
 Compact Grid ACTUALEVIDENCE independentlyaccepted nointegrityfindings/all60records1200timings/7vectors andoffscreenfullproof. Mixed12/30p50 and14/30p95higher; specific10k3colcold adversesignal unresolved/no5%allowance/HOLDadoption. Noabsenceoffullregression/ROOTwarm/originalparity/productionclaim. Plannerread-onlyonboundedreproducibilitynextstep; no body/source/build activated.
 
 
-## M2-A proposed reverse-order Grid reproducibility check
+#### M2-A proposed reverse-order Grid reproducibility check
 
 Status: pending review, not activated. Dependency: first Grid pair accepted as evidence at `fcaf9552`; compact adoption remains on hold. The 10,000-item, three-column cold case has an unresolved adverse signal. This follow-up tests whether that behavior recurs when arm order reverses. It is a new reproducibility question addressing the first pair's known order limitation, not a rerun to obtain a better result. Preserve the first pair unchanged.
 
@@ -1367,7 +1389,7 @@ Reverse-order Grid packet independently accepted without substantive corrections
 Reverse Grid pair and both-order evidence independently accepted: native0/0, all120 records/2400 timings/seven vectors/chronology/cross-round identities and work verified. Combined index17309a59d7a51d8bf484604440d4e006ee46a0bc5c1a8dae1de1c2cc033c6b51. Original10k3col direction reverses; other adverse directions recur (5 p50/6 p95 cases), including10k6col cold p95. HOLD/targeted triage; no third pair/adoption/causal claim. Read-only finding: full row conversion may retain wider Vec backing allocation; actual footprint/capacity diagnostic proposed separately, no new run/source activated.
 
 
-## M2-A private row-storage diagnostic
+#### M2-A private row-storage diagnostic
 
 Objective: confirm the concrete retained-storage mechanism identified after both Grid orders, without another performance pair or production repair. Both-order evidence is saved atb2d44515; adoption remains on hold. In galley_from_positioned_rows, Vec<LayoutRow<Glyph>> is collected into Vec<PlacedRow>. Installed standard-library source can retain the original allocation when element size/alignment permit. Suggested48B/24B layouts are not yet actual measurements, and no latency cause is established.
 

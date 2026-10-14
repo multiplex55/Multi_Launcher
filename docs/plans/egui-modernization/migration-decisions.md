@@ -1,3 +1,9 @@
+# Current migration decisions — revised policy2026-10-14
+
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). Retain current integrated work and explicit working Glow; renderer competition deferred. Live correctness closeout then functional M2-D and immediate Track B. Local-only publication remains unchanged. Earlier source/graph/gate statements below describe their historical checkpoints.
+
+## Historical record — unchanged, not operative
+
 # M0-A preflight decisions and unresolved items
 
 **Checkpoint publication:** User explicitly chose “Keep checkpoints local” after

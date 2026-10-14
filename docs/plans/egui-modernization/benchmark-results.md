@@ -1,3 +1,9 @@
+# Current performance acceptance — revised policy2026-10-14
+
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). Measurement: source796 ROOT regressions remain measured. Previous disposition: failed the original no-regression policy. Current disposition: accepted_with_documented_regression under the explicit user directive, subject to live correctness closeout. Isolated candidate results remain separate/deferred. All historical raw values and failed dispositions below are unchanged.
+
+## Historical record — unchanged, not operative
+
 # M0-B original baseline measurements
 
 ## M2-A comparison input audit —2026-10-13

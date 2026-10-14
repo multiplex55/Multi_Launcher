@@ -1,6 +1,8 @@
-# Multi Launcher — egui 0.27 → 0.36.2 Modernization and Performance-First Visual Redesign
+# Multi Launcher — egui 0.27 → 0.36.2 Modernization and Correctness-First Visual Redesign
 
-**Plan status:** Ready for Codex orchestration. **Source of truth:** the user-supplied `multi_launcher(20261012-203406).zip` snapshot; at execution, verify the chosen repository HEAD corresponds to this snapshot and inspect all differences. **Date:** 2026-10-12. **Execution model:** one uninterrupted, sequential Codex assignment; two distinct internally gated tracks: A = dependency/API migration, B = visual design/theme rollout. No user approval between tracks unless an explicit hard blocker arises. **Primary invariant:** functionality and performance outrank aesthetics.
+**Policy amended 2026-10-14:** [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](egui-modernization/PERFORMANCE_ACCEPTANCE_ADDENDUM.md) is authoritative under the user's explicit revised requirements. Continue the existing `egui-modernization` branch, complete BOTH tracks, and accept documented performance debt. Do not restart, reconstruct historical baselines, or ask for permission between tracks. The current status/next action is in `egui-modernization/status.md`; older evidence remains historical. Archive identity remains an honestly recorded gap, not a reason to reset current work.
+
+**Priority:** correctness/data/function; stable responsive interaction; finish migration and theming; low-complexity performance hygiene; comprehensive optimization/benchmarking as future work. Exact original-version performance parity is not required.
 
 ## 0. Mission, decisions, and rules
 
@@ -10,25 +12,25 @@ Decisions incorporated from user answers:
 
 - Upgrade directly to **0.36.2** after a preflight version confirmation. If a newer stable exists when Codex runs, document it and prefer the latest stable compatible with the approved migration target, but do not silently move to prereleases.
 - Dependency migration and visual redesign happen **back to back**, *not* in a single undifferentiated commit. The user selected both “separate” and “combined”; interpret this as one continuous run with independent milestones, baselines and reversible commits.
-- Preserve the existing GPU/backend behavior initially. Benchmark Glow and Wgpu when both can be enabled safely. Keep the fastest reliably supported configuration; do not accept a default backend change by accident.
+- Retain the explicitly selected, working Glow renderer unless a demonstrated compatibility or serious usability defect warrants change. Defer Glow/Wgpu competition to the post-modernization backlog; do not build backend variants to chase parity.
 - Style: minimalist, Windows Fluent-inspired, compact, excellent keyboard readability. No wholesale layout redesign or feature changes.
 - Scope: root query launcher/list/grid first, then settings and plugin dialogs. Explicitly **exclude** redesign of native radial-menu surfaces and native cursor overlays unless required for API compatibility. All plugins and existing feature commands continue working.
 - Keep System, Dark, Light, Custom; repair actual runtime theme application; add tasteful presets/accent colors; immediate in-dialog preview with Cancel rollback; standardize typography and icons.
 - Static corner radii, borders and minimal shadows are welcome. Blur, acrylic, perpetual animations/repaint loops are off. The user also checked “optional advanced graphical effects”: implement **optional, disabled-by-default** effects only if bounded, validated, and maintainable; don't let them delay core modernization.
-- Reject meaningful reproducible performance regressions. No default allowance for 5% regression. Benchmark with noise-aware repeated runs and report effect size, baseline variance and confidence; don't claim an improvement based on one sample.
+- Accept documented performance regressions under the revised user policy. Evaluate absolute/practical cost and actual severe usability/resource defects; higher medians or isolated percentiles alone do not block progress. Preserve all historical adverse evidence; further parity-only optimization and comprehensive statistics are deferred.
 - Dedicated branch, active checkpoint commit cadence, planner / implementer / reviewer delegation, Windows testing, rollback instructions. Keep appearance change isolated from API stabilization. No permanent classic/modern UI toggle is required; Git checkpoint is sufficient as rollback.
-- Branch: **`egui-modernization`** (working default because no branch name was supplied). Base it on the code matching the supplied archive. Do not automatically branch from `master` if the supplied snapshot comes from a feature branch; establish SHA and ask only if choosing a base risks losing source-of-truth work. Never destructively reset someone else's changes. Branch creation and push need existing valid remote and permissions; do not assume successful push.
+- Continue the existing **`egui-modernization`** branch and chosen live source. Do not reset/rebaseline, branch from master, merge unrelated work or discard changes. Checkpoints remain local-only under the existing user instruction.
 
 ### Absolute hard rules
 
-1. Inspect `AGENTS.md`, all applicable repository instructions, git status/log/branch, `Cargo.toml`, `Cargo.lock`, startup flow and GUI before changing code. The archive is the functional source of truth; repository HEAD at run-time must be reconciled against it.
+1. Inspect `AGENTS.md`, all applicable repository instructions, git status/log/branch, `Cargo.toml`, `Cargo.lock`, startup flow and GUI before changing code. The actual chosen live checkout is authoritative. Preserve the unresolved historical archive comparison as context; do not reset or reconstruct a baseline to reconcile it.
 2. No behavior redesign, command reorganization, altered hotkey dispatch, focus policy, search ranking, view switching, global mouse hook, macro semantics, clipboard privacy, persistence contract, or window placement policy.
 3. No panics/unwraps introduced on user input, missing resources, theme config or DPI/renderer reinitialization. No clippy-silencing broad allowances.
-4. Stop and fix any objectively measured severe regression before continuing to theming. If an upstream architectural incompatibility blocks the direct jump, document it and use intermediate versions as temporary *implementation stepping stones only*, without shipping partially incompatible binaries.
+4. Fix observed critical correctness defects or severe practical usability/resource regressions; slower historical synthetic benchmarks alone do not block theming. If an upstream architectural incompatibility blocks the direct jump, document it and use intermediate versions as temporary *implementation stepping stones only*, without shipping partially incompatible binaries.
 5. Never “repair” test failures by weakening assertions, deleting benchmarks, trimming fixtures or removing coverage. When an old test relies on a removed egui internal, replace it with an equivalent or stronger behavioral invariant.
-6. No unconditional per-frame `set_visuals`, `set_fonts`, icon decoding, theme cloning, SVG rasterization, texture loading, settings IO, native Windows querying or fresh dynamic allocation added to hot paths.
+6. Resolve/apply theme on effective changes; reuse fonts/icons/textures/caches. Avoid unconditional per-frame styling/resource setup, disk IO and expensive native queries. Bounded additional rendering work/allocations are acceptable; zero extra allocation is not a gate.
 7. Preserve event-driven idle behavior. Animations must have strict deadlines and cease requesting repaints when invisible, stationary or disabled.
-8. Preserve Track A/Track C cache/performance optimizations; treat their invariants as contracts. Reuse existing docs/performance scripts, telemetry and workload recipes rather than inventing uncorrelated benchmarks.
+8. Preserve functional cache/layout/Unicode/cursor/output invariants and already integrated justified optimizations. Do not port isolated candidates or broaden dependency forks solely for accepted performance debt. Reuse existing evidence/infrastructure instead of creating new sampling frameworks.
 9. Each checkpoint: tests appropriate to scope, reviewer assessment, write results and limitations, commit; push checkpoint when remote/policy allows. Never push an untested broken intermediate checkpoint as “done.”
 10. The implementation is not complete until both tracks A and B finish, required verification runs, and final reviewer signs off. A compiling app with unchanged visuals is **not completion**.
 
@@ -59,13 +61,15 @@ Decisions incorporated from user answers:
 
 Use an active, milestone-based commit cadence throughout this task. Break milestones into coherent implementation checkpoints (`M0-A`, `M1-A`, `M1-B`, etc.). Commit after each meaningful subsection rather than waiting for a whole phase. Prefix each commit message with the checkpoint (`M1-B: migrate root geometry atlas invalidation`). Maintain `docs/plans/egui-modernization/` with `status.md`, `dependency-audit.md`, `migration-decisions.md`, `baseline.md`, `benchmark-results.md`, `visual-qa.md`, `test-matrix.md`, `regressions.md`, and `handoff.md`. Checkpoints should include SHA, touched files, commands, pass/fail results, reviewer disposition, screenshots or UI notes, blockers and follow-up. Do not overwrite historic Track C metrics.
 
-**Branch guard:** `git status --short`; `git branch --show-current`; `git rev-parse HEAD`; `git remote -v`; fetch remote. If the archive omits `.git`, identify equivalent worktree commit by file hashes or best documented basis. If HEAD differs from archive, capture exact divergence and preserve archive content as precedence for feature behavior. Never cherry-pick or merge unrelated changes silently. Create `egui-modernization` from correct validated baseline. If already exists, verify ownership/history before using. Push only where safely configured; report inability to push but continue local changes.
+**Branch guard:** inspect actual status/branch/HEAD before significant work and commits. Continue current modernization history. Initial archive comparison/fetch/branch-creation procedures are historical, not repeated prerequisites. Preserve unrelated changes and source identities; no push without new authorization.
 
-**Role ownership:** planner maps migration and tests before files touched; implementer makes narrowly scoped changes; reviewer reviews API compatibility, performance contracts, persistence, native behavior and checkpoint evidence. Reviewer can demand fixes. Run independent file work in parallel **only where conflicts and behavioral coupling are low**. Sequential migration gates are mandatory; do not parallelize skinning before migration is validated.
+**Role ownership:** planner gives bounded coherent handoffs; one implementer writes each coupled milestone; reviewer evaluates correctness/compatibility/maintainability against the revised acceptance policy. Reviewers must not restore superseded parity requirements. Review coherent changes, not separate receipt/parser/listing/document approval cycles. Run independent file work in parallel **only where conflicts and behavioral coupling are low**. Sequential migration gates are mandatory; do not parallelize skinning before migration is validated.
 
 **Progress cadence:** publish a brief, actionable update after each milestone, showing commit SHA, test status, benchmark status, next checkpoint, risks. No artificial sleeping/polling for completion; avoid redundant expensive builds. Favor `cargo check` and targeted tests between major milestones, full test suite at gates.
 
-## 3. Gate M0 — source reconciliation, baseline, inventory (no dependency changes)
+## 3. M0 initial preflight record (no repeated baseline prerequisite)
+
+These initial tasks are retained as project context. Reuse their completed evidence; do not recreate the original baseline or reset current work. Unresolved archive/native/hardware coverage is recorded as a qualification gap under the addendum, not a new parity campaign or automatic Track B blocker.
 
 ### M0-A — Repository and toolchain preflight
 
@@ -132,40 +136,36 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 - Run preview, note markdown, toast and error notification smoke tests. Verify drag-and-drop and native file picker ownership/focus.
 - **Exit:** integrations compile and behavioral parity demonstrated. **Commit:** `M1-D: port egui integrations and image surfaces`.
 
-### M2-A — Geometry/cache migration (critical)
+### M2-A — Geometry/cache correctness closeout
 
-- Open `RootListGeometryCache` in `src/gui/render.rs`; document each invalidation key, measured geometry unit, list/grid mode, col count, font atlas, font family/style, DPI, presentation prefix and filters. Reconcile against Track C geometry/synthetic fixture assumptions.
-- Implement a stable font/layout revision or explicit signature in place of incompatible `Arc::ptr_eq` atlas identity. Include all factors that can alter text metrics: pixels_per_point, font definitions, font sizes, text wrapping, available width, row density, theme typography if changed. Do **not** invalidate for a color-only change.
-- Extend similarly to `src/gui/notes_dialog.rs` layout and markdown caches. Existing tests relying on pointer identity must become semantic cache validity tests: same inputs reuse; font/DPI/text width changes invalidate; color-only theme changes preserve geometry; reused cache never paints stale text or clips selected result.
-- Benchmark cold/warm list, large grid, quick notes and result handling with the original Track C harness. Quantify regression and determine whether it comes from egui layout cost, new cache key, text shaping or instrumentation. Don't mask overhead with fixture downsizing.
-- Preserve narrow cache ownership, bounded memory capacity and storage receipts. Avoid mutex contention and new full-list traversals.
-- **Exit:** cache correctness, no repeated needless remeasurement, measured performance parity. **Commit:** `M2-A: make font and layout cache invalidation egui-0.36-safe`.
+- Keep actual integrated source and inspect relevant cache/atlas/revision ownership; preserve correct invalidation, virtualization, wrapping, Unicode, cursors and full output. Palette-only changes must preserve text geometry; typography changes invalidate deliberately.
+- Validate the actual live provisional closed-presentation guards with targeted affected tests and a Windows all-target compile. Reuse valid unchanged lifecycle/input/cache/layout/vendor evidence; fix concrete failures only.
+- Existing release ROOT/list regressions are accepted performance debt. Preserve raw measurements, source/profile identities and original failed dispositions. Do not initiate compact/ASCII/shaping/allocation/row-storage experiments or additional benchmark matrices solely to recover original speed.
+- Preserve isolated candidates in the future backlog without porting them. Do not rebuild historical baselines for documentation completeness.
+- **Exit:** chosen live source has necessary compilation/correctness evidence, no known critical cache/geometry defect, and the former performance blocker is `accepted_with_documented_regression`. Unexecuted checks remain unexecuted. **Commit:** `M2-A: close live cache and presentation correctness`.
 
-### M2-B — Windows windowing, renderer and event integration
+### M2-B — Functional Windows integration
 
-- Test root viewport, secondary dialogs, independent UI surfaces, always-on-top, native hwnd uses, multi-monitor DPI transitions, screen geometry, focus ownership, tray interactions, transparency and closing/reopening windows.
-- Pay special attention to `src/visibility.rs`, `src/main.rs`, `src/gui/radial_actions.rs`, `src/gui/qr_dialog.rs`, `src/gui/regex_tester_dialog.rs`, `src/gui/screen_draw_toolbar.rs`, `src/gui/mkmacro_dialog/parameter_prompt.rs`, and `src/gui/radial_editor/mod.rs`.
-- Validate native hotkey path using real keyboard and mouse: Shift+Alt+Win+End chord, quick tap vs hold semantics, no missed key-up, no sticky modifiers and no focus theft. Confirm grid/window remains togglable while in focus.
-- Preserve native overlays (screen capture/region selection/mouse crosshair/radial) and their OS handle layering, even though they are out of visual-redesign scope.
-- Inspect mixed DPI 100/125/150/200%, negative desktop origin, Win10/Win11 if available, and render API capability. Mark unavailable hardware cases as such.
-- **Exit:** Windows-native regression checklist passes. **Commit:** `M2-B: validate native windows, input hooks and viewport lifecycle`.
+- Preserve hotkey tap/hold, visibility, input ownership, once-only actions, hidden-root child/prompt creation/dismissal, focus restoration and window placement.
+- Use available desktop and automated/source evidence for show/hide, typing/navigation/Enter/Escape, list/grid/scroll, representative notes/plugins and true idle distinguished from active timers/effects. Reuse existing synthetic isolated-workspace infrastructure.
+- Run the smallest useful smoke checks. Do not endlessly retry unavailable desktop captures/elevation/profiling. Record exact unobserved physical hotkey/focus/monitor/DPI/native scenarios and required manual QA; environmental gaps permit safe continued implementation, without inventing passes.
+- **Exit:** available functional evidence reviewed, demonstrated critical defects fixed, qualification gaps explicit. Accepted synthetic performance differences are not reopened. **Commit:** `M2-B: stabilize Windows integration and record QA gaps`.
 
-### M2-C — Renderer performance comparison and decision
+### M2-C — Retain working renderer
 
-- First measure 0.36.2 with **explicit Glow**, identical release profile/feature set and deterministic fixtures compared to old Glow baseline.
-- When safe, instrument a Wgpu build with equivalent behavior; compare binary size, cold startup, first usable frame, hotkey-to-visible, steady idle CPU/GPU, warm query latency, result scrolling and viewports. Repeat >=5 runs (prefer >=10 where variance is substantial), annotate outliers rather than silently excluding.
-- Evaluate GPU fallback, software renderers, remote session compatibility, high DPI and transparency. Ensure the alternative doesn't break native Win32 overlay interactions or impose high compile times unexpectedly.
-- Choose a backend supported on target environments, prioritizing reliable interaction and no measurable meaningful regression; if neither matches baseline, profile and fix. Keep selected renderer explicit in config and document why.
-- **Exit:** committed backend decision with reproducible results, without changing visual design. **Commit:** `M2-C: select measured egui 0.36 renderer`.
+- Inspect actual configuration. Currently eframe defaults are disabled, Glow is enabled, and NativeOptions explicitly selects `Renderer::Glow`.
+- Retain this working renderer unless a demonstrated compatibility or serious usability defect requires change. No new backend feature/variant/build solely for benchmark parity.
+- Reuse completed renderer evidence if any; otherwise record “Existing renderer retained; comparative performance study deferred.” The previous multi-run Glow/Wgpu competition is future backlog work.
+- **Exit:** explicit renderer decision documented. **Commit:** include the decision in the coherent migration stabilization checkpoint.
 
-### M2-D — Track A final parity gate (hard gate before skins)
+### M2-D — Functional migration acceptance before theming
 
-- Run fmt, clippy under repository standards, `cargo check` all targets, `cargo nextest run` (where project supports it), targeted benches and the Windows manual test matrix. Record skipped tests accurately.
-- Verify settings files, plugins, bookmarks, usage counts, global invocation, search, note, mouse, Multi Manager, MKMacro, radial trigger semantics, file search, quick notes, clipboard, regex and utility commands.
-- Diff visual baselines: only unavoidable framework-rendering deltas are allowed here. Do not prematurely “fix” by changing font size/color/layout unless necessary for pixel correctness.
-- Compare performance with M0-B; profile and repair regressions. Gather numbers for both visual frames and hidden idle. Reviewer must explicitly sign the performance and behavioral gate.
-- **STOP CONDITION:** Do not start Track B with failed critical tests, repeated crashes, fundamentally broken event ordering, or unmitigated meaningful performance regression. Fix first. Minor documented non-critical upstream rendering differences may proceed.
-- **Exit:** stable modernization checkpoint suitable as rollback to pre-styling state. **Commit:** `M2-D: accept functional egui 0.36 migration and performance gate`.
+- Establish adequate chosen-source Windows compilation and targeted correctness evidence. Keep broad automated regression at this meaningful stabilization or final gate, not after each small edit; classify preexisting/environment failures without deleting coverage.
+- Review existing functionality and available smoke checks, including persistence/plugins/input/child lifecycle. Fix known critical defects. Document missing environmental/manual coverage honestly and continue safe work.
+- Accepted benchmark regressions are documented debt. Do not require original parity, new large matrices or profiling before proceeding.
+- Preserve an identifiable migration-only rollback source checkpoint before theme changes. Reviewer assesses THIS revised policy.
+- **Exit:** adequate compilation/correctness, no known critical functional defect, accepted performance debt and QA gaps recorded. **Commit:** `M2-D: accept functional migration with documented performance debt`.
+- Immediately begin M3-A and complete Track B without another approval request.
 
 ## 5. Track B — theme engine, skins and visual polish (begins immediately after M2-D)
 
@@ -210,14 +210,14 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 - Reuse egui fonts and font data initialization once; avoid per-frame font definition reinstallation. Typography changes trigger deliberate list/grid/notes cache revision.
 - Standardize icons across launcher/result rows, toolbar actions, dialog controls; reuse existing icon assets and textures. Cache decoded resources; avoid per-result image decode and per-frame uploads. Avoid icons that depend on incompatible private egui APIs.
 - Validate clipping, ellipsis, tall glyphs, keyboard underline/focus ring, high DPI, CJK/non-Latin scripts if relevant. Add snapshot/geometry tests where feasible.
-- **Exit:** readable typography/icons without extra hot-path allocations. **Commit:** `M3-D: unify typography and cached icon resources`.
+- **Exit:** readable typography/icons with reused resources and bounded rendering cost. **Commit:** `M3-D: unify typography and cached icon resources`.
 
 ### M4-A — Root launcher search field polish
 
 - Prioritize high-visibility main launcher: deliberate root background, soft but legible search-surface boundary, search icon alignment, search text readability, placeholder and selection, shortcut hint if already in UI (do not add behavior).
 - Preserve precise existing controls and event ordering, focus on launch/hotkey, IME input, caret position, keyboard navigation and query clear. Avoid padding changes that desynchronize measured geometry.
 - Ensure selection/focus states and hover respond without animation loops. Keep root window size/position and user-selected dimensions unchanged.
-- Measure initial frame cost, typing response and paint primitive count before/after.
+- Use available lightweight responsiveness evidence where practical; retain keyboard/focus checks. No original-egui benchmark campaign is required for this styling checkpoint.
 - **Exit:** root query visual finish improved; all keyboard semantics unchanged. **Commit:** `M4-A: polish compact launcher search surface`.
 
 ### M4-B — Result list and grid visual polish
@@ -225,8 +225,8 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 - Replace inconsistent per-row colors, borders, disabled states and text sizes with semantic tokens in `src/gui/render.rs` and relevant drawing helpers. Use discreet selection fill/edge, category metadata contrast and hover indication; no per-cell heavy shadows.
 - Preserve result ordering, action labels, key navigation, quick-launch shortcuts, ID stability, visible-row virtualization, drag/swap controls and action counts. No expensive painter work for offscreen entries.
 - Audit grid/list geometry cache after any spacing/padding change. Recompute only on effective layout revision, not palette toggles; test 0/1/10/1k/10k results or realistic fixture sizes already in Track C.
-- Verify scroll anchoring, wrap and truncation; measure UI paint/gather and geometry cold/warm duration; compare to M2-D before accepting.
-- **Exit:** main launcher has coherent list/grid hierarchy, no altered usability or performance. **Commit:** `M4-B: restyle list and grid without virtualization regressions`.
+- Verify scroll anchoring, wrapping, truncation, stable IDs and virtualization. Assess bounded rendering cost against migration-only evidence where readily available; do not reopen original-egui parity.
+- **Exit:** coherent list/grid hierarchy, preserved behavior/virtualization and no observed severe usability defect; bounded extra rendering work is acceptable. **Commit:** `M4-B: restyle list and grid without virtualization regressions`.
 
 ### M4-C — UI primitives and standardized surfaces
 
@@ -241,7 +241,7 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 - Polish navigation, section headings, descriptions, checkbox/switch alignment, help text, validation, focus rings, save/cancel semantics, scroll areas and spacing in `src/settings_editor/*`, `src/gui/theme_settings_dialog.rs` and common settings components.
 - Maintain existing settings section structure and grouping; no feature removal. Avoid unnecessarily expanding dialogs or moving frequently used controls.
 - Ensure theme editor itself always reflects preview, supports color contrast safety and readable light/dark components. Show original vs draft where practical without expensive extra viewports.
-- Validate 100/125/150/200% DPI, minimum usable window size, viewport restoration/position and keyboard tab/escape behavior.
+- Validate available DPI/minimum size, viewport restoration/position and keyboard tab/Escape; record unavailable DPI/hardware scenarios as manual QA follow-up.
 - **Exit:** system feels cohesive at settings level and no setting value changes unexpectedly. **Commit:** `M5-A: polish settings and theme editor surfaces`.
 
 ### M5-B — High-usage plugin dialogs
@@ -250,7 +250,7 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 - For each dialog: standardize title/header, option hierarchy, labels, input background/stroke, high-contrast selection, separators, button placement, notification display, scroll reachability and content padding. No data model or command behavior modifications.
 - Preserve large editing canvases, macro image capture overlays, regex highlights, notes markdown syntax and file preview. Do not break overlays/highlight palettes that have domain-specific meaning; create controlled semantic token mappings where appropriate.
 - Track dialogs in a checklist by path, QA outcome and screenshot pair. Commit every 1–3 related dialogs rather than batching dozens into opaque diffs (`M5-B1`, `M5-B2`, ...).
-- **Exit:** core plugin experiences visually consistent, tested and performance-safe. **Commits:** `M5-B1..n: unify [dialog group] presentation`.
+- **Exit:** core plugins are visually consistent, behaviorally tested and responsive, with documented bounded rendering costs. **Commits:** `M5-B1..n: unify [dialog group] presentation`.
 
 ### M5-C — Remaining dialogs, messages and secondary windows
 
@@ -262,24 +262,25 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 
 ### M6-A — Optional advanced effects as constrained opt-in
 
-- User allowed optional advanced graphical effects. Limit to safe static or bounded features: optional modest elevation shadow, highlight/focus accent or bounded 100–150ms transitions **only if** measurements verify no meaningful regression and no continuous idle repaints. Avoid acrylic/blur/translucent composition initially.
+- User allowed optional advanced graphical effects. Limit to safe static or bounded features: optional modest elevation shadow, highlight/focus accent or bounded 100–150ms transitions only with bounded practical cost and no continuous idle repaints; accepted timing differences alone are not a veto. Avoid acrylic/blur/translucent composition initially.
 - If implementing transitions, add `enable_visual_motion` default false, respect reduced-motion Windows setting when feasible, schedule repaints only for active visible transition windows, no global timer/polling, and test that idle repaint stops.
 - Prefer skipping any effect that needs invasive native window handling, multi-pass rendering or significant shader pipeline changes. Document deferred effect ideas rather than coding them.
-- Test low-power laptop, Wgpu/Glow selected backend, and RDP. Keep advanced features under feature/runtime switch as appropriate, default off.
+- Use the selected Glow backend and available host; record unavailable hardware/RDP coverage. Keep expensive effects disabled/deferred and skip invasive work.
 - **Exit:** either a small fully validated optional improvement or explicit justified omission, never a hidden performance tax. **Commit if implemented:** `M6-A: add bounded optional visual effects`.
 
-### M6-B — Final visual, accessibility and performance acceptance
+### M6-B — Final visual and functional acceptance
 
-- Compare final UI to original screenshot matrix and M2-D migration-only baseline across root, theme editor, settings, common plugin dialogs, light/dark/custom, DPI and monitor locations. Check high contrast and warning/error/disabled semantics. Make the application clearly more polished without sacrificing density.
-- Performance comparisons must include three states: original 0.27 baseline, new 0.36 with old look (M2-D), and new 0.36 with full theme (final). Separate API/backend effects from skinning effects. Repeat matched tests and report median, spread, sample count and % delta; do not claim “no regression” when confidence is inadequate.
-- Run complete Windows manual regression and automated suites. Ensure 0 idle style work and idle repaint behavior; inspect allocated heap at steady state, image texture uploads, GPU/cold launch; performance regressions get profiled and fixed.
-- Check persistence with old settings files, newly saved themes, cancel preview, application restart, OS mode flip and layout cache revision consistency.
-- Reviewer independently samples high-risk workflows and evaluates metrics and behavioral parity. If acceptance fails, use `git bisect`/checkpoint isolation to narrow issue; do not mass revert unrelated changes.
-- **Exit:** signed-off functional and aesthetics gate. **Commit:** `M6-B: finalize visual migration validation`.
+- Review root, theme/settings editor, common plugin/secondary surfaces, System/Dark/Light/Custom, keyboard/contrast and available DPI. Complete the planned surface coverage; document intentional exceptions and unobserved scenarios.
+- Run relevant functional/automated checks, broad regression at a meaningful final/stabilization gate, and a bounded themed responsiveness/true-idle smoke. Preserve strict behavioral and persistence/Cancel/restart/theme-revision tests.
+- Use readily available lightweight comparisons to the migration-only checkpoint. Comprehensive original/migration/themed statistics, backend competition and unavailable native hardware coverage are FUTURE work, not a completion prerequisite.
+- Reviewer evaluates actual functionality, architectural safeguards, documented accepted debt and qualification limits. Fix observed critical defects; do not reopen exact parity or rewrite adverse evidence.
+- **Exit:** both migration and substantial visual modernization implemented and reviewed; actual tests, accepted regressions, native/manual gaps and remaining release blockers reported separately. **Commit:** `M6-B: finalize themed functional and visual acceptance`.
 
-## 6. Performance protocol and acceptance gates
+## 6. Performance hygiene and future measurement catalog
 
-### Required measured scenarios
+### Future measurement catalog (not a modernization prerequisite)
+
+The following existing workload catalog is retained for the separate future performance task. Immediate validation is the bounded functional/responsiveness/true-idle scope in the addendum. Do not automatically run this complete matrix.
 
 1. Clean cold process launch → interactive first frame; warm launch after caches.
 2. Global hotkey → visible and input-ready, including focused-visible toggle and long-hold/radial coexistence.
@@ -292,15 +293,16 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 9. Secondary viewports, mixed DPI drag, monitor changes, software/remote GPU path if available.
 10. Incremental Windows compile, debug build, release build and cargo nextest; report developer-workflow effects separately from runtime effects.
 
-### Performance judgment
+### Current performance acceptance
 
-- Primary rule: **no meaningful reproducible regression**. No arbitrary unconditional “under 5% is okay.”
-- Record multiple comparable samples and baseline noise. Flag any statistically distinguishable degradation in latency, visible UI input responsiveness, allocation, or idle behavior even if absolute delta looks small; triage effect sizes and measurement artifacts.
-- Treat a new constant idle repaint loop, repeated per-frame texture upload, unbounded layout cache growth, lost virtualization, or broken hotkey latency as automatic failures irrespective of median headline numbers.
-- Whenever platform-specific test isn't executable on available agent, report it “not run” and give a precise reproducible manual validation script. Never invent Windows pass results from Linux `cargo check`.
-- Keep output receipts and command logs in `docs/plans/egui-modernization/measurements/` or an appropriately ignored artifact directory. Record actual environment and checksum.
+- Documented regressions are acceptable. Consider absolute time, frequency, practical interaction and realistic large catalogs; no universal percentage threshold or exact statistical match is required.
+- Block only demonstrated critical correctness or serious usability/resource defects: crash/hang/data loss, broken input/hotkey/focus/lifecycle, repeated visible freezes, sustained true-idle busy work, unbounded growth or functionally broken virtualization/geometry. Explain the actual observation and severity.
+- Preserve all adverse samples and historical old-policy failures. Source796 ROOT debt is accepted under the revised user requirements, subject to actual live correctness closeout; isolated candidates remain deferred.
+- Record unavailable observations and manual QA follow-up; continue safe implementation. Source/headless evidence is not a native pass. Full comparative statistics belong to the future backlog.
 
-### Test matrix minimum
+### Functional coverage inventory
+
+Use relevant existing tests/smokes and preserve coverage. The performance column names future workloads, not additional parity gates. Unavailable native/hardware observations remain explicit qualification gaps.
 
 | Surface | Automated | Manual Windows | Performance | Migration gate |
 |---|---|---|---|---|
@@ -322,9 +324,9 @@ Use an active, milestone-based commit cadence throughout this task. Break milest
 
 **Checkpoint rollback:** M2-D is the hard migration-only recovery point; use its commit to compare regressions with final styled UI. M0-B is the pre-upgrade recovery point. Keep all checkpoint commits, do not squash before user review. Corrective fixes go on the same feature branch with separate labeled commits. Never force push or destroy original configuration/data. Use additive serde migrations and verified backup/recovery behavior.
 
-**Blockers:** Missing Windows toolchain, incompatible third-party egui wrappers, changed behavior in native event/viewport handling, or >noise runtime regressions must trigger root-cause analysis and workaround. If truly unsolved, produce an honest blocker report and the maximal green, reviewable code state. Do not fake a completed theme rollout. Because the user expressly requests back-to-back work, once migration gate passes, proceed to Track B **without requesting another confirmation**.
+**Blockers:** fix demonstrated critical functional/data/input/lifecycle failures and observed severe usability/resource problems. Slower historical benchmarks alone do not block Track B. Environmental access gaps are documented manual QA follow-up; do not endlessly retry unchanged tools. Continue safe implementation and begin Track B immediately after the functional migration checkpoint.
 
-**Final handoff must include:** SHA and branch; exact egui and renderer versions; toolchain; dependency changes; API migration summary; cache invariants; added theme capabilities; list of styled surfaces; old vs migration-only vs final benchmark table; tests actually run; unrun Windows scenarios; limitations; screenshots or clear QA references; opt-in visual effects behavior; rollback commits; documented known issues; follow-up wishlist clearly separated from completed work. Summarize improvements and risks without exaggeration.
+**Final handoff must include:** SHA and branch; exact egui and renderer versions; toolchain; dependency changes; API migration summary; cache invariants; added theme capabilities; list of styled surfaces; available original/migration/final evidence with unmeasured entries and deferred comprehensive benchmarking; tests actually run; unrun Windows scenarios; limitations; screenshots or clear QA references; opt-in visual effects behavior; rollback commits; documented known issues; follow-up wishlist clearly separated from completed work. Summarize improvements and risks without exaggeration.
 
 ## 8. Suggested commands (adapt to repo and Windows shell)
 
@@ -344,7 +346,7 @@ cargo nextest run
 cargo build --release
 ```
 
-For benchmarks, use existing Track C PowerShell recipes and their documented fixture contracts from `docs/performance`; run matched baseline and candidate builds with same host, flags and workload. For backend feature comparison, consult `cargo tree -e features` and eframe 0.36.2 feature list before specifying features. Never assume `cargo nextest` exists on an agent or that Windows-specific tests can run on Linux.
+For the separate future benchmark task, use existing Track C PowerShell recipes and their documented fixture contracts from `docs/performance`; run matched baseline and candidate builds with same host, flags and workload. For backend feature comparison, consult `cargo tree -e features` and eframe 0.36.2 feature list before specifying features. Never assume `cargo nextest` exists on an agent or that Windows-specific tests can run on Linux.
 
 ## 9. Targeted source-review notes and common migration traps
 
@@ -372,7 +374,7 @@ For benchmarks, use existing Track C PowerShell recipes and their documented fix
 - [ ] M1-D toast/markdown/texture integrations
 - [ ] M2-A cache migration and Track C compatibility
 - [ ] M2-B Win32 / viewport behavior
-- [ ] M2-C backend benchmarking and decision
+- [ ] M2-C retain working renderer; comparison deferred
 - [ ] M2-D **migration-only gate** accepted
 - [ ] M3-A semantic theme model
 - [ ] M3-B actual runtime application
@@ -385,7 +387,7 @@ For benchmarks, use existing Track C PowerShell recipes and their documented fix
 - [ ] M5-B plugin dialogs incrementally
 - [ ] M5-C remaining dialogs/secondary viewports
 - [ ] M6-A bounded optional effects (if accepted by evidence)
-- [ ] M6-B final performance / functional / visual signoff
+- [ ] M6-B final functional / visual / bounded responsiveness signoff
 - [ ] `docs/plans/egui-modernization/handoff.md` complete and checkpoint branch pushed if allowed
 
-**Done means both modernization and visual improvements are completed, reproducible, performance-validated, and reviewable.**
+**Done means BOTH migration and substantial visual improvements are implemented and reviewed, with actual functional checks, accepted performance debt, native/manual gaps and any release-blocking defects reported honestly. Comprehensive performance optimization remains a future task.**

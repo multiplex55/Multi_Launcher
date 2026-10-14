@@ -1,3 +1,9 @@
+# Historical QA plan — revised policy2026-10-14
+
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). This earlier child-framebuffer plan is historical reference, not a new gate or authorization to repeat native attempts. Preserve its completed evidence; unavailable current coverage is a manual QA gap.
+
+## Historical record — unchanged, not operative
+
 # M1-D native QR framebuffer prerequisite
 
 Planner handoff,2026-10-13. This bounded follow-up supports M1-D integration smoke and later M2-B evidence; it does not start the broader M2-B milestone. Execute only after original archived-source writer releases ownership. One current-checkout source writer; parent owns docs/Git/build attribution/native launches. ROOT capture already passed real native PNG gates. Current QR window opened, but desktop capture failed twice and its accessibility exposes only chrome.

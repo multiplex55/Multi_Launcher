@@ -1,6 +1,18 @@
 # egui modernization checkpoint ledger
 
-Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md). Statuses here distinguish recorded preflight evidence from acceptance gates that have actually passed.
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md), user directive2026-10-14; the [existing plan](../MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md) is amended, not replaced. Historical failures below retain their original old-policy meanings and cannot impose current gates.
+
+## CURRENT STATUS / NEXT ACTION
+
+- Continue branch `egui-modernization` from policy-audit HEAD6cf92f6b. Integrated app source6527ddc1 retains source796 measurement/cache work plus provisional closed ThemeSettings/ClipboardModify/radial guards. No reset/rebaseline/unrelated merge. `.gitignore` is exact tracked9F6B; unrelated Workspaces remains untouched; checkpoints local only.
+- Current performance decision: `accepted_with_documented_regression`. Source796 release ROOT10k cold127.5695→166.2805ms/warm0.2003→0.3171ms remain measured regressions, historically failed under old policy. They are accepted debt now, not exact metrics for later GUI-guard source and not native launch/hotkey latency.
+- No active source writer or build/test process at directive receipt. Stop the undispatched warm-cycle proposal; no code/artifact/body was created. Preserve compact/row-storage/ASCII/shaping experimental locations/results in the future backlog; do not port isolated candidates.
+- **Next action after the coherent POLICY checkpoint:** actual live Nextest for the strict radial closed-frame/callback contract and two ClipboardModify close/save contracts, then `cargo check --locked --offline --profile fast-dev --all-targets`. Fix concrete failures only; reuse unchanged lifecycle/input/cache/layout evidence. No benchmark or new vendor optimization.
+- Then bounded M2-B functional evidence/QA-gap review, retain Glow (M2-C decision below), and M2-D functional migration checkpoint with broad automated regression at a meaningful stabilization/final gate. Immediately implement M3-A→M6-B. Do not stop after Track A or ask permission for theming.
+- Native desktop access/physical chord/focus/DPI gaps remain qualification limits; use available evidence, record manual follow-up and continue safe work. Observed critical correctness or severe usability/idle/resource defects still block affected stability claims.
+- Planner, implementer and reviewer explicitly notified: no inherited parity/no-regression checklist may override this policy. Review coherent milestones; no separate receipt/parser/listing/doc approval cycles.
+
+## Current checkpoint states
 
 | Checkpoint | Status | Current evidence / exit gap |
 |---|---|---|
@@ -11,10 +23,10 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 | M1-B — app lifecycle migration | `in_progress` | Reviewed source checkpoints `dac00f8d` and `c560ad00` implement the native hooks and application lifecycle owners. All nine focused lifecycle regressions now pass in M1-C. Native launch/input/viewport acceptance remains outstanding; source acceptance and native acceptance are distinct. |
 | M1-C — mechanical egui API compatibility | `complete` | All-target compilation, formatting, 34 scoped tests and four directly repaired-closure tests pass. Independent review closed all findings, including a bounded integrity audit after formatter damage was repaired. Local implementing SHA is recorded below; native and integration/performance acceptance remain separate. |
 | M1-D — rich text, toasts, image and third-party compatibility | `complete` | Integration source `b30bc6d0`, scoped tests/checks and independent review pass. Actual current ROOT/Markdown/local-image/error-toast/native QR PNGs inspected; native picker cancel/focus return and automated file-drop boundary pass. Instrumented original comparison retains inherited warnings/layout differences. QR+ROOT native capture prerequisite independently accepted at `ff9ffc50`/`a8d31874`. Unrun native link/selection/scroll,OS drag transport/physical input remain explicit broader qualification gaps; no whole-app parity claim. |
-| M2-A — geometry/cache migration | `in_progress` | Actual production796 Full ROOT remains FAIL; live6527 GUI guards provisional. Separate compact+full-row repair has accepted private parity/storage (96B vs192B fixture), fresh canonical artifact8C53 and actual four-body qualification72records/1440timings. Cold medians improve, but ROOT warm/Grid tails are mixed/adverse; reviewed HOLD, no production port. Read-only next-decision triage continues. Notes/query/native/original parity remain outstanding. See receipts/m2a-repaired-compact-performance.md. |
-| M2-B — Windows windowing, renderer and event integration | `pending` | Not started. |
-| M2-C — renderer performance comparison and decision | `pending` | Concrete source-backed opt-in Wgpu/matched release packet independently reviewed and accepted in implementation-handoffs.md. Host preparation recheck recorded. No backend feature,selector,build or comparison executed; starts after M2-A/M2-B. |
-| M2-D — Track A final parity gate | `pending` | Not started. |
+| M2-A — live cache/presentation correctness closeout | `in_progress` | Performance debt: `accepted_with_documented_regression`. Retain integrated source6527/796; actual live three affected tests and all-target check pending. Isolated compact/row/ASCII candidates deferred, not ported. |
+| M2-B — functional Windows integration | `pending` | Bounded available functional evidence/smoke review next; missing physical hotkey/focus/DPI/native observations are explicit QA gaps, not automatic blockers. |
+| M2-C — retain working renderer | `complete` | Actual Cargo.toml enables Glow and src/main.rs selects Renderer::Glow. Existing renderer retained; comparative performance study deferred. No backend change/build competition required. |
+| M2-D — functional migration acceptance | `pending` | Adequate actual live correctness/compilation, meaningful broad regression gate, accepted debt and native QA gaps; save migration-only source checkpoint and immediately begin M3-A. |
 | M3-A — semantic theme model | `pending` | Not started. |
 | M3-B — runtime theme application | `pending` | Not started. |
 | M3-C — presets and transactional live theme preview | `pending` | Not started. |
@@ -26,9 +38,13 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 | M5-B1..n — high-usage plugin dialogs | `pending` | Not started. |
 | M5-C1..n — remaining dialogs, messages and secondary windows | `pending` | Not started. |
 | M6-A — optional advanced effects as constrained opt-in | `pending` | Not started. |
-| M6-B — final visual, accessibility and performance acceptance | `pending` | Not started. |
+| M6-B — final themed functional/visual acceptance | `pending` | Relevant tests, broad regression at meaningful gate and bounded responsiveness/true-idle smoke. Full three-way statistical performance campaign deferred. |
 
-## M0-A checklist
+## Historical execution ledger — reference only
+
+The following pre-directive entries are immutable historical context. Their FAIL/HOLD/queued/next-action text is not operative. Current status above and the addendum govern; no historical benchmark or native matrix is silently reactivated.
+
+#### M0-A checklist
 
 - [x] Read repository instructions, the full execution contract, the attached goal objective, and the available historical benchmark references.
 - [x] Record current branch/SHA, working-tree diff inventory, `Cargo.lock` digest, Rust/Cargo versions, and locked offline dependency-tree outputs.
@@ -41,7 +57,7 @@ Source contract: [`MULTI_LAUNCHER_EGUI_UPGRADE_AND_THEME_PLAN.md`](../MULTI_LAUN
 
 See [baseline.md](baseline.md), [dependency-audit.md](dependency-audit.md), [migration-decisions.md](migration-decisions.md), and raw command outputs under `receipts/`.
 
-## Active execution handoff
+#### Active execution handoff
 
 Updated2026-10-13. Branch `egui-modernization`; all checkpoints local, no push. Production source checkpoint `9b7006cd` (released-stack source `fc9edf1a`, prior bounded-plan source `87e08b32`); latest accepted post-section evidence `0155138a` (raw-result prototype `0857af6a`, released-stack comparison `a36547bf`, residual attribution `5c05ebea`). M1-C/M1-D source checkpoints are accepted; M2-A performance gate remains open. Track B starts only after M2-D.
 
@@ -55,7 +71,7 @@ Prior accepted attribution/prototype/warm evidence: `6606f5e9`, `b44af80f`, `ccf
 
 Current activation supersedes the proposal's earlier hold: after evidence checkpoint `0857af6a` and independent preimplementation acceptance, sole source writer `/root/implementer_m2a` is integrating the bounded raw-result core into live `vendor/epaint/src/text/font.rs`, `text_layout.rs` and `PATCH.md`, with fresh ignored harness/receipts only. Parent owns tracked general docs/Git. Eight private contracts, exact20 root tests, all-target check, unchanged20-record normal-preparation diagnostic and independent review remain required before a source checkpoint. No prototype instrumentation, reset hooks, dependency/font/profile/backend changes or broad acceptance run are authorized by this partial packet. Production integration is independently accepted: 8 private/20 root tests, final all-target/fmt/diff and 20-record normal-preparation diagnostic pass. Cold1,000-row owner p50 213.2354ms; warm2.1353ms. Writer released; see receipts/m2a-production-raw-shaping-reuse.md. Local source checkpoint9b7006cd saved. M2-A performance is not accepted; planner read-only next-cost proposal is underway.
 
-### Baseline evidence retained
+##### Baseline evidence retained
 
 All five full-mode original CPU owners passed: list6, grid30, notes42, query3, startup3 (84 cases), five warmups/twenty samples per case, zero exclusions. Independent review checked raw arrays, quantiles and tracked summary. CPU evidence does not prove native display/GPU/hotkey latency. See [benchmark-results.md](benchmark-results.md) and `receipts/cpu-original-summary.json`.
 
@@ -63,11 +79,11 @@ All original profile builds completed: fast-dev124.450s, dev261.312s, release419
 
 The revised fixture helper compiled, generated provenance-bound runs003/004 and passed initial typed roundtrips. Run004 additionally records JSON-only controlled-placement overrides separately from the original helper manifest. User explicitly authorizes launch, interaction and screenshots for Multi Launcher. Six fixture runs have produced no screenshot. Run005 verified native query entry through accessibility-only observation; run006 additionally verified select-all, prefixed local search and synthetic Enter activation. Other selection/navigation and native interactions remain unproven; indexed Settings clicking could not obtain input geometry. Runs003/004 activated successfully after authorization, but capture and refreshed-window recovery timed out; run005 still failed capture after verified input. Exact owned processes were gracefully closed and exit confirmed. Native visual/display/GPU checks remain unproven; this is an open M0-B/M2-D evidence gap, not a waiver. See [visual-qa.md](visual-qa.md) and ignored per-run receipts. Do not repeat unchanged capture attempts without a meaningful recovery condition.
 
-### M1-A accepted graph
+##### M1-A accepted graph
 
 Reviewed local checkpoint `5536feca` aligns eframe/extras0.36.2, toast0.22.0, CommonMark0.25.0, winit0.30.13 and raw-window-handle0.6.2, retaining explicit Glow/platform/accessibility features. All graph commands passed. Windows all-target check reaches expected source migration errors (621library/1269library-test); dependency alignment is accepted, runnable migration is not. Image0.25 decoder parity remains M1-D. See [m1a-api-errors.md](m1a-api-errors.md).
 
-### M1-B vendor boundary accepted — local checkpoint dac00f8d
+##### M1-B vendor boundary accepted — local checkpoint dac00f8d
 
 Planner confirmed released eframe0.36.2 hidden logic applies commands only to existing native viewports and cannot create a new macro prompt child. The local patch retains ROOT parking/focus and introduces default-compatible native hooks for logic-only dispatch, hidden child bootstrap, opted-in input invalidation, and CPU UI-frame completion after all discard decisions. Both Glow/Wgpu use the same scheduling policy while retaining hidden-root GPU guards. This is a disclosed local patch atop released0.36.2; it does not establish GPU presentation completion or native parity. See [vendor patch provenance](../../../vendor/eframe/PATCH.md).
 
@@ -75,7 +91,7 @@ Initial partial review found a P1: clearing pending events alone could leave hel
 
 Parent inspected actual log `target/egui-modernization/m1b-vendor-tests.log`: initial texture-delta harness failure is preserved, then the corrected focused offline package run passed4/4, exit0. Tests exercise actual EpiIntegration held-key and held-pointer visible/hidden-release/resumed-UI transitions, no delayed action, hidden event/drop discard, and close/title command retention. Reviewer found P1 resolved with no new findings. Root locked offline no-deps metadata also passed. Temporary vendor workspace manifests/locks were removed; build outputs are ignored. No test session remains active.
 
-### M1-B next acceptance dependency
+##### M1-B next acceptance dependency
 
 Local source checkpoint `c560ad00` separates runtime, visibility, supplied-root UI and retained-pass completion; startup returns Result and explicitly selects Glow. The initial five focused test definitions cover forced discard action/history once, repeated hidden requests/stale input, hidden simple and parameter child bootstrap, and hidden-transition observer closure. Their unused FullOutputs are explicitly consumed. Writer formatting/diff checks passed. Parent inspected `target/egui-modernization/m1b-check-final.log`: scoped library check exits101 with614 broad API errors. Tests are definitions only, not executed or accepted yet; M1-C must enable them and migrate remaining historical harness calls.
 
@@ -87,7 +103,7 @@ Final focused re-review accepted all production corrections, including radial pr
 
 Checkpoint commits and acceptance are distinct for this single-crate migration. M1-B source may be implemented with focused tests validation-pending until M1-C closes remaining API errors; record actual implementing/enabling commits and results honestly. M1-C may include compiler-required integration glue and the intended shared font revision interface, without disposable false adapters. M1-D and M2-A retain behavioral/performance acceptance. M2-D remains the integrated migration gate before any styling.
 
-### M1-C current compiler and font boundary evidence
+##### M1-C current compiler and font boundary evidence
 
 Scoped locked offline library checks under `target/egui-modernization/m1c/` progressed from614 to256,196,131 and16 errors. The latest `check-lib-3.log` now records a successful `cargo check --lib --locked --offline`, dev profile,47.85s,11 warnings; parent inspected the actual Finished summary. Earlier failed logs are retained, including parent-preserved check-lib-131.log (SHA256437506ABF859795D40423387727BD788DBE96F8A30909996FF694600160BEC75). The intermediate197-error raw log was overwritten and is not claimed as retained. Future runs use unique filenames. The first all-target check in check-all-targets-1.log failed with635 library-test errors; Subsequent unique all-target logs reduced errors232 ->58 ->6 ->1; check-all-targets-6.log now records a successful `cargo check --all-targets --locked --offline`, dev profile,1m34s,15 library-test warnings. Parent inspected the actual Finished summary. All-target compilation is closed for this snapshot; focused runtime tests and ignored FullOutput harness cleanup are next. Parent inspected the actual summaries. A post-review library check in check-lib-4.log also passed (13.32s). Test-only migration, focused test execution, runnable/native acceptance and final review remain pending. The sole writer owns these next corrections; no source checkpoint or performance acceptance is claimed.
 
@@ -116,11 +132,11 @@ Quick Notes correction now has runtime evidence: nextest-notes-popup-stable-id-2
 Todo View now explicitly senses clicks, but nextest-popup-identity-click-1.log reports Notes pass/Todo fail (1/2). The new Todo state test clicks wrapped text rather than padding. Parent inspected upstream Response::interact docs: a container upgrade covers background behind independently interactive children, so child Label/Link event ownership must be checked before declaring the menu restored. Writer was asked to preserve both text/padding access and child links/selection, composing actual responses under the existing stable menu ID if needed. A representative Notes title/meta click belongs to the same bounded ownership correction. No forced popup state, disabled label selection or removed assertions accepted; runtime cause/verification remain pending.
 Child-response ownership is now verified: nextest-popup-identity-click-2.log built in1m39s and passed2/2 (parent inspected). Todo's wrapped-text secondary click and Notes title-text/header-padding/stable-owner/removal assertions pass after combining actual Label/Link responses under the existing row/header menu ID. Child selection/link handling is retained. Parent identified Todo's temporary Vec<Response> as an avoidable new per-row frame allocation; writer is replacing it with an Option<Response> union fold and will reverify. No extra benchmark campaign is needed for removing that introduced allocation. Final M1-C scoped checks, source review and checkpoint remain pending.
 
-### M1-C post-format verification — 2026-10-13
+##### M1-C post-format verification — 2026-10-13
 
 Before formatting, `check-all-targets-final-2.log` passed and `nextest-m1c-targeted-final-2.log` passed34/34 (5.803s,5191 skipped). A task-local formatter incorrectly applied individual SequenceMatcher opcodes rather than complete formatting changes. It introduced syntax damage; this was an implementation error, not an upstream parser limitation. The helper is no longer used. The writer repaired affected Popup/navigation and test closures plus the font module declaration. Fresh `check-all-targets-final-6.log` passes `cargo check --all-targets --locked --offline` (1m02s); `nextest-m1c-targeted-final-3.log` passes34/34 (5.852s,5191 skipped). Parent inspected both actual summaries. Earlier failed receipts remain retained. Independent bounded source-integrity review is pending before acceptance or commit; these passes alone do not establish absence of valid-syntax formatter damage. Native/screenshots and M1-D/M2-A performance acceptance remain separate.
 
-### M1-C accepted source checkpoint
+##### M1-C accepted source checkpoint
 
 Final sole-writer handoff released ownership. Fresh all-target check, full formatting check and diff check pass; the34-case filter and four additional repaired-closure tests pass. Exact commands/results are in [M1-C verification](receipts/m1c-verification.md). The unused low-level font activation adapter is removed; all font-mutating fixtures use actual run_ui passes. Notes/Todo response unions preserve parent menu IDs and child interaction, with an allocation-free Option fold in Todo.
 
@@ -130,7 +146,7 @@ M1-C enables all nine M1-B lifecycle regressions without claiming native accepta
 
 Local M1-C implementing/enabling checkpoint: `df9bdd9172a44c63ec7a9fd6638e55e70dedb264` (`M1-C: adapt egui widgets, geometry and viewport APIs`). Post-commit status contains only the excluded default clipboard-modifier artifact. M1-D sole writer `/root/implementer_m1d` is active from this checkpoint; parent retains documentation/Git/native QA ownership.
 
-### M1-D current evidence — 2026-10-13
+##### M1-D current evidence — 2026-10-13
 
 The first completed focused run, nextest-focused-final.log, built in3m58s and ran3 cases: fragment identity passed; decoder-feature and toast-anchor assertions failed (1pass/2fail,5225 skipped). Earlier attempts were intentionally interrupted for review corrections or failed test compilation; they are not runtime passes. Source review closed the production fragment clone, explicit subtree/scroll identity, actual CommonMark response observation and initial toast clock corrections.
 
@@ -140,7 +156,7 @@ Parent inspected focused capability receipts: image-capability-dds-enabled-focus
 
 Known default clipboard-modifier test artifact was copied with identical SHA256E8A60851B2043C2DC68EC51768BDB93F105949A938A762D0BEB93244A3A53C65 to ignored target/egui-modernization/m1d/test-generated-clipboard-modifiers.json; root copy removed. Tests may regenerate it. Native capture remains unavailable after explicit visible original007; the reviewed qa-framebuffer-plan.md packet is ready for sequential work after M1-D writer release. No push.
 
-### M1-D source acceptance
+##### M1-D source acceptance
 
 Final source owner released. Parent inspected check-all-targets-final-vendor-toast-retry2.log (PASS1m24), nextest-m1d-final-focused-parity.log (23/23PASS,0.742s,5206 skipped), toast-log integration (2/2PASS) and file-drop integration (1/1PASS), plus dedicated toast reproduction (1/1PASS, also part of23). This is26 unique application cases, not27. DDS package enabled/disabled reporting/contract receipts remain valid with no subsequent image source changes. Exact application filters/results are in [M1-D verification](receipts/m1d-verification.md).
 
@@ -150,7 +166,7 @@ Root/vendor formatting and diff checks pass. Known regenerated default clipboard
 
 Local M1-D source checkpoint: `b30bc6d0` (`M1-D: preserve markdown, image and toast integration behavior`). Post-commit status was clean. Native/screenshot acceptance remains open. Sole probe source writer `/root/implementer_framebuffer` now executes qa-framebuffer-plan.md sequentially; parent retains docs/Git/native QA. The probe is a separate feature-gated evidence substep, not permission to start theming or alter benchmark builds.
 
-### Framebuffer QA prerequisite — current source work
+##### Framebuffer QA prerequisite — current source work
 
 The first feature-enabled all-target attempt failed with local Rust/API errors; corrected feature-check-20261013-r3.log passes in47.61s. Focused state-test compilation then exposed four test API errors; these are implementation feedback, with no runtime pass claimed. The sole writer is correcting them and the interim review findings: terminal worker-handoff failure, modeless File Search eligibility, and disabled/terminal frame-work guards. Independent review accepted Arc-identity request correlation and finite issueN/captureN+1/replyN+2 scheduling. Final source acceptance and an actual readable native PNG remain pending.
 
@@ -160,13 +176,13 @@ Final bounded probe source review accepts the correction snapshot: Saving is com
 
 Parent inspected state-tests-20261013-r2.log: corrected focused test build completed in4m16s and all9 probe cases passed in0.01s (5229 filtered, zero failures). Cases cover issue/capture/reply scheduling, retained ownership cancellation, matching/foreign token isolation, benchmark exclusion, bounded queue delivery and full/disconnected failure, F11 eligibility, and exclusive PNG no-overwrite behavior. Earlier failed compilation receipts are retained. Fresh final feature/default checks and formatting are underway; native PNG acceptance remains pending.
 
-### Native probe runs and visibility correction
+##### Native probe runs and visibility correction
 
 Local source checkpoint585d9b1eb3584158f8e6488ebee13bfe0b6cda00 built capture-enabled fast-dev in225.391s. Cargo JSON/build receipt and preserved executable are under target/egui-modernization/qa-framebuffer/build-585d9b1e; executable SHA25654F0EE312D80A96CDE942465711FA4CCDCE93081DE8469821351219A7443A90C. First isolated run-current-qa-001 rejected capture because the Track C variable was present after the launcher's null assignment. Its initial intended-environment fields were corrected in process-receipt.json; no PNG. Second fresh run-current-qa-002 explicitly removed benchmark variables and verified absence before launch. Request creation succeeded, ROOT accessibility/focused query/results were observed, but output remained empty. Both exact owned processes were gracefully closed after identity checks.
 
 Source inspection identified a QA-only eligibility defect: egui ViewportInfo::visible returns None when occlusion information is unsupported; egui-winit Windows sets minimized but does not guarantee occluded. The probe used unwrap_or(false), while actual Glow uses unwrap_or(true). This is the source-backed explanation, not a measured raw native viewport field. Sole writer is aligning QA with backend renderability and adding unknown/minimized/occluded semantic coverage. No native PNG acceptance yet. Existing source checks do not waive this runtime gate.
 
-### First readable native framebuffer — run-current-qa-003
+##### First readable native framebuffer — run-current-qa-003
 
 Visibility-fixed local6f5e3f3c0c36c73a315beb3df0944cf0f75d536c built capture-enabled fast-dev in54.261s; preserved executable SHA256EE6B86F0E6EED84B8795E20A416C6B8E88D631756FFF5363D1786C481CE1BC56. Fresh synthetic1000-action/100-note fixture, actual prelaunch settings hash1F8C65B401D603BA3DD24242626E10E4EDDFBB98613AABDB9F8AAE2939B732E9, aggregate hashC8D9396D1661B4C04B4D4E3A60581C36975894C494272EC5EB0D86E8F245405B. Normal interactive PID30348 started2026-10-13T07:07:27.6515893-04:00 with benchmark variables explicitly absent and process environment restored.
 
@@ -174,7 +190,7 @@ Actual framebuffer.png149441bytes,852x460, SHA256891EC9BA9FA8BF280C0218E14D30912
 
 This accepts current-probe native PNG operation, not all M1-D integrations or native Windows behavior. Framebuffer pixels do not prove OS composition/focus delivery/physical releases/display latency/mixed-DPI placement. Original comparison and markdown/preview/QR/toast/file-picker smoke remain pending. Sole writer now backports only the probe into the prepared ignored original0.27 source archive; current source remains unchanged and parent owns native flows/docs/Git.
 
-### Native Markdown/local-image smoke — run-current-qa-004-markdown
+##### Native Markdown/local-image smoke — run-current-qa-004-markdown
 
 Same visibility-fixed source6f5e3f3c/preserved executableEE6B86F0E6EED84B8795E20A416C6B8E88D631756FFF5363D1786C481CE1BC56. Fresh helper fixture1000 actions/100 notes; actual overridden inputs aggregate2D36811321699FAFAAF1B9908859503C9C34B1B776F18CCED357E81A359DB916. Added one owned note-open action (1001 total), controlled rich Markdown in note00000 and copied repository icon; all actual settings/actions/note/asset hashes recorded. ROOT1000x700,note default780x560, preview enabled, external note Neither, startup error toasts disabled. Normal PID25172,start2026-10-13T07:14:08.0705399-04:00, benchmark variables explicitly absent. Launch command returned exit1 after cleanup, but process/receipt existed and were verified; no duplicate launch was attempted.
 
@@ -182,7 +198,7 @@ Accessibility observed focused query; typed `app QA Markdown Note`, observed the
 
 This accepts this native preview/local-image/open/Escape smoke only. Native link activation, selection, scroll, native file picker, QR and error notifications remain unrun here; no comprehensive M1-D parity claim. The observed frame IDs are evidence, not an idle/performance measurement. Original probe backport remains the sole active source-writing assignment in its separate ignored archive.
 
-### Current005 QR discovery/error-toast smoke and source repair
+##### Current005 QR discovery/error-toast smoke and source repair
 
 Fresh run-current-qa-005-qr-toast used source6f5e3f3c/preserved executableEE6B86F0E6EED84B8795E20A416C6B8E88D631756FFF5363D1786C481CE1BC56,1000 generated actions/100 notes plus local QR-open and invalid-QR actions. Actual prelaunch settings4E8C4CFA3A3626338988C33AAACA9DC5CD80A7F67C5B8FC805C88E5185316853; requestCCC74D190F470C757778F7CD37E16EA46901C0348D41CB8BA53CC1DBC0F81359; aggregate in launch-fixture-manifest.json. ROOT1000x700,error/inline notifications enabled,fixture toast duration20s,external note Neither. New launch_current_qa_fixture.ps1 passed PowerShell parsing and actual launch, verifies executable hash/fresh process receipt, explicitly removes benchmark variables, restores unset versus empty environment values and records script hash. Normal PID8956,start2026-10-13T07:20:33.6445619-04:00.
 
@@ -192,13 +208,13 @@ The later app QA QR Invalid query did not activate through Return after settling
 
 During separate original backport diagnostics, writer omitted archive workdir and wrote a probe marker plus scratch into current source. Writer attributed both paths and stopped current writes. Parent restored src/gui/qa_framebuffer.rs from Git stdout bytes and verified HEAD blob b9887213990e9c9141c5cf817672ee2dab53e5c3; raw restored source62237LFbytes,SHA256E21C8FA754EA8CD92BDEDF680788B93D23CF9E7BE02EEF86D0D369739890D8D1. Removed only exact4-byte test scratch afterSHA9F86D081884C7D659A2FEAA0C55AD015A3BF4F1B2B0B822CD15D6C15B0F00A08 confirmation. current-source-repair-receipt.json records recovery. No tracked current source changes remain; tested preserved executable/PNGs unaffected. No build is needed for restoring the exact committed blob. Future archive writes require explicit absolute scope/workdir; no diagnostics may overwrite source. Original focused library compile continues after actual0.27 test API corrections; a zero-selected bin run is compilation only, not test success.
 
-### Current006 native image-picker cancellation
+##### Current006 native image-picker cancellation
 
 Fresh run-current-qa-006-picker used source6f5e3f3c/preserved executableEE6B86F0E6EED84B8795E20A416C6B8E88D631756FFF5363D1786C481CE1BC56,1001 actions/100 notes,852x460 ROOT,query autocomplete explicitly off. Prelaunch settings28897943555D68B6A2A887E6492B430FA8BA6B89F8219DF11389442F1A1EA504,request448FF5D3D92AE9F6361649BF3CC0295EF0193FE54D0E0740B3A84898225416A8. Normal PID23716,start2026-10-13T07:48:17.8115202-04:00,environment isolation/helper hash recorded.
 
 Typed app QA Image Picker and observed owned result. Tab did not visibly move query focus; indexed click failed coordinate geometry unavailable. Freshly observed query Return opened owned native Open dialog4068402 (ROOT3675166), exposing PNG/JPEG/BMP filter and Open/Cancel controls. Escape canceled without selecting/saving a file; fresh inventory then contained ROOT only and query focus returned. F11 saved852x460 PNG23961bytes,SHA25648FFC7C6E41976330C37B395AA46CE404CE28CA08DBECEB54151ADD81818675B,frames2330/2331/2332,result generation2,PPP1/zoom1. Parent viewed returned ROOT query/result with no crop dialog. Exact process gracefully closed. This passes bounded picker-open/cancel/focus-return smoke, not file decoding, drag transport or dialog screenshot proof. Enter succeeded with autocomplete disabled, narrowing but not classifying current005's default-autocomplete observation.
 
-### Original source acceptance and current QR source ownership
+##### Original source acceptance and current QR source ownership
 
 Original backport writer released. Parent inspected8/8 owner tests (2m47s build,0.02s execution), feature lib/bin check1m59s and default lib/bin check49.16s. Independent review accepted the bounded original update/render seams, timing/ownership/buffer/write behavior and explicit weaker correlation. Parent audited preserved tar against every regular source file:843 unchanged bytes,four intended existing changes plus new probe only. Canonical patchSHA2563781AEC526CE36DA7B6A1B713FD65ABEEE3B4637D7D8836131EE7A7FFF69A05E was checked/applied to fresh baseline integration files; normalized outputs match all five archived inputs. Initial raw patch-result comparison needed Windows EOL normalization; corrected verification is recorded, not a source change. See receipts/original-qa-backport-verification.md and ignored source-patch-receipt.json.
 
@@ -206,7 +222,7 @@ Parent original fast-dev QA build began after source acceptance, separate origin
 
 New sole CURRENT source writer /root/implementer_qr_capture implements qa-secondary-framebuffer-plan.md after archive writer release. This is a bounded M1-D native QA prerequisite supporting laterM2-B, not broaderM2-B/theme work. Critical reviewed planning corrections: actual callback class/ID rather than stale Context class; ignore child advances before issue parent's final ROOT dispatch baseline; capture/reply child progression may share a later parent frame; buffer until final ROOT eligibility. Parent owns docs/Git/original build/native flows; source writers must use checked absolute scope/workdir and never diagnostic source overwrites.
 
-### Instrumented original008 ROOT PNG gate
+##### Instrumented original008 ROOT PNG gate
 
 Original QA build completed in268.394s,exact egui0.27 source72a01bd5 plus patch3781AEC526CE36DA7B6A1B713FD65ABEEE3B4637D7D8836131EE7A7FFF69A05E. Preserved executableSHA2565B62B0BC1D0AA740AC4DEEB8FECCAF2045E56BF1BEA48209E24C16DAAEB49003; Cargo JSON/build/source-patch receipts under qa-framebuffer/build-72a01bd5 and original-qa-target. No preserved unmodified binary overwritten.
 
@@ -216,17 +232,17 @@ Actual852x460 PNG137345bytes,SHA2564704692E5A18E0341E825EC59412623F2B252EA5FF8A4
 
 Launch helper renamed launch_native_qa_fixture.ps1 for reused original/current build slots and now carries source-kind/QA-patch/build-receipt hashes. Original008 actual launch validates these attribution fields. A subsequent small helper change preserves exact prelaunch settings bytes before launch and checks their hash; future runs will validate it. Earlier runs retain honest hash-only prelaunch claims and are not retroactively relabeled as byte snapshots. Historical helper hash935E... remains in local56ab1f9b; original008 launch used16BFA616EBA7EFDFA72B684021CBE2CBE08680DA2AB02E5CA703A80C7C164E2A before the snapshot addition.
 
-### Original009 and QR capture review
+##### Original009 and QR capture review
 
 Local afaacc2d records original009 Markdown comparison with current004: same action/note/icon bytes, readable expected content/local image, original inherited red ScrollArea ID6898 diagnostics absent in migrated scoped fragments, different typography/spacing/window geometry. PNG25C912629751025CCD398387C37E9764721BDD56FBA911AD8E8B64C995F445F1 independently viewed/hashed. Escape closed preview and query focus returned; unchanged note bytes; exact process gracefully closed. Actual prelaunch settings snapshot hash verified. See visual-qa.md for full provenance and evidence limits.
 
 QR extension initial checks: feature/default all-target compilation,QR26/probe15 overlapping application cases,standalone vendor5 plus focused1,fmt/diff pass. Independent review found active-only LauncherApp wrappers bypass QR-Armed hidden/takeover policy; sole writer is correcting both guards and wrapper-level tests before source/native acceptance. Parent owns docs/Git/native. No source checkpoint or QR PNG pass claimed yet. M2-A planner rechecked final M1-C font owner/cache assertions; corrections persisted in implementation-handoffs.md without broadening scope. Checkpoints remain local and goal continues through Track B after M2-D.
 
-### Completed post-section attribution archive
+##### Completed post-section attribution archive
 
 Production checkpoint9b7006cd is frozen; plan checkpoint2850b743 accepted. Sole implementer_m2a owned the fresh ignored post-shape-layout-attribution archive's six observer/owner files and receipts. Parent owns tracked docs/Git. Source/no-run/binary and actual full parity gates are independently accepted. The separately authorized timing invocation passed with regenerated parity, four warmups and ten retained samples; independent evidence review accepted all results. Post-section p50 is35.9742ms across975 actual calls and does not dominate. Owner off/on226.0966/239.8295ms includes observed run variation; no pure clock-overhead or original-parity claim. Writer released; see receipts/m2a-post-section-layout-attribution.md. Local evidence checkpoint0155138a saved. The planner proposes an archive-only earlier raw-hit return before unused shaper/plan setup; test and frozen paired-binary details are being clarified. This proposal is read-only and not activated. Normal production raw cache remains enabled during normal preparation and both clock controls. M2-A performance remains open; no Track B or further production optimization yet.
 
-### Active earlier raw-hit candidate
+##### Active earlier raw-hit candidate
 
 Reviewed plan48027a1d is activated for sole implementer_m2a in ignored raw-hit-setup-candidate baseline/candidate copies of the accepted post-section source. Candidate runtime scope is only moving a valid raw hit before unused shaper/plan setup; identical root protocol and candidate-only ninth private eviction contract support it. Current action is input audit, source construction, private8/9 verification and immutable per-version Nextest archive/binary freeze. Root parity is not yet authorized; full actual paired parity review is required before timing. No production adoption, new instrumentation or performance gate claim. Parent owns tracked docs/Git; local checkpoints only.
 

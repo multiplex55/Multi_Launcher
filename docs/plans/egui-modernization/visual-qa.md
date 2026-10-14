@@ -1,3 +1,9 @@
+# Current visual QA policy — revised policy2026-10-14
+
+Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). Complete substantive Track B surface coverage and supported visual/functional checks. Record unavailable native/hardware observations and manual QA follow-up; do not endlessly retry unchanged tools or describe software/headless pixels as desktop/focus/hotkey proof. Earlier inventories below are historical evidence.
+
+## Historical record — unchanged, not operative
+
 # M0-B visual QA preparation
 
 Status: **PREPARED; both legacy fixture runs completed generation and serializer round-trip checks, but their exact helper-library binding is unverified. Two native launch attempts are recorded below; neither produced a screenshot, completed visual interaction, or measured performance result.**
