@@ -260,6 +260,7 @@ struct RootListGeometryKey {
     width_bits: u32,
     pixels_per_point_bits: u32,
     button_font: egui::FontId,
+    secondary_font: egui::FontId,
     wrap_mode: egui::TextWrapMode,
     extra_text_line_spacing_bits: u32,
     button_padding_x_bits: u32,
@@ -274,6 +275,10 @@ struct RootListGeometryKey {
     grid_spacing_x_bits: u32,
     grid_spacing_y_bits: u32,
 }
+
+/// Preserve the long-standing minimum button height across grid measurement,
+/// allocation, and selected-item scrolling.
+const ROOT_GRID_MIN_HEIGHT: f32 = 44.0;
 
 /// Cached actual SelectableLabel row geometry for the root list.
 ///
@@ -458,17 +463,15 @@ impl RootListGeometryCache {
         is_grid: bool,
     ) -> bool {
         let spacing = ui.spacing();
-        let button_font = egui::FontSelection::Default.resolve_with_fallback(
-            ui.style(),
-            egui::FontSelection::Style(egui::TextStyle::Button),
-        );
+        let text_presentation = RootResultTextPresentation::new(ui);
         let key = RootListGeometryKey {
             result_generation: self.result_generation,
             result_count: results.len(),
             font_revision: super::font_revision::active_revision(ui.ctx()),
             width_bits: ui.available_width().to_bits(),
             pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
-            button_font,
+            button_font: text_presentation.primary_font.clone(),
+            secondary_font: text_presentation.secondary_font.clone(),
             wrap_mode: ui.wrap_mode(),
             extra_text_line_spacing_bits: spacing.extra_text_line_spacing.to_bits(),
             button_padding_x_bits: spacing.button_padding.x.to_bits(),
@@ -517,8 +520,9 @@ impl RootListGeometryCache {
             row_x_offsets.push(content_x_offset);
             row_widths.push(content_width);
 
-            let text = root_list_display_text(action, folder_aliases, show_full_paths);
-            let size = egui::WidgetText::from(text).measure_size_impl(
+            let text =
+                root_list_result_text(action, folder_aliases, show_full_paths, &text_presentation);
+            let size = text.measure_size_impl(
                 ui.ctx(),
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
@@ -582,17 +586,15 @@ impl RootListGeometryCache {
         // Grid buttons are placed in a left-to-right child UI, whose default
         // text mode is Extend unless the style explicitly overrides it.
         let wrap_mode = ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Extend);
-        let button_font = egui::FontSelection::Default.resolve_with_fallback(
-            ui.style(),
-            egui::FontSelection::Style(egui::TextStyle::Button),
-        );
+        let text_presentation = RootResultTextPresentation::new(ui);
         let key = RootListGeometryKey {
             result_generation: self.result_generation,
             result_count: results.len(),
             font_revision: super::font_revision::active_revision(ui.ctx()),
             width_bits: width.to_bits(),
             pixels_per_point_bits: ui.ctx().pixels_per_point().to_bits(),
-            button_font,
+            button_font: text_presentation.primary_font.clone(),
+            secondary_font: text_presentation.secondary_font.clone(),
             wrap_mode,
             extra_text_line_spacing_bits: spacing.extra_text_line_spacing.to_bits(),
             button_padding_x_bits: spacing.button_padding.x.to_bits(),
@@ -625,15 +627,16 @@ impl RootListGeometryCache {
         let mut column_widths = vec![interaction_width; actual_columns];
         let mut cell_widths = Vec::with_capacity(results.len());
         let mut cell_heights = Vec::with_capacity(results.len());
-        let mut row_heights = vec![interaction_height.max(44.0); results.len().div_ceil(columns)];
+        let mut row_heights =
+            vec![interaction_height.max(ROOT_GRID_MIN_HEIGHT); results.len().div_ceil(columns)];
 
         #[cfg(test)]
         let cell_loop_started = c2e_grid_cell_loop_observer::loop_started();
         #[cfg(test)]
         let observe_cell_loop = cell_loop_started.is_some();
         for (index, action) in results.iter().enumerate() {
-            let text = format!("{}\n{}", action.label, action.desc);
-            let galley = egui::WidgetText::from(text).into_galley_impl(
+            let text = root_grid_result_text(action, &text_presentation);
+            let galley = text.into_galley_impl(
                 ui.ctx(),
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
@@ -644,7 +647,7 @@ impl RootListGeometryCache {
                 egui::Align::Center,
             );
             let cell_width = nominal_width.max(galley.size().x + 2.0 * padding.x);
-            let cell_height = 44.0_f32
+            let cell_height = ROOT_GRID_MIN_HEIGHT
                 .max(interaction_height)
                 .max(galley.size().y + 2.0 * padding.y);
             let column = index % columns;
@@ -688,7 +691,7 @@ impl RootListGeometryCache {
         let grid_visual_row_tops = row_tops
             .iter()
             .zip(&row_heights)
-            .map(|(top, height)| top + ((height - 44.0) * 0.5).max(0.0))
+            .map(|(top, height)| top + ((height - ROOT_GRID_MIN_HEIGHT) * 0.5).max(0.0))
             .collect::<Vec<_>>();
         let grid_visual_row_bottoms = grid_visual_row_tops
             .iter()
@@ -876,12 +879,104 @@ fn root_list_display_text<'a>(
     }
 }
 
+/// Font inputs and colors shared by root-result measurement and painting.
+/// Resolving both roles here keeps the geometry cache aligned with the actual
+/// selectable button text, including global egui font overrides.
+#[derive(Clone, Debug)]
+struct RootResultTextPresentation {
+    primary_font: egui::FontId,
+    secondary_font: egui::FontId,
+    primary_line_height: f32,
+    secondary_line_height: f32,
+    primary_color: egui::Color32,
+    secondary_color: egui::Color32,
+    valign: egui::Align,
+}
+
+impl RootResultTextPresentation {
+    fn new(ui: &egui::Ui) -> Self {
+        let style = ui.style();
+        let primary_font = egui::FontSelection::Default
+            .resolve_with_fallback(style, egui::FontSelection::Style(egui::TextStyle::Button));
+        let secondary_font = egui::FontSelection::Default
+            .resolve_with_fallback(style, egui::FontSelection::Style(egui::TextStyle::Small));
+        let override_text_color = style.visuals.override_text_color;
+        let extra_line_spacing = style.spacing.extra_text_line_spacing;
+        let (primary_line_height, secondary_line_height) = ui.ctx().fonts_mut(|fonts| {
+            (
+                fonts.row_height(&primary_font) + extra_line_spacing,
+                fonts.row_height(&secondary_font) + extra_line_spacing,
+            )
+        });
+
+        Self {
+            primary_font,
+            secondary_font,
+            primary_line_height,
+            secondary_line_height,
+            primary_color: override_text_color.unwrap_or(egui::Color32::PLACEHOLDER),
+            secondary_color: override_text_color.unwrap_or_else(|| style.visuals.weak_text_color()),
+            valign: ui.text_valign(),
+        }
+    }
+
+    fn widget_text(&self, primary: &str, secondary: Option<(&str, &str)>) -> egui::WidgetText {
+        let primary_format = egui::text::TextFormat {
+            font_id: self.primary_font.clone(),
+            line_height: Some(self.primary_line_height),
+            color: self.primary_color,
+            valign: self.valign,
+            ..Default::default()
+        };
+        let secondary_format = egui::text::TextFormat {
+            font_id: self.secondary_font.clone(),
+            line_height: Some(self.secondary_line_height),
+            color: self.secondary_color,
+            valign: self.valign,
+            ..Default::default()
+        };
+
+        let mut job = egui::text::LayoutJob::default();
+        job.append(primary, 0.0, primary_format.clone());
+        if let Some((separator, secondary)) = secondary {
+            job.append(separator, 0.0, primary_format);
+            job.append(secondary, 0.0, secondary_format);
+        }
+        egui::WidgetText::from(job)
+    }
+}
+
+fn root_list_result_text(
+    action: &Action,
+    folder_aliases: &HashMap<String, Option<String>>,
+    show_full_paths: bool,
+    presentation: &RootResultTextPresentation,
+) -> egui::WidgetText {
+    let has_alias = folder_aliases
+        .get(&action.action)
+        .and_then(|alias| alias.as_ref())
+        .is_some();
+    if show_full_paths || !has_alias {
+        presentation.widget_text(&action.label, Some((" : ", &action.desc)))
+    } else {
+        presentation.widget_text(&action.label, None)
+    }
+}
+
+fn root_grid_result_text(
+    action: &Action,
+    presentation: &RootResultTextPresentation,
+) -> egui::WidgetText {
+    presentation.widget_text(&action.label, Some(("\n", &action.desc)))
+}
+
 fn root_grid_cell_response(
     ui: &egui::Ui,
     geometry: &RootListGeometryCache,
     index: usize,
     action: &Action,
     selected: bool,
+    presentation: &RootResultTextPresentation,
 ) -> egui::Response {
     let columns = geometry.grid_columns.max(1);
     let column = index % columns;
@@ -908,13 +1003,13 @@ fn root_grid_cell_response(
     if !ui.is_enabled() {
         cell_ui.disable();
     }
-    let text = format!("{}\n{}", action.label, action.desc);
+    let text = root_grid_result_text(action, presentation);
     cell_ui
         .with_layout(
             egui::Layout::left_to_right(egui::Align::Center),
             |cell_ui| {
                 cell_ui.add_sized(
-                    [geometry.grid_nominal_width, 44.0],
+                    [geometry.grid_nominal_width, ROOT_GRID_MIN_HEIGHT],
                     egui::Button::selectable(selected, text),
                 )
             },
@@ -3360,7 +3455,8 @@ impl LauncherApp {
                                                 self.root_list_geometry.grid_column_x_offsets
                                                     [column],
                                                 self.root_list_geometry.row_tops[row]
-                                                    + ((row_height - 44.0) * 0.5).max(0.0),
+                                                    + ((row_height - ROOT_GRID_MIN_HEIGHT) * 0.5)
+                                                        .max(0.0),
                                             ),
                                         egui::vec2(
                                             self.root_list_geometry.grid_cell_widths[selected],
@@ -3372,6 +3468,7 @@ impl LauncherApp {
 
                                 let mut visible_rows =
                                     self.root_list_geometry.visible_grid_rows(viewport);
+                                let text_presentation = RootResultTextPresentation::new(ui);
                                 if let Some(owner) = self.root_list_geometry.popup_owner() {
                                     visible_rows.push(owner / cols);
                                     visible_rows.sort_unstable();
@@ -3405,6 +3502,7 @@ impl LauncherApp {
                                             idx,
                                             &action,
                                             self.selected == Some(idx),
+                                            &text_presentation,
                                         );
                                         #[cfg(test)]
                                         self.test_root_rendered_rows
@@ -3513,10 +3611,16 @@ impl LauncherApp {
                                     visible_rows.dedup();
                                 }
 
+                                let text_presentation = RootResultTextPresentation::new(ui);
+
                                 for idx in visible_rows {
                                     let a = self.results[idx].clone();
-                                    let text =
-                                        root_list_display_text(&a, &self.folder_aliases, show_full);
+                                    let text = root_list_result_text(
+                                        &a,
+                                        &self.folder_aliases,
+                                        show_full,
+                                        &text_presentation,
+                                    );
                                     let row_rect = egui::Rect::from_min_size(
                                         content_origin
                                             + egui::vec2(
@@ -5634,8 +5738,9 @@ mod tests {
             available_widths: Vec::with_capacity(actions.len()),
             bounds: outer,
         };
+        let text_presentation = RootResultTextPresentation::new(ui);
         for action in actions {
-            let text = root_list_display_text(action, aliases, show_full_paths).into_owned();
+            let text = root_list_result_text(action, aliases, show_full_paths, &text_presentation);
             let available_width = ui.available_width();
             layout.available_widths.push(available_width);
             let response = ui.add_sized(
@@ -5784,7 +5889,7 @@ mod tests {
             },
             Action {
                 label: "Explicit lines\nsecond line".into(),
-                desc: "Unicode λ🙂 and a moderately long wrapped description".into(),
+                desc: "Unicode e\u{301} 文雪 🧭🙂 and a moderately long wrapped description".into(),
                 action: "test:multiline".into(),
                 args: None,
             },
@@ -5829,6 +5934,7 @@ mod tests {
             let mut virtual_rows = Vec::new();
             let mut eager_layout = None;
             let mut measured_button_font = egui::FontId::default();
+            let mut measured_secondary_font = egui::FontId::default();
 
             let output = ctx.run_ui(input, |ctx| {
                 let mut eager = test_child_ui(
@@ -5865,7 +5971,13 @@ mod tests {
                             ui.style(),
                             egui::FontSelection::Style(egui::TextStyle::Button),
                         );
+                        measured_secondary_font = egui::FontSelection::Default
+                            .resolve_with_fallback(
+                                ui.style(),
+                                egui::FontSelection::Style(egui::TextStyle::Small),
+                            );
                         cache.ensure(ui, &actions, &aliases, false, false);
+                        let text_presentation = RootResultTextPresentation::new(ui);
                         for (index, action) in actions.iter().enumerate() {
                             let row_rect = egui::Rect::from_min_size(
                                 outer.min
@@ -5880,7 +5992,8 @@ mod tests {
                                 outer,
                             );
                             row_ui.set_style(ui.style().clone());
-                            let text = root_list_display_text(action, &aliases, false).into_owned();
+                            let text =
+                                root_list_result_text(action, &aliases, false, &text_presentation);
                             let response = row_ui
                                 .with_layout(
                                     egui::Layout::centered_and_justified(ui.layout().main_dir()),
@@ -5905,6 +6018,18 @@ mod tests {
                 extra_line_spacing.to_bits()
             );
             assert_eq!(key.button_font, measured_button_font);
+            assert_eq!(key.secondary_font, measured_secondary_font);
+            if case_index == 0 {
+                assert_ne!(
+                    key.button_font, key.secondary_font,
+                    "result descriptions use the secondary text role by default"
+                );
+            } else if heading_override || override_font.is_some() {
+                assert_eq!(
+                    key.button_font, key.secondary_font,
+                    "global style overrides retain precedence for both result sections"
+                );
+            }
             assert_eq!(cache.row_tops.len(), eager_rows.len());
             for (index, response) in eager_rows.iter().enumerate() {
                 let expected_top = response.top() - outer.top();
@@ -5986,6 +6111,7 @@ mod tests {
             .max(160.0);
         let mut cells = Vec::with_capacity(actions.len());
         let mut cell_cursors = Vec::with_capacity(actions.len());
+        let text_presentation = RootResultTextPresentation::new(ui);
         let grid = egui::Grid::new(("root-grid-real", identity))
             .num_columns(columns)
             .spacing([8.0, 6.0])
@@ -5993,10 +6119,10 @@ mod tests {
                 for (index, action) in actions.iter().enumerate() {
                     cell_cursors.push(ui.cursor().min);
                     let response = ui.add_sized(
-                        [nominal_width, 44.0],
+                        [nominal_width, ROOT_GRID_MIN_HEIGHT],
                         egui::Button::selectable(
                             false,
-                            format!("{}\n{}", action.label, action.desc),
+                            root_grid_result_text(action, &text_presentation),
                         ),
                     );
                     cells.push(response.rect);
@@ -6305,14 +6431,16 @@ mod tests {
                             "unwrapped/path-segment/".repeat(12)
                         )
                     } else if index == 1 {
-                        "Explicit first line\nsecond line λ🙂".into()
+                        "Explicit first line\nsecond line e\u{301} 文雪 🧭🙂".into()
                     } else {
                         format!("Grid result {index}")
                     },
                     desc: if index == 0 {
-                        "A tall first-cell description\nwith another line".into()
+                        "A tall first-cell description\nwith another line and mixed Unicode 文雪 🧭🙂".into()
                     } else {
-                        format!("Description for cell {index}")
+                        format!(
+                            "Description for cell {index} with longer supporting details that wrap at narrow widths"
+                        )
                     },
                     action: format!("test:grid-{index}"),
                     args: None,
@@ -6334,6 +6462,7 @@ mod tests {
             let mut measured_root_cursor = egui::Pos2::ZERO;
             let mut measured_wrap_mode = egui::TextWrapMode::Extend;
             let mut measured_button_font = egui::FontId::default();
+            let mut measured_secondary_font = egui::FontId::default();
 
             for frame in 0..4 {
                 let input = egui::RawInput {
@@ -6389,13 +6518,27 @@ mod tests {
                                     ui.style(),
                                     egui::FontSelection::Style(egui::TextStyle::Button),
                                 );
+                            measured_secondary_font = egui::FontSelection::Default
+                                .resolve_with_fallback(
+                                    ui.style(),
+                                    egui::FontSelection::Style(egui::TextStyle::Small),
+                                );
                             interaction_size = ui.spacing().interact_size;
                             cache.ensure_grid(ui, &actions, columns);
+                            let text_presentation = RootResultTextPresentation::new(ui);
                             cached_cells = actions
                                 .iter()
                                 .enumerate()
                                 .map(|(index, action)| {
-                                    root_grid_cell_response(ui, &cache, index, action, false).rect
+                                    root_grid_cell_response(
+                                        ui,
+                                        &cache,
+                                        index,
+                                        action,
+                                        false,
+                                        &text_presentation,
+                                    )
+                                    .rect
                                 })
                                 .collect();
                         });
@@ -6416,6 +6559,13 @@ mod tests {
                 extra_line_spacing.to_bits()
             );
             assert_eq!(key.button_font, measured_button_font);
+            assert_eq!(key.secondary_font, measured_secondary_font);
+            if heading || override_font.is_some() {
+                assert_eq!(
+                    key.button_font, key.secondary_font,
+                    "global style overrides retain precedence for both grid text sections"
+                );
+            }
             for (index, (eager, cached)) in eager_cells.iter().zip(&cached_cells).enumerate() {
                 assert!(
                     eager.min.distance(cached.min) <= 1.0 && eager.max.distance(cached.max) <= 1.0,
@@ -15354,6 +15504,48 @@ mod tests {
     }
 
     #[test]
+    fn root_result_text_job_preserves_explicit_color_override_for_both_roles() {
+        let ctx = egui::Context::default();
+        let override_color = egui::Color32::from_rgb(213, 47, 181);
+        let mut section_colors = Vec::new();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut style = (**ui.style()).clone();
+                    style.visuals.override_text_color = Some(override_color);
+                    ui.set_style(style);
+
+                    let presentation = RootResultTextPresentation::new(ui);
+                    let egui::WidgetText::LayoutJob(job) =
+                        presentation.widget_text("Primary", Some((" : ", "Secondary")))
+                    else {
+                        panic!("prepared result text remains a layout job");
+                    };
+                    section_colors = job
+                        .sections
+                        .iter()
+                        .map(|section| section.format.color)
+                        .collect();
+                });
+            },
+        );
+        output.drop_without_applying_deltas();
+
+        assert_eq!(
+            section_colors,
+            vec![override_color, override_color],
+            "explicit visual text color applies to both primary and secondary sections"
+        );
+    }
+
+    #[test]
     fn root_list_geometry_rebuilds_only_when_layout_or_display_inputs_change() {
         let ctx = egui::Context::default();
         let mut actions = (0..32).map(root_list_action).collect::<Vec<_>>();
@@ -15394,6 +15586,41 @@ mod tests {
             .drop_without_applying_deltas();
         frame += 1;
         expect_rebuild(&app);
+
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        let mut expected_primary_font = style
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .expect("the button text role exists")
+            .clone();
+        expected_primary_font.size *= app.list_scale;
+        let mut secondary_font = style
+            .text_styles
+            .get(&egui::TextStyle::Small)
+            .expect("the small text role exists")
+            .clone();
+        secondary_font.size += 2.0;
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, secondary_font.clone());
+        ctx.set_style_of(ctx.theme(), style);
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        expect_rebuild(&app);
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().secondary_font,
+            egui::FontId::new(
+                secondary_font.size * app.list_scale,
+                secondary_font.family.clone(),
+            ),
+            "changing only the secondary result font rebuilds list geometry"
+        );
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().button_font,
+            expected_primary_font,
+            "changing the secondary result font leaves the primary font unchanged"
+        );
 
         let mut style = (*ctx.style_of(ctx.theme())).clone();
         style.override_text_style = Some(egui::TextStyle::Heading);
@@ -16242,6 +16469,56 @@ mod tests {
         assert_eq!(
             crate::gui::font_revision::active_revision(&ctx),
             palette_revision
+        );
+
+        frame += 1;
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.override_text_style = None;
+        ctx.set_style_of(ctx.theme(), style.clone());
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        expect_rebuild(&app);
+
+        let mut expected_primary_font = style
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .expect("the button text role exists")
+            .clone();
+        expected_primary_font.size *= app.list_scale;
+        let mut secondary_font = style
+            .text_styles
+            .get(&egui::TextStyle::Small)
+            .expect("the small text role exists")
+            .clone();
+        secondary_font.size += 2.0;
+        style
+            .text_styles
+            .insert(egui::TextStyle::Small, secondary_font.clone());
+        ctx.set_style_of(ctx.theme(), style);
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        frame += 1;
+        expect_rebuild(&app);
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().secondary_font,
+            egui::FontId::new(
+                secondary_font.size * app.list_scale,
+                secondary_font.family.clone(),
+            ),
+            "changing only the secondary result font rebuilds the measured grid once"
+        );
+        assert_eq!(
+            app.root_list_geometry.key.as_ref().unwrap().button_font,
+            expected_primary_font,
+            "changing the secondary result font leaves the primary font unchanged"
+        );
+        run_root_list_frame(&ctx, &mut app, frame, 820.0, 640.0, Vec::new())
+            .drop_without_applying_deltas();
+        assert_eq!(
+            app.root_list_geometry.test_observation().rebuild_count,
+            rebuilds,
+            "the secondary-font geometry is reused warm"
         );
 
         let mut visuals = egui::Visuals::dark();

@@ -15,7 +15,8 @@ Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.
 - **M3-C complete:** transactional dialog baseline/draft, one runtime preview overlay, atomic conflict-checked Apply/Save, latest-committed Cancel rollback, pinned/repeated focus/all close routes and collision-safe curated presets/accents. preview-00331/31/native0, source bindings unchanged; scoped fmt/diff and coherent review accepted. Earlier failures retained. See receipts/m3c-transactional-preview.md.
 - **M3-D complete:** semantic existing-font roles, Context-cached brand/vector chrome resources and root/theme-editor consumers. Source findings resolved; resources-00134/35 plus exact corrected role1/1 in002, normal Windows binbuild0, unchanged bindings, scoped fmt/diff/review accepted. Native synthetic typing/search/Enter/Escape observed; capture/hotkey restoration remain unverified. One bounded idle sample CPU0.0625s/10.039s, working set unchanged; fixture closed normally. See receipts/m3d-typography-resources.md.
 - **M4-A complete:** compact native query surface/search icon/focus boundary/placeholder and secondary autocomplete/errors; native editor output/caret/IDs/overrides/modal/event routing retained. query-0028/8/native0, unchanged bindings, scoped fmt/diff/review accepted; first accessor compile failure retained. See receipts/m4a-query-surface.md.
-- **NEXT ACTION M4-B:** one shared result-text preparation boundary for measurement/painting, semantic list/grid hierarchy and selection/hover, cache/virtualization/override contracts preserved.
+- **M4-B complete:** shared measured/painted result jobs with primary/secondary hierarchy, bothfont cache inputs, native selectable buttons and centralized grid minimum. Explicit font/text-color overrides preserved. results-00211/11/native0, unchanged bindings, scoped fmt/diff/review accepted; original0018/10 failure retained. See receipts/m4b-result-hierarchy.md.
+- **NEXT ACTION:** existing opt-in framebuffer ROOT visual inspection of current checkpoint, then directly M4-C shared UI primitives and M5-A settings/editor shells. Comprehensive benchmark remains deferred.
 - Native desktop access/physical chord/focus/DPI gaps remain qualification limits; use available evidence, record manual follow-up and continue safe work. Observed critical correctness or severe usability/idle/resource defects still block affected stability claims.
 - Planner, implementer and reviewer explicitly notified: no inherited parity/no-regression checklist may override this policy. Review coherent milestones; no separate receipt/parser/listing/doc approval cycles.
 
@@ -39,7 +40,7 @@ Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.
 | M3-C — presets and transactional live theme preview | `complete` | Preview/session/close/preset/conflict/cache contracts31/31 pass; review findings resolved. |
 | M3-D — typography, icons and lightweight rendering assets | `complete` | Role/resource/accessibility/cache contracts pass; normal binary build and bounded native accessibility smoke, explicit capture/hotkey/manual gaps. |
 | M4-A — root launcher search field polish | `complete` | Eight query/caret/history/autocomplete/modal/numpad/presentation contracts pass; native font overrides preserved. |
-| M4-B — result list and grid visual polish | `pending` | Not started. |
+| M4-B — result list and grid visual polish | `complete` | Eleven shared-text/eager/cache/virtualization/identity/override/navigation contracts pass; ROOT visual inspection next. |
 | M4-C — UI primitives and standardized surfaces | `pending` | Not started. |
 | M5-A — global settings shell and theme editor redesign | `pending` | Not started. |
 | M5-B1..n — high-usage plugin dialogs | `pending` | Not started. |

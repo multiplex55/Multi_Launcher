@@ -6,7 +6,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 
 | Presentation owner | Group | Status / evidence |
 |---|---|---|
-| `src/gui/render.rs` | M4-A/B | M4-A query surface/input contracts accepted; M4-B result polish pending; actual themed capture pending |
+| `src/gui/render.rs` | M4-A/B | M4-A query and M4-B result hierarchy/layout contracts accepted; actual themed capture pending |
 | `src/gui/actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/add_action_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/add_bookmark_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
