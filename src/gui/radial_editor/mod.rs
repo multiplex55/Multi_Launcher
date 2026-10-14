@@ -1477,12 +1477,14 @@ impl ResourceNotice {
 }
 
 fn show_resource_notice(ui: &mut egui::Ui, notice: &ResourceNotice) {
-    let (color, prefix) = match notice.severity {
-        ResourceNoticeSeverity::Info => (ui.visuals().text_color(), "Info"),
-        ResourceNoticeSeverity::Warning => (ui.visuals().warn_fg_color, "Warning"),
-        ResourceNoticeSeverity::Error => (ui.visuals().error_fg_color, "Error"),
+    let (tone, label) = match notice.severity {
+        ResourceNoticeSeverity::Info => (crate::gui::theme::widgets::StatusTone::Info, "Info"),
+        ResourceNoticeSeverity::Warning => {
+            (crate::gui::theme::widgets::StatusTone::Warning, "Warning")
+        }
+        ResourceNoticeSeverity::Error => (crate::gui::theme::widgets::StatusTone::Error, "Error"),
     };
-    ui.colored_label(color, format!("{prefix}: {}", notice.message));
+    crate::gui::theme::widgets::semantic_status(ui, tone, label, Some(&notice.message));
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

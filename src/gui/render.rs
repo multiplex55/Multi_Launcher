@@ -3115,13 +3115,11 @@ impl LauncherApp {
             if self.should_render_inline_error()
                 && let Some(err) = &self.error
             {
-                let error_color = ui.visuals().error_fg_color;
-                ui.label(
-                    egui::RichText::new(err)
-                        .text_style(crate::gui::theme::text_style_for_role(
-                            crate::gui::theme::TextRole::Error,
-                        ))
-                        .color(error_color),
+                crate::gui::theme::widgets::semantic_status(
+                    ui,
+                    crate::gui::theme::widgets::StatusTone::Error,
+                    "Error",
+                    Some(err),
                 );
             }
 

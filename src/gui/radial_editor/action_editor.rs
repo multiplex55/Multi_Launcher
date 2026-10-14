@@ -1086,7 +1086,12 @@ impl ActionBindingEditorState {
         let (summary, unavailable_reason) = presentation;
         ui.small(format!("Assigned: {summary}"));
         if let Some(reason) = &unavailable_reason {
-            ui.colored_label(ui.visuals().warn_fg_color, format!("Unavailable: {reason}"));
+            crate::gui::theme::widgets::semantic_status(
+                ui,
+                crate::gui::theme::widgets::StatusTone::Warning,
+                "Unavailable",
+                Some(reason),
+            );
         }
         let test_enabled = unavailable_reason.is_none();
         let response = ui.add_enabled(test_enabled, egui::Button::new("Test assigned binding"));
@@ -1269,11 +1274,11 @@ impl ActionBindingEditorState {
                     if let Some(preview) = &self.search_preview {
                         ui.label(format!("Would execute: {preview}"));
                     } else if let Some(reason) = &self.search_preview_unavailable {
-                        ui.colored_label(
-                            ui.visuals().warn_fg_color,
-                            format!(
-                                "First result unavailable: {reason}. Later results will not be substituted."
-                            ),
+                        crate::gui::theme::widgets::semantic_status(
+                            ui,
+                            crate::gui::theme::widgets::StatusTone::Warning,
+                            "First result unavailable",
+                            Some(&format!("{reason}. Later results will not be substituted.")),
                         );
                     } else {
                         ui.label("The first result has no available action; later results will not be substituted.");
@@ -1293,7 +1298,12 @@ impl ActionBindingEditorState {
                 ui.label("No launcher results. Saving this query still opens it for interaction.");
             }
             SearchStatus::Unavailable(reason) => {
-                ui.colored_label(ui.visuals().warn_fg_color, reason);
+                crate::gui::theme::widgets::semantic_status(
+                    ui,
+                    crate::gui::theme::widgets::StatusTone::Warning,
+                    "Warning",
+                    Some(reason),
+                );
             }
         };
 

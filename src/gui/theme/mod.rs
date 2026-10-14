@@ -7,6 +7,8 @@ use eframe::egui::style::WidgetVisuals;
 use eframe::egui::{self, Plugin, RawInput, Style, Theme, ThemePreference};
 use std::sync::Arc;
 
+pub(crate) mod widgets;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemAppearance {
     Dark,

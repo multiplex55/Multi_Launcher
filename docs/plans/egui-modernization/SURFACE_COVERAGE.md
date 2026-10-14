@@ -6,7 +6,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 
 | Presentation owner | Group | Status / evidence |
 |---|---|---|
-| `src/gui/render.rs` | M4-A/B | M4-A query and M4-B result hierarchy/layout contracts accepted; actual themed capture pending |
+| `src/gui/render.rs` | M4-A/B | M4-A/B accepted; Dark/Light852x460 ROOT framebuffer inspected, receipts/m4b-root-visual-review.md; physical focus/IME/DPI gaps remain |
 | `src/gui/actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/add_action_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/add_bookmark_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -73,3 +73,9 @@ Owner notes_dialog.rs + note_panel.rs; existing shared helpers/runtime only. Sta
 Invariants: slug-based window/text/scroll IDs, menu-owner retention, query projection/NotesGeometry keys/virtualization, split/outline allocation, save/discard/external-open and analysis reuse. No storage/parsing/mutation/cache-policy/native changes. Reuse actual landed helpers, no note-specific theme state.
 
 Target quick_notes_browsing_virtualizes_rows_and_reuses_geometry; quick_notes_geometry_follows_consumer_font_activation; markdown_title_change_keeps_note_window_rect; split_view_allows_narrow_dialog_without_forcing_pane_minimums; discard_prompt_actions_have_explicit_transitions; markdown_fragments_keep_distinct_stable_ids_and_prepare_shared_cache. Add only missing changed footer/toolbar reachability protection. Locked/offline fast-dev targeted Nextest, explicit FullOutput disposal, scoped fmt/diff/review, appropriate compile. No benchmark/full suite/native campaign. Record actual visual inspection/manual gaps. Complete when both surfaces use shared chrome/status and editing/geometry contracts pass.
+
+Recovery-surface follow-up: retained invalid-fixture Dark001 defaults400x220 capture crowds recovery banner/header. Inspect constrained fallback recovery layout during planned M5-C; data-preservation rejection behaved correctly.
+
+### Theme editor pre-shell observation
+
+Existing immutable M4-B QA binary C95E, isolated run-m4b-theme-before-001, ROOT852x460 capture saved and visually inspected. Color sections extend below visible bounds and Apply/Save/Cancel footer is not visible. M5-A already owns adaptive scrolling body and reserved footer correction; this is retained adverse evidence, not final acceptance. Capture: target/egui-modernization/native-themed/run-m4b-theme-before-001/framebuffer-output/framebuffer.png with source/build/process receipt. Fixture PID31952 exited after normal Alt-F4; no source or settings save action performed. Native screenshot/focus coverage remains distinct from framebuffer pixels.

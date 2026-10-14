@@ -43,7 +43,7 @@ Theme application follows effective changes, reuses resources/caches, preserves 
 
 Planner, implementer and reviewer have been explicitly notified that inherited no-regression gates are superseded. Review coherent milestones and commit meaningful changes; do not create separate approval cycles for receipts, parsers, listings or documentation. One current status/next-action section in `status.md` is authoritative; older handoffs/ledger entries are historical. Reuse compiled targets where appropriate; no routine cargo clean or immutable-artifact rebuild.
 
-No repository kickstart file was found. The external attachment kickstart remains preserved, with its conflicting performance/renderer instructions superseded by this directive and addendum. This is an amendment to the existing plan, not a replacement migration initiative.
+No repository kickstart file was found. The actual external attachment `C:/Users/Jay/.codex/attachments/f39de87d-0ada-4fe7-b7b2-1d1f8413fc3e/goal-objective.md` is now amended in place: old no-regression/rebenchmark/restart/publication gates removed and current policy/ledger made authoritative. Its original bytes remain unchanged in receipts/original-orchestrator-kickstart.md, SHA256d5037773ca32085b23e71d620b24f43e112c2306c8f323e13b114351f9d74e21. This amends the existing execution contract, not a replacement migration initiative.
 
 Do not broaden vendored forks solely to remove accepted regressions. Existing justified patches remain with purpose, correctness coverage and removal considerations recorded in the performance backlog and each `vendor/*/PATCH.md`. No mandatory upstreaming/rewrite before theming.
 

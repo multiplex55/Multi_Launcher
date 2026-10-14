@@ -183,8 +183,7 @@ impl SettingsEditor {
     }
 
     fn render_hotkey_section(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("Launcher hotkey");
+        crate::gui::theme::widgets::labeled_form_row(ui, "Launcher hotkey", |ui| {
             let resp = ui.text_edit_singleline(&mut self.hotkey);
             if resp.changed() {
                 self.hotkey_valid = crate::hotkey::parse_hotkey(&self.hotkey).is_some();
@@ -193,6 +192,7 @@ impl SettingsEditor {
                 }
             }
             hotkey_indicator(ui, self.hotkey_valid);
+            resp
         });
         self.render_optional_hotkey(ui, "Enable quit hotkey", "Quit hotkey", HotkeyKind::Quit);
         self.render_optional_hotkey(ui, "Enable help hotkey", "Help hotkey", HotkeyKind::Help);
@@ -453,8 +453,7 @@ impl SettingsEditor {
         };
         ui.checkbox(enabled, toggle_label);
         if *enabled {
-            ui.horizontal(|ui| {
-                ui.label(field_label);
+            crate::gui::theme::widgets::labeled_form_row(ui, field_label, |ui| {
                 let resp = ui.text_edit_singleline(value);
                 if resp.changed() {
                     *valid = crate::hotkey::parse_hotkey(value).is_some();
@@ -463,6 +462,7 @@ impl SettingsEditor {
                     }
                 }
                 hotkey_indicator(ui, *valid);
+                resp
             });
         }
     }
@@ -987,10 +987,10 @@ enum ClipboardModifySettingsCommand {
 }
 
 fn hotkey_indicator(ui: &mut egui::Ui, valid: bool) {
-    let color = if valid {
-        egui::Color32::GREEN
+    let (tone, label) = if valid {
+        (crate::gui::theme::widgets::StatusTone::Success, "Valid")
     } else {
-        egui::Color32::RED
+        (crate::gui::theme::widgets::StatusTone::Error, "Invalid")
     };
-    ui.add(egui::Label::new(egui::RichText::new("●").color(color)));
+    crate::gui::theme::widgets::semantic_status(ui, tone, label, None);
 }

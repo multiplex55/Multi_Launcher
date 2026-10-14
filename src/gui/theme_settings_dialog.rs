@@ -1,3 +1,4 @@
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::theme::{
     ChromeIcon, ResolvedTheme, SystemAppearance, TextRole, chrome_icon_button,
     chrome_small_icon_button, effective_color_scheme, resolve_theme, text_style_for_role,
@@ -221,11 +222,7 @@ pub fn ui(
         .default_width(980.0)
         .show(ctx, |ui| {
             if let Some(err) = &state.last_error {
-                ui.label(
-                    egui::RichText::new(err)
-                        .text_style(text_style_for_role(TextRole::Error))
-                        .color(egui::Color32::RED),
-                );
+                widgets::semantic_status(ui, StatusTone::Error, "Error", Some(err));
                 ui.separator();
             }
 
@@ -258,9 +255,11 @@ pub fn ui(
 
             if state.is_conflicted() {
                 ui.horizontal(|ui| {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "The saved theme changed while this draft was open.",
+                    widgets::semantic_status(
+                        ui,
+                        StatusTone::Warning,
+                        "Warning",
+                        Some("The saved theme changed while this draft was open."),
                     );
                     if chrome_icon_button(
                         ui,
@@ -276,10 +275,7 @@ pub fn ui(
                 ui.separator();
             }
 
-            ui.label(
-                egui::RichText::new("Customize launcher colors and theme mode.")
-                    .text_style(text_style_for_role(TextRole::Metadata)),
-            );
+            widgets::secondary_help(ui, "Customize launcher colors and theme mode.");
             ui.separator();
 
             let mut changed = false;
@@ -322,26 +318,28 @@ pub fn ui(
 
             ui.separator();
             ui.horizontal(|ui| {
-                if chrome_icon_button(
+                let reset = chrome_icon_button(
                     ui,
                     ChromeIcon::Reset,
                     "theme.reset-all",
                     "Reset all to default",
-                )
-                .clicked()
-                {
+                );
+                if widgets::with_button_emphasis(ui, reset, ButtonEmphasis::Destructive).clicked() {
                     let presets = state.draft.named_presets.clone();
                     state.draft = ThemeSettings::default();
                     state.draft.named_presets = presets;
                     state.dirty = true;
                     draft_changed = true;
                 }
-                if chrome_icon_button(ui, ChromeIcon::Cancel, "theme.cancel", "Cancel").clicked() {
+                let cancel = chrome_icon_button(ui, ChromeIcon::Cancel, "theme.cancel", "Cancel");
+                if widgets::with_button_emphasis(ui, cancel, ButtonEmphasis::Ordinary).clicked() {
                     *open = false;
                 }
                 if ui
                     .add_enabled_ui(state.dirty && state.can_commit(), |ui| {
-                        chrome_icon_button(ui, ChromeIcon::Apply, "theme.apply", "Apply")
+                        let apply =
+                            chrome_icon_button(ui, ChromeIcon::Apply, "theme.apply", "Apply");
+                        widgets::with_button_emphasis(ui, apply, ButtonEmphasis::Ordinary)
                     })
                     .inner
                     .clicked()
@@ -376,7 +374,8 @@ pub fn ui(
                 }
                 if ui
                     .add_enabled_ui(state.dirty && state.can_commit(), |ui| {
-                        chrome_icon_button(ui, ChromeIcon::Save, "theme.save", "Save")
+                        let save = chrome_icon_button(ui, ChromeIcon::Save, "theme.save", "Save");
+                        widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary)
                     })
                     .inner
                     .clicked()
@@ -428,12 +427,8 @@ fn system_appearance(ctx: &egui::Context) -> SystemAppearance {
     }
 }
 
-fn section_heading(ui: &mut egui::Ui, title: &str) {
-    ui.label(
-        egui::RichText::new(title)
-            .text_style(text_style_for_role(TextRole::SectionHeading))
-            .strong(),
-    );
+fn section_heading(ui: &mut egui::Ui, title: &str, description: Option<&str>) {
+    widgets::compact_section_heading(ui, title, description);
 }
 
 fn defaults_for_mode(mode: ThemeMode) -> ColorScheme {
@@ -445,7 +440,11 @@ fn defaults_for_mode(mode: ThemeMode) -> ColorScheme {
 
 fn section_base_mode(ui: &mut egui::Ui, mode: &mut ThemeMode) -> bool {
     let mut changed = false;
-    section_heading(ui, "Base mode");
+    section_heading(
+        ui,
+        "Base mode",
+        Some("Follow the system setting or choose a fixed appearance."),
+    );
     ui.horizontal(|ui| {
         changed |= ui
             .selectable_value(mode, ThemeMode::System, "System")
@@ -471,7 +470,11 @@ const CURATED_PRESETS: [(&str, &str); 6] = [
 ];
 
 fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> bool {
-    section_heading(ui, "Palettes");
+    section_heading(
+        ui,
+        "Palettes",
+        Some("Choose a saved palette or start from a curated preset."),
+    );
     let active_name = if state.draft.mode == ThemeMode::Custom {
         state
             .draft
@@ -603,7 +606,7 @@ fn section_accent(
     accent: &mut Option<ThemeColor>,
     palette_accent: ThemeColor,
 ) -> bool {
-    section_heading(ui, "Accent");
+    section_heading(ui, "Accent", None);
     let mut changed = false;
     ui.horizontal(|ui| {
         let mut enabled = accent.is_some();
@@ -620,7 +623,7 @@ fn section_accent(
 
 fn section_core_surfaces(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    section_heading(ui, "Core surfaces");
+    section_heading(ui, "Core surfaces", None);
     changed |= color_row(ui, "Window background", &mut scheme.window_fill);
     changed |= color_row(ui, "Panel background", &mut scheme.panel_fill);
     if chrome_small_icon_button(
@@ -639,7 +642,7 @@ fn section_core_surfaces(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: Them
 
 fn section_text_and_links(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    section_heading(ui, "Text and links");
+    section_heading(ui, "Text and links", None);
     changed |= color_row(ui, "Text", &mut scheme.text);
     changed |= color_row(ui, "Hyperlink", &mut scheme.hyperlink);
     if chrome_small_icon_button(
@@ -658,7 +661,7 @@ fn section_text_and_links(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: The
 
 fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    section_heading(ui, "Interactive widgets");
+    section_heading(ui, "Interactive widgets", None);
     changed |= color_row(ui, "Inactive fill", &mut scheme.widget_inactive_fill);
     changed |= color_row(ui, "Inactive stroke", &mut scheme.widget_inactive_stroke);
     changed |= color_row(ui, "Hovered fill", &mut scheme.widget_hovered_fill);
@@ -681,7 +684,7 @@ fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode)
 
 fn section_selection(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    section_heading(ui, "Selection and highlight");
+    section_heading(ui, "Selection and highlight", None);
     changed |= color_row(ui, "Selection background", &mut scheme.selection_bg);
     changed |= color_row(ui, "Selection stroke", &mut scheme.selection_stroke);
     if chrome_small_icon_button(
@@ -700,7 +703,7 @@ fn section_selection(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMod
 
 fn section_semantic(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
     let mut changed = false;
-    section_heading(ui, "Semantic accents");
+    section_heading(ui, "Semantic accents", None);
     changed |= color_row(ui, "Success", &mut scheme.success_accent);
     changed |= color_row(ui, "Warning", &mut scheme.warn_accent);
     changed |= color_row(ui, "Error", &mut scheme.error_accent);
@@ -771,7 +774,7 @@ fn reset_semantic_to_mode_defaults(scheme: &mut ColorScheme, mode: ThemeMode) {
 
 fn preview(ui: &mut egui::Ui, resolved: ResolvedTheme) {
     let palette = resolved.palette;
-    section_heading(ui, "Live preview");
+    section_heading(ui, "Live preview", None);
     egui::Frame::NONE
         .fill(to_egui(palette.window_surface))
         .stroke(egui::Stroke::new(1.0_f32, to_egui(palette.control_border)))
