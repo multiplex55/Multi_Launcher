@@ -549,3 +549,7 @@ Compact Grid LISTING gate independentlyacceptedwithoutfindings: F26D/6E7 eachnat
 Compact Grid pairterminalnative0/0, all60records1200timings7vectors/exactcrossarmmetadataIDsworkvalidate; index52627f8ea605e692158d3e0ba8702c5d7c9c122c90b57e588be0e317fd8568eb. Painted14×cols/allcoldN>painted supportsfreshfullworkwithoutmisscountclaim. Fullcoldmediansmostlyclose/mixedtails; adverse10k3colp50131.9753→136.05ms/p95142.5866→154.2881ms retained. Independentreviewpending/HOLDadoption/no5%waiver/noautomaticROOTwarmresolution or productionpass.
 
 Compact Grid ACTUALEVIDENCE independentlyaccepted nointegrityfindings/all60records1200timings/7vectors andoffscreenfullproof. Mixed12/30p50 and14/30p95higher; specific10k3colcold adversesignal unresolved/no5%allowance/HOLDadoption. Noabsenceoffullregression/ROOTwarm/originalparity/productionclaim. Plannerread-onlyonboundedreproducibilitynextstep; no body/source/build activated.
+
+Planner recommends one reverse-order Grid pair (compact6E7 then baselineF26) to test recurrence of the unresolved adverse full-layout case. Keep the first pair unchanged and report every case separately. Additional budget60 records/1200 timings; no rebuild/source/listing repeat/new timer/best selection/automatic third pair. Packet pending review; no body activated.
+
+Reverse-order Grid reproducibility packet accepted: one candidate→baseline pair, same existing artifacts/owner/budget, no third pair or adoption. Keep both orders/all cases; disappearance cannot prove order causation or pass. Plan checkpoint then parent native execution.

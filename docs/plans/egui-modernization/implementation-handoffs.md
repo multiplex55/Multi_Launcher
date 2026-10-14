@@ -1346,3 +1346,20 @@ Compact Grid packet independently accepted without substantivecorrections. Sourc
 Compact Grid LISTING gate independentlyacceptedwithoutfindings: F26D/6E7 eachnative0/exactoneignoredGridowner/no body, stdout174C006C/emptyerr, gateC39DAB32; source/executable/acceptedartifactchains/cleanenv verified. Localcheckpoint then separatelyactivatedoneGridpair60records1200timings. No performance/adoptionclearance; see receipts/m2a-compact-grid-full-output.md.
 
 Compact Grid ACTUALEVIDENCE independentlyaccepted nointegrityfindings/all60records1200timings/7vectors andoffscreenfullproof. Mixed12/30p50 and14/30p95higher; specific10k3colcold adversesignal unresolved/no5%allowance/HOLDadoption. Noabsenceoffullregression/ROOTwarm/originalparity/productionclaim. Plannerread-onlyonboundedreproducibilitynextstep; no body/source/build activated.
+
+
+## M2-A proposed reverse-order Grid reproducibility check
+
+Status: pending review, not activated. Dependency: first Grid pair accepted as evidence at `fcaf9552`; compact adoption remains on hold. The 10,000-item, three-column cold case has an unresolved adverse signal. This follow-up tests whether that behavior recurs when arm order reverses. It is a new reproducibility question addressing the first pair's known order limitation, not a rerun to obtain a better result. Preserve the first pair unchanged.
+
+Reuse the accepted compact6E7 and baselineF26 executables and frozen bindings. No rebuild, source edit, listing repeat, private-test repeat, timer or owner change. Parent owns native execution, documentation and Git. Use fresh reverse-order output directories under `compact-measurement-001/grid-full-comparison-001`; verify source and executable hashes before/after.
+
+Run exactly one candidate body followed by exactly one baseline body. Keep the exact existing Grid owner, ignored/single-thread/no-capture arguments, Full mode, release profile, honest arm source labels, PERF1/clipboard1 controls and sanitized QA/profile/Rustflags/experiment environment. No concurrent benchmark or build work. Direct native logs and exit receipts precede parsing.
+
+Fixed additional budget: 30 existing cases per arm, five warmups/twenty measured samples each; 60 records/1,200 timings and seven vectors. Native0 and exactly one passed owner per arm, unchanged bindings, stable corresponding fixture/output/structural/revision/viewport/work identities, actual Grid painted-cell counts and cold measured>painted support remain required. No exclusions, best-run selection or automatic third pair. Parser failures never authorize a body repeat.
+
+Report both pairs separately by actual execution order. Compare medians, p95 and ranges for every corresponding case, emphasizing but not limiting analysis to the adverse 10k/three-column/cold case. Do not average away unfavorable data or apply an arbitrary under-5% allowance. If the adverse direction recurs, maintain HOLD and triage the responsible boundary before adoption. If it reverses or disappears, report sensitivity to run conditions and remaining uncertainty. That does not prove order caused the difference and is not an automatic pass. Any port requires a separate reviewed decision considering both pairs and mixed ROOT warm evidence.
+
+This check addresses reproducibility of the directly changed full-output path only. It does not establish original parity, qualify live GUI guards, complete Notes/query/other M2-A gates or open Track B. Local plan checkpoint precedes activation; stop for independent actual-result review after the single reverse pair.
+
+Reverse-order Grid packet independently accepted without substantive corrections. The extra pair addresses a distinct recurrence question; keep both orders and all cases. Recurrence requires HOLD/triage; reversal/disappearance is sensitivity to run conditions, not proof of order causation or automatic acceptance. No third pair or adoption is cleared. Local plan checkpoint precedes native execution.
