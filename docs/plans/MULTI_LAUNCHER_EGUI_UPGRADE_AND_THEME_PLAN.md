@@ -382,7 +382,7 @@ Current evidence and ownership are authoritative in `egui-modernization/status.m
 - [x] M3-B actual runtime application
 - [x] M3-C live preview and presets
 - [x] M3-D typography and icons
-- [ ] M4-A root search polish
+- [x] M4-A root search polish
 - [ ] M4-B list/grid polish
 - [ ] M4-C common UI primitives
 - [ ] M5-A settings and theme editor

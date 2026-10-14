@@ -2105,6 +2105,75 @@ impl LauncherApp {
     }
 }
 
+struct RootQueryEditorPresentation {
+    output: egui::text_edit::TextEditOutput,
+    #[cfg(test)]
+    search_icon_rect: egui::Rect,
+}
+
+fn show_root_query_editor(
+    ui: &mut egui::Ui,
+    query: &mut String,
+    input_id: egui::Id,
+    query_scale: f32,
+    interactive: bool,
+) -> RootQueryEditorPresentation {
+    let scale = if query_scale.is_finite() {
+        query_scale.max(0.0).min(5.0)
+    } else {
+        1.0
+    };
+    // Match the font selection used by TextEdit's native Default selection,
+    // including any local override_font_id or override_text_style.
+    let query_font = egui::FontSelection::Default.resolve(ui.style());
+    let query_text_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&query_font)) + ui.spacing().extra_text_line_spacing;
+    let mut search_icon_rect = egui::Rect::NOTHING;
+    let output = ui
+        .horizontal(|ui| {
+            search_icon_rect = crate::gui::theme::reserve_search_icon(ui, query_text_height);
+            let padding = ui.spacing().button_padding * scale;
+            // Bound the horizontal inset by the remaining width so a resized
+            // launcher always leaves room for editable query text.
+            let horizontal_padding = padding.x.min(ui.available_width().max(0.0) * 0.2);
+            let margin = egui::Margin::symmetric(
+                horizontal_padding.round().clamp(0.0, i8::MAX as f32) as i8,
+                padding.y.round().clamp(0.0, i8::MAX as f32) as i8,
+            );
+
+            // Keep egui's native frame and cursor, selection, and IME path.
+            egui::TextEdit::singleline(query)
+                .id(input_id)
+                .hint_text("Search…")
+                .margin(margin)
+                .interactive(interactive)
+                .desired_width(f32::INFINITY)
+                .show(ui)
+        })
+        .inner;
+
+    crate::gui::theme::paint_search_icon(ui, search_icon_rect, output.galley.size().y);
+
+    if output.response.has_focus() {
+        // Draw the active semantic focus token over the native response frame.
+        let active = ui.style().interact(&output.response);
+        let focus_stroke = active.bg_stroke;
+        let corner_radius = active.corner_radius;
+        ui.painter().rect_stroke(
+            output.response.rect,
+            corner_radius,
+            focus_stroke,
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    RootQueryEditorPresentation {
+        output,
+        #[cfg(test)]
+        search_icon_rect,
+    }
+}
+
 impl LauncherApp {
     pub(super) fn invalidate_root_list_results(&mut self) {
         self.track_c_query_observer.results_invalidated();
@@ -2951,12 +3020,13 @@ impl LauncherApp {
             if self.should_render_inline_error()
                 && let Some(err) = &self.error
             {
+                let error_color = ui.visuals().error_fg_color;
                 ui.label(
                     egui::RichText::new(err)
                         .text_style(crate::gui::theme::text_style_for_role(
                             crate::gui::theme::TextRole::Error,
                         ))
-                        .color(Color32::RED),
+                        .color(error_color),
                 );
             }
 
@@ -2977,16 +3047,14 @@ impl LauncherApp {
                 };
 
                 let text_edit_started = self.track_c_query_observer.tentative_start();
-                let mut query_output = ui
-                    .horizontal(|ui| {
-                        crate::gui::theme::paint_search_icon(ui);
-                        egui::TextEdit::singleline(&mut self.query)
-                            .id(input_id)
-                            .interactive(!action_sheet_blocks_launcher_input)
-                            .desired_width(f32::INFINITY)
-                            .show(ui)
-                    })
-                    .inner;
+                let mut query_output = show_root_query_editor(
+                    ui,
+                    &mut self.query,
+                    input_id,
+                    self.query_scale,
+                    !action_sheet_blocks_launcher_input,
+                )
+                .output;
                 if self.move_cursor_end
                     && !action_sheet_blocks_launcher_input
                     && query_output.response.enabled()
@@ -3046,7 +3114,13 @@ impl LauncherApp {
                 if self.query_autocomplete && !use_dashboard && !self.suggestions.is_empty() {
                     ui.vertical(|ui| {
                         for s in &self.suggestions {
-                            ui.colored_label(Color32::GRAY, s);
+                            ui.label(
+                                egui::RichText::new(s)
+                                    .text_style(crate::gui::theme::text_style_for_role(
+                                        crate::gui::theme::TextRole::Metadata,
+                                    ))
+                                    .weak(),
+                            );
                         }
                     });
                 }
@@ -21263,6 +21337,76 @@ mod tests {
             .unwrap();
         assert_eq!(range.primary.index.0, query.chars().count());
         assert_eq!(range.secondary.index.0, query.chars().count());
+    }
+
+    #[test]
+    fn root_query_presentation_stays_usable_when_narrow_and_scaled() {
+        let ctx = egui::Context::default();
+        let query_id = egui::Id::new("query_input");
+        let mut query = String::new();
+        let override_font = egui::FontId::new(37.0, egui::FontFamily::Monospace);
+        let mut presentation = None;
+        let mut expected_galley_height = None;
+        let mut prior_focus_retained = false;
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(180.0, 120.0),
+                )),
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                let focus_owner = ui.button("Existing focus owner");
+                let focus_owner_id = focus_owner.id;
+                focus_owner.request_focus();
+                scale_ui(ui, 1.75, |ui| {
+                    let mut style = (**ui.style()).clone();
+                    style.override_font_id = Some(override_font.clone());
+                    style.override_text_style = Some(egui::TextStyle::Heading);
+                    ui.set_style(style);
+                    presentation =
+                        Some(show_root_query_editor(ui, &mut query, query_id, 1.75, true));
+                    expected_galley_height = Some(
+                        ui.fonts_mut(|fonts| fonts.row_height(&override_font))
+                            + ui.spacing().extra_text_line_spacing,
+                    );
+                    prior_focus_retained =
+                        ui.ctx().memory(|memory| memory.has_focus(focus_owner_id));
+                });
+            },
+        );
+        output.drop_without_applying_deltas();
+
+        let presentation = presentation.expect("the query editor is rendered");
+        let actual_galley_font = presentation.output.galley.job.sections[0]
+            .format
+            .font_id
+            .clone();
+        assert_eq!(presentation.output.response.id, query_id);
+        assert_eq!(actual_galley_font, override_font);
+        assert!(
+            (presentation.output.galley.size().y - expected_galley_height.unwrap()).abs() < 0.1,
+            "layout height follows the actual overridden galley font"
+        );
+        assert!(presentation.output.response.rect.width() > 0.0);
+        assert!(presentation.output.response.rect.height() > 0.0);
+        assert!(presentation.output.text_clip_rect.width() > 0.0);
+        assert!(presentation.output.text_clip_rect.height() > 0.0);
+        assert!(
+            presentation.search_icon_rect.right() <= presentation.output.text_clip_rect.left(),
+            "the decorative search mark stays outside the editable/caret region"
+        );
+        assert!(!presentation.output.response.has_focus());
+        assert!(
+            prior_focus_retained,
+            "the query must not steal existing focus"
+        );
+        assert!(
+            query.is_empty(),
+            "the placeholder does not become query text"
+        );
     }
 
     #[test]

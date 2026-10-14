@@ -6,6 +6,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 
 | Presentation owner | Group | Status / evidence |
 |---|---|---|
+| `src/gui/render.rs` | M4-A/B | M4-A query surface/input contracts accepted; M4-B result polish pending; actual themed capture pending |
 | `src/gui/actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/add_action_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/add_bookmark_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -50,7 +51,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/snippet_prompt_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/tempfile_alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/tempfile_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | pending surface polish/review; runtime inheritance available |
+| `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | M3-C transaction and M3-D typography/icons accepted; M5-A adaptive shell polish pending; native visual gap |
 | `src/gui/timer_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/toast_log_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/todo_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |

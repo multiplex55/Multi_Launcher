@@ -498,14 +498,23 @@ pub(crate) fn paint_brand_badge(ui: &mut egui::Ui) {
     );
 }
 
-pub(crate) fn paint_search_icon(ui: &mut egui::Ui) {
+pub(crate) fn reserve_search_icon(ui: &mut egui::Ui, text_height: f32) -> egui::Rect {
     let height = ui.spacing().interact_size.y;
-    let icon_size = ui.spacing().icon_width.min(height).max(12.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(icon_size, height), egui::Sense::hover());
+    let available_width = ui.available_width().max(0.0);
+    // Keep the decorative search mark in proportion to the query text while
+    // reserving most of a narrow root window for the actual editor.
+    let icon_width = text_height.min(height).min(available_width * 0.22);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(icon_width, height), egui::Sense::hover());
+    rect
+}
+
+pub(crate) fn paint_search_icon(ui: &egui::Ui, bounds: egui::Rect, text_height: f32) {
+    let icon_size = text_height.min(bounds.width()).min(bounds.height());
+    let icon_rect = egui::Rect::from_center_size(bounds.center(), egui::vec2(icon_size, icon_size));
     paint_chrome_icon(
         ui.painter(),
         ChromeIcon::Search,
-        rect,
+        icon_rect,
         ui.visuals().text_color(),
     );
 }
