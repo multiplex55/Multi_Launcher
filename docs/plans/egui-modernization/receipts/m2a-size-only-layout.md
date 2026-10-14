@@ -53,3 +53,15 @@ No release archive, canonical parity body, performance/control body, GPU/native 
 ## Next gate
 
 After this local source-contract checkpoint, prepare exactly one canonical-release candidate artifact with frozen source/profile/executable and no-body listing review. Actual Trace parity review precedes the separately authorized matched baseline/candidate observer-control pair. Preserve existing assertions and all samples. Operation-only differences require actual classified evidence and review; no silent adapters or count changes. Production adoption and original/current Full ROOT qualification remain a later gate. Keep checkpoints local.
+
+## Completed canonical-release artifact gate
+
+The single canonical archive build completed native0 in728.0730448s; the fresh full no-body listing completed native0 in2.3381692s. Archive SHA-256 `f62ca5c635234dd1796d691faa2f4818bcbedd64b8f6fe24dae6cfabe2c2a4a4` (30,635,445 bytes). Built/extracted executable SHA-256 `ebbb2dc3ba820ff4780a64a8cbc370bd33211d4f1c8f3e70c12cf7184951663f` (87,190,528 bytes); extracted path is `size-only-layout-001/extract-canonical-release-listing-001/target/release/deps/multi_launcher-4b74913c56898d7e.exe`.
+
+The listing contains5,239 multi_launcher test cases. Both exact ignored owners, `track_c_diagnostic_root_list_raw_hit_precedes_shaper_setup` and `track_c_diagnostic_root_list_release_observer_control`, are present; full-list mismatch reason `ignored` is expected. No test body ran. All nine frozen source bindings and baseline archive preservation were rechecked. Parent independently verified127 unique linked file bindings, the x86_64 PE header, exact listing owners/count, source/version/environment closure and native result records. Independent artifact review accepted without findings.
+
+Receipts are in the outer candidate `receipts` directory: input SHA `4c49dc24950f8f54d0cebba106e2ab98e2677bcc06060abd8448a9f552f9d86d`, runner `be1512cc0ae15f64591b6d05e6b8d6596b3a87bacdbfdda5114c743f15b1a70c`, build result `c28a92353a5a36bfe329fad7d5fc7246d6d02a8cb466d79014b2ed85e0337eb5`, list result `a1b827785917d3a0141260fdbe1aa66b12d62536a421799f14a8e398a6d7ac05`. Direct native logs are retained. A Python3.11 TOML parsing incompatibility was corrected in the ignored runner before launch; no build/body was consumed by that preflight failure.
+
+Default-font asset supplement `bcca2955e6d6e26c071671574144b730a899832de0bf24578574c0b598c1d609` is explicitly observed during the live build, not pre-launch; all four assets and cached crate bytes match the accepted baseline. Immutable input was not rewritten. Parent independently observed the owned root rustc36512 during build with `--test`, `-C opt-level=3`, `-C strip=debuginfo`; canonical release/MSVC/default-feature/override-free provenance was accepted. This compile evidence is not parity or performance acceptance.
+
+Actual candidate Trace parity is the next separate gate. No timing/control/production body has run for this candidate.
