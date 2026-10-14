@@ -187,7 +187,7 @@ mod tests {
         let navigation =
             ctx.input_mut(|input| consume_physical_numpad_navigation(focused, input, &probe));
         let remaining = ctx.input(|input| input.events.clone());
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
         (navigation, remaining, probe.calls.get())
     }
 
@@ -299,7 +299,7 @@ mod tests {
         assert!(navigation.is_empty());
         assert_eq!(ctx.input(|input| input.events.clone()), events);
         assert_eq!(probe.calls.get(), 1);
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]

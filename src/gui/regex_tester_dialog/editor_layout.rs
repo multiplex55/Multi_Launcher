@@ -1,7 +1,10 @@
 //! Paste-time glyph guard. The full String remains owned by the editor/session;
 //! copying, hashing and undo bookkeeping still have input-size-dependent costs.
 
-use eframe::egui::{self, text::LayoutJob};
+use eframe::egui::{
+    self,
+    text::{ByteIndex, LayoutJob},
+};
 
 pub(super) fn oversized_job(text: &str, maximum_bytes: usize) -> Option<LayoutJob> {
     if text.len() <= maximum_bytes {
@@ -11,7 +14,13 @@ pub(super) fn oversized_job(text: &str, maximum_bytes: usize) -> Option<LayoutJo
         text: text.to_owned(),
         ..Default::default()
     };
-    // epaint 0.27 returns an elided empty galley before paragraph/glyph layout.
+    // egui 0.36 validates section coverage before its max_rows == 0 early return.
+    // This full-range section keeps the intentionally glyph-free job valid.
+    job.sections.push(egui::text::LayoutSection {
+        leading_space: 0.0,
+        byte_range: ByteIndex::ZERO..ByteIndex(text.len()),
+        format: Default::default(),
+    });
     job.wrap.max_rows = 0;
     Some(job)
 }
@@ -21,11 +30,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glyph_guard_retains_full_unicode_job_and_elides_before_sections() {
+    fn glyph_guard_retains_full_unicode_job_with_one_valid_full_text_section() {
         let text = "🦀".repeat(256 * 1024);
         let job = oversized_job(&text, 64 * 1024).unwrap();
         assert_eq!(job.text, text);
-        assert!(job.sections.is_empty());
+        assert_eq!(job.sections.len(), 1);
+        assert_eq!(
+            job.sections[0].byte_range,
+            ByteIndex::ZERO..ByteIndex(text.len())
+        );
+        assert_eq!(job.sections[0].format, egui::TextFormat::default());
         assert_eq!(job.wrap.max_rows, 0);
         let ctx = egui::Context::default();
         let output = ctx.run_ui(egui::RawInput::default(), |ui| {

@@ -9105,7 +9105,8 @@ mod tests {
             let frame = state.frame_index;
             state.frame_index += 1;
             let _ =
-                run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new());
+                run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
+                    .drop_without_applying_deltas();
             let _ = track_c_validate_root_list_state(&state);
             drop(state);
         }
@@ -12869,14 +12870,8 @@ mod tests {
         app.follow_mouse = false;
         focus_launcher_query(&ctx, &mut app);
         for frame in 0..9 {
-            drop(run_root_list_frame(
-                &ctx,
-                &mut app,
-                frame,
-                960.0,
-                640.0,
-                Vec::new(),
-            ));
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
         }
         app.dashboard_data_cache.wait_for_refresh();
         assert_eq!(app.plugins.search_generation(), provider_generation);
@@ -13186,7 +13181,7 @@ mod tests {
         state.frame_index = state.frame_index.saturating_add(1);
         let started = Instant::now();
         let output = run_root_list_frame(&state.ctx, &mut state.app, frame, width, height, events);
-        drop(output);
+        output.drop_without_applying_deltas();
         let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         let after = state.app.track_c_query_observer.snapshot();
         let provider_calls_after = state.provider_calls.load(Ordering::SeqCst) as u64;
@@ -14007,6 +14002,8 @@ mod tests {
 
         let ctx = egui::Context::default();
         let mut app = root_list_app_at(&ctx, catalog.to_vec(), root);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         // Launcher construction supplies known-folder aliases when no settings
         // file exists. This fixture measures only its synthetic catalog.
         app.folder_aliases.clear();
@@ -14629,7 +14626,7 @@ mod tests {
             let observation = track_c2c_validate_owner(&state, &output);
             assert_eq!(observation.work_counters[0], 101);
             assert_eq!(observation.work_counters[14], 5);
-            drop(output);
+            output.drop_without_applying_deltas();
             drop(state);
         }
         drop(workspace);
@@ -14714,7 +14711,7 @@ mod tests {
                 geometry_before.rebuild_count + 1 + field as u64,
                 "changed Action field invalidates geometry"
             );
-            drop(output);
+            output.drop_without_applying_deltas();
         }
 
         let reordered = expected_catalog.iter().cloned().rev().collect::<Vec<_>>();
@@ -14730,7 +14727,7 @@ mod tests {
             before_order_refresh + 1,
             "a changed ordered result vector is replaced"
         );
-        drop(output);
+        output.drop_without_applying_deltas();
 
         let before_text_edit = state.app.root_list_geometry.result_generation_for_test();
         let same_output = state.app.results.clone();
@@ -14872,6 +14869,8 @@ mod tests {
         let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
         let results = (0..120).map(root_list_action).collect::<Vec<_>>();
         let mut app = root_list_app_at(&ctx, results, workspace.root());
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
         app.update_action_cache();
         app.query = TRACK_C2C_QUERY.into();
         app.handle_query_text_changed();
@@ -15081,7 +15080,8 @@ mod tests {
         let invocation_id = 77;
         let revision = arm_track_c_frame_sample(&mut app, invocation_id);
 
-        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new())
+            .drop_without_applying_deltas();
 
         let generation = app.root_list_geometry.result_generation;
         assert!(!app.visibility_revision.complete_first_usable_frame(
@@ -15111,7 +15111,8 @@ mod tests {
         let revision = arm_track_c_frame_sample(&mut app, invocation_id);
         app.track_c_test_provider_change_at_frame_end = true;
 
-        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new())
+            .drop_without_applying_deltas();
 
         let current_provider_revision = app.plugins.search_generation();
         assert_ne!(accepted_provider_revision, current_provider_revision);
@@ -15149,7 +15150,8 @@ mod tests {
         let revision = arm_track_c_frame_sample(&mut app, invocation_id);
         app.track_c_test_catalog_version_change_at_frame_end = true;
 
-        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new());
+        run_root_list_frame(&ctx, &mut app, 0, 960.0, 700.0, Vec::new())
+            .drop_without_applying_deltas();
 
         assert_ne!(
             accepted_catalog_versions,
@@ -17016,6 +17018,7 @@ mod tests {
             command,
             egui::ViewportCommand::Visible(false) | egui::ViewportCommand::Minimized(true)
         )));
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -17215,6 +17218,7 @@ mod tests {
             )));
             assert!(app.visible_flag.load(Ordering::SeqCst));
             assert!(app.last_visible);
+            output.drop_without_applying_deltas();
         });
         #[cfg(windows)]
         {
@@ -17279,6 +17283,7 @@ mod tests {
             let next_generation = app.screen_draw_controller.state().generation().unwrap();
             let transaction = observer.begin_transaction(next_generation, desktop);
             assert_eq!(transaction.original_snapshot().rect(), onscreen);
+            output.drop_without_applying_deltas();
         });
         #[cfg(windows)]
         {
@@ -17347,6 +17352,7 @@ mod tests {
             )));
             assert!(app.visible_flag.load(Ordering::SeqCst));
             assert!(app.last_visible);
+            output.drop_without_applying_deltas();
         });
         #[cfg(windows)]
         {
@@ -17408,6 +17414,7 @@ mod tests {
             let next_generation = app.screen_draw_controller.state().generation().unwrap();
             let transaction = observer.begin_transaction(next_generation, desktop);
             assert_eq!(transaction.original_snapshot().rect(), onscreen);
+            output.drop_without_applying_deltas();
         });
         #[cfg(windows)]
         {
@@ -17577,6 +17584,9 @@ mod tests {
         assert!(app.last_visible);
         assert!(app.mkmacro_dialog.open);
         assert!(app.visibility_revision.current() > restore_revision);
+        restored.drop_without_applying_deltas();
+        hidden.drop_without_applying_deltas();
+        shown.drop_without_applying_deltas();
     }
 
     #[test]
@@ -17681,6 +17691,7 @@ mod tests {
             command,
             egui::ViewportCommand::Visible(true) | egui::ViewportCommand::Focus
         )));
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -17727,6 +17738,7 @@ mod tests {
                 command,
                 egui::ViewportCommand::Focus | egui::ViewportCommand::Minimized(false)
             )));
+            output.drop_without_applying_deltas();
         });
         #[cfg(windows)]
         {
@@ -17821,6 +17833,7 @@ mod tests {
                 command,
                 egui::ViewportCommand::Visible(true) | egui::ViewportCommand::Focus
             )));
+            output.drop_without_applying_deltas();
         });
         #[cfg(windows)]
         {
@@ -18029,6 +18042,7 @@ mod tests {
                 root_commands(&output)
                     .contains(&egui::ViewportCommand::InnerSize(egui::vec2(900.0, 650.0)))
             );
+            output.drop_without_applying_deltas();
             let (next, queued) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
                     app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
@@ -18036,6 +18050,7 @@ mod tests {
                 });
             assert!(queued.is_empty());
             assert_root_activation_requests(&next, &queued);
+            next.drop_without_applying_deltas();
         }
     }
 
@@ -18067,6 +18082,7 @@ mod tests {
                 });
             assert!(queued.is_empty());
             assert_root_activation_requests(&initial, &queued);
+            initial.drop_without_applying_deltas();
             assert_eq!(app.root_window_bridge.identity().0, 0);
             assert!(app.restore_flag.load(Ordering::SeqCst));
             if hide_before_attachment {
@@ -18088,6 +18104,7 @@ mod tests {
                 }
             );
             assert_root_activation_requests(&qualified, &queued);
+            qualified.drop_without_applying_deltas();
             assert_eq!(app.last_visible, !hide_before_attachment);
             assert_eq!(
                 app.visible_flag.load(Ordering::SeqCst),
@@ -18153,12 +18170,14 @@ mod tests {
                 |_| {},
             );
             app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
-                .0;
+                .0
+                .drop_without_applying_deltas();
             output
         });
         assert_eq!(queued, [(initial_revision, 42)]);
         assert!(queued_visibility.is_none());
         assert_root_activation_requests(&output, &queued);
+        output.drop_without_applying_deltas();
         let (shown, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
             let mut batch = VisibilityToggleBatch::default();
             batch.record_toggle_ordered_with_invocation(
@@ -18180,7 +18199,8 @@ mod tests {
                 (900.0, 650.0),
             );
             app.run_root_frame_for_test(&ctx, egui::RawInput::default(), false)
-                .0;
+                .0
+                .drop_without_applying_deltas();
             assert!(!app.last_visible);
             let mut batch = VisibilityToggleBatch::default();
             batch.record_toggle_ordered_with_invocation(
@@ -18206,6 +18226,7 @@ mod tests {
         });
         assert_eq!(queued, [(initial_revision + 2, 42)]);
         assert_root_activation_requests(&shown, &queued);
+        shown.drop_without_applying_deltas();
         assert_eq!(app.visibility_revision.invocation_id(), Some(72));
         assert!(app.visible_flag.load(Ordering::SeqCst) && app.last_visible);
     }
@@ -18263,6 +18284,7 @@ mod tests {
             RootFocusIntent::PreserveForeground
         );
         assert!(app.visible_flag.load(Ordering::SeqCst));
+        output.drop_without_applying_deltas();
     }
 
     #[cfg(windows)]
@@ -18372,6 +18394,7 @@ mod tests {
         });
         assert_eq!(queued, [(revision + 1, 42)]);
         assert_root_activation_requests(&output, &queued);
+        output.drop_without_applying_deltas();
         assert_eq!(app.visibility_revision.current(), revision + 1);
         assert_eq!(observer.restored_rects(), [original]);
         assert_eq!(observer.current_rect(), original);
@@ -18428,6 +18451,7 @@ mod tests {
         });
         assert_eq!(queued, [(revision + 2, 42)]);
         assert_root_activation_requests(&output, &queued);
+        output.drop_without_applying_deltas();
         assert_eq!(app.visibility_revision.current(), revision + 2);
         assert_eq!(observer.current_rect(), original);
         assert_eq!(observer.restored_rects(), [original]);
@@ -18516,6 +18540,7 @@ mod tests {
         );
         // These are simulated wake and real queue-admission receipts. The
         // fixture does not observe native OS restoration completion.
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -19044,7 +19069,7 @@ mod tests {
                 .qualify_simulated_wake_for_test()
                 .unwrap();
             let initial_revision = app.visibility_revision.current();
-            let (_, initial_scheduled) =
+            let (discarded_output, initial_scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
                     ctx.begin_pass(egui::RawInput::default());
                     let first = hook_recovery_notice(&app.screen_draw_recovery_bridge)
@@ -19056,6 +19081,7 @@ mod tests {
                     }
                     ctx.end_pass()
                 });
+            discarded_output.drop_without_applying_deltas();
             assert_eq!(initial_scheduled, [(initial_revision + 1, 42)]);
             let mut queued = hook_recovery_notice(&app.screen_draw_recovery_bridge);
             let old = queued
@@ -19110,11 +19136,12 @@ mod tests {
             );
             let mut fresh_notice = hook_recovery_notice(&app.screen_draw_recovery_bridge);
             app.root_window_bridge.request_presentation_reconcile();
-            let (_, scheduled) =
+            let (discarded_output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
                     app.run_root_frame_for_test(&ctx, screen_draw_root_reconcile_input(), false)
                         .0
                 });
+            discarded_output.drop_without_applying_deltas();
             assert_eq!(
                 app.screen_draw_recovery_bridge.activity_epoch(),
                 epoch,
@@ -19138,6 +19165,7 @@ mod tests {
                     .emergency_pause(old_emergency)
                     .unwrap()
             );
+            output.drop_without_applying_deltas();
             let (output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
                     ctx.begin_pass(egui::RawInput::default());
@@ -19178,6 +19206,7 @@ mod tests {
             let fresh = fresh_notice
                 .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
                 .unwrap();
+            output.drop_without_applying_deltas();
             let (output, scheduled) =
                 crate::window_manager::with_launcher_restore_queue_for_test(|| {
                     ctx.begin_pass(egui::RawInput::default());
@@ -19205,6 +19234,7 @@ mod tests {
                     .unwrap()
                     .capture()
             ));
+            output.drop_without_applying_deltas();
         }
     }
 
@@ -19221,7 +19251,7 @@ mod tests {
             .qualify_simulated_wake_for_test()
             .unwrap();
         let initial_revision = app.visibility_revision.current();
-        let (_, initial_scheduled) =
+        let (discarded_output, initial_scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
                 ctx.begin_pass(egui::RawInput::default());
                 let first = hook_recovery_notice(&app.screen_draw_recovery_bridge)
@@ -19230,6 +19260,7 @@ mod tests {
                 app.recover_screen_draw(first);
                 ctx.end_pass()
             });
+        discarded_output.drop_without_applying_deltas();
         assert_eq!(initial_scheduled, [(initial_revision + 1, 42)]);
         let old = hook_recovery_notice(&app.screen_draw_recovery_bridge)
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
@@ -19273,6 +19304,7 @@ mod tests {
         let _ = commands.try_iter().collect::<Vec<_>>();
         let state = app.screen_draw_controller.state().clone();
         let restored = observer.restored_rects();
+        output.drop_without_applying_deltas();
         let (output, scheduled) =
             crate::window_manager::with_launcher_restore_queue_for_test(|| {
                 ctx.begin_pass(egui::RawInput::default());
@@ -19291,16 +19323,19 @@ mod tests {
         let fresh = hook_recovery_notice(&app.screen_draw_recovery_bridge)
             .take_screen_draw_recovery(&app.screen_draw_recovery_bridge)
             .unwrap();
-        let (_, scheduled) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.begin_pass(egui::RawInput::default());
-            app.recover_screen_draw(fresh);
-            ctx.end_pass()
-        });
+        let (discarded_output, scheduled) =
+            crate::window_manager::with_launcher_restore_queue_for_test(|| {
+                ctx.begin_pass(egui::RawInput::default());
+                app.recover_screen_draw(fresh);
+                ctx.end_pass()
+            });
+        discarded_output.drop_without_applying_deltas();
         assert_eq!(scheduled, [(revision + 1, 42)]);
         assert_eq!(app.visibility_revision.current(), revision + 1);
         assert_eq!(observer.current_rect(), original);
         assert_eq!(observer.restored_rects(), [original, original]);
         assert_eq!(app.screen_draw_controller.state(), &state);
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -19623,6 +19658,7 @@ mod tests {
             &crate::screen_draw::ScreenDrawState::NoSession
         );
         assert!(!app.screen_draw_recovery_bridge.is_active());
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -19681,6 +19717,7 @@ mod tests {
             commands.try_iter().collect::<Vec<_>>().as_slice(),
             [crate::screen_draw::NativeSessionCommand::Ghost]
         ));
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -19724,6 +19761,7 @@ mod tests {
                     | egui::ViewportCommand::Visible(true)
                     | egui::ViewportCommand::Minimized(false)
             )));
+            output.drop_without_applying_deltas();
         });
         #[cfg(windows)]
         {
@@ -19752,38 +19790,40 @@ mod tests {
             .unwrap();
         let revision = app.visibility_revision.current();
         acceptance_trace::take_screen_draw_restore_test_events();
-        let (_, scheduled) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
-            ctx.begin_pass(egui::RawInput::default());
-            app.recover_screen_draw(intent);
-            assert_eq!(app.visibility_revision.current(), revision + 1);
-            assert_eq!(app.root_window_bridge.identity(), mismatched_wake_identity);
-            assert_eq!(
-                app.root_window_bridge
-                    .take_simulated_wake_observations_for_test(),
-                [mismatched_wake_identity]
-            );
-            app.root_window_bridge.set_identity_for_test(42);
-            let retry_wake_identity = app
-                .root_window_bridge
-                .qualify_simulated_wake_for_test()
-                .unwrap();
-            assert_eq!(retry_wake_identity.0, 42);
-            assert!(retry_wake_identity.1 > mismatched_wake_identity.1);
-            app.recover_screen_draw(intent);
-            assert_eq!(app.root_window_bridge.identity(), retry_wake_identity);
-            assert_eq!(
-                app.root_window_bridge
-                    .take_simulated_wake_observations_for_test(),
-                [retry_wake_identity]
-            );
-            app.recover_screen_draw(intent);
-            assert!(
-                app.root_window_bridge
-                    .take_simulated_wake_observations_for_test()
-                    .is_empty()
-            );
-            ctx.end_pass()
-        });
+        let (discarded_output, scheduled) =
+            crate::window_manager::with_launcher_restore_queue_for_test(|| {
+                ctx.begin_pass(egui::RawInput::default());
+                app.recover_screen_draw(intent);
+                assert_eq!(app.visibility_revision.current(), revision + 1);
+                assert_eq!(app.root_window_bridge.identity(), mismatched_wake_identity);
+                assert_eq!(
+                    app.root_window_bridge
+                        .take_simulated_wake_observations_for_test(),
+                    [mismatched_wake_identity]
+                );
+                app.root_window_bridge.set_identity_for_test(42);
+                let retry_wake_identity = app
+                    .root_window_bridge
+                    .qualify_simulated_wake_for_test()
+                    .unwrap();
+                assert_eq!(retry_wake_identity.0, 42);
+                assert!(retry_wake_identity.1 > mismatched_wake_identity.1);
+                app.recover_screen_draw(intent);
+                assert_eq!(app.root_window_bridge.identity(), retry_wake_identity);
+                assert_eq!(
+                    app.root_window_bridge
+                        .take_simulated_wake_observations_for_test(),
+                    [retry_wake_identity]
+                );
+                app.recover_screen_draw(intent);
+                assert!(
+                    app.root_window_bridge
+                        .take_simulated_wake_observations_for_test()
+                        .is_empty()
+                );
+                ctx.end_pass()
+            });
+        discarded_output.drop_without_applying_deltas();
         assert_eq!(app.visibility_revision.current(), revision + 2);
         assert_eq!(
             scheduled,
@@ -19827,6 +19867,7 @@ mod tests {
         });
         assert!(queued.is_empty());
         assert_root_activation_requests(&output, &queued);
+        output.drop_without_applying_deltas();
         assert_eq!(app.visibility_revision.current(), revision + 1);
         assert_eq!(observer.current_rect(), original);
         assert!(acceptance_trace::take_screen_draw_restore_test_events().iter().any(|event| matches!(event,
@@ -19841,6 +19882,7 @@ mod tests {
         });
         assert_eq!(queued, [(revision + 2, 42)]);
         assert_root_activation_requests(&output, &queued);
+        output.drop_without_applying_deltas();
         assert_eq!(app.visibility_revision.current(), revision + 2);
         assert_eq!(observer.current_rect(), original);
         let decisions = acceptance_trace::take_screen_draw_restore_test_events()
@@ -20983,8 +21025,11 @@ mod tests {
             assert_eq!(panel.has_unsaved_changes(), dirty);
             app.note_panels.push(panel);
             app.update_panel_stack();
-            let mut output = None;
+            let mut output = None::<egui::FullOutput>;
             for _ in 0..4 {
+                if let Some(previous) = output.take() {
+                    previous.drop_without_applying_deltas();
+                }
                 output = Some(
                     app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
                         .0,
@@ -21034,6 +21079,7 @@ mod tests {
                     modifiers: egui::Modifiers::NONE,
                 });
             }
+            output.take().unwrap().drop_without_applying_deltas();
             let mut output = app.run_root_frame_for_test(&ctx, escape, false).0;
             if dirty {
                 assert_eq!(
@@ -21043,6 +21089,7 @@ mod tests {
                 );
                 assert!(app.note_panels[0].has_unsaved_changes());
                 for _ in 0..3 {
+                    output.drop_without_applying_deltas();
                     output = app
                         .run_root_frame_for_test(&ctx, actual_query_input(true), false)
                         .0;
@@ -21068,6 +21115,7 @@ mod tests {
                 let point = discard_point(&output);
                 let mut input = actual_query_input(true);
                 input.events.push(egui::Event::PointerMoved(point));
+                output.drop_without_applying_deltas();
                 output = app.run_root_frame_for_test(&ctx, input, false).0;
                 for pressed in [true, false] {
                     let point = discard_point(&output);
@@ -21078,9 +21126,11 @@ mod tests {
                         pressed,
                         modifiers: egui::Modifiers::NONE,
                     });
+                    output.drop_without_applying_deltas();
                     output = app.run_root_frame_for_test(&ctx, input, false).0;
                 }
             }
+            output.drop_without_applying_deltas();
             app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
                 .0
                 .drop_without_applying_deltas();
@@ -22327,12 +22377,14 @@ mod tests {
         assert!(choice.is_none());
         let (point, disabled) = button(&output, "Add to radial", D08Control::AddMenu);
         assert!(!disabled);
+        output.drop_without_applying_deltas();
         for event in [
             egui::Event::PointerMoved(point),
             pointer(point, true),
             pointer(point, false),
         ] {
-            let (_, choice) = frame(vec![event]);
+            let (output, choice) = frame(vec![event]);
+            output.drop_without_applying_deltas();
             assert!(choice.is_none());
         }
         let mut latest = frame(Vec::new()).0;
@@ -22346,17 +22398,39 @@ mod tests {
         ] {
             let (output, choice) = frame(vec![event]);
             assert!(choice.is_none(), "disabled Add emitted {choice:?}");
+            latest.drop_without_applying_deltas();
             latest = output;
         }
+        // A click inside even a disabled item closes this submenu in egui 0.36.
+        // Reopen through the real root button and measure the current menu again.
+        latest.drop_without_applying_deltas();
+        let (closed, choice) = frame(Vec::new());
+        assert!(choice.is_none());
+        let (reopen, disabled) = button(&closed, "Add to radial", D08Control::AddMenu);
+        assert!(!disabled);
+        closed.drop_without_applying_deltas();
+        for event in [
+            egui::Event::PointerMoved(reopen),
+            pointer(reopen, true),
+            pointer(reopen, false),
+        ] {
+            let (output, choice) = frame(vec![event]);
+            assert!(choice.is_none());
+            output.drop_without_applying_deltas();
+        }
+        let (latest, choice) = frame(Vec::new());
+        assert!(choice.is_none());
         let (point, disabled) = button(&latest, "Save live query", D08Control::SaveLiveQuery);
         assert!(!disabled);
+        latest.drop_without_applying_deltas();
         let mut choices = Vec::new();
         for event in [
             egui::Event::PointerMoved(point),
             pointer(point, true),
             pointer(point, false),
         ] {
-            let (_, choice) = frame(vec![event]);
+            let (output, choice) = frame(vec![event]);
+            output.drop_without_applying_deltas();
             choices.extend(choice);
         }
         assert_eq!(choices.len(), 1);
@@ -23344,7 +23418,7 @@ mod tests {
 
         let phase_started = Instant::now();
         let output = run_root_list_frame(&ctx, &mut app, 0, 960.0, 640.0, Vec::new());
-        drop(output);
+        output.drop_without_applying_deltas();
         phase_ns[5] = phase_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         let elapsed_ns = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         let accounted = phase_ns[..6].iter().copied().sum::<u64>();

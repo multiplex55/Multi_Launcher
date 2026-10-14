@@ -20,15 +20,15 @@ fn in_result_scroll_column<R>(
     column_width_at_query_start: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
-    if !reserve_parent_scrollbar {
-        return add_contents(ui);
-    }
-
     let available = ui.available_size();
     let scroll = ui.spacing().scroll;
-    let parent_scrollbar_hit_width = scroll.bar_width.max(scroll.allocated_width())
-        + scroll.bar_inner_margin
-        + scroll.bar_outer_margin;
+    let parent_scrollbar_hit_width = if reserve_parent_scrollbar {
+        scroll.bar_width.max(scroll.allocated_width())
+            + scroll.bar_inner_margin
+            + scroll.bar_outer_margin
+    } else {
+        0.0
+    };
     let list_width = available.x.min(column_width_at_query_start);
     let allocated = ui.allocate_ui_with_layout(
         egui::vec2(
@@ -2391,6 +2391,7 @@ mod tests {
             &initial,
             "Pin this action",
         );
+        initial.drop_without_applying_deltas();
         let pin = pin_intents.into_iter().find_map(|intent| match intent {
             ActionBindingEditorIntent::Pin { binding } => Some(binding),
             _ => None,
@@ -2417,7 +2418,7 @@ mod tests {
         assert_eq!(state.command, "window:close");
         assert_eq!(state.args, "--all");
 
-        let (_after_save, save_intents) = click_action_editor_button(
+        let (after_save, save_intents) = click_action_editor_button(
             &context,
             &mut state,
             scope.clone(),
@@ -2426,6 +2427,8 @@ mod tests {
             &after_pin,
             "Save query",
         );
+        after_pin.drop_without_applying_deltas();
+        after_save.drop_without_applying_deltas();
         let saved_query = save_intents.into_iter().find_map(|intent| match intent {
             ActionBindingEditorIntent::SaveQuery { binding } => Some(binding),
             _ => None,
@@ -2457,7 +2460,7 @@ mod tests {
             &catalog,
             Vec::new(),
         );
-        let (_after_command, command_intents) = click_action_editor_button(
+        let (after_command, command_intents) = click_action_editor_button(
             &context,
             &mut state,
             scope.clone(),
@@ -2466,6 +2469,8 @@ mod tests {
             &advanced,
             "Use exact command",
         );
+        advanced.drop_without_applying_deltas();
+        after_command.drop_without_applying_deltas();
         let exact_command = command_intents.into_iter().find_map(|intent| match intent {
             ActionBindingEditorIntent::SetCommand { binding } => Some(binding),
             _ => None,
@@ -2508,6 +2513,7 @@ mod tests {
         assert_eq!(state.active_binding, Some(original));
         assert_eq!(state.selected_binding(), Some(pinned));
         assert!(state.has_unassigned_text());
+        rendered.drop_without_applying_deltas();
         let controls = crate::radial::acceptance_trace::take_action_editor_control_test_events();
         assert!(controls.iter().any(|event| matches!(
             event,
@@ -2848,27 +2854,30 @@ mod tests {
         replacement: &str,
     ) -> egui::FullOutput {
         let point = input_bounds(output, existing).center();
-        let _ = frame(
+        frame(
             context,
             state,
             scope.clone(),
             binding,
             vec![egui::Event::PointerMoved(point)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             context,
             state,
             scope.clone(),
             binding,
             vec![pointer_button(point, true)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             context,
             state,
             scope.clone(),
             binding,
             vec![pointer_button(point, false)],
-        );
+        )
+        .drop_without_applying_deltas();
         let move_to_start = egui::Event::Key {
             key: egui::Key::Home,
             physical_key: Some(egui::Key::Home),
@@ -2876,7 +2885,8 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::default(),
         };
-        let _ = frame(context, state, scope.clone(), binding, vec![move_to_start]);
+        frame(context, state, scope.clone(), binding, vec![move_to_start])
+            .drop_without_applying_deltas();
         let select_to_end = egui::Event::Key {
             key: egui::Key::End,
             physical_key: Some(egui::Key::End),
@@ -2887,14 +2897,16 @@ mod tests {
                 ..Default::default()
             },
         };
-        let _ = frame(context, state, scope.clone(), binding, vec![select_to_end]);
-        let _ = frame(
+        frame(context, state, scope.clone(), binding, vec![select_to_end])
+            .drop_without_applying_deltas();
+        frame(
             context,
             state,
             scope.clone(),
             binding,
             vec![egui::Event::Text(replacement.to_owned())],
-        );
+        )
+        .drop_without_applying_deltas();
         frame(context, state, scope.clone(), binding, Vec::new())
     }
 
@@ -3093,7 +3105,7 @@ mod tests {
             vec![pointer_button(position, true)],
             vec![pointer_button(position, false)],
         ] {
-            let (_, frame_intents) = render(
+            let (frame_output, frame_intents) = render(
                 context,
                 state,
                 editor_scope.clone(),
@@ -3102,6 +3114,7 @@ mod tests {
                 events,
             );
             all_intents.extend(frame_intents);
+            frame_output.drop_without_applying_deltas();
             let _ = crate::radial::acceptance_trace::take_action_editor_control_test_events();
         }
         assert!(
@@ -3110,6 +3123,7 @@ mod tests {
                 .all(|intent| !matches!(intent, ActionBindingEditorIntent::Test { .. })),
             "the disabled assigned Test control cannot create a Test intent"
         );
+        output.drop_without_applying_deltas();
         reason
     }
 
@@ -3240,6 +3254,7 @@ mod tests {
                     assert_eq!(state.active_binding.as_ref(), Some(&binding));
                     assert!(state.pending_test_binding.is_none());
                     assert!(state.pending_test_identity.is_none());
+                    output.drop_without_applying_deltas();
                     output = next;
                 }
                 let save_node = output
@@ -3260,7 +3275,7 @@ mod tests {
                     save_node.0,
                     save_node.1.bounds().unwrap(),
                 ));
-                let (_, intents) = click_action_editor_button(
+                let (save_output, intents) = click_action_editor_button(
                     &context,
                     &mut state,
                     editor_scope,
@@ -3281,6 +3296,8 @@ mod tests {
                         && !json.contains("91")
                 );
                 assert_eq!(state.active_binding.as_ref(), Some(&binding));
+                output.drop_without_applying_deltas();
+                save_output.drop_without_applying_deltas();
             }
         }
         assert_eq!(
@@ -3331,6 +3348,7 @@ mod tests {
                 );
                 assert!(intents.is_empty());
                 assert!(format!("{:?}", output.shapes).contains(&expected));
+                output.drop_without_applying_deltas();
             }
         }
     }
@@ -3851,9 +3869,12 @@ mod tests {
         name: &str,
     ) {
         let point = named_button_bounds(output, name).center();
-        let _ = prompt_frame(context, editor, vec![egui::Event::PointerMoved(point)]);
-        let _ = prompt_frame(context, editor, vec![pointer_button(point, true)]);
-        let _ = prompt_frame(context, editor, vec![pointer_button(point, false)]);
+        prompt_frame(context, editor, vec![egui::Event::PointerMoved(point)])
+            .drop_without_applying_deltas();
+        prompt_frame(context, editor, vec![pointer_button(point, true)])
+            .drop_without_applying_deltas();
+        prompt_frame(context, editor, vec![pointer_button(point, false)])
+            .drop_without_applying_deltas();
     }
 
     #[test]
@@ -3983,6 +4004,7 @@ mod tests {
             "saved query A",
             "unsaved query B",
         );
+        initial.drop_without_applying_deltas();
         assert_eq!(state.query, "unsaved query B");
 
         let mut intents = Vec::new();
@@ -4003,6 +4025,7 @@ mod tests {
         assert!(state.pending_test_identity.is_none());
         assert!(state.pending_test_query.is_none());
         assert!(edited.platform_output.accesskit_update.is_some());
+        edited.drop_without_applying_deltas();
         let events = crate::radial::acceptance_trace::take_authoring_provider_trace_test_events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].edge, "retired");
@@ -4128,13 +4151,14 @@ mod tests {
         };
 
         first_scope.draft_generation = DraftGeneration(4);
-        let _ = frame(
+        frame(
             &context,
             &mut state,
             first_scope.clone(),
             &binding,
             Vec::new(),
-        );
+        )
+        .drop_without_applying_deltas();
 
         assert_eq!(state.query, "notes");
         assert_eq!(state.command, "window:show");
@@ -4174,6 +4198,7 @@ mod tests {
             "window:close",
             "window:show",
         );
+        initial.drop_without_applying_deltas();
         assert_eq!(state.command, "window:show");
         assert!(!state.test_binding_matches(&pending_identity, &pending_binding));
 
@@ -4202,9 +4227,11 @@ mod tests {
             "first argument",
             "second argument",
         );
+        after_command.drop_without_applying_deltas();
         assert_eq!(state.args, "second argument");
         assert!(!state.test_binding_matches(&pending_args_identity, &pending_args_binding));
         assert!(after_args.platform_output.accesskit_update.is_some());
+        after_args.drop_without_applying_deltas();
     }
 
     #[test]
@@ -4316,7 +4343,7 @@ mod tests {
                 egui::pos2(188.0, 213.0),
                 egui::pos2(-1440.0, 90.0),
             ] {
-                let _output = frame_at_monitor_origin(
+                let output = frame_at_monitor_origin(
                     &context,
                     &mut state,
                     editor_scope.clone(),
@@ -4324,6 +4351,7 @@ mod tests {
                     Vec::new(),
                     monitor_origin,
                 );
+                output.drop_without_applying_deltas();
                 let events =
                     crate::radial::acceptance_trace::take_action_editor_control_test_events();
                 let row_event = events.iter().find_map(|event| match event {
@@ -4466,7 +4494,7 @@ mod tests {
                 egui::Pos2::ZERO,
                 egui::pos2((right - 1) as f32, bottom as f32),
             );
-            let _output = frame_at_monitor_origin_with_clip(
+            let output = frame_at_monitor_origin_with_clip(
                 &context,
                 &mut state,
                 editor_scope.clone(),
@@ -4475,6 +4503,7 @@ mod tests {
                 egui::pos2(-1200.0, 160.0),
                 Some(partial_clip),
             );
+            output.drop_without_applying_deltas();
             let clipped_event =
                 crate::radial::acceptance_trace::take_action_editor_control_test_events()
                     .into_iter()
@@ -4504,8 +4533,8 @@ mod tests {
             );
 
             state.selected_binding = Some(row.binding.clone().expect("assignable fixture row"));
-            let _output =
-                frame_in_narrow_panel(&context, &mut state, editor_scope, &binding, 300.0);
+            let output = frame_in_narrow_panel(&context, &mut state, editor_scope, &binding, 300.0);
+            output.drop_without_applying_deltas();
             let narrow_events =
                 crate::radial::acceptance_trace::take_action_editor_control_test_events();
             let narrow_row = narrow_events
@@ -4696,7 +4725,7 @@ mod tests {
 
         let empty_action_catalog = action_snapshot(Vec::new());
         let _ = crate::radial::acceptance_trace::take_action_editor_control_test_events();
-        let _ = render_editor_with_catalog(
+        let (initial_output, _) = render_editor_with_catalog(
             &context,
             &mut state,
             editor_scope.clone(),
@@ -4704,6 +4733,7 @@ mod tests {
             &empty_action_catalog,
             Vec::new(),
         );
+        initial_output.drop_without_applying_deltas();
         let initial_controls =
             crate::radial::acceptance_trace::take_action_editor_control_test_events();
         let scroll_origin = initial_controls
@@ -4729,7 +4759,7 @@ mod tests {
         let mut maximum_offset_y_milli = 0i64;
         for (direction, steps) in [(-1.0, 18), (1.0, 36)] {
             for _ in 0..steps {
-                let (_, intents) = render_editor_with_catalog(
+                let (output, intents) = render_editor_with_catalog(
                     &context,
                     &mut state,
                     editor_scope.clone(),
@@ -4745,6 +4775,7 @@ mod tests {
                         },
                     ],
                 );
+                output.drop_without_applying_deltas();
                 assert!(intents.is_empty());
                 for event in
                     crate::radial::acceptance_trace::take_action_editor_scroll_test_events()
@@ -4796,7 +4827,7 @@ mod tests {
             vec![pointer_button(pin_position, true)],
             vec![pointer_button(pin_position, false)],
         ] {
-            let (_, intents) = render_editor_with_catalog(
+            let (output, intents) = render_editor_with_catalog(
                 &context,
                 &mut state,
                 editor_scope.clone(),
@@ -4804,6 +4835,7 @@ mod tests {
                 &empty_action_catalog,
                 events,
             );
+            output.drop_without_applying_deltas();
             pin_intents.extend(intents);
             let _ = crate::radial::acceptance_trace::take_action_editor_control_test_events();
         }
@@ -4840,7 +4872,7 @@ mod tests {
         )
         .0;
         let replacement_query = "a new authored query after pin";
-        let _ = replace_text(
+        replace_text(
             &context,
             &mut state,
             &editor_scope,
@@ -4848,7 +4880,9 @@ mod tests {
             &pinned_output,
             query,
             replacement_query,
-        );
+        )
+        .drop_without_applying_deltas();
+        pinned_output.drop_without_applying_deltas();
         assert!(state.has_unassigned_text());
         assert_eq!(
             state.binding_for_explicit_apply(),
@@ -4935,6 +4969,7 @@ mod tests {
                 initial_frame = Some(rendered);
                 break;
             }
+            rendered.output.drop_without_applying_deltas();
         }
 
         let initial_frame = initial_frame.expect("both nested scrollbar responses are rendered");
@@ -5039,6 +5074,7 @@ mod tests {
         );
 
         let outer_offset_before = initial_frame.outer_offset_y;
+        initial_frame.output.drop_without_applying_deltas();
         let mut after_drag = geometry;
         for events in [
             vec![egui::Event::PointerMoved(start)],
@@ -5057,6 +5093,7 @@ mod tests {
             );
             time += 1.0 / 60.0;
             assert_eq!(rendered.outer_offset_y, outer_offset_before);
+            rendered.output.drop_without_applying_deltas();
             if let Some(geometry) = action_editor_scroll_geometry(
                 &crate::radial::acceptance_trace::take_action_editor_scroll_test_events(),
             ) {
@@ -5078,13 +5115,14 @@ mod tests {
         crate::radial::acceptance_trace::reset_action_editor_scroll_test_state();
         let mut properties_geometry = None;
         for _ in 0..6 {
-            let _ = frame(
+            frame(
                 &properties_context,
                 &mut properties_state,
                 properties_scope.clone(),
                 &binding,
                 Vec::new(),
-            );
+            )
+            .drop_without_applying_deltas();
             if let Some(geometry) = action_editor_scroll_geometry(
                 &crate::radial::acceptance_trace::take_action_editor_scroll_test_events(),
             ) {
@@ -5138,18 +5176,21 @@ mod tests {
         let identity = state.identity().expect("scoped action editor identity");
 
         let mut events = Vec::new();
+        let mut expected_frame = context.cumulative_frame_nr();
         // The first ScrollArea frame can reserve its scrollbar without
         // registering the interaction response until the visibility
         // animation has advanced. Keep rendering deterministic frames until
         // the owner publishes the actual current-frame track geometry.
         for _ in 0..4 {
-            let _ = frame(
+            expected_frame = context.cumulative_frame_nr();
+            frame(
                 &context,
                 &mut state,
                 editor_scope.clone(),
                 &binding,
                 Vec::new(),
-            );
+            )
+            .drop_without_applying_deltas();
             events.extend(crate::radial::acceptance_trace::take_action_editor_scroll_test_events());
             if events.iter().any(|event| {
                 matches!(
@@ -5286,7 +5327,30 @@ mod tests {
             crate::radial::acceptance_trace::private_trace_text_digest(query)
         );
         assert_ne!(scroll_id, 0);
-        assert!(frame_nr > 0);
+        assert_eq!(frame_nr, expected_frame);
+        crate::radial::acceptance_trace::reset_action_editor_scroll_test_state();
+        let expected_next_frame = context.cumulative_frame_nr();
+        frame(
+            &context,
+            &mut state,
+            editor_scope.clone(),
+            &binding,
+            Vec::new(),
+        )
+        .drop_without_applying_deltas();
+        let next_frame = crate::radial::acceptance_trace::take_action_editor_scroll_test_events()
+            .into_iter()
+            .find_map(|event| match event {
+                crate::radial::acceptance_trace::Event::DesignerActionEditorScroll {
+                    frame_nr: next,
+                    scroll_id: next_id,
+                    ..
+                } if next_id == scroll_id => Some(next),
+                _ => None,
+            })
+            .expect("same owner publishes the subsequent frame");
+        assert_eq!(next_frame, expected_next_frame);
+        assert!(next_frame > frame_nr);
         assert!(content_height > inner_height && inner_height > 0);
         assert!(pixels_per_point > 0);
         assert!(handle_min_length >= 12_000);
@@ -5749,7 +5813,7 @@ mod tests {
                 &assigned,
                 Vec::new(),
             );
-            let _ = replace_text(
+            replace_text(
                 &context,
                 &mut draft.action_editor,
                 &scope,
@@ -5757,7 +5821,9 @@ mod tests {
                 &before,
                 "window:close:44",
                 "window:show",
-            );
+            )
+            .drop_without_applying_deltas();
+            before.drop_without_applying_deltas();
             assert_eq!(draft.action_editor.command, "window:show");
         }
 
@@ -6047,6 +6113,7 @@ mod tests {
             assert!(editor.close_prompt);
             let prompt = prompt_frame(&context, &mut editor, Vec::new());
             click_button(&context, &mut editor, &prompt, "Keep editing");
+            prompt.drop_without_applying_deltas();
             assert!(!editor.close_prompt);
             assert_eq!(editor.session.as_ref().unwrap().editor_session, session);
             assert_eq!(
@@ -6149,6 +6216,7 @@ mod tests {
             editor.request_close();
             let prompt = prompt_frame(&context, &mut editor, Vec::new());
             click_button(&context, &mut editor, &prompt, "Keep editing");
+            prompt.drop_without_applying_deltas();
             assert_eq!(editor.session.as_ref().unwrap().editor_session, session);
             assert!(!editor.close_prompt);
             session
@@ -6187,6 +6255,7 @@ mod tests {
             editor.request_close();
             let prompt = prompt_frame(&context, &mut editor, Vec::new());
             click_button(&context, &mut editor, &prompt, "Discard");
+            prompt.drop_without_applying_deltas();
             assert!(!editor.open);
             assert!(editor.session.is_none());
             editor.open();

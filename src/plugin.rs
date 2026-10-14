@@ -1764,14 +1764,16 @@ mod tests {
         started_rx.recv().unwrap();
         let mut rendered_busy = false;
         let context = egui::Context::default();
-        let _ = context.run_ui(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                if matches!(manager.try_write_plugin("blocking"), Err("plugin busy")) {
-                    ui.label("blocking settings are temporarily busy; retry next frame.");
-                    rendered_busy = true;
-                }
-            });
-        });
+        context
+            .run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if matches!(manager.try_write_plugin("blocking"), Err("plugin busy")) {
+                        ui.label("blocking settings are temporarily busy; retry next frame.");
+                        rendered_busy = true;
+                    }
+                });
+            })
+            .drop_without_applying_deltas();
         assert!(rendered_busy);
         release_tx.send(()).unwrap();
         worker.join().unwrap();

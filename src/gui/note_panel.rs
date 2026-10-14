@@ -6494,7 +6494,7 @@ mod tests {
             // Settle the real dialog caller before arming the observer or
             // editing. The retained FullOutput is dropped outside any sample.
             let baseline_output = track_c1a_run_frame(&context, &mut panel, &mut app, 9.0);
-            drop(baseline_output);
+            baseline_output.drop_without_applying_deltas();
             let initial_rows = track_c1a_panel_rows(&panel);
 
             let observer_scope = NoteRefreshObservationScope::new();
@@ -6504,7 +6504,7 @@ mod tests {
             );
             panel.replace_content_from_mutation(draft_content.clone(), 10.0);
             let predeadline_output = track_c1a_run_frame(&context, &mut panel, &mut app, 10.1);
-            drop(predeadline_output);
+            predeadline_output.drop_without_applying_deltas();
             let predeadline_observation = observer_scope.snapshot();
             assert_eq!(
                 predeadline_observation,
@@ -6878,7 +6878,7 @@ mod tests {
         let idle_time = state.owner_time() + 0.01;
         let idle_output =
             track_c1a_run_frame(&state.context, &mut state.panel, &mut state.app, idle_time);
-        drop(idle_output);
+        idle_output.drop_without_applying_deltas();
         assert_eq!(
             state._observer_scope.snapshot(),
             NoteRefreshObservation::default(),
@@ -7189,7 +7189,7 @@ mod tests {
             let output =
                 track_c1a_run_frame(&state.context, &mut state.panel, &mut state.app, time);
             let (observation, details) = track_c1a_validate_owner(&mut state, &output);
-            drop(output);
+            output.drop_without_applying_deltas();
             assert_ne!(observation.output_identity, 0);
             assert_ne!(observation.structural_signature, 0);
             assert_eq!(details.observation.fenced_content_calls, 100);
@@ -8170,7 +8170,7 @@ mod tests {
                     frame_time,
                 );
                 let _ = track_c1a_validate_owner(&mut state, &frame);
-                drop(frame);
+                frame.drop_without_applying_deltas();
 
                 // The C1-A observer is disabled for both owner paths and all
                 // projection preparation/publication timings. Track C's
@@ -8837,6 +8837,7 @@ mod tests {
                 assert_eq!(widget.role, NoteCloseWidgetRole::DiscardChanges);
                 assert_eq!(widget.owner_slug_digest, before.slug_digest);
             }
+            output.drop_without_applying_deltas();
         }
         let widget = observed.expect("the actual normal confirmation must render");
         assert!(widget.widget_id != 0 && widget.enabled && widget.visible && widget.fully_visible);

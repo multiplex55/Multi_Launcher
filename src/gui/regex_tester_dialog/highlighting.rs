@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn sections_preserve_adjacent_unicode_and_multiline_source_and_active_style() {
-        for (pattern, text) in [(".", "Ã©ðŸ¦€"), (".+", "Ã©Ã©\nab")] {
+        for (pattern, text) in [(".", "é🦀"), (".+", "éé\nab")] {
             let ctx = egui::Context::default();
             let mut session = evaluated(pattern, text);
             let (source, view) = session.text_edit_parts();
@@ -245,13 +245,13 @@ mod tests {
     #[test]
     fn same_frame_multibyte_edit_and_revision_mismatch_discard_all_stale_highlights() {
         let ctx = egui::Context::default();
-        let mut session = evaluated("a", "aaÃ©");
+        let mut session = evaluated("a", "aaé");
         let (text, mut view) = session.text_edit_parts();
-        text.insert_str(0, "æ–‡");
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        text.insert_str(0, "文");
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let job = layout(text, &view, ui, 100.0);
-                assert_eq!(job.text, "æ–‡aaÃ©");
+                assert_eq!(job.text, "文aaé");
                 assert_eq!(job.sections.len(), 1);
                 assert_eq!(
                     job.sections[0].format.background,
@@ -266,12 +266,13 @@ mod tests {
                     egui::Color32::TRANSPARENT
                 );
             });
-        });
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
     fn zero_width_markers_map_unicode_crlf_eof_empty_and_soft_wrap_in_one_row_walk() {
-        for text in ["", "Ã©\r\nðŸ¦€\n", "abcdefghi"] {
+        for text in ["", "é\r\n🦀\n", "abcdefghi"] {
             for width in [400.0, 15.0] {
                 let ctx = egui::Context::default();
                 let mut session = evaluated("", text);

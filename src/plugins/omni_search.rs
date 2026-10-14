@@ -637,11 +637,12 @@ mod tests {
         let mut value = json!("invalid");
         let ctx = egui::Context::default();
 
-        let _ = ctx.run_ui(Default::default(), |ctx| {
+        ctx.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 plugin.settings_ui(ui, &mut value);
             });
-        });
+        })
+        .drop_without_applying_deltas();
 
         let parsed: OmniSearchSettings =
             serde_json::from_value(value).expect("ui should write valid omni settings json");

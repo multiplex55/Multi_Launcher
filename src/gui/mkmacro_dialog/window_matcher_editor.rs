@@ -129,11 +129,13 @@ mod tests {
         let mut matcher = original.clone();
 
         let mut outcome = MatcherEditorOutcome::default();
-        let _ = egui::Context::default().run_ui(egui::RawInput::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                outcome = matcher_ui(ui, &mut matcher);
-            });
-        });
+        egui::Context::default()
+            .run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    outcome = matcher_ui(ui, &mut matcher);
+                });
+            })
+            .drop_without_applying_deltas();
         assert!(!outcome.changed);
         assert!(!outcome.pick_window);
         assert_eq!(matcher, original);

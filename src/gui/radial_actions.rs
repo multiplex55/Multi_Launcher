@@ -3657,6 +3657,7 @@ mod tests {
                 .viewport_output
                 .contains_key(&crate::gui::radial_editor::radial_designer_viewport_id())
         );
+        output.drop_without_applying_deltas();
         assert_eq!(
             app.authoring_catalog_build_count
                 .load(AtomicOrdering::SeqCst),
@@ -3694,8 +3695,8 @@ mod tests {
         );
         assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
 
-        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
-
+        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker)
+            .drop_without_applying_deltas();
         assert_eq!(app.query, "ordinary current needle");
         assert_eq!(app.last_search_query, app.query);
         assert_eq!(
@@ -3735,8 +3736,8 @@ mod tests {
         assert!(app.last_results_valid);
         worker.cancellation.store(true, Ordering::Release);
 
-        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
-
+        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker)
+            .drop_without_applying_deltas();
         assert_eq!(app.query, "ordinary failed needle");
         assert!(app.results.is_empty());
         assert!(app.last_results_valid);
@@ -3803,8 +3804,8 @@ mod tests {
                 worker.cancellation.store(true, Ordering::Release);
                 let generation = app.plugins.search_generation();
 
-                release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
-
+                release_capacity_worker_in_root_frame(&mut app, &ctx, &worker)
+                    .drop_without_applying_deltas();
                 assert_eq!(app.query, "cal upcoming");
                 assert_eq!(app.last_search_query, "cal upcoming");
                 assert_eq!(app.results, rows);
@@ -3869,8 +3870,8 @@ mod tests {
             let usage = app.usage.clone();
             let revision = app.visibility_revision.current();
 
-            release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
-
+            release_capacity_worker_in_root_frame(&mut app, &ctx, &worker)
+                .drop_without_applying_deltas();
             assert_eq!(app.query, query);
             assert_eq!(app.last_search_query, query);
             assert!(app.last_results_valid);
@@ -3979,8 +3980,8 @@ mod tests {
         );
         worker.cancellation.store(true, Ordering::Release);
 
-        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker);
-
+        release_capacity_worker_in_root_frame(&mut app, &ctx, &worker)
+            .drop_without_applying_deltas();
         assert_eq!(app.results, rows);
         assert_eq!(app.query, "cal upcoming");
         assert!(app.last_results_valid);
@@ -4049,6 +4050,7 @@ mod tests {
                 .viewport_output
                 .contains_key(&crate::gui::radial_editor::radial_designer_viewport_id())
         );
+        output.drop_without_applying_deltas();
         assert_eq!(*worker.calls.lock().unwrap(), [CAPACITY_GATE_QUERY]);
         let completed = app.cached_universal_action_catalog_snapshot();
         assert!(!Arc::ptr_eq(&first, &completed));
@@ -4098,6 +4100,7 @@ mod tests {
                     .viewport_output
                     .contains_key(&crate::gui::radial_editor::radial_designer_viewport_id())
             );
+            output.drop_without_applying_deltas();
         }
         assert_eq!(
             app.authoring_catalog_build_count

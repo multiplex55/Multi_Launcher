@@ -427,7 +427,7 @@ mod tests {
             });
             let routed = ctx.input_mut(ActionSheetState::consume_open_shortcut);
             let enter_remains = ctx.input(|input| input.key_pressed(egui::Key::Enter));
-            let _ = ctx.end_pass();
+            ctx.end_pass().drop_without_applying_deltas();
             (routed, enter_remains)
         };
 
@@ -449,7 +449,7 @@ mod tests {
         });
         assert_eq!(ctx.input_mut(ActionSheetState::consume_key), None);
         assert!(!ctx.input(|input| input.key_pressed(egui::Key::Enter)));
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]

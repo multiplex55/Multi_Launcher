@@ -206,9 +206,10 @@ mod tests {
                 },
             );
             output.clear();
-            for shape in frame.shapes {
+            for shape in &frame.shapes {
                 append(&shape.shape, &mut output);
             }
+            frame.drop_without_applying_deltas();
         }
         output
     }
@@ -269,14 +270,15 @@ mod tests {
         let mut view = OcrView::default();
         let mut state = OcrPresentation::Result("first\nsecond".into());
         ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_input")));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             view.show(ctx, generation, &mut state);
-        });
+        })
+        .drop_without_applying_deltas();
         assert!(
             !view.editor_focused,
             "focus stays pending during hidden sizing"
         );
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -294,15 +296,17 @@ mod tests {
             |ctx| {
                 assert!(view.show(ctx, generation, &mut state).is_none());
             },
-        );
+        )
+        .drop_without_applying_deltas();
         assert!(
             matches!(&state,OcrPresentation::Result(text) if text.len()=="first\nsecond".len()+1 && text.matches('\n').count()==2)
         );
         let other = egui::Id::new("other_control");
         ctx.memory_mut(|memory| memory.request_focus(other));
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             view.show(ctx, generation, &mut state);
-        });
+        })
+        .drop_without_applying_deltas();
         assert!(!ctx.memory(|memory| memory.has_focus(editor_id(generation))));
     }
 }

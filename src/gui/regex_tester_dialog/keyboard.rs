@@ -60,12 +60,13 @@ mod tests {
                 modifiers,
             });
         }
-        let _ = ctx.run_ui(input, |ctx| {
+        ctx.run_ui(input, |ctx| {
             let layer = egui::LayerId::background();
             assert_eq!(navigation(ctx, layer, false), None);
             assert_eq!(navigation(ctx, layer, true), Some(false));
             assert_eq!(navigation(ctx, layer, true), Some(true));
             assert_eq!(navigation(ctx, layer, true), None);
-        });
+        })
+        .drop_without_applying_deltas();
     }
 }

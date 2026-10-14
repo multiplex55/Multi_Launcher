@@ -4693,7 +4693,7 @@ mod tests {
         // queued envelopes for the measured first root frame.
         let setup_root_frames = if recipe == TrackC3CRecipe::Finite {
             let setup_output = context.run_ui(egui::RawInput::default(), |_| {});
-            drop(setup_output);
+            setup_output.drop_without_applying_deltas();
             0
         } else {
             let setup_output = app
@@ -6522,7 +6522,7 @@ mod tests {
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
         app.process_watch_events();
         app.show_screen_draw_toolbar(&ctx);
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
         assert_eq!(
             app.screen_draw_controller.state().generation(),
             Some(generation)
@@ -6532,7 +6532,7 @@ mod tests {
         ctx.begin_pass(egui::RawInput::default());
         app.event_tx.send(WatchEvent::ScreenDrawStart).unwrap();
         app.process_watch_events();
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
         assert!(!app.screen_draw_toolbar.was_open);
         assert_eq!(app.screen_draw_toolbar.focus_request_count, 0);
     }

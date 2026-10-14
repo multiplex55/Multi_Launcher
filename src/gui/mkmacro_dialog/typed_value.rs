@@ -79,12 +79,14 @@ mod tests {
     fn fixed_type_render_does_not_coerce_incompatible_values() {
         let context = egui::Context::default();
         let mut value = MkValue::Null;
-        let _ = context.run_ui(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                let edit = fixed_type_ui(ui, MkValueType::Number, &mut value);
-                assert!(!edit.compatible && !edit.changed);
-            });
-        });
+        context
+            .run_ui(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let edit = fixed_type_ui(ui, MkValueType::Number, &mut value);
+                    assert!(!edit.compatible && !edit.changed);
+                });
+            })
+            .drop_without_applying_deltas();
         assert_eq!(value, MkValue::Null);
         for kind in [
             MkValueType::String,

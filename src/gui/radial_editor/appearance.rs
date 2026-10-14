@@ -93,16 +93,18 @@ mod tests {
             root_window_bridge: Default::default(),
         };
         let draw = |editor: &mut RadialEditorState| {
-            let _ = context.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1200.0, 1000.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| editor.viewport_ui(ctx, &frame, egui::ViewportClass::Deferred),
-            );
+            context
+                .run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1200.0, 1000.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| editor.viewport_ui(ctx, &frame, egui::ViewportClass::Deferred),
+                )
+                .drop_without_applying_deltas();
         };
         let prepare = |editor: &mut RadialEditorState| {
             let request = endpoint.request_rx.try_recv().unwrap();
@@ -451,6 +453,7 @@ mod tests {
             } else if frame == 2 {
                 assert!(context.input(|input| input.pointer.primary_clicked()));
             }
+            output.drop_without_applying_deltas();
         }
         for owner in owners {
             assert!(

@@ -1672,6 +1672,7 @@ mod tests {
                 ..
             })
         ));
+        output.drop_without_applying_deltas();
     }
 
     #[cfg(windows)]
@@ -1689,6 +1690,7 @@ mod tests {
                 .contains(&egui::ViewportCommand::Focus)
         );
         assert!(acceptance_trace::take_root_activation_test_events().is_empty());
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -2486,14 +2488,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let _ = ctx.run_ui(input, |child| {
+        ctx.run_ui(input, |child| {
             assert_eq!(child.viewport_id(), child_id);
             let root = RootViewportCtx::new(child);
             assert_eq!(root.viewport_id(), egui::ViewportId::ROOT);
             root.request_repaint();
             assert!(child.has_requested_repaint_for(&egui::ViewportId::ROOT));
             root.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        });
+        })
+        .drop_without_applying_deltas();
     }
 
     #[cfg(windows)]
@@ -2592,6 +2595,7 @@ mod tests {
                 ..
             }
         )));
+        output.drop_without_applying_deltas();
     }
 
     #[test]

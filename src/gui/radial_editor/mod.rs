@@ -12074,6 +12074,7 @@ mod tests {
         let cancel =
             accesskit_named_bounds(&guarded, "Cancel change", egui::accesskit::Role::Button)
                 .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(cancel)])
             .drop_without_applying_deltas();
@@ -12102,6 +12103,7 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(discard)])
             .drop_without_applying_deltas();
@@ -12142,6 +12144,7 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(apply)])
             .drop_without_applying_deltas();
@@ -12181,6 +12184,7 @@ mod tests {
     fn properties_query_must_be_saved_before_navigation_apply_and_continue() {
         let (mut driver, target, initial) = retained_properties_popup();
         let typed = replace_retained_text(&mut driver, &initial, "", "saved only on request");
+        initial.drop_without_applying_deltas();
         assert_eq!(
             driver
                 .editor
@@ -12193,6 +12197,7 @@ mod tests {
         );
         let popup_apply =
             accesskit_named_bounds(&typed, "Apply", egui::accesskit::Role::Button).center();
+        typed.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(popup_apply)])
             .drop_without_applying_deltas();
@@ -12228,6 +12233,7 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(apply)])
             .drop_without_applying_deltas();
@@ -12249,6 +12255,7 @@ mod tests {
         );
 
         let cancelled = click_retained_button(&mut driver, &still_guarded, "Cancel navigation");
+        still_guarded.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(
             driver.editor.session.as_ref().unwrap().selection.as_ref(),
@@ -12275,7 +12282,8 @@ mod tests {
                 .has_unassigned_text()
         );
 
-        let _saved = click_retained_button(&mut driver, &cancelled, "Save query");
+        let saved = click_retained_button(&mut driver, &cancelled, "Save query");
+        cancelled.drop_without_applying_deltas();
         assert_eq!(
             driver
                 .editor
@@ -12297,6 +12305,7 @@ mod tests {
                 .action_editor
                 .has_unassigned_text()
         );
+        saved.drop_without_applying_deltas();
 
         queue_navigation_to_screenshot_region(&mut driver);
         let guarded = driver.frame(Vec::new());
@@ -12306,6 +12315,7 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(apply)])
             .drop_without_applying_deltas();
@@ -12345,6 +12355,7 @@ mod tests {
     fn properties_command_must_be_set_before_navigation_apply_and_continue() {
         let (mut driver, target, initial) = retained_properties_popup();
         let advanced = click_retained_named_control(&mut driver, &initial, "Advanced");
+        initial.drop_without_applying_deltas();
         assert!(
             driver
                 .editor
@@ -12360,7 +12371,9 @@ mod tests {
             "",
             0,
         );
-        let _typed = replace_retained_text_at(&mut driver, command_bounds.center(), "window:close");
+        replace_retained_text_at(&mut driver, command_bounds.center(), "window:close")
+            .drop_without_applying_deltas();
+        advanced.drop_without_applying_deltas();
         assert_eq!(
             driver
                 .editor
@@ -12380,6 +12393,7 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(apply)])
             .drop_without_applying_deltas();
@@ -12400,6 +12414,7 @@ mod tests {
         );
 
         let cancelled = click_retained_button(&mut driver, &still_guarded, "Cancel navigation");
+        still_guarded.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(
             driver.editor.session.as_ref().unwrap().selection.as_ref(),
@@ -12416,7 +12431,8 @@ mod tests {
             "window:close"
         );
 
-        let _set = click_retained_button(&mut driver, &cancelled, "Use exact command");
+        let set = click_retained_button(&mut driver, &cancelled, "Use exact command");
+        cancelled.drop_without_applying_deltas();
         assert_eq!(
             driver
                 .editor
@@ -12429,6 +12445,7 @@ mod tests {
                 args: None,
             })
         );
+        set.drop_without_applying_deltas();
         queue_navigation_to_screenshot_region(&mut driver);
         let guarded = driver.frame(Vec::new());
         let apply = accesskit_named_bounds(
@@ -12437,6 +12454,7 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(apply)])
             .drop_without_applying_deltas();
@@ -12475,10 +12493,13 @@ mod tests {
     #[test]
     fn properties_action_text_is_discarded_only_by_explicit_discard() {
         let (mut driver, target, initial) = retained_properties_popup();
-        let _ = replace_retained_text(&mut driver, &initial, "", "discard this draft");
+        replace_retained_text(&mut driver, &initial, "", "discard this draft")
+            .drop_without_applying_deltas();
+        initial.drop_without_applying_deltas();
         queue_navigation_to_screenshot_region(&mut driver);
         let guarded = driver.frame(Vec::new());
-        let _discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        let discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        guarded.drop_without_applying_deltas();
 
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(driver.editor.properties_draft.is_none());
@@ -12494,14 +12515,16 @@ mod tests {
                 binding: ActionBinding::Persisted { .. }
             }
         ));
+        discarded.drop_without_applying_deltas();
     }
 
     #[test]
     fn pinned_search_text_does_not_guard_navigation() {
-        let (mut driver, target, _) = retained_properties_popup();
+        let (mut driver, target, initial) = retained_properties_popup();
         let pin = test_pinned_binding();
         let search_query = "find help before pinning";
         seed_pinned_properties_draft(&mut driver, &target, pin.clone(), search_query);
+        initial.drop_without_applying_deltas();
         driver.frame(Vec::new()).drop_without_applying_deltas();
         assert_eq!(
             driver
@@ -12532,17 +12555,20 @@ mod tests {
 
     #[test]
     fn editing_query_after_pin_restores_the_dirty_navigation_guard() {
-        let (mut driver, target, _) = retained_properties_popup();
+        let (mut driver, target, initial) = retained_properties_popup();
         let pin = test_pinned_binding();
         let search_query = "find help before pinning";
         seed_pinned_properties_draft(&mut driver, &target, pin.clone(), search_query);
+        initial.drop_without_applying_deltas();
         let current = driver.frame(Vec::new());
-        let _ = replace_retained_text(
+        let edited = replace_retained_text(
             &mut driver,
             &current,
             search_query,
             "query authored after pin",
         );
+        current.drop_without_applying_deltas();
+        edited.drop_without_applying_deltas();
         assert!(
             driver
                 .editor
@@ -12562,6 +12588,7 @@ mod tests {
             egui::accesskit::Role::Button,
         )
         .center();
+        guarded.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(apply)])
             .drop_without_applying_deltas();
@@ -12580,7 +12607,9 @@ mod tests {
                 .query_for_test(),
             "query authored after pin"
         );
-        let _ = click_retained_button(&mut driver, &still_guarded, "Cancel navigation");
+        let cancelled = click_retained_button(&mut driver, &still_guarded, "Cancel navigation");
+        cancelled.drop_without_applying_deltas();
+        still_guarded.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(
             driver.editor.session.as_ref().unwrap().selection.as_ref(),
@@ -12599,9 +12628,10 @@ mod tests {
 
     #[test]
     fn properties_pin_control_stages_exact_binding_then_apply_continues_navigation() {
-        let (mut driver, target, _) = retained_properties_popup();
+        let (mut driver, target, initial) = retained_properties_popup();
         let pin = test_pinned_binding();
         seed_properties_search_result(&mut driver, &target, pin.clone(), "find a result to pin");
+        initial.drop_without_applying_deltas();
         let shown = driver.frame(Vec::new());
         let selected = click_retained_named_fragment(
             &mut driver,
@@ -12609,6 +12639,7 @@ mod tests {
             "Fixture action",
             egui::accesskit::Role::Button,
         );
+        shown.drop_without_applying_deltas();
         assert_eq!(
             driver
                 .editor
@@ -12620,6 +12651,7 @@ mod tests {
             Some(pin.clone())
         );
         let pinned = click_retained_button(&mut driver, &selected, "Pin this action");
+        selected.drop_without_applying_deltas();
         assert_eq!(
             driver
                 .editor
@@ -12644,6 +12676,7 @@ mod tests {
         let guarded = driver.frame(Vec::new());
         assert!(driver.editor.pending_scope_change.is_some());
         let continued = click_retained_button(&mut driver, &guarded, "Apply and continue");
+        guarded.drop_without_applying_deltas();
         assert!(driver.editor.properties_popup.is_none());
         assert!(driver.editor.pending_scope_change.is_none());
         let session = driver.editor.session.as_ref().expect("authoring session");
@@ -12655,15 +12688,17 @@ mod tests {
             "Apply and continue persists the exact pinned binding before navigating"
         );
         assert!(continued.platform_output.accesskit_update.is_some());
-        let _ = pinned;
+        continued.drop_without_applying_deltas();
+        pinned.drop_without_applying_deltas();
     }
 
     #[test]
     fn saving_query_after_selecting_result_clears_candidate_before_navigation_apply() {
-        let (mut driver, target, _) = retained_properties_popup();
+        let (mut driver, target, initial) = retained_properties_popup();
         let stale_candidate = test_pinned_binding();
         let saved_query = "keep this query after choosing a result";
         seed_properties_search_result(&mut driver, &target, stale_candidate.clone(), saved_query);
+        initial.drop_without_applying_deltas();
         let shown = driver.frame(Vec::new());
         let selected = click_retained_named_fragment(
             &mut driver,
@@ -12671,6 +12706,7 @@ mod tests {
             "Fixture action",
             egui::accesskit::Role::Button,
         );
+        shown.drop_without_applying_deltas();
         assert!(
             driver
                 .editor
@@ -12681,6 +12717,7 @@ mod tests {
                 .has_unassigned_text()
         );
         let saved = click_retained_button(&mut driver, &selected, "Save query");
+        selected.drop_without_applying_deltas();
         let draft = driver.editor.properties_draft.as_ref().unwrap();
         assert_eq!(
             draft.action_binding,
@@ -12698,6 +12735,7 @@ mod tests {
         queue_navigation_to_screenshot_region(&mut driver);
         let guarded = driver.frame(Vec::new());
         let continued = click_retained_button(&mut driver, &guarded, "Apply and continue");
+        guarded.drop_without_applying_deltas();
         assert!(driver.editor.properties_popup.is_none());
         assert!(driver.editor.pending_scope_change.is_none());
         let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
@@ -12712,7 +12750,8 @@ mod tests {
             "navigation Apply keeps the query selected by Save query, not the stale row"
         );
         assert!(continued.platform_output.accesskit_update.is_some());
-        let _ = saved;
+        continued.drop_without_applying_deltas();
+        saved.drop_without_applying_deltas();
         assert_ne!(
             authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
             CellContent::Action {
@@ -12884,6 +12923,7 @@ mod tests {
         let query = "keep this action before replacing its source";
         let (mut driver, target, original_binding, initial) = retained_dirty_inspector(query);
         let queued = click_retained_button(&mut driver, &initial, "Dynamic source");
+        initial.drop_without_applying_deltas();
         assert!(matches!(
             driver
                 .editor
@@ -12907,6 +12947,7 @@ mod tests {
         );
 
         let applied = click_retained_button(&mut driver, &queued, "Apply action");
+        queued.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
         let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
@@ -12929,6 +12970,7 @@ mod tests {
 
         let ready = driver.frame(Vec::new());
         let replaced = click_retained_button(&mut driver, &ready, "Dynamic source");
+        ready.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(
             authored_cell(&driver.editor, &menu_id, &ring_id, &cell_id).content,
@@ -12939,6 +12981,8 @@ mod tests {
         );
         assert!(replaced.platform_output.accesskit_update.is_some());
         assert!(applied.platform_output.accesskit_update.is_some());
+        replaced.drop_without_applying_deltas();
+        applied.drop_without_applying_deltas();
     }
 
     #[test]
@@ -12947,7 +12991,8 @@ mod tests {
         let mut driver = RetainedDesignerDriver::new(editor);
         let initial = driver.frame(Vec::new());
         let query = "Inspector browse query remains unassigned";
-        let _ = replace_retained_text(&mut driver, &initial, "", query);
+        replace_retained_text(&mut driver, &initial, "", query).drop_without_applying_deltas();
+        initial.drop_without_applying_deltas();
         let before = driver.editor.acceptance_observation().unwrap();
         let draft = driver.editor.session.as_ref().unwrap().draft.clone();
         assert!(before.properties_dirty && !before.properties_popup_open);
@@ -12966,7 +13011,9 @@ mod tests {
         let guarded = request_properties(&mut driver);
         assert!(driver.editor.pending_scope_change.is_some());
         assert!(driver.editor.properties_popup.is_none());
-        let _ = click_retained_button(&mut driver, &guarded, "Cancel change");
+        let cancelled = click_retained_button(&mut driver, &guarded, "Cancel change");
+        guarded.drop_without_applying_deltas();
+        cancelled.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert_eq!(
             driver.editor.inspector_action_editor.query_for_test(),
@@ -12976,7 +13023,9 @@ mod tests {
         assert!(driver.editor.properties_popup.is_none());
 
         let guarded = request_properties(&mut driver);
-        let _ = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        let discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        guarded.drop_without_applying_deltas();
+        discarded.drop_without_applying_deltas();
         driver.frame(Vec::new()).drop_without_applying_deltas();
         let after = driver.editor.acceptance_observation().unwrap();
         assert!(driver.editor.pending_scope_change.is_none());
@@ -13055,9 +13104,11 @@ mod tests {
         let query = "discard only after explicit choice";
         let (mut driver, target, original_binding, initial) = retained_dirty_inspector(query);
         let guarded = click_retained_button(&mut driver, &initial, "Delete cell");
+        initial.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_some());
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
         let cancelled = click_retained_button(&mut driver, &guarded, "Cancel change");
+        guarded.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
         assert_eq!(
@@ -13073,10 +13124,14 @@ mod tests {
             }
         );
         assert!(cancelled.platform_output.accesskit_update.is_some());
+        cancelled.drop_without_applying_deltas();
 
         let ready = driver.frame(Vec::new());
         let guarded = click_retained_button(&mut driver, &ready, "Delete cell");
-        let _discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        ready.drop_without_applying_deltas();
+        let discarded = click_retained_button(&mut driver, &guarded, "Discard and continue");
+        guarded.drop_without_applying_deltas();
+        discarded.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
         let session = driver.editor.session.as_ref().expect("authoring session");
@@ -13151,10 +13206,13 @@ mod tests {
         let mut driver = RetainedDesignerDriver::new(editor);
         let initial = driver.frame(Vec::new());
         let swap_confirmation = click_retained_button(&mut driver, &initial, "Swap");
+        initial.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_some());
         assert!(driver.editor.inspector_action_editor.has_unassigned_text());
-        let _continued =
+        let continued =
             click_retained_button(&mut driver, &swap_confirmation, "Apply and continue");
+        swap_confirmation.drop_without_applying_deltas();
+        continued.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
 
@@ -13223,7 +13281,9 @@ mod tests {
             .queue_editor_operation(DeferredEditorOperation::Undo);
         let guarded = driver.frame(Vec::new());
         assert!(driver.editor.pending_scope_change.is_some());
-        let _applied = click_retained_button(&mut driver, &guarded, "Apply action");
+        let applied = click_retained_button(&mut driver, &guarded, "Apply action");
+        guarded.drop_without_applying_deltas();
+        applied.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         let session = driver.editor.session.as_ref().expect("authoring session");
         assert_eq!(
@@ -13280,7 +13340,9 @@ mod tests {
             .queue_editor_operation(DeferredEditorOperation::Redo);
         let guarded = driver.frame(Vec::new());
         assert!(driver.editor.pending_scope_change.is_some());
-        let _applied = click_retained_button(&mut driver, &guarded, "Apply action");
+        let applied = click_retained_button(&mut driver, &guarded, "Apply action");
+        guarded.drop_without_applying_deltas();
+        applied.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         let session = driver.editor.session.as_ref().expect("authoring session");
         assert_eq!(
@@ -13351,8 +13413,9 @@ mod tests {
 
     #[test]
     fn stale_inspector_scope_change_cannot_run_after_generation_changes() {
-        let (mut driver, target, _, _initial) =
+        let (mut driver, target, _, initial) =
             retained_dirty_inspector("stale edit must remain local");
+        initial.drop_without_applying_deltas();
         let (menu_id, ring_id, cell_id) = cell_target_parts(&target);
         let before_count = authored_cell_count(&driver.editor, &menu_id, &ring_id);
         driver
@@ -13380,11 +13443,13 @@ mod tests {
             )
             .is_positive()
         );
-        let _discarded = click_retained_button(
+        let discarded = click_retained_button(
             &mut driver,
             &stale,
             "Discard action and cancel stale change",
         );
+        stale.drop_without_applying_deltas();
+        discarded.drop_without_applying_deltas();
         assert!(driver.editor.pending_scope_change.is_none());
         assert!(!driver.editor.inspector_action_editor.has_unassigned_text());
         assert_eq!(
@@ -13514,19 +13579,19 @@ mod tests {
             })
         };
 
-        let _ = draw(Vec::new());
+        draw(Vec::new()).drop_without_applying_deltas();
         let point = response_bounds.get().center();
-        let _ = draw(vec![egui::Event::PointerMoved(point)]);
+        draw(vec![egui::Event::PointerMoved(point)]).drop_without_applying_deltas();
         let pointer_button = |pressed| egui::Event::PointerButton {
             pos: point,
             button: egui::PointerButton::Primary,
             pressed,
             modifiers: egui::Modifiers::default(),
         };
-        let _ = draw(vec![pointer_button(true)]);
-        let _ = draw(vec![pointer_button(false)]);
-        let _ = draw(vec![egui::Event::Text(" edited".into())]);
-        let _ = draw(Vec::new());
+        draw(vec![pointer_button(true)]).drop_without_applying_deltas();
+        draw(vec![pointer_button(false)]).drop_without_applying_deltas();
+        draw(vec![egui::Event::Text(" edited".into())]).drop_without_applying_deltas();
+        draw(Vec::new()).drop_without_applying_deltas();
 
         let expected_digest = acceptance_trace::private_trace_text_digest(&value);
         assert_eq!(value, "Pinned label edited");
@@ -13693,10 +13758,9 @@ mod tests {
                     });
                 },
             );
-            (
-                accesskit_named_bounds(&output, "−", egui::accesskit::Role::Button),
-                clip.unwrap(),
-            )
+            let below = accesskit_named_bounds(&output, "−", egui::accesskit::Role::Button);
+            output.drop_without_applying_deltas();
+            (below, clip.unwrap())
         };
         // The real gallery Grid and ScrollArea retain their measured widths
         // and overflow after the first frame.
@@ -13772,7 +13836,7 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        scroll_id = Some(ui.make_persistent_id(egui::Id::new("scroll_area")));
+                        scroll_id = Some(ui.make_persistent_id(egui::IdSalt::new("scroll_area")));
                         editor.tree(
                             ui,
                             &crate::radial::model::RadialFeatureSettings::default(),
@@ -13796,7 +13860,10 @@ mod tests {
                 .expect("actual painted menu row supplies its ScrollArea clip");
             let bounds =
                 |name: &str| accesskit_named_bounds(&output, name, egui::accesskit::Role::Button);
-            (bounds("scroll-owner-menu-39"), bounds(&first_name), clip)
+            let below = bounds("scroll-owner-menu-39");
+            let first = bounds(&first_name);
+            output.drop_without_applying_deltas();
+            (below, first, clip)
         };
         let _ = frame(None);
         let (below, first, clip) = frame(None);
@@ -13876,17 +13943,30 @@ mod tests {
         let path = driver.editor.visited_path.clone();
         let initial_bounds = control_bounds(&initial);
         initial.drop_without_applying_deltas();
+        let paint_left = measured.paint_clip_bounds[0] as f32;
+        let input_left = measured.input_bounds[0] as f32;
+        assert!(paint_left.is_finite() && input_left.is_finite());
+        assert!(
+            paint_left < input_left,
+            "actual pane has a paint-only gap: {measured:?}"
+        );
+        let interior_top = (measured.paint_clip_bounds[1].max(measured.input_bounds[1])) as f32;
+        let interior_bottom = (measured.paint_clip_bounds[3].min(measured.input_bounds[3])) as f32;
+        assert!(interior_bottom > interior_top);
         let margin = egui::pos2(
-            initial_bounds.center().x,
-            measured.input_bounds[3] as f32 + 1.0,
+            (paint_left + input_left) / 2.0,
+            (interior_top + interior_bottom) / 2.0,
         );
         assert!(
-            margin.x > measured.input_bounds[0] as f32
-                && margin.x < measured.input_bounds[2] as f32
+            margin.x > paint_left && margin.x < input_left,
+            "the point lies in the measured left paint-only gap: {measured:?}"
         );
         assert!(
-            margin.y < measured.paint_clip_bounds[3] as f32,
-            "actual content paint margin must extend beyond the input viewport: {measured:?}"
+            margin.y > measured.paint_clip_bounds[1] as f32
+                && margin.y < measured.paint_clip_bounds[3] as f32
+                && margin.y > measured.input_bounds[1] as f32
+                && margin.y < measured.input_bounds[3] as f32,
+            "the point stays within the measured paint and client-height bounds: {measured:?}"
         );
         let mut last_frame = measured.frame_nr;
         for index in 0..4 {
@@ -13910,15 +13990,19 @@ mod tests {
             let current_bounds = control_bounds(&output);
             assert_eq!(
                 current_bounds, initial_bounds,
-                "wheel input in the real paint-only margin cannot scroll {owner:?}"
+                "wheel input in the actual left paint-only gap cannot scroll {owner:?}"
             );
             output.drop_without_applying_deltas();
             last_frame = current.frame_nr;
         }
         let interior = egui::pos2(
-            margin.x,
+            (measured.input_bounds[0] + measured.input_bounds[2]) as f32 / 2.0,
             (measured.input_bounds[1] + measured.input_bounds[3]) as f32 / 2.0,
         );
+        assert!(interior.x > measured.input_bounds[0] as f32);
+        assert!(interior.x < measured.input_bounds[2] as f32);
+        assert!(interior.y > measured.input_bounds[1] as f32);
+        assert!(interior.y < measured.input_bounds[3] as f32);
         let mut final_bounds = initial_bounds;
         for index in 0..4 {
             let events = if index == 0 {
@@ -14981,6 +15065,7 @@ mod tests {
             })
             .unwrap_or_else(|| panic!("missing {query:?} search result: {names:?}"));
         let point = result.center();
+        results.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(point)])
             .drop_without_applying_deltas();
@@ -15003,7 +15088,14 @@ mod tests {
         let (_, node) = update
             .nodes
             .iter()
-            .find(|(_, node)| node.role() == role && node.label() == Some(name))
+            .find(|(_, node)| {
+                node.role() == role
+                    && (if role == egui::accesskit::Role::Label {
+                        node.value()
+                    } else {
+                        node.label()
+                    }) == Some(name)
+            })
             .unwrap_or_else(|| panic!("missing {role:?} named {name:?} in AccessKit tree"));
         let bounds = node.bounds().expect("semantic control bounds");
         egui::Rect::from_min_max(
@@ -15296,7 +15388,9 @@ mod tests {
             driver.editor.session.as_ref().unwrap().generation,
             generation
         );
-        let _ = click_retained_button(driver, &controls, apply_name);
+        let applied = click_retained_button(driver, &controls, apply_name);
+        controls.drop_without_applying_deltas();
+        applied.drop_without_applying_deltas();
         driver.frame(Vec::new()).drop_without_applying_deltas();
         let session = driver.editor.session.as_mut().unwrap();
         assert_eq!(*session.draft, *expected);
@@ -15317,7 +15411,9 @@ mod tests {
         let before = (*driver.editor.session.as_ref().unwrap().draft).clone();
         let generation = driver.editor.session.as_ref().unwrap().generation;
         let first = driver.frame(Vec::new());
-        let _ = click_retained_named_control(&mut driver, &first, "text.bold");
+        click_retained_named_control(&mut driver, &first, "text.bold")
+            .drop_without_applying_deltas();
+        first.drop_without_applying_deltas();
         for _ in 0..3 {
             let output = driver.frame(Vec::new());
             assert!(
@@ -15337,6 +15433,7 @@ mod tests {
                 driver.editor.bulk_style_staged_value,
                 Some(skin_editor::with_payload(serde_json::json!(true)))
             );
+            output.drop_without_applying_deltas();
         }
         let mut expected = before.clone();
         for cell in &mut expected.menus[0].rings[0].cells[..2] {
@@ -15358,7 +15455,8 @@ mod tests {
         let generation = driver.editor.session.as_ref().unwrap().generation;
         let first = driver.frame(Vec::new());
         let point = accesskit_any_named_bounds(&first, "text.font_size").center();
-        let _ = replace_retained_text_at(&mut driver, point, "38.5");
+        first.drop_without_applying_deltas();
+        replace_retained_text_at(&mut driver, point, "38.5").drop_without_applying_deltas();
         // Commit the local DragValue text edit before checking retained frames.
         driver
             .frame(vec![key_event(
@@ -15685,9 +15783,29 @@ mod tests {
             );
             let mut driver = RetainedDesignerDriver::new(editor);
             let _ = acceptance_trace::take_action_editor_control_test_events();
-            let _ = driver.frame_in_client(client_size, 0.0, Vec::new());
+            driver
+                .frame_in_client(client_size, 0.0, Vec::new())
+                .drop_without_applying_deltas();
             let output = driver.frame_in_client(client_size, 0.05, Vec::new());
-            let search = accesskit_value_bounds(&output, egui::accesskit::Role::TextInput, "");
+            let tree_inputs = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .unwrap()
+                .nodes
+                .iter()
+                .filter(|(_, node)| {
+                    node.role() == egui::accesskit::Role::TextInput
+                        && node.placeholder() == Some("Authored menus, labels, or IDs")
+                        && node.value() == Some("")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(tree_inputs.len(), 1, "uniquely identify Tree Search");
+            let bounds = tree_inputs[0].1.bounds().unwrap();
+            let search = egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            );
             assert!(search.is_positive());
             assert!(
                 search.right() < client_size.x / 2.0,
@@ -15699,6 +15817,7 @@ mod tests {
                 inspector_heading.center().x,
                 inspector_heading.bottom() + 20.0,
             );
+            output.drop_without_applying_deltas();
             let mut query_geometry = None;
             for step in 0..12 {
                 let events = if step == 0 {
@@ -15715,7 +15834,9 @@ mod tests {
                     ]
                 };
                 let _ = acceptance_trace::take_action_editor_control_test_events();
-                let _ = driver.frame_in_client(client_size, 0.1 + step as f64 * 0.2, events);
+                driver
+                    .frame_in_client(client_size, 0.1 + step as f64 * 0.2, events)
+                    .drop_without_applying_deltas();
                 let controls = acceptance_trace::take_action_editor_control_test_events();
                 for event in controls {
                     if let Event::DesignerActionEditorControl {
@@ -15858,7 +15979,8 @@ mod tests {
         let mut driver = RetainedDesignerDriver::new(editor);
         let initial = driver.frame(Vec::new());
         let query = "unassigned Inspector close fixture";
-        let _ = replace_retained_text(&mut driver, &initial, "", query);
+        replace_retained_text(&mut driver, &initial, "", query).drop_without_applying_deltas();
+        initial.drop_without_applying_deltas();
         assert_eq!(
             driver.editor.inspector_action_editor.query_for_test(),
             query
@@ -15871,7 +15993,9 @@ mod tests {
         assert!(driver.editor.close_prompt);
         assert!(!driver.editor.action_editor_request_is_current(&identity));
         let prompt = driver.frame(Vec::new());
-        let _ = click_retained_button(&mut driver, &prompt, "Keep editing");
+        let keep_editing = click_retained_button(&mut driver, &prompt, "Keep editing");
+        prompt.drop_without_applying_deltas();
+        keep_editing.drop_without_applying_deltas();
         driver.frame(Vec::new()).drop_without_applying_deltas();
         assert!(driver.editor.open);
         assert!(!driver.editor.close_prompt);
@@ -15903,7 +16027,9 @@ mod tests {
 
         driver.editor.request_close();
         let prompt = driver.frame(Vec::new());
-        let _ = click_retained_button(&mut driver, &prompt, "Discard");
+        let discarded = click_retained_button(&mut driver, &prompt, "Discard");
+        prompt.drop_without_applying_deltas();
+        discarded.drop_without_applying_deltas();
         let closed = driver.editor.acceptance_observation().unwrap();
         assert!(!closed.open && !closed.properties_dirty && !closed.properties_popup_open);
         assert!(closed.action_editor.is_none());
@@ -15948,7 +16074,8 @@ mod tests {
 
     #[test]
     fn force_close_disposes_unassigned_inspector_buffers_and_observation() {
-        let (mut driver, _, _, _) = retained_dirty_inspector("force-close local draft");
+        let (mut driver, _, _, initial) = retained_dirty_inspector("force-close local draft");
+        initial.drop_without_applying_deltas();
         let identity = driver.editor.inspector_action_editor.identity().unwrap();
         assert!(driver.editor.properties_popup_dirty());
         driver.editor.force_close();
@@ -16882,10 +17009,12 @@ mod tests {
                 .expect("Designer exposes its feedback")
                 .nodes
                 .iter()
-                .any(|(_, node)| node.label().is_some_and(
-                    |name| name.contains("Error: Action assignment failed: RequestPending")
-                ))
+                .any(|(_, node)| node.role() == egui::accesskit::Role::Label
+                    && node.value().is_some_and(
+                        |name| name.contains("Error: Action assignment failed: RequestPending")
+                    ))
         );
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -16893,7 +17022,8 @@ mod tests {
         let source = include_str!("mod.rs");
         let production = production_source(source);
         let action_editor_production = include_str!("action_editor.rs");
-        assert!(production.contains("WidgetInfo::selected(egui::WidgetType::Checkbox"));
+        let compact_production = production.split_whitespace().collect::<String>();
+        assert!(compact_production.contains("WidgetInfo::selected(egui::WidgetType::Checkbox"));
         assert!(production.contains("egui::WidgetType::ColorButton"));
         assert!(production.contains("egui::WidgetType::ComboBox"));
         assert!(production.contains("info.label = Some(accessible_name.into())"));
@@ -16963,6 +17093,7 @@ mod tests {
         let update = output
             .platform_output
             .accesskit_update
+            .as_ref()
             .expect("AccessKit tree update");
         assert!(update.nodes.iter().any(|(_, node)| {
             node.role() == egui::accesskit::Role::ColorWell
@@ -16975,6 +17106,7 @@ mod tests {
                 && node.label() == Some("text.visible")
                 && node.toggled() == Some(egui::accesskit::Toggled::False)
         }));
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -17023,12 +17155,14 @@ mod tests {
                 .expect("initial AccessKit tree")
                 .nodes
                 .iter()
-                .any(|(_, node)| node.label().is_some_and(
-                    |name| name.contains("Loading the authoritative radial configuration")
-                ))
+                .any(|(_, node)| node.role() == egui::accesskit::Role::Label
+                    && node.value().is_some_and(
+                        |name| name.contains("Loading the authoritative radial configuration")
+                    ))
         );
         let pending_click =
             accesskit_named_bounds(&initial, "New Menu", egui::accesskit::Role::Button).center();
+        initial.drop_without_applying_deltas();
         let (pending_menu_count, pending_generation) = {
             let session = driver.editor.session.as_ref().expect("authoring session");
             (session.draft.menus.len(), session.generation)
@@ -17071,6 +17205,7 @@ mod tests {
         let mut generation_before = session.generation;
         let add_menu = accesskit_named_bounds(&enabled, "New Menu", egui::accesskit::Role::Button);
         let click_at = add_menu.center();
+        enabled.drop_without_applying_deltas();
 
         driver
             .frame(vec![egui::Event::PointerMoved(click_at)])
@@ -17109,6 +17244,7 @@ mod tests {
         let tree_button =
             accesskit_named_bounds(&after_click, "Tree", egui::accesskit::Role::Button);
         let tree_click = tree_button.center();
+        after_click.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(tree_click)])
             .drop_without_applying_deltas();
@@ -17127,6 +17263,7 @@ mod tests {
             egui::accesskit::Role::Button,
         );
         let inspector_click = inspector_button.center();
+        after_tree_click.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(inspector_click)])
             .drop_without_applying_deltas();
@@ -17141,6 +17278,7 @@ mod tests {
             "New menu",
         );
         let menu_name_click = menu_name.center();
+        inspector_toggled.drop_without_applying_deltas();
         driver
             .frame(vec![egui::Event::PointerMoved(menu_name_click)])
             .drop_without_applying_deltas();
@@ -17210,10 +17348,12 @@ mod tests {
         let update = output
             .platform_output
             .accesskit_update
+            .as_ref()
             .expect("AccessKit tree update");
         assert!(update.nodes.iter().any(|(_, node)| {
             node.role() == egui::accesskit::Role::Button && node.label() == Some(expected.as_str())
         }));
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -17340,7 +17480,8 @@ mod tests {
         let names = update
             .nodes
             .iter()
-            .filter_map(|(_, node)| node.label())
+            .filter(|(_, node)| node.role() == egui::accesskit::Role::Label)
+            .filter_map(|(_, node)| node.value())
             .collect::<Vec<_>>();
         assert!(names.iter().any(|name| *name == "Info: Exported package"));
         assert!(
@@ -17620,6 +17761,7 @@ mod tests {
             "Edit dynamic source definition",
             egui::accesskit::Role::Button,
         );
+        initial.drop_without_applying_deltas();
         let click = button.center();
         driver
             .frame(vec![egui::Event::PointerMoved(click)])

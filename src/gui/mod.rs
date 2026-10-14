@@ -6758,6 +6758,7 @@ mod tests {
         let (root_output, callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&root_output, viewport_id), 1);
         assert!(ctx.has_requested_repaint_for(&viewport_id));
+        root_output.drop_without_applying_deltas();
 
         let first = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             callback(child);
@@ -6768,6 +6769,8 @@ mod tests {
 
         assert_eq!(focus_commands(&first, viewport_id), 0);
         assert_eq!(focus_commands(&second, viewport_id), 0);
+        first.drop_without_applying_deltas();
+        second.drop_without_applying_deltas();
     }
 
     #[test]
@@ -6779,20 +6782,24 @@ mod tests {
         let viewport_id = radial_editor::radial_designer_viewport_id();
         let (initial, callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&initial, viewport_id), 1);
+        initial.drop_without_applying_deltas();
 
         let initial_child = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             callback(child);
         });
         assert_eq!(focus_commands(&initial_child, viewport_id), 0);
+        initial_child.drop_without_applying_deltas();
 
         app.enforce_pinned();
         app.enforce_pinned();
         let (maintained, maintained_callback) = register_radial_deferred_callback(&ctx, &app);
         assert_eq!(focus_commands(&maintained, viewport_id), 0);
+        maintained.drop_without_applying_deltas();
         let maintained_child = ctx.run_ui(deferred_child_input(viewport_id), |child| {
             maintained_callback(child);
         });
         assert_eq!(focus_commands(&maintained_child, viewport_id), 0);
+        maintained_child.drop_without_applying_deltas();
 
         app.focus_panel(Panel::RadialEditor);
         let (explicit, explicit_callback) = register_radial_deferred_callback(&ctx, &app);
@@ -6801,6 +6808,8 @@ mod tests {
             explicit_callback(child);
         });
         assert_eq!(focus_commands(&explicit_child, viewport_id), 0);
+        explicit.drop_without_applying_deltas();
+        explicit_child.drop_without_applying_deltas();
     }
 
     #[test]

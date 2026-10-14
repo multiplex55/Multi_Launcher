@@ -167,9 +167,10 @@ mod tests {
     use eframe::egui;
 
     fn render_duration_frame(dialog: &mut TimerDialog, ctx: &egui::Context) {
-        let _ = ctx.run_ui(Default::default(), |ctx| {
+        ctx.run_ui(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| dialog.duration_ui(ui));
-        });
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]

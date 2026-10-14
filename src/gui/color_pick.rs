@@ -474,7 +474,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
         );
         // Observe picker effects independently of constructor mouse placement.
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .drop_without_applying_deltas();
         app.last_visible = true;
         app.visibility_revision
             .request_with_focus_intent(RootFocusIntent::PreserveForeground, || {});
@@ -725,6 +726,7 @@ mod tests {
             egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
         )));
         assert_eq!(app.query, "keep original query");
+        output.drop_without_applying_deltas();
         release.store(true, Ordering::Release);
         wait(&mut app, |app| !app.color_pick_owns_root());
         assert_eq!(observer.current_rect(), original());
@@ -765,5 +767,6 @@ mod tests {
                     egui::ViewportCommand::OuterPosition(_) | egui::ViewportCommand::InnerSize(_)
                 ))
         );
+        output.drop_without_applying_deltas();
     }
 }

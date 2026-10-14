@@ -527,7 +527,7 @@ mod tests {
             })
             .into_iter()
             .collect();
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             RawInput {
                 events,
                 ..Default::default()
@@ -535,7 +535,8 @@ mod tests {
             |ctx| {
                 CentralPanel::default().show(ctx, |ui| show(ui, d));
             },
-        );
+        )
+        .drop_without_applying_deltas();
     }
 
     #[test]

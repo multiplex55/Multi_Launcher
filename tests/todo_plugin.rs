@@ -481,7 +481,7 @@ fn dialog_scrolls_with_many_entries() {
     output.drop_without_applying_deltas();
 
     let rect = ctx
-        .memory(|m| m.area_rect(egui::Id::new("Todos")))
+        .memory(|m| m.area_rect(egui::Id::new(Some("Todos"))))
         .expect("window rect");
     assert!(rect.height() < 800.0);
 }
@@ -510,7 +510,7 @@ fn todo_view_dialog_has_fixed_size() {
 
     let (min_size, max_size) = todo_view_window_constraints();
     let _rect = ctx
-        .memory(|m| m.area_rect(egui::Id::new("View Todos")))
+        .memory(|m| m.area_rect(egui::Id::new(Some("View Todos"))))
         .expect("window rect");
     let (_window_size, _) = todo_view_layout_sizes();
     assert_eq!(min_size, max_size);

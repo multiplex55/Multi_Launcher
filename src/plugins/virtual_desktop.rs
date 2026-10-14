@@ -1488,11 +1488,13 @@ mod tests {
             unsaved.auto_switch_rules[0].executable = "unsaved.exe".into();
             let mut draft_value = serde_json::to_value(unsaved).unwrap();
             let context = egui::Context::default();
-            let _ = context.run_ui(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    plugin.settings_ui(ui, &mut draft_value);
-                });
-            });
+            context
+                .run_ui(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        plugin.settings_ui(ui, &mut draft_value);
+                    });
+                })
+                .drop_without_applying_deltas();
             assert_eq!(plugin.settings, committed);
             assert_eq!(counts.starts.load(Ordering::SeqCst), 1);
             assert_eq!(counts.shutdowns.load(Ordering::SeqCst), 0);
@@ -1512,11 +1514,13 @@ mod tests {
         let mut value = plugin.default_settings().unwrap();
         let context = egui::Context::default();
         for _ in 0..2 {
-            let _ = context.run_ui(egui::RawInput::default(), |ctx| {
-                egui::CentralPanel::default().show(ctx, |ui| {
-                    plugin.settings_ui(ui, &mut value);
-                });
-            });
+            context
+                .run_ui(egui::RawInput::default(), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        plugin.settings_ui(ui, &mut value);
+                    });
+                })
+                .drop_without_applying_deltas();
         }
         assert_eq!(source.snapshots.load(Ordering::Relaxed), 1);
     }

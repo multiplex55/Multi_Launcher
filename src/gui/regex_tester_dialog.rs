@@ -1031,7 +1031,7 @@ mod tests {
                 .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
             let draft = dialog.session.draft.clone();
             let revision = dialog.session.revision();
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -1066,7 +1066,8 @@ mod tests {
                         assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                     });
                 },
-            );
+            )
+            .drop_without_applying_deltas();
             assert_eq!(dialog.session.draft, draft);
             assert_eq!(dialog.session.revision(), revision);
         }
@@ -1087,7 +1088,7 @@ mod tests {
         ctx: &egui::Context,
         events: Vec<egui::Event>,
     ) {
-        let _ = ctx.run_ui(
+        ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
                     egui::Pos2::ZERO,
@@ -1099,7 +1100,8 @@ mod tests {
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
             },
-        );
+        )
+        .drop_without_applying_deltas();
     }
 
     fn keyboard_dialog() -> RegexTesterDialogState {
@@ -1238,7 +1240,7 @@ mod tests {
         let foreign_id = egui::Id::new("foreign_editor");
         let mut foreign = String::new();
         let mut run = |events| {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     events,
                     ..Default::default()
@@ -1249,7 +1251,8 @@ mod tests {
                     });
                     egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
                 },
-            );
+            )
+            .drop_without_applying_deltas();
         };
         run(Vec::new());
         ctx.memory_mut(|memory| memory.request_focus(foreign_id));
@@ -1290,7 +1293,7 @@ mod tests {
                 .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
             let ctx = egui::Context::default();
             let run = |dialog: &mut RegexTesterDialogState, events: Vec<egui::Event>| {
-                let _ = ctx.run_ui(
+                ctx.run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
@@ -1304,7 +1307,8 @@ mod tests {
                             dialog.body(ui);
                         });
                     },
-                );
+                )
+                .drop_without_applying_deltas();
             };
             run(&mut dialog, Vec::new());
             ctx.memory_mut(|memory| memory.request_focus(egui::Id::new(id)));
@@ -1408,7 +1412,7 @@ mod tests {
         let ctx = egui::Context::default();
         dialog.open();
         for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -1421,7 +1425,8 @@ mod tests {
                         assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                     });
                 },
-            );
+            )
+            .drop_without_applying_deltas();
         }
         assert_eq!(dialog.session.draft, draft);
         assert_eq!(dialog.session.revision(), revision);
@@ -1619,7 +1624,7 @@ mod tests {
             }
             let retained_replacement = dialog.session.draft.replacement.clone();
             for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
-                let _ = ctx.run_ui(
+                ctx.run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                         ..Default::default()
@@ -1632,7 +1637,8 @@ mod tests {
                             assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                         });
                     },
-                );
+                )
+                .drop_without_applying_deltas();
             }
             assert_eq!(dialog.session.draft.pattern, draft.pattern);
             assert_eq!(dialog.session.draft.flags, draft.flags);
@@ -1700,7 +1706,7 @@ mod tests {
         let revision = dialog.session.revision();
         let ctx = egui::Context::default();
         for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -1713,7 +1719,8 @@ mod tests {
                         assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                     });
                 },
-            );
+            )
+            .drop_without_applying_deltas();
         }
         dialog.open();
         dialog.open = false;
@@ -1744,11 +1751,12 @@ mod tests {
             .session
             .mark_changed(now - std::time::Duration::from_secs(1));
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 dialog.body(ui);
             });
-        });
+        })
+        .drop_without_applying_deltas();
         assert!(history_path.exists());
         assert!(!preset_path.exists());
         let mut restarted = RegexTesterDialogState::with_storage_paths(&history_path, &preset_path);
@@ -1782,7 +1790,7 @@ mod tests {
         restarted.open();
         assert_eq!(restarted.session.draft.pattern, "é");
         for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -1795,7 +1803,8 @@ mod tests {
                         assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                     });
                 },
-            );
+            )
+            .drop_without_applying_deltas();
         }
     }
 
@@ -1888,7 +1897,7 @@ mod tests {
         for query in ["", "not-a-catalog-entry"] {
             dialog.examples.query = query.into();
             for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
-                let _ = ctx.run_ui(
+                ctx.run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                         ..Default::default()
@@ -1901,7 +1910,8 @@ mod tests {
                             assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                         });
                     },
-                );
+                )
+                .drop_without_applying_deltas();
             }
         }
         assert_eq!(dialog.session.draft, draft);
@@ -1949,7 +1959,7 @@ mod tests {
         let revision = dialog.session.revision();
         let ctx = egui::Context::default();
         for size in [egui::vec2(360.0, 240.0), egui::vec2(960.0, 680.0)] {
-            let _ = ctx.run_ui(
+            ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
@@ -1962,7 +1972,8 @@ mod tests {
                         assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                     });
                 },
-            );
+            )
+            .drop_without_applying_deltas();
         }
         assert_eq!(dialog.session.draft, draft);
         assert_eq!(dialog.session.revision(), revision);
@@ -2055,14 +2066,15 @@ mod tests {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ctx| {
+            ctx.run_ui(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let bounds = ui.available_rect_before_wrap();
                     dialog.body(ui);
                     assert!(ui.min_rect().right() <= bounds.right() + 0.1);
                     assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                 });
-            });
+            })
+            .drop_without_applying_deltas();
         }
         assert_eq!(dialog.session.draft, draft);
         assert!(dialog.session.pending_delay(now).is_none());
@@ -2152,7 +2164,8 @@ mod tests {
             .tick(Instant::now() + crate::regex_tester::session::EVALUATION_DEBOUNCE);
         dialog.information_section = InformationSection::MatchDetails;
         let ctx = egui::Context::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx));
+        ctx.run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx))
+            .drop_without_applying_deltas();
         assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
         assert_eq!(backend.attempts.load(Ordering::Relaxed), 0);
     }
@@ -2198,15 +2211,15 @@ mod tests {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         scroll_id.set(Some(
                             ui.id()
-                                .with("regex_tester_editor_area")
-                                .with(egui::Id::new("regex_tester_text_scroll")),
+                                .with(egui::IdSalt::new("regex_tester_editor_area"))
+                                .with(egui::IdSalt::new("regex_tester_text_scroll")),
                         ));
                         dialog.body(ui)
                     });
                 },
             )
         };
-        render(&mut dialog, Vec::new());
+        render(&mut dialog, Vec::new()).drop_without_applying_deltas();
         let editor_id = egui::Id::new("regex_tester_test_text");
         ctx.memory_mut(|memory| memory.request_focus(editor_id));
         let mut state = egui::TextEdit::load_state(&ctx, editor_id).unwrap();
@@ -2239,6 +2252,7 @@ mod tests {
                 .expect("input galley must be rendered")
         };
         let initial_y = input_y(&before);
+        before.drop_without_applying_deltas();
         for pressed in [true, false] {
             render(
                 &mut dialog,
@@ -2251,7 +2265,8 @@ mod tests {
                         modifiers: egui::Modifiers::NONE,
                     },
                 ],
-            );
+            )
+            .drop_without_applying_deltas();
         }
         assert_eq!(dialog.session.selected_index(), Some(2));
         assert_eq!(dialog.navigation_summary(), "Match 3 of 3");
@@ -2263,12 +2278,12 @@ mod tests {
             Some("three")
         );
         assert!(dialog.scroll_to_selected);
-        render(&mut dialog, Vec::new());
+        render(&mut dialog, Vec::new()).drop_without_applying_deltas();
         assert!(!dialog.scroll_to_selected);
         // ScrollArea animates its target for up to 0.3s. Advance only egui's
         // deterministic input clock, with no sleep or production delay.
         frame_time.set(frame_time.get() + 0.5);
-        render(&mut dialog, Vec::new());
+        render(&mut dialog, Vec::new()).drop_without_applying_deltas();
         let scrolled = egui::scroll_area::State::load(&ctx, scroll_id.get().unwrap()).unwrap();
         assert!(scrolled.offset.y > 0.0);
         // egui builds content geometry before advancing the animated offset;
@@ -2279,6 +2294,7 @@ mod tests {
             "editor must scroll towards the distant selected match: {initial_y} -> {}",
             input_y(&after)
         );
+        after.drop_without_applying_deltas();
         assert!(!dialog.scroll_to_selected);
         assert_eq!(dialog.session.draft, draft);
         assert_eq!(dialog.session.revision(), revision);
@@ -2304,9 +2320,10 @@ mod tests {
             .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
         let draft = dialog.session.draft.clone();
         let render = |dialog: &mut RegexTesterDialogState| {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            ctx.run_ui(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
-            });
+            })
+            .drop_without_applying_deltas();
         };
         render(&mut dialog);
         let id = egui::Id::new("regex_tester_test_text");
@@ -2371,7 +2388,7 @@ mod tests {
             )),
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |ctx| {
+        ctx.run_ui(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let bounds = ui.available_rect_before_wrap();
                 let layout = dialog.body(ui);
@@ -2380,7 +2397,8 @@ mod tests {
                 assert!(layout.editor.height() > 25.0);
                 assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
             });
-        });
+        })
+        .drop_without_applying_deltas();
         dialog.session.draft.pattern = "a".into();
         dialog.session.mark_changed(now);
         assert!(dialog.validation_error().is_none());
@@ -2419,9 +2437,10 @@ mod tests {
         let mut dialog = RegexTesterDialogState::default();
         dialog.session.draft.pattern = "a".into();
         dialog.session.draft.test_text = "a".repeat(1001);
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
-        });
+        })
+        .drop_without_applying_deltas();
         assert!(
             dialog
                 .session
@@ -2429,9 +2448,10 @@ mod tests {
         );
         assert_eq!(dialog.summary(), "At least 1001 matches; showing 1000");
         let revision = dialog.session.revision();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
-        });
+        })
+        .drop_without_applying_deltas();
         assert_eq!(dialog.session.revision(), revision);
         assert!(dialog.session.pending_delay(Instant::now()).is_none());
     }
@@ -2442,9 +2462,10 @@ mod tests {
         let mut dialog = RegexTesterDialogState::default();
         dialog.session.draft.test_text = "🦀".repeat(dialog.session.policy().text_bytes);
         let original = dialog.session.draft.test_text.clone();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
-        });
+        })
+        .drop_without_applying_deltas();
         assert_eq!(dialog.session.draft.test_text, original);
         assert!(dialog.preview_text().len() <= 4096);
         assert!(original.starts_with(dialog.preview_text()));
@@ -2463,9 +2484,10 @@ mod tests {
         dialog.session.draft.flags.case_insensitive = true;
         let original = dialog.session.draft.clone();
         for _ in 0..2 {
-            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            ctx.run_ui(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
-            });
+            })
+            .drop_without_applying_deltas();
         }
         assert_eq!(dialog.session.draft, original);
         assert!(utf8_prefix(&original.pattern, 128).len() <= 128);
@@ -2495,7 +2517,7 @@ mod tests {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
                 };
-                let _ = ctx.run_ui(input, |ctx| {
+                ctx.run_ui(input, |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let bounds = ui.available_rect_before_wrap();
                         let layout = dialog.body(ui);
@@ -2526,7 +2548,8 @@ mod tests {
                         assert!(ui.min_rect().right() <= bounds.right() + 0.1);
                         assert!(ui.min_rect().bottom() <= bounds.bottom() + 0.1);
                     });
-                });
+                })
+                .drop_without_applying_deltas();
                 assert_eq!(dialog.session.draft, draft);
             }
         }
@@ -2553,7 +2576,7 @@ mod tests {
         let mut dialog = RegexTesterDialogState::default();
         dialog.session.draft.pattern = "https?://example.com/a/b".into();
         let mut positions = Vec::new();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     positions = dialog
@@ -2562,7 +2585,8 @@ mod tests {
                         .to_vec();
                 });
             });
-        });
+        })
+        .drop_without_applying_deltas();
         for position in positions {
             let input = egui::RawInput {
                 events: vec![
@@ -2582,11 +2606,12 @@ mod tests {
                 ],
                 ..Default::default()
             };
-            let _ = ctx.run_ui(input, |ctx| {
+            ctx.run_ui(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.horizontal(|ui| dialog.flags_area(ui));
                 });
-            });
+            })
+            .drop_without_applying_deltas();
         }
         assert_eq!(dialog.session.draft.flags.suffix(), "imsx");
         assert_eq!(dialog.session.draft.pattern, "https?://example.com/a/b");
@@ -2618,7 +2643,8 @@ mod tests {
         let mut dialog = keyboard_dialog();
         let draft = dialog.session.draft.clone();
         dialog.open();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx));
+        ctx.run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx))
+            .drop_without_applying_deltas();
         assert!(!dialog.focus_pattern);
         let mut input = egui::RawInput::default();
         input.events.push(egui::Event::Key {
@@ -2628,12 +2654,14 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         });
-        let _ = ctx.run_ui(input, |ctx| dialog.show(ctx));
+        ctx.run_ui(input, |ctx| dialog.show(ctx))
+            .drop_without_applying_deltas();
         assert!(!dialog.open);
         assert_eq!(dialog.session.draft, draft);
         assert!(dialog.session.substitution_enabled());
         dialog.open();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx));
+        ctx.run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx))
+            .drop_without_applying_deltas();
         assert!(dialog.open);
         assert_eq!(dialog.session.draft, draft);
         assert!(dialog.session.substitution_enabled());

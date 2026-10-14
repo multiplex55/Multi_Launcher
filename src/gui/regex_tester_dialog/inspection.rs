@@ -136,11 +136,12 @@ mod tests {
         assert_eq!(copy_text(matched, CopyTarget::Capture(3)), Some(""));
         let ctx = egui::Context::default();
         let mut selected = 2;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 show(ui, matched, &mut selected);
             });
-        });
+        })
+        .drop_without_applying_deltas();
         assert_eq!(matched.text, source);
         assert_eq!(selected, 2);
     }

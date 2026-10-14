@@ -3862,7 +3862,7 @@ mod tests {
         let without_beta_metadata = super::build_row_metadata(&without_beta, false, false).unwrap();
         let without_beta_indices = vec![0, 1, 2];
         let mut geometries = None;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
             let old = super::measure_notes_geometry(
                 ctx,
                 &ctx.style_of(ctx.theme()),
@@ -3897,7 +3897,8 @@ mod tests {
                 3,
             );
             geometries = Some((old, new, replacement));
-        });
+        })
+        .drop_without_applying_deltas();
         let (old, new, replacement) = geometries.expect("measurements run in an egui frame");
         let beta_top = old.rows[1].top;
         let (anchor_top, intra_row) = super::remap_scroll_anchor(&old, &new, beta_top + 4.0)

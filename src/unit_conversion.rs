@@ -2390,7 +2390,7 @@ mod tests {
     fn converts_degrees_to_radians() {
         assert_close(
             convert(180.0, Unit::Degree, Unit::Radian).unwrap(),
-            PI_FOR_TEST,
+            std::f64::consts::PI,
         );
     }
 
@@ -2887,6 +2887,4 @@ mod tests {
             vec![Approximation::ThreeHundredSixtyFiveDayYear]
         );
     }
-
-    const PI_FOR_TEST: f64 = 3.141592653589793;
 }

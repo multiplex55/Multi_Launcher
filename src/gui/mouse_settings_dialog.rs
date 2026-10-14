@@ -764,9 +764,10 @@ mod tests {
             ..Default::default()
         };
         let mut scroll = None;
-        let _ = ctx.run_ui(input, |ctx| {
+        ctx.run_ui(input, |ctx| {
             scroll = dialog.show_ui(ctx, &mut adapter);
-        });
+        })
+        .drop_without_applying_deltas();
 
         let scroll = scroll.expect("open settings window should render its form");
         assert!(

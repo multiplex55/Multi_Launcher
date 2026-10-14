@@ -1156,7 +1156,7 @@ mod tests {
         ticket.required = false;
         ticket.input_kind = SnippetInputKind::Multiline;
 
-        let _ = dialog_frame(&ctx, &mut app.snippet_dialog, Vec::new());
+        dialog_frame(&ctx, &mut app.snippet_dialog, Vec::new()).drop_without_applying_deltas();
         let editor_id = app
             .snippet_dialog
             .body_editor_widget_id
@@ -1358,7 +1358,7 @@ mod tests {
     }
 
     fn dialog_rect(ctx: &egui::Context) -> egui::Rect {
-        ctx.memory(|memory| memory.area_rect(egui::Id::new("Snippets")).unwrap())
+        ctx.memory(|memory| memory.area_rect(egui::Id::new(Some("Snippets"))).unwrap())
     }
 
     #[test]
@@ -1371,7 +1371,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..4 {
-            dialog_frame(&ctx, &mut dialog, Vec::new());
+            dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
         }
         let size = dialog_rect(&ctx).size();
         assert!(size.x < 650.0 && size.y < 550.0, "{size:?}");
@@ -1393,10 +1393,11 @@ mod tests {
                     .iter()
                     .any(|command| matches!(command, egui::ViewportCommand::InnerSize(_)))
             }));
+            output.drop_without_applying_deltas();
         }
         dialog.filter = "no match".into();
         for _ in 0..4 {
-            dialog_frame(&ctx, &mut dialog, Vec::new());
+            dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
             assert_eq!(dialog_rect(&ctx).size(), size);
         }
         dialog.filter.clear();
@@ -1408,14 +1409,15 @@ mod tests {
         }));
         dialog.begin_existing(0);
         for _ in 0..4 {
-            dialog_frame(&ctx, &mut dialog, Vec::new());
+            dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
             assert_eq!(dialog_rect(&ctx).size(), size);
         }
         dialog.reveal_contents();
         for _ in 0..4 {
-            dialog_frame(&ctx, &mut dialog, Vec::new());
+            dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
             assert_eq!(dialog_rect(&ctx).size(), size);
         }
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -1430,7 +1432,7 @@ mod tests {
             ..Default::default()
         };
         for _ in 0..4 {
-            dialog_frame(&ctx, &mut dialog, Vec::new());
+            dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
         }
         let original = dialog_rect(&ctx);
         let corner = original.max - egui::vec2(2.0, 2.0);
@@ -1446,13 +1448,15 @@ mod tests {
                     modifiers: egui::Modifiers::NONE,
                 },
             ],
-        );
+        )
+        .drop_without_applying_deltas();
         let resized_corner = original.min + egui::vec2(240.0, 260.0);
         dialog_frame(
             &ctx,
             &mut dialog,
             vec![egui::Event::PointerMoved(resized_corner)],
-        );
+        )
+        .drop_without_applying_deltas();
         dialog_frame(
             &ctx,
             &mut dialog,
@@ -1462,9 +1466,10 @@ mod tests {
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
             }],
-        );
+        )
+        .drop_without_applying_deltas();
         for _ in 0..4 {
-            dialog_frame(&ctx, &mut dialog, Vec::new());
+            dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
         }
         let resized = dialog_rect(&ctx);
         assert!(
@@ -1499,11 +1504,13 @@ mod tests {
                     modifiers: egui::Modifiers::NONE,
                 },
             ],
-        );
+        )
+        .drop_without_applying_deltas();
         let after = dialog_frame(&ctx, &mut dialog, Vec::new());
         assert!(text_position(&after, "80 of 80 snippets").x < count.x);
         assert_eq!(dialog_rect(&ctx), resized);
 
+        before.drop_without_applying_deltas();
         let before = dialog_frame(&ctx, &mut dialog, Vec::new());
         let first_visible_row = |output: &egui::FullOutput| {
             output
@@ -1536,7 +1543,9 @@ mod tests {
                     modifiers: egui::Modifiers::NONE,
                 },
             ],
-        );
+        )
+        .drop_without_applying_deltas();
+        after.drop_without_applying_deltas();
         let after = dialog_frame(&ctx, &mut dialog, Vec::new());
         // Smooth scrolling can move part of a row before it leaves the clip rect.
         assert!(
@@ -1548,9 +1557,11 @@ mod tests {
         dialog.end_session();
         dialog.open = true;
         for _ in 0..4 {
-            dialog_frame(&ctx, &mut dialog, Vec::new());
+            dialog_frame(&ctx, &mut dialog, Vec::new()).drop_without_applying_deltas();
         }
         assert_eq!(dialog_rect(&ctx), resized);
+        after.drop_without_applying_deltas();
+        before.drop_without_applying_deltas();
     }
 
     #[test]
@@ -1694,6 +1705,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut output = dialog_frame(&ctx, &mut dialog, Vec::new());
         for _ in 0..3 {
+            output.drop_without_applying_deltas();
             output = dialog_frame(&ctx, &mut dialog, Vec::new());
         }
         let painted = painted_text(&output);
@@ -1705,6 +1717,7 @@ mod tests {
 
         dialog.reveal_contents();
         for _ in 0..4 {
+            output.drop_without_applying_deltas();
             output = dialog_frame(&ctx, &mut dialog, Vec::new());
         }
         let editor_painted = painted_text(&output);
@@ -1716,7 +1729,8 @@ mod tests {
         assert!(dialog.body_revealed);
         assert_eq!(dialog.discovered_field_keys, vec!["secret_key"]);
         assert!(dialog.template_error.is_none());
-        let _ = field_settings_frame(&field_context, &mut dialog);
+        field_settings_frame(&field_context, &mut dialog).drop_without_applying_deltas();
+        output.drop_without_applying_deltas();
         let output = field_settings_frame(&field_context, &mut dialog);
         let fields_painted = painted_text(&output);
         assert!(fields_painted.contains("secret_key"), "{fields_painted:?}");
@@ -1731,6 +1745,7 @@ mod tests {
                 .iter()
                 .any(|field| field.name == "removed_key")
         );
+        output.drop_without_applying_deltas();
     }
 
     #[test]
@@ -1809,7 +1824,7 @@ mod tests {
         };
 
         let first_session = dialog.body_edit_session;
-        let _ = frame(&mut dialog.text, first_session, 0.0, Vec::new());
+        frame(&mut dialog.text, first_session, 0.0, Vec::new()).drop_without_applying_deltas();
         let point = editor_bounds.get().left_top() + egui::vec2(12.0, 12.0);
         let pointer_button = |pressed| egui::Event::PointerButton {
             pos: point,
@@ -1817,30 +1832,34 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        let _ = frame(
+        frame(
             &mut dialog.text,
             first_session,
             0.1,
             vec![egui::Event::PointerMoved(point)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut dialog.text,
             first_session,
             0.2,
             vec![pointer_button(true)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut dialog.text,
             first_session,
             0.3,
             vec![pointer_button(false)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut dialog.text,
             first_session,
             0.4,
             vec![egui::Event::Text(" edited".into())],
-        );
+        )
+        .drop_without_applying_deltas();
         assert_ne!(dialog.text, "confidential λ\nsecond line");
 
         dialog.set_hide_contents(false);
@@ -1855,7 +1874,7 @@ mod tests {
         assert_ne!(second_session, first_session);
         assert_eq!(dialog.text, "public body");
 
-        let _ = frame(&mut dialog.text, second_session, 0.5, Vec::new());
+        frame(&mut dialog.text, second_session, 0.5, Vec::new()).drop_without_applying_deltas();
         let point = editor_bounds.get().left_top() + egui::vec2(12.0, 12.0);
         let pointer_button = |pressed| egui::Event::PointerButton {
             pos: point,
@@ -1863,25 +1882,28 @@ mod tests {
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
-        let _ = frame(
+        frame(
             &mut dialog.text,
             second_session,
             0.6,
             vec![egui::Event::PointerMoved(point)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut dialog.text,
             second_session,
             0.7,
             vec![pointer_button(true)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut dialog.text,
             second_session,
             0.8,
             vec![pointer_button(false)],
-        );
-        let _ = frame(
+        )
+        .drop_without_applying_deltas();
+        frame(
             &mut dialog.text,
             second_session,
             0.9,
@@ -1892,7 +1914,8 @@ mod tests {
                 repeat: false,
                 modifiers: egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
             }],
-        );
+        )
+        .drop_without_applying_deltas();
         assert_eq!(dialog.text, "public body");
     }
 

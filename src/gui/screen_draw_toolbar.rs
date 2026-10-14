@@ -2557,7 +2557,7 @@ mod tests {
             retained_toolbar_frame(&ctx, &state, ScreenDrawMode::Ghost, logical, scale, true)
                 .unwrap();
         let mut measured = Some(base);
-        let _ = ctx.run_ui(observation_input(logical, scale), |ctx| {
+        ctx.run_ui(observation_input(logical, scale), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let logical_client = egui::Rect::from_min_size(egui::Pos2::ZERO, logical);
                 let response = ui.small("Ghost");
@@ -2612,7 +2612,8 @@ mod tests {
                 assert_ne!(edge.visible_bounds, edge.bounds);
                 assert!(!edge.fully_visible);
             });
-        });
+        })
+        .drop_without_applying_deltas();
     }
 
     #[test]
@@ -2717,7 +2718,7 @@ mod tests {
         measured.as_mut().unwrap().label = None;
         measured.as_mut().unwrap().resume = None;
         let mut actions = Vec::new();
-        let _ = ctx.run_ui(observation_input(egui::vec2(264.0, 700.0), 1.0), |ctx| {
+        ctx.run_ui(observation_input(egui::vec2(264.0, 700.0), 1.0), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.add_enabled_ui(false, |ui| {
                     render_toolbar_contents(
@@ -2733,7 +2734,8 @@ mod tests {
                     );
                 });
             });
-        });
+        })
+        .drop_without_applying_deltas();
         assert!(!measured.unwrap().label.unwrap().enabled);
         assert!(!measured.unwrap().resume.unwrap().enabled);
         assert!(actions.is_empty());
@@ -3055,7 +3057,7 @@ mod tests {
                     input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
                 }));
             }
-            let _ = ctx.end_pass();
+            ctx.end_pass().drop_without_applying_deltas();
         }
     }
 
@@ -3106,7 +3108,7 @@ mod tests {
         assert!(
             ctx.input(|input| matches!(input.events[0], egui::Event::Key { pressed: false, .. }))
         );
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -3137,7 +3139,7 @@ mod tests {
             consume_toolbar_local_shortcuts(&ctx, &state, &settings),
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Rectangle)]
         );
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -3155,7 +3157,7 @@ mod tests {
             consume_toolbar_local_shortcuts(&ctx, &state, &settings),
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
         );
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
 
         let mut repeated = key_press(egui::Key::P, egui::Modifiers::NONE);
         if let egui::Event::Key { repeat, .. } = &mut repeated {
@@ -3167,7 +3169,7 @@ mod tests {
         ]));
         assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
         assert_eq!(ctx.input(|input| input.events.len()), 2);
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -3196,7 +3198,7 @@ mod tests {
             .is_empty()
         );
         assert_eq!(reads.get(), 0);
-        let _ = empty.end_pass();
+        empty.end_pass().drop_without_applying_deltas();
 
         let unsupported = egui::Context::default();
         unsupported.begin_pass(raw_input(vec![key_press(
@@ -3213,7 +3215,7 @@ mod tests {
             .is_empty()
         );
         assert_eq!(reads.get(), 0);
-        let _ = unsupported.end_pass();
+        unsupported.end_pass().drop_without_applying_deltas();
 
         let repeated = egui::Context::default();
         repeated.begin_pass(raw_input(vec![key_press(
@@ -3224,7 +3226,7 @@ mod tests {
             consume_toolbar_local_shortcuts(&repeated, &state, &settings),
             vec![LocalShortcutAction::Tool(ScreenDrawTool::Pen)]
         );
-        let _ = repeated.end_pass();
+        repeated.end_pass().drop_without_applying_deltas();
         let mut repeated_press = key_press(egui::Key::P, egui::Modifiers::NONE);
         if let egui::Event::Key { repeat, .. } = &mut repeated_press {
             *repeat = true;
@@ -3240,7 +3242,7 @@ mod tests {
             .is_empty()
         );
         assert_eq!(reads.get(), 0);
-        let _ = repeated.end_pass();
+        repeated.end_pass().drop_without_applying_deltas();
     }
 
     #[test]
@@ -3290,7 +3292,7 @@ mod tests {
             });
             assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
             assert_eq!(ctx.input(|input| input.events.len()), 1);
-            let _ = ctx.end_pass();
+            ctx.end_pass().drop_without_applying_deltas();
         }
     }
 
@@ -3420,7 +3422,7 @@ mod tests {
         assert!(consume_toolbar_local_shortcuts(&ctx, &state, &settings).is_empty());
         assert!(consume_drawing_escape(&ctx, &state));
         assert!(ctx.input(|input| input.events.is_empty()));
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
     }
 
     #[test]

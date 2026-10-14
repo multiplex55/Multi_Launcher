@@ -12,6 +12,48 @@ mod operation_preview;
 mod rules_dialog;
 mod text_view;
 
+/// Window builders take outer sizes in egui 0.36, while Diff persists body sizes.
+fn window_chrome(ctx: &egui::Context) -> egui::Vec2 {
+    let style = ctx.global_style();
+    let frame = egui::Frame::window(&style);
+    let heading_height =
+        ctx.fonts_mut(|fonts| fonts.row_height(&egui::TextStyle::Heading.resolve(&style)));
+    // AtomLayout allocates the laid-out text galley, which can be taller than
+    // the fractional font row metric after glyph/layout rounding. Reuse its
+    // WidgetText preparation so font overrides and extra line spacing agree.
+    let title_height = egui::WidgetText::from("Diff")
+        .into_galley_impl(
+            ctx,
+            &style,
+            egui::text::TextWrapping::from_wrap_mode_and_width(
+                egui::TextWrapMode::Truncate,
+                f32::INFINITY,
+            ),
+            egui::TextStyle::Heading.into(),
+            style.override_text_valign.unwrap_or(egui::Align::Min),
+        )
+        .size()
+        .y
+        .max(heading_height);
+    // The title's atom frame retains the window inner margin. Its cursor advance
+    // also includes the bottom title stroke; body margins are counted separately.
+    frame.total_margin().sum()
+        + egui::vec2(
+            0.0,
+            title_height + frame.inner_margin.sum().y + frame.total_margin().bottom
+                - f32::from(frame.inner_margin.bottom),
+        )
+}
+
+fn inner_work_area(screen: [f32; 4], chrome: egui::Vec2) -> [f32; 4] {
+    [
+        screen[0],
+        screen[1],
+        (screen[2] - chrome.x).max(screen[0]),
+        (screen[3] - chrome.y).max(screen[1]),
+    ]
+}
+
 /// Captures a complete, persistable inner size and outer position, or rejects
 /// the observation atomically.
 fn runtime_window_geometry(
@@ -461,23 +503,21 @@ impl DiffDialogState {
         }
         let mut open = self.open;
         let screen = ctx.input(|i| i.content_rect());
-        let (initial_size, initial_position) = crate::diff::model::validated_window_geometry(
-            &self.persistence,
+        let chrome = window_chrome(ctx);
+        let body_screen = inner_work_area(
             [screen.left(), screen.top(), screen.right(), screen.bottom()],
+            chrome,
         );
-        let minimum_size = crate::diff::model::diff_window_min_size([
-            screen.left(),
-            screen.top(),
-            screen.right(),
-            screen.bottom(),
-        ]);
+        let (initial_size, initial_position) =
+            crate::diff::model::validated_window_geometry(&self.persistence, body_screen);
+        let minimum_size = crate::diff::model::diff_window_min_size(body_screen);
         let mut window = egui::Window::new("Diff")
             .id(egui::Id::new(("diff_window", self.workspace.workspace_id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size(initial_size)
-            .min_size(minimum_size);
+            .default_size(egui::Vec2::from(initial_size) + chrome)
+            .min_size(egui::Vec2::from(minimum_size) + chrome);
         if let Some(position) = initial_position {
             window = window.default_pos(position);
         }
@@ -613,11 +653,8 @@ impl DiffDialogState {
         self.show_operation_preview(ctx);
         if let Some(response) = response
             && let Some(inner_size) = response.inner
-            && let Some((size, position)) = runtime_window_geometry(
-                inner_size,
-                response.response.rect.left_top(),
-                [screen.left(), screen.top(), screen.right(), screen.bottom()],
-            )
+            && let Some((size, position)) =
+                runtime_window_geometry(inner_size, response.response.rect.left_top(), body_screen)
         {
             self.persistence.window_size = Some(size);
             self.persistence.window_position = Some(position);
@@ -1500,6 +1537,26 @@ mod tests {
     }
 
     #[test]
+    fn runtime_geometry_accepts_attainable_body_on_small_work_area() {
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let chrome = window_chrome(ui.ctx());
+            let screen = inner_work_area([0.0, 0.0, 300.0, 200.0], chrome);
+            let size = egui::vec2(screen[2], screen[3]);
+            assert!(size.x < 300.0 && size.y < 200.0);
+            assert_eq!(
+                runtime_window_geometry(size, egui::Pos2::ZERO, screen),
+                Some(([size.x, size.y], [0.0, 0.0]))
+            );
+            assert!(
+                runtime_window_geometry(size - egui::Vec2::splat(1.0), egui::Pos2::ZERO, screen)
+                    .is_none()
+            );
+        });
+        output.drop_without_applying_deltas();
+    }
+
+    #[test]
     fn runtime_geometry_rejects_incomplete_rectangles_without_partial_persistence() {
         let screen = [0.0, 0.0, 1920.0, 1080.0];
         let rejected = [
@@ -1525,64 +1582,88 @@ mod tests {
 
     #[test]
     fn repeated_open_persists_the_bounded_inner_viewport() {
-        let ctx = egui::Context::default();
-        let screen = [0.0, 0.0, 1600.0, 1200.0];
-        let mut persistence = crate::diff::persistence::DiffPersistenceV1::default();
-        persistence.window_size = Some([900.0, 650.0]);
-        persistence.window_position = Some([40.0, 50.0]);
-        let tolerance = 0.01;
+        for (font_override, extra_line_spacing) in [(None, 0.0), (Some(32.0), 0.0), (None, 3.5)] {
+            let ctx = egui::Context::default();
+            ctx.style_mut_of(ctx.theme(), |style| {
+                style.override_font_id = font_override.map(egui::FontId::proportional);
+                style.spacing.extra_text_line_spacing = extra_line_spacing;
+            });
+            let screen = [0.0, 0.0, 1600.0, 1200.0];
+            let mut persistence = crate::diff::persistence::DiffPersistenceV1::default();
+            persistence.window_size = Some([900.0, 650.0]);
+            persistence.window_position = Some([40.0, 50.0]);
+            let tolerance = 0.01;
 
-        for workspace_id in 100..103 {
-            let (restored_size, restored_position) =
-                crate::diff::model::validated_window_geometry(&persistence, screen);
-            assert!((restored_size[0] - 900.0).abs() <= tolerance);
-            assert!((restored_size[1] - 650.0).abs() <= tolerance);
+            for workspace_id in 100..103 {
+                let (restored_size, restored_position) =
+                    crate::diff::model::validated_window_geometry(&persistence, screen);
+                assert!((restored_size[0] - 900.0).abs() <= tolerance);
+                assert!((restored_size[1] - 650.0).abs() <= tolerance);
 
-            let mut observation = None;
-            let _ = ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_max(
-                        egui::pos2(screen[0], screen[1]),
-                        egui::pos2(screen[2], screen[3]),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    let mut window = egui::Window::new("Diff")
-                        .id(egui::Id::new(("geometry_regression", workspace_id)))
-                        .default_size(restored_size)
-                        .min_size(crate::diff::model::diff_window_min_size(screen));
-                    if let Some(position) = restored_position {
-                        window = window.default_pos(position);
-                    }
-                    let response = window
-                        .show(ctx, |ui| {
-                            let viewport = DiffViewport::remaining(ui);
-                            allocate_viewport(ui, viewport, |_| viewport.size).inner
-                        })
-                        .unwrap();
-                    observation = Some((response.inner, response.response.rect));
-                },
-            );
+                let mut observation = None;
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_max(
+                            egui::pos2(screen[0], screen[1]),
+                            egui::pos2(screen[2], screen[3]),
+                        )),
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        let chrome = window_chrome(ctx.ctx());
+                        let mut open = true;
+                        let mut window = egui::Window::new("Diff")
+                            .id(egui::Id::new(("geometry_regression", workspace_id)))
+                            .open(&mut open)
+                            .collapsible(false)
+                            .resizable(true)
+                            .default_size(egui::Vec2::from(restored_size) + chrome)
+                            .min_size(
+                                egui::Vec2::from(crate::diff::model::diff_window_min_size(
+                                    inner_work_area(screen, chrome),
+                                )) + chrome,
+                            );
+                        if let Some(position) = restored_position {
+                            window = window.default_pos(position);
+                        }
+                        let response = window
+                            .show(ctx, |ui| {
+                                let viewport = DiffViewport::remaining(ui);
+                                allocate_viewport(ui, viewport, |_| viewport.size).inner
+                            })
+                            .unwrap();
+                        observation = Some((response.inner, response.response.rect, chrome));
+                    },
+                )
+                .drop_without_applying_deltas();
 
-            let (inner_size, outer_rect) = observation.unwrap();
-            let inner_size = inner_size.expect("window body rendered");
-            let geometry = runtime_window_geometry(inner_size, outer_rect.left_top(), screen)
+                let (inner_size, outer_rect, chrome) = observation.unwrap();
+                let inner_size = inner_size.expect("window body rendered");
+                let geometry = runtime_window_geometry(
+                    inner_size,
+                    outer_rect.left_top(),
+                    inner_work_area(screen, chrome),
+                )
                 .expect("complete window geometry");
-            assert!((geometry.0[0] - 900.0).abs() <= tolerance);
-            assert!((geometry.0[1] - 650.0).abs() <= tolerance);
-            // The Area response is permitted to carry frame/title-bar size.
-            // Model that explicitly rather than depending on platform styling
-            // (some egui test styles make the response and body equally sized),
-            // and prove that only its position participates in persistence.
-            let outer_size_with_chrome = outer_rect.size() + egui::vec2(17.0, 29.0);
-            assert!(
-                (outer_size_with_chrome.x - geometry.0[0]).abs() > tolerance
-                    || (outer_size_with_chrome.y - geometry.0[1]).abs() > tolerance,
-                "outer frame/title-bar dimensions must not become the persisted body viewport"
-            );
-            persistence.window_size = Some(geometry.0);
-            persistence.window_position = Some(geometry.1);
+                assert!((geometry.0[0] - 900.0).abs() <= tolerance);
+                assert!(
+                    (geometry.0[1] - 650.0).abs() <= tolerance,
+                    "workspace={workspace_id} override={font_override:?} restored={restored_size:?} chrome={chrome:?} body={inner_size:?} outer={outer_rect:?} actual_chrome={:?}",
+                    outer_rect.size() - inner_size
+                );
+                // The Area response is permitted to carry frame/title-bar size.
+                // Model that explicitly rather than depending on platform styling
+                // (some egui test styles make the response and body equally sized),
+                // and prove that only its position participates in persistence.
+                let outer_size_with_chrome = outer_rect.size() + egui::vec2(17.0, 29.0);
+                assert!(
+                    (outer_size_with_chrome.x - geometry.0[0]).abs() > tolerance
+                        || (outer_size_with_chrome.y - geometry.0[1]).abs() > tolerance,
+                    "outer frame/title-bar dimensions must not become the persisted body viewport"
+                );
+                persistence.window_size = Some(geometry.0);
+                persistence.window_position = Some(geometry.1);
+            }
         }
     }
 
@@ -2068,7 +2149,7 @@ mod tests {
             requested_size + egui::vec2(200.0, 200.0),
         ));
         for input in [input.clone(), input] {
-            let _ = ctx.run_ui(input, |ctx| {
+            ctx.run_ui(input, |ctx| {
                 let response = egui::Window::new("Diff production layout regression")
                     .id(egui::Id::new(("diff-production-layout", id)))
                     .collapsible(false)
@@ -2077,7 +2158,7 @@ mod tests {
                     // Each test frame represents a settled user resize. A fixed
                     // size avoids `default_size` being treated as a first-frame
                     // hint and then recomputed from the production content.
-                    .fixed_size(requested_size)
+                    .fixed_size(requested_size + window_chrome(ctx.ctx()))
                     .show(ctx, |ui| {
                         // Match `DiffDialogState::ui`: reserve the complete body before
                         // laying out any production child. Otherwise a long child can
@@ -2145,7 +2226,8 @@ mod tests {
                     })
                     .unwrap();
                 measured.outer = response.response.rect;
-            });
+            })
+            .drop_without_applying_deltas();
         }
         measured
     }

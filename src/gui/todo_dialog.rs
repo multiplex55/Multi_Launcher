@@ -444,7 +444,7 @@ mod tests {
             ..Default::default()
         });
         dlg.ui(&ctx, &mut app);
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
 
         assert_eq!(dlg.entries.len(), 1);
         assert_eq!(dlg.entries[0].text, "task");
@@ -472,7 +472,7 @@ mod tests {
             ..Default::default()
         });
         dlg.ui(&ctx, &mut app);
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
 
         assert_eq!(dlg.entries.len(), 1);
         assert_eq!(dlg.entries[0].text, "tagged");

@@ -8,7 +8,7 @@ Authority: `PERFORMANCE_ACCEPTANCE_ADDENDUM.md`. This backlog is not a prerequis
 |---|---|---|
 | Original egui0.27.2 | Original baseline72A01BD5; corrected test-fixture/benchmark source `f45e377390284cc1ba6cf474fcd23e008514318e`. Original release executable990081; `release-small-control/receipts/original-release-small-002.exe`. Original CPU owner logs/indexes recorded in benchmark-results.md | Separate original profiles/builds and instrumented QA captures; do not mix them. Original26 vs migrated25 painted rows and old/new lifecycle owner boundaries are documented |
 | Integrated migrated geometry | `79653eca51c80c8777b1b7e9ddaf6fd9a826e823`; release F26D (`release-full-root-size-only-001/receipts/current-release-multi_launcher-libtest.exe`), source binding/index/raw body runs under that directory | Latest integrated geometry comparison; later live GUI guards are not measured by this exact run |
-| Chosen live source at policy change | `6527ddc15b6aa0c83fb2cbe41f5ceef9e4104669`; integrated measurement/cache plus provisional closed-presentation guards | Actual live compilation/affected correctness closeout next; do not substitute isolated candidates |
+| Chosen live source at policy change | `6527ddc15b6aa0c83fb2cbe41f5ceef9e4104669`; integrated measurement/cache plus closed-presentation guards | Actual live compilation/affected correctness passed at71a41051; subsequent broad functional stabilization is in progress. Do not substitute isolated candidates |
 | Migration-only checkpoint | Pending M2-D; record actual SHA, features/lock identity and readily available measurements when saved | No new complete benchmark required |
 | Final themed checkpoint | Pending M6-B; record actual SHA, surface coverage and bounded responsiveness/idle evidence | Full original/migrated/themed statistical campaign deferred, not completed |
 
@@ -21,7 +21,7 @@ Artifact paths below are relative to `target/egui-modernization/m2a/`.
 | Work | Disposition | Preserved source/findings |
 |---|---|---|
 | Integrated shaping plan/raw-result reuse, paragraph capacity, exact measurement | Adopted already; retain under revised policy | Live vendor source and PATCH.md; production receipts and correctness contracts |
-| Closed ThemeSettings/ClipboardModify/radial presentation guards | Integrated provisionally; finish actual live correctness checks | Live6527; `closed-aux-live-port-001/receipts`, `m2a-closed-aux-presentation.md`; archived candidate A438 is separate |
+| Closed ThemeSettings/ClipboardModify/radial presentation guards | Integrated and retained; actual live M2-A correctness/check passed | Live6527/71a41051; `receipts/m2a-live-correctness-closeout.md`, `closed-aux-live-port-001/receipts`, `m2a-closed-aux-presentation.md`; archived candidate A438 is separate |
 | Compact measurement | Deferred, not integrated | `compact-measurement-001/root`, C2E5 text_layout source; artifact6E7A84F5; six private contracts, ROOT and both Grid orders retained |
 | Wider row-storage diagnostic and repair | Deferred, not integrated | `compact-storage-diagnostic-001/root` BBB42; `compact-full-row-storage-001/root` final0E8EAD63; repair artifact8C534F9C. Fixture outer storage192→96B, no timing causality claim. Four-body indexes BD2F24FB/C4854F21, combinedC0A0FE00; mixed warm/tail evidence retained |
 | ASCII face lookup | Deferred, not integrated | `ascii-face-resolution-001`, artifact29F5D665; correctness passed, limited cold signal/mixed warm evidence |

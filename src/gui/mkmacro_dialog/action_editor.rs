@@ -6917,6 +6917,7 @@ mod tests {
             }
             assert!(text.contains("If not found"), "rendered text: {text}");
             assert!(text.contains(expected), "rendered text: {text}");
+            output.drop_without_applying_deltas();
         }
     }
 

@@ -1023,19 +1023,23 @@ mod tests {
         input.screen_rect = Some(screen);
         let measured = Rc::new(RefCell::new(None));
         let captured = measured.clone();
-        let _ = context.run_ui(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.allocate_ui(egui::vec2(300.0, 200.0), |ui| {
-                    let json = format!(r#"{{"payload":"{}"}}"#, "x".repeat(100_000));
-                    let output = egui::ScrollArea::both()
-                        .id_salt(("long-line-regression", "left", "xy"))
-                        .show(ui, |ui| {
-                            ui.add(egui::Label::new(json).wrap_mode(egui::TextWrapMode::Extend));
-                        });
-                    *captured.borrow_mut() = Some((output.inner_rect, output.content_size));
+        context
+            .run_ui(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.allocate_ui(egui::vec2(300.0, 200.0), |ui| {
+                        let json = format!(r#"{{"payload":"{}"}}"#, "x".repeat(100_000));
+                        let output = egui::ScrollArea::both()
+                            .id_salt(("long-line-regression", "left", "xy"))
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(json).wrap_mode(egui::TextWrapMode::Extend),
+                                );
+                            });
+                        *captured.borrow_mut() = Some((output.inner_rect, output.content_size));
+                    });
                 });
-            });
-        });
+            })
+            .drop_without_applying_deltas();
         let (pane, content) = measured.borrow().expect("scroll area was rendered");
         assert_eq!(screen.size(), egui::vec2(800.0, 600.0));
         assert!(pane.width() <= 300.0, "pane must not widen its parent");

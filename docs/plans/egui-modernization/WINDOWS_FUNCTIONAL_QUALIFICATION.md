@@ -1,0 +1,34 @@
+# Windows functional qualification — current modernization
+
+Authority: PERFORMANCE_ACCEPTANCE_ADDENDUM.md. This records available functional evidence and exact remaining manual QA; unavailable desktop observations are not invented passes or automatic blockers to safe theming. Accepted synthetic performance debt is not reopened.
+
+## Chosen source and available checks
+
+Current integrated runtime follows6527ddc1/79653eca; M2-A checkpoint71a41051 adds only explicit headless texture-output disposal in one strict radial lifecycle test. Actual Windows fast-dev compilation and all-target check passed. Both ClipboardModify contracts and the corrected radial closed-frame/real-callback contract passed; see receipts/m2a-live-correctness-closeout.md. Integrated vendor layout/preparation sources still match the accepted source796 reference after known text EOL normalization only.
+
+Existing M1-C evidence covers once-only query/action/history dispatch, hidden logic without stale key/drop replay, hidden macro/parameter child bootstrap without root activation, geometry/selection/absolute widget IDs, bounded list/grid virtualization and note popup ownership. M1-D covers Markdown/cache/link/checkbox semantics, local image formats/DDS admission, QR texture reuse/PNG, macro image preview, crop, toast hover/lifetime and file-drop boundaries. See receipts/m1c-verification.md and m1d-verification.md. These are source/headless/integration results, not physical input/focus proof.
+
+The broad stabilization run retained6463run/6242pass/221fail/45skip. Scoped correction runs closed the failures without rewriting the original result; final corrections005 and006 each passed17/17, including strict body-size restoration with font/line-spacing variants. Global formatting and all-target Clippy005 passed; final lib Clippy006 passed. No benchmark owner was activated. See receipts/m2d-functional-stabilization.md for actual counts/source-bound logs and remaining qualification limits.
+
+## Functional coverage and manual follow-up
+
+| Behavior | Available evidence | Native/manual observation still required |
+|---|---|---|
+| Hotkey show/hide, tap/hold and radial coexistence | Migrated input/visibility/lifecycle owners and existing focused tests; current broad gate/scoped corrections include applicable automated tests | Physical launcher chord while hidden/focused, tap/hold/release and repeated invocation. Not freshly observed; no synthetic Win-key substitution |
+| Query typing, navigation, Enter/Escape, once-only execution | M1-C root action/history and event-modifier/focus tests; list/grid stable identity oracles | Current native typing/IME/arrows/Enter/Escape under real focus and hook transport |
+| List/grid/scroll and large catalogs | Existing eager-layout oracles, warm cache/revision rules, absolute IDs and bounded visible-row tests; retained CPU results | Actual scrolling/toggle/selection/anchoring at representative catalog size and available DPI |
+| Notes and representative plugins | M1-C/M1-D note/Markdown/image/QR/toast/file-drop and editor tests; previous native framebuffer visuals documented in ledger | Current native note editing and representative dialog open/close/scroll with focus restoration |
+| Hidden-root child/prompt create/dismiss | Existing hidden macro prompt/parameter notice bootstrap, stale-input and root-unpainted tests; strict radial real retained callback close now passes actual live source | Real hidden-root child visibility/closing, no root flash or focus theft; native callback/window transport |
+| Window placement/focus | Native bridge/lifecycle source and tested no-root-move/activation command semantics | Actual monitor/negative-origin/mixed-DPI placement, prior foreground restoration and root parking |
+| True idle vs active timers/effects | Event-driven architecture and existing repaint/deadline tests; no theming effect/animation added yet | Bounded native hidden/visible idle observation with pointer still, timers/previews/tooltips distinguished; sustained busy work must be fixed if observed |
+| Persistence and data integrity | Existing settings/model/editor and failed-save preservation tests; broad gate and scoped corrections documented | Isolated-fixture restart/save/Cancel and recovered settings; no personal-data migration or destructive action |
+
+## Environment and decision
+
+Current CUA supports browser surfaces only; native computer APIs are disabled, and no callable Sky desktop connector is present in the active tool inventory. Earlier unchanged desktop capture/elevation/profiling failures are retained. No repeated failed capture, new profiler, unsupported input injection or backend competition is required to establish synthetic equivalence.
+
+Existing native framebuffer screenshots prove their specific rendered output; they do not establish OS composition, physical chords, hotkey-to-visible latency or focus ownership. Broader physical/hardware/DPI/RDP observations remain explicit release-qualification gaps. Use available supported checks and continue safe implementation; correct any demonstrated critical defect before claiming its functionality stable.
+
+Renderer decision: actual Cargo features and NativeOptions explicitly select Glow. Existing renderer retained; comparative performance study deferred to POST_MODERNIZATION_PERFORMANCE_BACKLOG.md. No new backend variant or renderer change.
+
+M2-B/M2-D acceptance uses actual automated results, supported observations, documented accepted debt and these limits. It must not claim complete native verification or unconditional release readiness. After the functional migration checkpoint, immediately continue M3-A through the full visual rollout.

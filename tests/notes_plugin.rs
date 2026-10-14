@@ -431,8 +431,7 @@ fn missing_link_colored_red() {
             show_wiki_link(ui, &mut app, "missing");
         });
     });
-    let shapes = output.shapes;
-    assert!(shapes.iter().any(|s| match &s.shape {
+    assert!(output.shapes.iter().any(|s| match &s.shape {
         egui::epaint::Shape::Text(t) => {
             t.galley
                 .job
@@ -442,6 +441,7 @@ fn missing_link_colored_red() {
         }
         _ => false,
     }));
+    output.drop_without_applying_deltas();
 }
 
 #[test]

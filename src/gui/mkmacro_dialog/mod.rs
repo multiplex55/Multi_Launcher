@@ -1010,9 +1010,10 @@ mod tests {
             assert!(d.folder_delete_confirmation.is_open());
             let ctx = Context::default();
             // A second frame includes the window after egui's initial sizing pass.
-            let _ = ctx.run_ui(Default::default(), |ctx| {
+            ctx.run_ui(Default::default(), |ctx| {
                 d.folder_delete_confirmation.ui(ctx);
-            });
+            })
+            .drop_without_applying_deltas();
             let output = ctx.run_ui(Default::default(), |ctx| {
                 d.folder_delete_confirmation.ui(ctx);
             });
@@ -1028,6 +1029,7 @@ mod tests {
             assert!(text.contains("No macros will be deleted."), "{text}");
             assert_eq!(d.draft, before);
             assert!(!d.dirty);
+            output.drop_without_applying_deltas();
         }
     }
 

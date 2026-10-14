@@ -2361,7 +2361,7 @@ mod tests {
         state.ui(&ctx, &mut coordinator);
         let consumed_by_later_launcher_code =
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
 
         assert!(!consumed_by_later_launcher_code);
         assert!(!state.open);
@@ -3735,7 +3735,7 @@ mod tests {
             ..Default::default()
         });
         state.ui(&ctx, &mut coordinator);
-        let _ = ctx.end_pass();
+        ctx.end_pass().drop_without_applying_deltas();
 
         assert_eq!(state.selected_result().cloned(), selected_before);
         assert_eq!(coordinator.diagnostics().started, 0);
