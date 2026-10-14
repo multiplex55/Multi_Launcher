@@ -1,6 +1,6 @@
 # M2-A closed auxiliary presentation candidate
 
-Status: v3 candidate artifact, repaired radial contract and diagnostic listing independently accepted; no candidate timing body has run. Live production source remains79653eca and Full ROOT performance remains FAIL.
+Status: v3 artifact, repaired contract and single timing evidence independently accepted. Useful tail signal; whole-owner benefit unproved. No production port yet. Live production source remains79653eca and Full ROOT performance remains FAIL.
 
 Plan checkpointf8c7f745. The existing ignored warm-ui-regions-001/root now holds the candidate. Its pre-edit render63DA and radial source753452, baseline executableC60C and accepted diagnostic3c147aa1 are preserved/bound under `target/egui-modernization/m2a/closed-aux-presentation-001/receipts/source-preparation-001/`. Prior probe receipts are historical, not a claim that the mutable archive remains unchanged.
 
@@ -53,3 +53,24 @@ Parent-owned native recheck completed0/423.2427802s; rawstdout `885f4eca15425817
 Exactly one repaired radial contract passed native0, result `01b8a8195c66aa2d328115853072f5916663d11b9a75a95d8252edd2d81f775e`; stdout `52356b5c24c551c84e8b7da0232ddc573534b0c4b02bee9f1f549494e3fa0862`, empty stderr. Its actual setup assertion now confirms exactly one SetTheme; pending close remains, then strict empty close-command/session/identity/32closed-frame assertions pass. Exactly one diagnostic no-body listing passed native0, result `53c4570a68fee9a199bfb70b0e9b6dd6240f34a94c5fde0413fcd0c65dd3e2bd`, stdout6AD8/emptyerr. Gate `2c7f569a33497a67bfe68a72a94fd565d1fbb992b9bec4218708e740d46f3d0a`. Independent artifact/contract/listing review accepted without findings; source8A2B/9DC4 and baselineC60C unchanged. No candidate benchmark body yet.
 
 Next is exactly one candidate warm-region invocation under the existing counterbalanced protocol. Comparison with3c147aa1 is historical/unpaired and cannot establish causal savings or production acceptance.
+
+
+## Candidate timing evidence accepted
+
+Exactly one candidate body completed native0/1.1575461s, one passed owner,14records retained with zero exclusions. Input5F196414EE834A013F3B7243667197694D50C09F1CEA5A75474B16A4638A5AB8; native result `7d4e3f30fe173f0e163725a5cb24c754a5265a7222a16f50f6c3128fbcd73e3d`; stdoutBEF8FBFE3795FA9B90B543E92D99584FAAE335F6A14302D2C576BD8B667B969F; stderrAF551B0D146622D2F977B18A835788A5A2F2088B6D65E434AB7467A37A30D70C; parsed `2d3779e487d4ce484a502bf1382bc88820f27c6712ac41d007bb27818a9571ba`. Evidence is body-runs/candidate-warm-regions-001. Source8A2B/9DC4/executableA438 matched before/after. ASCII writer held tools for capture and resumed afterward. Parent parsed every field/protocol/order and verified geometry/work, identities, phase/residual/region/metric arithmetic and off sentinels; independent review accepted without findings.
+
+Ordered candidate sample arrays (nanoseconds):
+
+| Interval | Clocks disabled | Clocks enabled |
+|---|---|---|
+| Owner |379400,303500,304800,466500,261600|289100,327200,264900,264100,261600|
+| UI |323300,265300,257300,409300,229500|249800,275800,232700,232100,226900|
+| Prelude |unavailable zeros|41600,53100,37500,37200,36900|
+| Central |unavailable zeros|163100,170600,156600,151600,153800|
+| Tail |unavailable zeros|44400,51700,38300,42900,35800|
+| Central minus rows |unavailable zero sentinel|33700,36100,27700,28200,27900|
+| Nested rows |135700,127200,147800,230600,124500|129400,134500,128900,123400,125900|
+
+Historical baseline versus candidate: enabled-tail p50/p95us66.7/94.6 to42.9/51.7; all five candidate tail values35.8-51.7us are below the baseline55.8-94.6us range. Enabled owner329.9/476.1 to264.9/327.2us, but disabled owner275.4/434.4 to304.8/466.5us worsened; disabled nested rows also varied materially. Do not add independent medians or claim causal savings, precise observer overhead, overall improvement or production acceptance from these unpaired runs.
+
+Review considers the tail a useful local signal for a separately reviewed provisional guard port; whole-owner benefit remains unproved. The fixture repair is independently warranted by the inherited failure and passing strict repaired contract. No production source port is yet activated. Production796/Full ROOT FAIL and both mission tracks remain required.
