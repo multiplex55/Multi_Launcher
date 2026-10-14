@@ -1,0 +1,13 @@
+# M2-A closed auxiliary presentation candidate
+
+Status: archived source independently accepted without substantive findings. No candidate build, test, listing or timing body has run. Live production source remains79653eca and Full ROOT performance remains FAIL.
+
+Plan checkpointf8c7f745. The existing ignored warm-ui-regions-001/root now holds the candidate. Its pre-edit render63DA and radial source753452, baseline executableC60C and accepted diagnostic3c147aa1 are preserved/bound under `target/egui-modernization/m2a/closed-aux-presentation-001/receipts/source-preparation-001/`. Prior probe receipts are historical, not a claim that the mutable archive remains unchanged.
+
+Only archived render.rs and radial_editor/mod.rs changed. Theme and Clipboard Modify admission now precedes their existing extraction/argument preparation; open bodies and restoration remain identical. Radial closed/no-pending-close admission moved inside the existing lock before preference/feature/diagnostic cloning. Pending-close callback servicing remains unchanged. Notes, NoteGraph, FileSearch, preview polling, cleanup, radial intents and preference persistence remain untouched.
+
+Final render SHA `8a2b503b4181009a4b94e3b0385521efe3e9da4aa74a7c5961a6ba2521805e45`; radial SHA `caa267fe650e1ef4520c598118fb1f5a8e79b1f72c10926da33fdb3b829146fe`. Exact two-file patch `closed-aux-presentation-v1.patch` SHA `f770163ce3223d76febd7aa87174a558f2a4f443296dfd76f3b1afe3f0a69ee8`; pre-edit receipt `8739d314d8f9e443973892709e550e1921f0483b088997795767247e84159f4a`; final provenance `9f563326dff2913405aa4ad04413bfddad969982110dc3a4af2c89b753d001fd`. Parent inspected the exact patch and matched receipt hashes. Scoped rustfmt passed; five accepted manifest/vendor bindings remain unchanged.
+
+These avoidable preparation patterns also existed in originalf45; source inspection proves no migration-regression cause or material savings. Next gates are source acceptance, same-target release artifact/radial retained-callback contract and exact diagnostic listing, then one candidate body under existing timers. Historical baseline comparison is limited by drift/variation; no baseline/Full/original repeat or automatic adoption. Both mission tracks remain required; checkpoints stay local.
+
+Independent source review accepted exact two-file scope and preserved open/pending-close paths; baseline/source/patch/provenance/five dependency bindings pass. Parent independently matched both candidate source hashes and five unchanged bindings. The next gate is the same-target release no-run artifact, one exact existing radial retained-callback contract and one exact warm-region no-body listing. No candidate body is cleared yet.
