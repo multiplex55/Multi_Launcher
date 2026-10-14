@@ -365,3 +365,5 @@ CPU sampling next plan independently reviewed: official portable decoder/help/sy
 
 
 Canonical CPU sampling Phase1 ACCEPTED at4257a1427d1de4072686a0f8c97485b9ce69660263202f12989739b9fe9f0f05; parent13linkedhashes/toolMicrosoftsignature/PDB checks pass, independentreview no blocker. PerfView3.2.8 headless stack export and WPR namedinstancehelp ready; actualPID/TID/time/symbolcoverage/lostevents remain dynamicchecks. Parent separately authorizes exactlyONE currentFullROOT capture/body after freshstatus, acquirednamedinstancecleanuponly, matchingPDBsymbolpath on DECODERchild/no unsafe match. Retain rawETL and mixed/unresolvedclassification, no timingacceptance/repeat/source/build. See receipts/m2a-canonical-cpu-sampling.md.
+
+CPU capture firststart FAILED0xC5585011 underrequire_escalated/mediumfilteredadmin; noSeSystemProfilePrivilege, acquiredfalse/bodyfalse/noETL/no cleanup. FailuregateFA6E023A…51731 independentlyaccepted. Preparefresh002 normalRunAscontroller afterfinallycleanup +scopedstatus corrections; no securitypolicychange/syntheticconsent, elevatedchildattribution-only/contextdisclosed. No UAC/secondstart yet; performanceFAIL/fullmissionactive.
