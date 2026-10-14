@@ -1,6 +1,6 @@
 # M2-A closed auxiliary presentation candidate
 
-Status: v1 candidate built and listed, but the radial contract exposed an inherited fixture failure. Fixture correction is under source review; no candidate timing body has run. Live production source remains79653eca and Full ROOT performance remains FAIL.
+Status: v3 candidate artifact, repaired radial contract and diagnostic listing independently accepted; no candidate timing body has run. Live production source remains79653eca and Full ROOT performance remains FAIL.
 
 Plan checkpointf8c7f745. The existing ignored warm-ui-regions-001/root now holds the candidate. Its pre-edit render63DA and radial source753452, baseline executableC60C and accepted diagnostic3c147aa1 are preserved/bound under `target/egui-modernization/m2a/closed-aux-presentation-001/receipts/source-preparation-001/`. Prior probe receipts are historical, not a claim that the mutable archive remains unchanged.
 
@@ -37,3 +37,19 @@ One P2 source correction remains: parent initially requested ordinary drop of se
 
 
 Final v3 fixture source gate independently accepted: radial SHA `9dc4f335d30416bd3005ae9e795838b9ebc8112990d74e7b9aa9c13c29452958`; patch `637e0b01af93cd61be7cfa12e3fff526576eb991d1dee05de3b2f3669dc14dc5`; provenance `df47fbdbb55c3e8f756809004f8d6d73909fb0a65e4b62b303888cdeb924315f`, under receipts/source-preparation-003. V2-to-v3 is exactly the explicit drop_without_applying_deltas call. Parent hashes and reviewer26bindings pass; scopedformat0/render8A2Bunchanged. Strict drain assertions remain. The minimal same-target no-run recheck plus repaired exact radial contract and new-artifact diagnostic listing are next; no candidate benchmark body is cleared.
+
+
+## Parent-owned native recheck
+
+Two runner bootstrap collisions stopped before attempt002 native launch; writer confirmed no matching process, preserved prep-only scripts and released artifact execution ownership. Parent replaced the wrapper with `receipts/canonical-parent-no-run-002.py`, stored outside its fresh output directory. The actual second candidate native build started2026-10-14T15:16:32.916745Z, Cargo29036/session94507, same target/argv/clean environment and accepted8A2B/9DC4/DF47bindings. Input `receipts/parent-native-recheck-002/input.json` SHA `447ce43b6f700836222340754241bb3f801501d1b0c3204cf13c8d85bcb0562a` correctly records prior candidate build0/contract101. Parent observed the process live and retained the sole completion handle. Artifact selection, repaired contract and new-executable listing are pending; no candidate timing body.
+
+With warm source frozen and source writer released, the reviewed ASCII source/private packet9ecfb7d3 was activated for source preparation only in a separate fresh ignored production796 copy. It cannot modify this warm source, target or evidence. Parent owns native execution/docs/Git; there is only one source writer. No ASCII private test or performance body is yet authorized.
+
+
+## Repaired artifact and contract accepted
+
+Parent-owned native recheck completed0/423.2427802s; rawstdout `885f4eca1542581724b546554c00f4fff0c7654af68581f93cbe9a5a1d5a93ca`, stderr `960d0537f4d7a6ed35de198bdec55ec2e25066b74cb86e3ac8d1c0afcd114b98`. Actual523CargoJSONmessages select one newly compiled libtest with opt3/debug0/assertfalse/overflowfalse/testtrue/features[]. No unused-variable warning remains. Preserved `receipts/parent-native-recheck-002/candidate-release-v3-libtest.exe`,87,045,632bytes, SHA `a438afa747b951f65d60c4bb06146f2e9a06eddc7bd55c2159838682fc536f8b`; selection `13242ca65e87deef5059cb48187696496c32c5c34e1fa92de1e44303fe497445`. Buildresult `58018d8d7ee0d0cfd85724312c00d344d386fb9c4ee407bb99abc89dedabdcbb`.
+
+Exactly one repaired radial contract passed native0, result `01b8a8195c66aa2d328115853072f5916663d11b9a75a95d8252edd2d81f775e`; stdout `52356b5c24c551c84e8b7da0232ddc573534b0c4b02bee9f1f549494e3fa0862`, empty stderr. Its actual setup assertion now confirms exactly one SetTheme; pending close remains, then strict empty close-command/session/identity/32closed-frame assertions pass. Exactly one diagnostic no-body listing passed native0, result `53c4570a68fee9a199bfb70b0e9b6dd6240f34a94c5fde0413fcd0c65dd3e2bd`, stdout6AD8/emptyerr. Gate `2c7f569a33497a67bfe68a72a94fd565d1fbb992b9bec4218708e740d46f3d0a`. Independent artifact/contract/listing review accepted without findings; source8A2B/9DC4 and baselineC60C unchanged. No candidate benchmark body yet.
+
+Next is exactly one candidate warm-region invocation under the existing counterbalanced protocol. Comparison with3c147aa1 is historical/unpaired and cannot establish causal savings or production acceptance.
