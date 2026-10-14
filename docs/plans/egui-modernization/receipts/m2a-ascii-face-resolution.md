@@ -1,6 +1,6 @@
 # M2-A ASCII face-resolution storage candidate
 
-Status: source and private harness independently accepted; no tests, ROOT build or timing body yet. Production796/Full ROOT FAIL unchanged. Plan9ecfb7d3; fresh ignored ascii-face-resolution-001/root copied from frozen796/4cf, separate from the warm guard copy.
+Status: source/private correctness independently accepted; no ROOT build or timing body yet. Production796/Full ROOT FAIL unchanged. Plan9ecfb7d3; fresh ignored ascii-face-resolution-001/root copied from frozen796/4cf, separate from the warm guard copy.
 
 CachedFamily owns exclusive ASCII [Option<FontFaceKey>;128] and non-ASCII map storage. Central helpers route existing Font::resolve_face reads/writes; ordered resolver/fallback, negativeSome(INVALID), both constructors, lifetime and reconstruction semantics remain intact. No shaping, segmentation, glyph allocation, layout, raw-result policy, dependencies or timers change. One private contract covers128ASCII cold/repeat against ordered lookup, exclusive containers, actual emoji fallback, empty negative caching and reconstruction. Actual fixed array-byte cost is pending execution; do not assume map savings.
 
@@ -9,3 +9,14 @@ Only fonts.rs SHA `1cde6124f28c1b813283c2fa85ace9ed29c1379073816746389703596dc84
 Private harness manifest `ef241bb288e4d0e59aa5d232c4b1bc3076d4b7b01d2e498ae720169707bbc7b5` differs only in [lib].path pointing at this candidate; pinned lock `fc8fa3053c4abb2e57aa82f1e7ef579c17da56261222a5bd8764d69a4c441b1c` remains identical.
 
 Next: exactly four targeted Nextest fast-dev library tests (new resolver contract; unchanged full_layout_matches_frozen_stock_output, positioned_row_measurement_matches_full_size_bits and test_fallback_glyph_width), fresh private target. Parent owns native execution. No ROOT/performance clearance or production adoption follows from private correctness.
+
+
+## Private correctness evidence accepted
+
+All four approved unique tests passed across two Nextest runs; the initial failure is preserved. First run75131829-e96e-459a-9cde-16fc78fee99d (private-tests-001) ended100/29.0437735s: resolver contract and fallback-width passed, stock full-output failed, size parity did not run because of fail-fast. Resolver stdout reports actual array storage2,048bytes per family; no map-saving offset is assumed. Result SHA `7be85188a10628bef56b0e43afadc5f90fe7734c8af2c79755b2bae31a978ffd`, stdout0E8350CF35AE86871FBBFE9BC7A67B2CD2EAD4AD237CC2B0B730FA677F19C2B4/stderrCB767E0B0D076CF4D246F6CD210B4CD9A84FA6BBA230784CDF50E2028B978F81.
+
+Parent decoded the failed mixed_sections strings:24,400actualbytes versus24,598expected; equality holds exactly after replacing CRLF withLF. The copied frozen archive had converted the two serialized fixtures toCRLF. Candidate fixtures were restored from immutable796 Git blobs, not generated from candidate output; old copies and exact normalization proof remain in fixture-input-repair-001. Canonical D75C7B2C...FADD51D and3AB2A7AC...5F5E2B7 match existing production fixtures. Runtime source/harness/lock remain unchanged. Candidate now differs from copied frozen root in two runtime files plus those two fixture EOL restorations; frozen baseline/live files were untouched.
+
+Only failed stock-output and previously unrun size-parity were rechecked on the same target with no-fail-fast: runfebbc871-60f7-4889-96b4-cefbcafb6858 (private-tests-002), native0/3.0750987s,2passed/58skipped. Result SHA `67a866e9797a5a9b8e37cc1514fbddfdb59bdf61496df5e642eee021a64e28fd`, input315E2420D4F299FB70D4BA7069368C3AD84CAC2F9F48528851EDA17BD84606EF; stdout1D59CF1032440E377768F24A00E06C6A1D1DB0CE5755BAC3BAE32F3FAF5E1BC4/stderr801D143575239ABE74405AFE251CA76A3C8D68DBDF7CB1E3E46A9B4C240E798A. Both stock jobs and exact measured-size parity pass with untouched canonical expectations. Two previously passed tests were not repeated.
+
+Independent private-evidence review accepted without findings: four tests, actual2048Bcost, unchanged runtime/harness bindings and exact canonical fixture restoration verified. Source/private milestone complete only; no ROOT/performance/adoption clearance. Future archived private testing must preserve these serialized fixtures' exact Git bytes rather than normalizing their line endings with Rust source.
