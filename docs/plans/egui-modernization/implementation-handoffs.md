@@ -668,3 +668,42 @@ Both corrected immutableartifact gates independently CLOSED withoutfindings. Can
 Actualpairedparity independentlyCLOSED nofindings: index0020F33F5854078F9D45E8CBE33F45EB8B3C737F07C7749576C8EBD2BC6853DA69F; native0baseline4.266576s/candidate4.568951s,complete4964903bytefilesallreference66D25…712C. All55positions/commonraw/work/identitiesverified; intentionalplanlookups/hits4047→975/maxentries2→1,allpostclocks0. Parent explicitlyauthorizesONEtiminginvocationperversion sequentiallyunchangedreviewedarchives/freeze004/binaries,freshEMPTYextraction/outputdirs/sameenv+phase=timing/success-outputfinal/no-buildflags. Eachregeneratesfullparitythen2warmups5samplestraceoff,allrawsamples/55vectors/identitytuple/extractedhashes/native/walls/argv/envretained. STOPforindependentactualtimingreview; noexclusions/repeats/adoption/Full81/release/native/newoptimization.
 
 Earlier raw-hit archive experiment COMPLETE/independentlyaccepted withoutunresolvedfindings. Actualtiming native0baseline10.753454s/candidate9.806516s; bothregeneratedfullreferenceparity,4warmups+10samples/all55vectors retained. Ownerp50 227.9514→217.8085ms(4.45%),allrawsamples in receipts/m2a-earlier-raw-hit-setup-candidate.md; intendedplan4047→975/max2→1,allcommonraw/work/bounds/identitysame. Reviewerverified27bindings/index7965DE91EE341781F36DBAB1115CF3F712364ED2F5DF448E292CC5B82764D31C; sortedaggregatevsorderedrecords clarification35594692BCB746DC6E9AB1DC60CD6E2B3BB080C21EA8315E0C1639C94494019D accepted. Savingsincludeexistingplanobserverwork; five sequentialdiagnostics doNOTproveproductiongain/original/release/nativeparity orM2-Aacceptance. Writerreleased;noadoption/newoptimizationactivated. Parentpreparinglocalonlyevidencecheckpoint. Plannerread-onlysmallliveadoptionanddirectparityevidencestrategyrequested;noimplementationauthorizationyet.
+
+## M2-A live earlier raw-hit adoption proposal — NOT activated
+
+Objective: port the accepted ownership correction after evidence checkpoint75a611d0. This is partial progress; the archive median227.9514→217.8085ms includes skipped observer work and does not quantify production gain. Production source remains9b7006cd.
+
+### Ownership and scope
+
+One writer owns only vendor/epaint/src/text/font.rs, vendor/epaint/PATCH.md and fresh ignored harness/artifact/receipt outputs. Parent owns general documentation and Git. FontFace::shape_for_layout owns raw reuse: a valid hit needs neither a shaper nor a shape plan. No application, text_layout.rs, dependency, lockfile, font, profile or renderer changes. No archive observers, switches, clocks or public diagnostic exports enter production.
+
+### Required behavior
+
+1. Preserve actual combined variation resolution and Some(instance) bypass, pre-mutation buffer eligibility, population, flags, guessed properties and complete raw key.
+2. Look up the existing raw result immediately. A hit returns the unchanged owned Cached carrier, exact glyph arrays and original buffer with recycling preserved.
+3. Only misses and bypasses construct the same HarfRust shaper and consult/build the same FIFO8 plan before native shaping and admission.
+4. Preserve raw LRU bounds, keys, memory accounting, emission, fallback and metrics. The intentional internal change is that a raw hit no longer repopulates an evicted plan; native shaping still consults FIFO8.
+5. Port raw_hit_returns_before_repopulating_an_evicted_shape_plan. Use real distinct public ShapePlanKeys and FIFO helpers to retain the raw entry while evicting its plan. Verify bounded plan storage, exact cached glyphs/recycling, and unchanged actual plan order/content after the hit. Permit only necessary cfg(test) helper visibility adjustment.
+6. Update PATCH.md with ownership, accepted archive evidence, upstream provenance and removal condition, preserving existing raw/FIFO/version provenance. Do not claim quantified production savings.
+
+### Verification
+
+Use a fresh ignored private harness derived from target/egui-modernization/m2a/production-adoption-validation/epaint-focused-005/Cargo.toml, pointing to live vendor source with the existing pinned dependencies, lock, features and genuine test dependencies. Run the existing eight plus the ninth contract. Preserve actual Bahnschrift format/face-tweak, allocation, unknown-policy and bounds coverage. Source and private compilation-only bindings must be reviewed before private test bodies.
+
+For the application, use the exact 20-test OR-filter from production-adoption-validation/receipts/root-focused-20-002.receipt.txt. Run locked/offline fast-dev all-target checking, formatting and diff checks. Execute unchanged track_c_diagnostic_root_list_geometry_cost_breakdown:100/1000 rows, cold/warm, two warmups and five samples per cell, all20 records, normal preparation with raw reuse active. No Full81, full suite, release or native testing belongs to this adoption packet.
+
+### Artifact and execution rules
+
+Use a fresh isolated adoption target under ignored m2a; leave the shared target intact. Do not trust Fresh, executable filenames or metadata package IDs as source proof. Use explicit actual workspace cwd, stable Windows toolchain, profile/features, locked/offline settings and environment/QA exclusions.
+
+Build and preserve an immutable ROOT Nextest archive without bodies. Full metadata must list each of the exact20 owners plus the diagnostic owner; verify current/extracted executable hashes. Independent source/artifact review precedes ROOT execution. Run only through reviewed archives with fresh existing-empty extraction/output directories and --success-output final. Bind the private harness's exact source, no-run binary hash and selected nine tests.
+
+Bind precommit HEAD plus actual source hashes/canonical diff, manifest/lock, features and toolchain; do not pretend uncommitted code belongs to a source commit. Source changes renew bindings. Reuse the isolated target only within unchanged source/profile. Record exact argv/environment/native exit/wall time/actual counts/logs and preserve failures. Use scoped escalation upfront for known target/reparse writes; never infer a native exit after launch failure.
+
+Done requires the reviewed two-file production diff, private9/root20/check/fmt/diff and20 diagnostic records, actual artifact/receipt review, and a coherent local commit. Writer stops for parent before further work.
+
+### Later performance proposal — reference only
+
+After adoption is checkpointed, prefer a direct existing canonical-release track_c_benchmark_root_list_frame_geometry comparison against accepted original f45e377390284cc1ba6cf474fcd23e008514318e before further instrumentation. This requires a separate reviewed packet for artifact/source binding, preserved original binary eligibility, matched six100/1000/10000 cold/warm cases with five warmups/20samples, and existing fixture/work/paint-row differences. It cannot replace fast-dev comparisons or eventual81cases, waive the original regression, or completeM2-A. Production benefit and the remaining release gap are unknown. Nothing in this later proposal is activated.
+
+Live earlier raw-hit proposal preimplementation review accepted: implementer-ready, no substantive corrections. The ninth real-FIFO eviction contract covers the intended plan ownership change; existing eight contracts retain policy/output/recycling/bounds/variation coverage. Fresh harness must resolve to LIVE vendor source (existing template epaint-focused-005). Uncommitted source hashes and renewed artifact bindings remain mandatory. No implementation performed or activated yet.

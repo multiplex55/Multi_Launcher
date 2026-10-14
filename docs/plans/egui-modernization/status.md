@@ -241,3 +241,5 @@ Corrected baseline archive004 builds successfully and contains exact newowner am
 Source/private/bothimmutableartifact review CLOSED nofindings. Parent authorized exactlyoneparity-only run perversion through frozenarchives; actual fullreference/output/counterreview precedes timing. No timing yet.
 
 Earlier raw-hit archive experiment complete and independently accepted. Both regenerated full snapshots match reference; private8/9,4warmups+10samples/all55vectors and27artifactbindings verified. Diagnostic median227.9514→217.8085ms(4.45%),no exclusions; sorted-summary receipt clarification accepted. Production unchanged9b7006cd,originalperformance/M2-Astillopen. Writerreleased; see receipts/m2a-earlier-raw-hit-setup-candidate.md. Plannerread-onlynextproduction/paritypacketrequested,noactivation. Localcheckpointnext.
+
+Local archive evidence checkpoint75a611d0 saved; only unrelated Workspaces/ remained. Planner proposed two-file live early-return/ninthcontract adoption and a later direct original release comparison; adoption preimplementationreview underway, NOTactivated. Production still9b7006cd, M2-Aopen and TrackBrequired.
