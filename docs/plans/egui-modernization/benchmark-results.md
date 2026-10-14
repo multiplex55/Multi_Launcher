@@ -170,3 +170,23 @@ Fresh matched originalf45/currentfcd4 canonical-release Full ROOT pair: both one
 Accepted source/private11fd6663, releaseartifact405a5cb4 and completeTraceparity0aded75e precede exactly one fresh baseline48B2/5D87 then candidateF62C/EBBB observer-control body. Bothnative0;1000cold/nineprep/two warmups+five samples perstate, all28records/N55 retained. Disabled owner p50/p95ms25.3959/34.2486→16.4733/19.6152, ranges24.4816–34.2486 vs15.2652–19.6152 disjoint; every corresponding candidate sample lower. Enabled supporting p50/p95ms31.6263/33.5289→16.3410/25.7514. Full ordered samples, bindings, record checks and limitations are in `receipts/m2a-size-only-layout.md`.
 
 This is descriptive single fixed-arm-order diagnostic evidence, not a causalpercentage, old0.27comparison, production adoption or performance gate waiver. Actual production Full ROOT remains FAIL. Evidence supports separately reviewed live port and then actual original/current Full qualification; no theme rollout yet.
+
+
+## Actual original/current Full ROOT pair — performance FAIL
+
+Exactly one original f45e377/990081 invocation then one actual production79653eca/F26D invocation completed native0, wall28.903s/38.175s. Both correctness assertions pass. Full owner and recipe unchanged:6cases,5warmups/20samples each, all12records/240values and7aligned20-value vectors, zeroexclusions. Parent independently audited actual12rawrecords/fields/quantiles/logbindings/sourceprofile/work/within-versionidentities. Independent result review pending.
+
+| Case | Original p50 / p95 ms | Current p50 / p95 ms | Original range ms | Current range ms |
+| --- | ---: | ---: | ---: | ---: |
+| 100 cold | 1.3181 / 1.6105 | 1.2828 / 1.7002 | 1.1506–2.1009 | 1.1970–1.8628 |
+| 100 warm | 0.1567 / 0.2203 | 0.2694 / 0.3546 | 0.1018–0.2611 | 0.2606–0.3546 |
+| 1,000 cold | 11.2742 / 16.5789 | 15.8411 / 17.7901 | 10.5613–16.7666 | 15.4875–27.1029 |
+| 1,000 warm | 0.1832 / 0.2370 | 0.2847 / 0.3849 | 0.1590–0.2748 | 0.2611–0.6334 |
+| 10,000 cold | 127.5695 / 149.0629 | 166.2805 / 179.1976 | 118.1821–179.8763 | 158.4539–182.6321 |
+| 10,000 warm | 0.2003 / 0.2771 | 0.3171 / 0.3891 | 0.1916–0.3553 | 0.3048–0.4530 |
+
+Current is slower in5/6medians;10kcold+30.345% and10kwarm+58.313% descriptive in this pair. Full10kcoldranges overlap; do not claim disjoint ranges or trim current1kcold27.1029ms/any other sample. Fixed original-first armorder, nonexclusive local Get-Process compiler snapshot/CIMaccessdenied, original26/current25paint and distinct oldContext.run/currentlogic-ui-finalizer owner boundaries remain explicit. No cross-version outputidentityequality required. Priorparagraph-only/newsource differences are unpaired and cannot establish causalportbenefit. M2-A remains FAIL; no TrackB/performancewaiver/automaticoptimization or repeats.
+
+Artifacts: matchedindex5e41fec2f480d5282ccd66b9d4511402ebec72e830690430c7df590a688c8f9b; originalparsedf642e79e8213a0397cd64498043beead235706b9926c97b67369db8c8247814c; currentparsedaeffbb924bcc09408afcd46c58f875ad0db2339858a1cbaa5991a2d47c0833e0. Directrunnerbcf3c0733e7780e7f43d1afd182ec873c18200c9407942d1fd7d2724a73d9dfe. Rawlogs/preflight/native/results preserved under release-full-root-size-only-001/body-runs. No source/build/body repeats.
+
+Independent actual-result review accepted the Full ROOT measurement evidence without integrity findings and retained performance FAIL. No repeat/exclusion/automatic optimization or Track B acceptance. Source79653eca remains provisional.
