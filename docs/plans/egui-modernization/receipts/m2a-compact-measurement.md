@@ -1,6 +1,6 @@
 # M2-A compact measurement materialization candidate
 
-Status: source/private correctness milestone independently accepted; six approved tests pass. No ROOT artifact, performance or production-adoption claim. Plan `ad54f3aa`; candidate is frozen production796 in a separate ignored `compact-measurement-001/root`, excluding ASCII and live GUI guards.
+Status: six private correctness contracts, canonical artifact and ROOT comparison independently accepted as evidence. Adoption is held; production performance parity remains unproved. Plan `ad54f3aa`; candidate is frozen production796 in a separate ignored `compact-measurement-001/root`, excluding ASCII and live GUI guards.
 
 Only runtime source change: `vendor/epaint/src/text/text_layout.rs`. A private compile-time LayoutGlyph interface chooses existing Glyph or compact MeasurementGlyph records (character/X/advance/line-height/section). Shared segmentation, shaping, emission, row-breaking, overflow, alignment and bounds remain one kernel. Private owned rows avoid public Row/Arc<Row>/RowVisuals materialization for measurement. Full finalization retains existing public glyphs/rows/visuals without an extra glyph copy. Measurement skips unused intrinsic metadata/per-glyph Y assignment; all allocate_glyph calls, physical-X snapping and atlas warming remain shared. Public APIs, Fonts/cache ownership, dependencies and ROOT callers stay unchanged.
 
