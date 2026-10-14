@@ -269,3 +269,25 @@ Release geometry evidence checkpointa6c656f7 saved locally; only unrelated Works
 Read-only review found egui Id::Debug is profile-dependent: canonical25widgetID values andderivedviewport/output hashes differ despite equal structuralgeometry. Unchangedreleaseownerreusewithdrawn. Superseding proposal is freshignoredcopy/private diagnostic adapter withstrictallotherfieldbytecomparison, fullrawdiff and independentproductionrelease tuple, existingtypedIDassertions preserved. No production/sharedsignaturechange/newbaselinebuild. Finalboundedreviewpending; NOTactivated.
 
 Superseding profile-aware diagnosticadapter packet independently accepted,27strictallowedrepresentation/derivedreceiptfields andallotherbytes exact; actualsnapshotwrittencreate-new beforecomparisonfailure. No findings/extra baselinebuild. Parent localplancheckpointnext; preparation remainsnotactivateduntilcheckpoint.
+
+Localplancheckpointa741d76b saved. Soleimplementer_m2a preparingfreshignoredcopy/privateprofileadapteronly; firstsourcefreeze reviewbeforecompile. Bodiesandbuildremainnotauthorized. Currentproduction3a10unchanged; geometryevidencea6c656f7 accepted;M2-AperformanceFAILandbothtracksrequired.
+
+Fresh ignored profile adapter prepared; source review found one exact-byte comparator issue and requested literal row-index text equality. Writer is fixing only that test helper and adding runtime/lock correspondence. No compilation or body executed; production and failed performance gate unchanged.
+
+Profile-adapter source freeze003 independently accepted; exact row-index correction and runtime/lock correspondence verified. One isolated canonical-release archive preparation authorized from frozen C51176CF…09B00 source. No parity/timing bodies cleared; source/performance acceptance remains distinct.
+
+Instrumented release archive build88479 is live; parent confirmed named Cargo35484/35456 and Nextest17256 processes against actual start receipt. Frozen source C51176CF…09B00, new isolated target, no overrides/QA. Wait for true native completion and reviewed archive/executable/listing before parity. Current turn made progress through accepted corrected source freeze and build activation; goal remains active through both tracks.
+
+Release attribution archive build completed once: native0/718.3853411s, archiveEC19024C…6DC8/30592440bytes, sourceC511unchanged. Parent verified native receipt/releaseoptimized log/archive-source hashes; named owned processes terminal. Reviewer artifact/profile audit underway while writer completes no-body metadata/listing. No parity/timing body cleared.
+
+Release attribution artifact gate independently accepted at binding0033C247CDF…44D3CB after receipt-only extraction-path correction. Parent separately cleared exactlyone parity-only archive body; no timing/build/source edits/reruns. Await complete actual snapshot/diff review before timing.
+
+Parity001 failed native100/2.3297983s at QA-variable absence guard before fixture; no snapshot/diff/timing evidence. Parent reproduced wrapper root cause: PS7.6.5/.NET10 null SetEnvironmentVariable leaves present empty key; Remove-Item makes child key absent. Failed attempt retained, receipt absence claim must be corrected. Writer/reviewer preparing bounded actual-removal/prelaunch-check correction; no retry/source/archive rebuild/timing cleared.
+
+Launch-only failure review closed; append-only correction002 withdraws false QA-absence claim. Parent explicitly cleared one corrected parity002 using Python's explicit child env with QA keys removed and absence asserted, same accepted archive/source/fresh directories. Failed001 preserved; timing remains gated on actual parity.
+
+Corrected parity002 passed native0/2.613673600135371s and independent actual review:108948lines,108921byte-identical,25DebugIDvalues+2approvedreceipts only; all glyph/geometry/work/controls/bindings pass. Failed001 retained. Parent separately authorized exactlyone timing invocation (2warmups+5measured55-field vectors) using same archive and corrected child env; no performancewaiver.
+
+Instrumented release timing completed once native0/3.8276592001784593s:2warm+5samples retained, same complete parity snapshot/diff. Parent raw55-field/order/work/ID audit passed; mediansowner33.7573/section20.9049/emission10.3810/native3.3504/segment3.0892ms (nested, not additive or exactproductioncost).103830glyphcachehits0miss;raw975evictions. Analysis-only prefix parser correction preservedall8vectors; no rerun. Actual resultsreviewpending; plannerread-onlynextcostproposalrequested, nooptimizationactivated.
+
+Release layout attribution independently accepted without findings: source/artifact/parity and all2warm+5sample55-vectors/bindings/medians reviewed. Parser correctionEE826…F61D retainsall8records; source3a10unchanged. Parent preparing coherent local evidence checkpoint; plannerboundedemission/cache-hit root-cause proposal pending. M2-A performance FAIL/noTrackB.
