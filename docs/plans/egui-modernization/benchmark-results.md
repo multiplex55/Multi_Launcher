@@ -139,3 +139,15 @@ All three serial builds passed with the existing cache state; no clean was run. 
 | release | 419.488 | 4266A55233B5B94EB4C2276559EB16CF954306EB0B2FBA49C78E0F51507F2715 |
 
 [Exact commands and receipts](receipts/original-build-times.json). Original executables and startup/library test binaries are preserved locally under ignored `target/egui-modernization/baseline/bin/`. No native latency or GPU result follows from successful builds.
+
+## Current canonical-release Full ROOT control
+
+Matched originalf45e3773 against production3a10f1de using the same direct libtest runner, canonical release and existing Full owner. Both one-shot invocations passed correctness; each retained six cases/five warmups/twenty samples, with zero exclusions. Performance acceptance remains **FAIL**.
+
+| Rows | Original cold p50 ms | Current cold p50 ms | Original warm p50 ms | Current warm p50 ms |
+| --- | ---: | ---: | ---: | ---: |
+| 100 | 1.3030 | 1.9867 | 0.1636 | 0.2740 |
+| 1,000 | 11.5831 | 21.0992 | 0.1745 | 0.2989 |
+| 10,000 | 126.1726 | 235.4586 | 0.2057 | 0.3284 |
+
+[Full results, p95/spread, artifact bindings and limitations](receipts/m2a-release-full-root-control.md). All240 measurements and aligned arrays remain available. Original26/current25 painted rows, owner-boundary labels and emoji-icon font differences are disclosed; no cross-version output identity was forced. These CPU-owner results do not establish native/display/GPU or Full81 acceptance. Historical baseline results above remain unchanged.
