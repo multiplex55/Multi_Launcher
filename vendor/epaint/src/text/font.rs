@@ -835,11 +835,6 @@ impl FontFace {
             ))
         };
 
-        let shaper = shaper_data
-            .shaper(font_ref)
-            .instance(instance.as_ref())
-            .build();
-
         // Eligibility is decided before changing the input buffer. Hidden
         // context and replacement policy are trusted only on the proven
         // new-or-cleared layout path.
@@ -864,6 +859,24 @@ impl FontFace {
             flags: flags.bits(),
         });
 
+        if let Some(key) = raw_cache_key
+            && let Some((glyph_infos, glyph_positions)) = raw_shape_cache.lookup(key)
+        {
+            buffer.clear();
+            return LayoutShapeBuffer::Cached {
+                glyph_infos,
+                glyph_positions,
+                buffer,
+            };
+        }
+
+        // A raw hit needs neither a shaper nor a retained ShapePlan. Keep
+        // those objects on the native-shaping path only.
+        let shaper = shaper_data
+            .shaper(font_ref)
+            .instance(instance.as_ref())
+            .build();
+
         let key = harfrust::ShapePlanKey::new(Some(script), direction)
             .language(language.as_ref())
             .instance(instance.as_ref())
@@ -879,17 +892,6 @@ impl FontFace {
         };
 
         let plan = &shape_plans[plan_index];
-        if let Some(key) = raw_cache_key
-            && let Some((glyph_infos, glyph_positions)) = raw_shape_cache.lookup(key)
-        {
-            buffer.clear();
-            return LayoutShapeBuffer::Cached {
-                glyph_infos,
-                glyph_positions,
-                buffer,
-            };
-        }
-
         let glyph_buffer = shaper.shape(buffer, harfrust::ShapeOptions::new().plan(Some(plan)));
         if let Some(key) = raw_cache_key {
             let _ = raw_shape_cache.insert(
@@ -1212,7 +1214,7 @@ mod shape_plan_cache_tests {
         face_from_data(name, data)
     }
 
-    fn plan_for(
+    pub(super) fn plan_for(
         face: &FontFace,
         script: Script,
         direction: Direction,
@@ -2356,5 +2358,155 @@ mod raw_shape_cache_tests {
             weights[1]
         );
         drop(tweaked.clear());
+    }
+
+    #[test]
+    fn raw_hit_returns_before_repopulating_an_evicted_shape_plan() {
+        use super::shape_plan_cache_tests::plan_for;
+
+        let text = "office AV";
+        let coords = VariationCoords::default();
+        let mut face = default_face("Ubuntu-Light");
+        let reference_face = default_face("Ubuntu-Light");
+
+        let mut input = harfrust::UnicodeBuffer::new();
+        input.set_flags(flags());
+        input.push_str(text);
+        input.guess_segment_properties();
+        let original_language = input.language();
+        let original_key = harfrust::ShapePlanKey::new(Some(input.script()), input.direction())
+            .language(original_language.as_ref())
+            .instance(None)
+            .features(&[]);
+
+        let miss = shape(
+            &mut face,
+            text,
+            &coords,
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        assert!(matches!(&miss, LayoutShapeBuffer::GlyphBuffer(_)));
+        let original_signature = layout_signature(&miss);
+        let expected = reference_shape(
+            &reference_face,
+            text,
+            &coords,
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+        );
+        assert_eq!(
+            original_signature,
+            signature(expected.glyph_infos(), expected.glyph_positions()),
+            "the initial miss matches the complete independent reference output"
+        );
+        assert_eq!(face.shape_plans.len(), 1);
+        assert_eq!(shape_plan_index(&face.shape_plans, &original_key), Some(0));
+        let retained_raw_entry = cache_snapshot(&face);
+        assert_eq!(retained_raw_entry.0.len(), 1);
+        drop(miss.clear());
+
+        let filler_languages: Vec<harfrust::Language> =
+            ["fr", "de", "es", "it", "pt", "nl", "sv", "da"]
+                .into_iter()
+                .map(|language| language.parse().expect("valid distinct language tag"))
+                .collect();
+        for (index, language) in filler_languages.iter().enumerate() {
+            let plan = plan_for(
+                &face,
+                harfrust::script::LATIN,
+                harfrust::Direction::LeftToRight,
+                Some(language),
+                None,
+                &[],
+            );
+            assert!(
+                !original_key.matches(&plan),
+                "each inserted public plan key is distinct from the original"
+            );
+            let inserted_key = harfrust::ShapePlanKey::new(
+                Some(harfrust::script::LATIN),
+                harfrust::Direction::LeftToRight,
+            )
+            .language(Some(language))
+            .instance(None)
+            .features(&[]);
+            assert!(
+                shape_plan_index(&face.shape_plans, &inserted_key).is_none(),
+                "each filler key is genuinely absent before FIFO insertion"
+            );
+            let evicted = insert_shape_plan(&mut face.shape_plans, plan);
+            assert_eq!(
+                evicted,
+                index == 7,
+                "the eighth distinct insertion evicts the original FIFO plan"
+            );
+        }
+
+        assert_eq!(face.shape_plans.len(), SHAPE_PLAN_CACHE_CAPACITY);
+        assert!(
+            shape_plan_index(&face.shape_plans, &original_key).is_none(),
+            "the original public plan key has been evicted"
+        );
+        assert_eq!(
+            cache_snapshot(&face),
+            retained_raw_entry,
+            "plan eviction leaves the retained raw result unchanged"
+        );
+        for (expected_index, language) in filler_languages.iter().enumerate() {
+            let inserted_key = harfrust::ShapePlanKey::new(
+                Some(harfrust::script::LATIN),
+                harfrust::Direction::LeftToRight,
+            )
+            .language(Some(language))
+            .instance(None)
+            .features(&[]);
+            assert_eq!(
+                shape_plan_index(&face.shape_plans, &inserted_key),
+                Some(expected_index),
+                "the inserted public plans retain FIFO order and content"
+            );
+        }
+
+        let hit = shape(
+            &mut face,
+            text,
+            &coords,
+            harfrust::UnicodeBuffer::new(),
+            flags(),
+            ShapeBufferProvenance::LayoutOwnedClean,
+        );
+        assert!(
+            matches!(&hit, LayoutShapeBuffer::Cached { .. }),
+            "the raw result hits even though its original shape plan was evicted"
+        );
+        assert_eq!(layout_signature(&hit), original_signature);
+        assert_eq!(face.shape_plans.len(), SHAPE_PLAN_CACHE_CAPACITY);
+        assert!(shape_plan_index(&face.shape_plans, &original_key).is_none());
+        for (expected_index, language) in filler_languages.iter().enumerate() {
+            let inserted_key = harfrust::ShapePlanKey::new(
+                Some(harfrust::script::LATIN),
+                harfrust::Direction::LeftToRight,
+            )
+            .language(Some(language))
+            .instance(None)
+            .features(&[]);
+            assert_eq!(
+                shape_plan_index(&face.shape_plans, &inserted_key),
+                Some(expected_index),
+                "the cache hit does not repopulate or reorder the FIFO plan cache"
+            );
+        }
+        assert_eq!(
+            cache_snapshot(&face),
+            retained_raw_entry,
+            "the cache hit preserves the same retained raw entry"
+        );
+        let recycled = hit.clear();
+        assert!(
+            recycled.is_empty(),
+            "the cached carrier releases its buffer"
+        );
     }
 }

@@ -38,6 +38,13 @@ policy, oversized text, or oversized entry follows normal shaping. Hits retain
 the exact `GlyphInfo` and `GlyphPosition` arrays and return the cleared input
 buffer for reuse before glyph emission.
 
+An eligible raw-result hit returns before building the HarfRust shaper or
+consulting the FIFO plan cache. Native misses and bypasses retain the existing
+shaper, plan lookup/build, shaping, and admission path. A hit therefore does
+not refresh or repopulate a plan that was evicted from the FIFO. The focused
+`raw_hit_returns_before_repopulating_an_evicted_shape_plan` test verifies this
+ordering using a retained raw result and eight distinct public plan keys.
+
 The raw key is complete for the fixed layout call contract: empty feature list,
 default HarfRust font-unit scale, and no point-size or custom shaping functions.
 The proven fresh-or-cleared input also has empty pre/post context and the
@@ -64,6 +71,15 @@ warm, release, or native acceptance. The live private tests cover LRU and
 payload bounds, exact hit/miss output, buffer allocation recycling, unknown
 buffer and custom-policy bypass, and variation-instance bypass at Bahnschrift
 `wght` 300 and 700.
+
+The accepted archive-only earlier-hit comparison passed complete reference
+glyph and eager-geometry parity. Its five-sample cold owner medians were
+227.9514 ms before and 217.8085 ms after moving the raw hit ahead of unused
+shaper and plan setup. That diagnostic also skipped existing plan-lookup
+observer work on hits, so the measurements do not quantify production savings.
+The full evidence and limitations were accepted at checkpoint `75a611d0` and
+are recorded in
+`../../docs/plans/egui-modernization/receipts/m2a-earlier-raw-hit-setup-candidate.md`.
 
 The accepted archive-only prototype and its limits are documented in
 `docs/plans/egui-modernization/receipts/m2a-plan-reuse-prototype.md` at
