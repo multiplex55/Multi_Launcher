@@ -5,6 +5,7 @@
 //! mutation only when the dialog applies the complete proposal.
 
 use super::MkMacroDialog;
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::{
     PlannedStep, RecordedStep, RecordingPlan, RecordingResult, RecordingSourceSpan,
     RecordingSuggestion, RecordingSuggestionId, RecordingTarget, ReviewStepId,
@@ -105,6 +106,20 @@ pub struct RecordingReviewSession {
     pub preview_ticket: Option<u64>,
     pub preview_state: Option<crate::mkmacro::RuntimeState>,
     pub preview_diagnostic: Option<crate::mkmacro::ExecutionDiagnostic>,
+    #[cfg(test)]
+    test_chrome: Option<ReviewChromeObservation>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct ReviewChromeObservation {
+    body_id: eframe::egui::Id,
+    body_rect: eframe::egui::Rect,
+    content_size: eframe::egui::Vec2,
+    scroll_offset: eframe::egui::Vec2,
+    last_action: Option<(String, eframe::egui::Id, eframe::egui::Rect)>,
+    footer_clip: eframe::egui::Rect,
+    footer_buttons: Vec<(String, eframe::egui::Id, eframe::egui::Rect)>,
 }
 
 impl RecordingReviewSession {
@@ -169,6 +184,8 @@ impl RecordingReviewSession {
             preview_ticket: None,
             preview_state: None,
             preview_diagnostic: None,
+            #[cfg(test)]
+            test_chrome: None,
         }
     }
 
@@ -533,6 +550,68 @@ fn provenance_label(step: &PlannedStep) -> String {
     )
 }
 
+fn recording_review_footer_reserved_height(ui: &mut eframe::egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &eframe::egui::widget_style::Classes::default(),
+        eframe::egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        native_button_style.frame.total_margin().sum()
+    } else {
+        eframe::egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    let mut row_width = 0.0;
+    let mut row_height = 0.0_f32;
+    let mut actions_height = 0.0;
+
+    for label in labels {
+        let text_size = eframe::egui::WidgetText::from(*label)
+            .into_galley(ui, Some(wrap_mode), text_width, button_font.clone())
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            actions_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    actions_height += row_height.max(spacing.interact_size.y);
+    let separator_spacing = style
+        .separator_style(
+            &eframe::egui::widget_style::Classes::default(),
+            eframe::egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let footer_height = actions_height + 2.0 * spacing.item_spacing.y + separator_spacing;
+    (footer_height * pixels_per_point).ceil() / pixels_per_point
+}
+
 pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
     if dialog.recording_review.is_none() {
         return;
@@ -582,6 +661,21 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
         .default_size([780.0, 620.0])
         .resizable(true)
         .show(ctx, |ui| {
+            let footer_labels: &[&str] = if preview_active {
+                &["Stop Preview", "Apply", "Cancel"]
+            } else {
+                &["Play All", "Play Selected Range", "Apply", "Cancel"]
+            };
+            let footer_height = recording_review_footer_reserved_height(ui, footer_labels);
+            let body_max_height = (ui.available_height() - footer_height).max(0.0);
+            #[cfg(test)]
+            let mut last_action = None;
+            let body_output = eframe::egui::ScrollArea::vertical()
+                .id_salt("mkmacro_recording_review_body")
+                .auto_shrink([false, false])
+                .min_scrolled_height(0.0)
+                .max_height(body_max_height)
+                .show(ui, |ui| {
             let review = dialog.recording_review.as_mut().unwrap();
             let stats = &review.statistics;
             ui.horizontal_wrapped(|ui| {
@@ -599,20 +693,21 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                 ));
             });
             if review.dropped_event_count > 0 {
-                ui.colored_label(
-                    eframe::egui::Color32::YELLOW,
-                    format!("{} input events were dropped", review.dropped_event_count),
+                semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    &format!("{} input events were dropped", review.dropped_event_count),
+                    None,
                 );
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut review.view, RecordingReviewView::Literal, "Literal");
                 ui.selectable_value(&mut review.view, RecordingReviewView::Cleaned, "Cleaned");
                 ui.selectable_value(&mut review.view, RecordingReviewView::Actions, "Actions");
-                ui.separator();
-                ui.label(match review.mode {
-                    RecordingReviewMode::Generated => "Generated mode",
-                    RecordingReviewMode::Editable => "Editable mode",
-                });
+            });
+            ui.label(match review.mode {
+                RecordingReviewMode::Generated => "Generated mode",
+                RecordingReviewMode::Editable => "Editable mode",
             });
             ui.separator();
 
@@ -771,10 +866,7 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                 });
             }
 
-            let height = ui.available_height().max(160.0) - 130.0;
-            eframe::egui::ScrollArea::vertical()
-                .max_height(height.max(120.0))
-                .show(ui, |ui| match review.view {
+            match review.view {
                     RecordingReviewView::Literal => {
                         for (index, step) in review.literal_steps.iter().enumerate() {
                             ui.label(format!(
@@ -799,12 +891,16 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                         let mut selection_request = None;
                         for (index, step) in review.proposed_steps().iter().enumerate() {
                             let selected = review.selection.contains(&step.review_id);
+                            #[cfg(test)]
+                            let is_last = index + 1 == review.proposed_steps().len();
                             let label = format!(
                                 "{}. {} — {}",
                                 index + 1,
                                 super::action_catalog::action_name(&step.action),
                                 super::action_catalog::action_details(&step.action)
                             );
+                            #[cfg(test)]
+                            let last_label = is_last.then(|| label.clone());
                             let response = ui.selectable_label(selected, label);
                             if response.clicked() {
                                 let modifiers = ui.input(|input| input.modifiers);
@@ -814,13 +910,17 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                                     modifiers.shift,
                                 ));
                             }
+                            #[cfg(test)]
+                            if let Some(label) = last_label {
+                                last_action = Some((label, response.id, response.rect));
+                            }
                             response.on_hover_text(provenance_label(step));
                         }
                         if let Some((id, toggle, extend)) = selection_request {
                             review.select(id, toggle, extend);
                         }
                     }
-                });
+            }
 
             ui.separator();
             ui.horizontal_wrapped(|ui| {
@@ -900,9 +1000,11 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             });
             if review.reconfigure_confirmation {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(
-                        eframe::egui::Color32::YELLOW,
+                    semantic_status(
+                        ui,
+                        StatusTone::Warning,
                         "Discard manual review edits and rebuild from cleanup settings?",
+                        None,
                     );
                     if ui.button("Discard edits").clicked() {
                         let _ = review.reconfigure(true);
@@ -913,12 +1015,14 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                 });
             }
             if let Some(message) = &review.message {
-                ui.colored_label(eframe::egui::Color32::YELLOW, message);
+                semantic_status(ui, StatusTone::Error, message, None);
             }
             if let Some(diagnostic) = &review.preview_diagnostic {
-                ui.colored_label(
-                    eframe::egui::Color32::YELLOW,
-                    format!("Preview failed: {}", diagnostic.message),
+                semantic_status(
+                    ui,
+                    StatusTone::Error,
+                    &format!("Preview failed: {}", diagnostic.message),
+                    None,
                 );
                 for (key, value) in &diagnostic.context {
                     ui.small(format!("{key}: {value}"));
@@ -938,7 +1042,7 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
             }
             if let Some(blocker) = &apply_blocker {
                 if review.message.as_deref() != Some(blocker) {
-                    ui.colored_label(eframe::egui::Color32::YELLOW, blocker);
+                    semantic_status(ui, StatusTone::Warning, blocker, None);
                 }
                 if blocker.contains("original insertion step")
                     && ui
@@ -972,51 +1076,85 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
                     });
                 }
             }
-            ui.horizontal(|ui| {
-                if preview_active {
-                    if ui.button("Stop Preview").clicked() {
-                        stop_preview = true;
-                    }
-                } else {
-                    if ui
-                        .add_enabled(
-                            !review_editor_open && !playback_active && !review.proposed_steps().is_empty(),
-                            eframe::egui::Button::new("Play All"),
-                        )
-                        .clicked()
-                    {
-                        preview_all = true;
-                    }
-                    if ui
-                        .add_enabled(
-                            !review_editor_open && !playback_active && !review.selection.is_empty(),
-                            eframe::egui::Button::new("Play Selected Range"),
-                        )
-                        .on_hover_text("Plays from the first through the last selected action, including intervening rows")
-                        .clicked()
-                    {
-                        preview_selected = true;
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        !review_editor_open && apply_blocker.is_none(),
-                        eframe::egui::Button::new("Apply"),
-                    )
-                    .clicked()
-                {
-                    apply = true;
-                }
-                if ui
-                    .add_enabled(!review_editor_open, eframe::egui::Button::new("Cancel"))
-                    .clicked()
-                {
-                    cancel = true;
-                }
-            });
             if review_editor_open {
                 ui.small("Finish or cancel the Action Editor before changing this review.");
             }
+                });
+            ui.separator();
+            #[cfg(test)]
+            let footer_clip = ui.clip_rect();
+            #[cfg(test)]
+            let mut footer_buttons = Vec::new();
+            let review = dialog.recording_review.as_mut().unwrap();
+            ui.horizontal_wrapped(|ui| {
+                if preview_active {
+                    let response = ui.button("Stop Preview");
+                    #[cfg(test)]
+                    footer_buttons.push(("Stop Preview".to_owned(), response.id, response.rect));
+                    if response.clicked() {
+                        stop_preview = true;
+                    }
+                } else {
+                    let response = ui.add_enabled(
+                        !review_editor_open
+                            && !playback_active
+                            && !review.proposed_steps().is_empty(),
+                        eframe::egui::Button::new("Play All"),
+                    );
+                    #[cfg(test)]
+                    footer_buttons.push(("Play All".to_owned(), response.id, response.rect));
+                    if response.clicked() {
+                        preview_all = true;
+                    }
+                    let response = ui
+                        .add_enabled(
+                            !review_editor_open
+                                && !playback_active
+                                && !review.selection.is_empty(),
+                            eframe::egui::Button::new("Play Selected Range"),
+                        )
+                        .on_hover_text("Plays from the first through the last selected action, including intervening rows");
+                    #[cfg(test)]
+                    footer_buttons.push((
+                        "Play Selected Range".to_owned(),
+                        response.id,
+                        response.rect,
+                    ));
+                    if response.clicked() {
+                        preview_selected = true;
+                    }
+                }
+                let response = ui.add_enabled(
+                    !review_editor_open && apply_blocker.is_none(),
+                    eframe::egui::Button::new("Apply"),
+                );
+                #[cfg(test)]
+                footer_buttons.push(("Apply".to_owned(), response.id, response.rect));
+                if response.clicked() {
+                    apply = true;
+                }
+                let response =
+                    ui.add_enabled(!review_editor_open, eframe::egui::Button::new("Cancel"));
+                #[cfg(test)]
+                footer_buttons.push(("Cancel".to_owned(), response.id, response.rect));
+                if response.clicked() {
+                    cancel = true;
+                }
+            });
+            #[cfg(test)]
+            {
+                review.test_chrome = Some(ReviewChromeObservation {
+                    body_id: body_output.id,
+                    body_rect: body_output.inner_rect,
+                    content_size: body_output.content_size,
+                    scroll_offset: body_output.state.offset,
+                    last_action,
+                    footer_clip,
+                    footer_buttons,
+                });
+            }
+            #[cfg(not(test))]
+            let _ = (body_output, footer_height);
         });
 
     if let Some(id) = edit
@@ -1287,6 +1425,317 @@ mod tests {
             capture_duration: Duration::from_secs(2),
             raw_event_count: 12,
         }
+    }
+
+    const REVIEW_FOOTER_LABELS: [&str; 4] = ["Play All", "Play Selected Range", "Apply", "Cancel"];
+
+    #[test]
+    fn mkmacro_review_chrome_keeps_long_body_above_native_footer_without_commit() {
+        use eframe::egui::accesskit::{NodeId, Role};
+
+        #[derive(Clone)]
+        struct FooterButton {
+            label: String,
+            id: eframe::egui::Id,
+            response_rect: eframe::egui::Rect,
+            accesskit_rect: eframe::egui::Rect,
+        }
+
+        #[derive(Clone)]
+        struct Layout {
+            body_id: eframe::egui::Id,
+            body_rect: eframe::egui::Rect,
+            content_size: eframe::egui::Vec2,
+            scroll_offset: eframe::egui::Vec2,
+            last_action: (String, eframe::egui::Id, eframe::egui::Rect),
+            footer_clip: eframe::egui::Rect,
+            footer_buttons: Vec<FooterButton>,
+        }
+
+        fn same_rect(left: eframe::egui::Rect, right: eframe::egui::Rect) -> bool {
+            (left.min.x - right.min.x).abs() < 0.5
+                && (left.min.y - right.min.y).abs() < 0.5
+                && (left.max.x - right.max.x).abs() < 0.5
+                && (left.max.y - right.max.y).abs() < 0.5
+        }
+
+        fn response_node_bounds(
+            output: &eframe::egui::FullOutput,
+            response_id: eframe::egui::Id,
+            label: &str,
+        ) -> Option<eframe::egui::Rect> {
+            let node_id = NodeId(response_id.value());
+            let (_, node) = output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == node_id)?;
+            if node.role() != Role::Button || node.label() != Some(label) {
+                return None;
+            }
+            let bounds = node.bounds()?;
+            Some(eframe::egui::Rect::from_min_max(
+                eframe::egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                eframe::egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            ))
+        }
+
+        fn same_layout(left: &Layout, right: &Layout) -> bool {
+            left.body_id == right.body_id
+                && same_rect(left.body_rect, right.body_rect)
+                && (left.content_size - right.content_size).length() < 0.5
+                && (left.scroll_offset - right.scroll_offset).length() < 0.5
+                && left.last_action.0 == right.last_action.0
+                && left.last_action.1 == right.last_action.1
+                && same_rect(left.last_action.2, right.last_action.2)
+                && same_rect(left.footer_clip, right.footer_clip)
+                && left.footer_buttons.len() == right.footer_buttons.len()
+                && left
+                    .footer_buttons
+                    .iter()
+                    .zip(&right.footer_buttons)
+                    .all(|(left, right)| {
+                        left.label == right.label
+                            && left.id == right.id
+                            && same_rect(left.response_rect, right.response_rect)
+                            && same_rect(left.accesskit_rect, right.accesskit_rect)
+                    })
+        }
+
+        fn layout_from_observation(
+            observation: &ReviewChromeObservation,
+            latest_footer_nodes: &[Option<(eframe::egui::Id, eframe::egui::Rect)>],
+        ) -> Option<Layout> {
+            if observation.footer_buttons.len() != REVIEW_FOOTER_LABELS.len()
+                || !observation
+                    .footer_buttons
+                    .iter()
+                    .zip(REVIEW_FOOTER_LABELS)
+                    .all(|((label, _, _), expected)| label == expected)
+            {
+                return None;
+            }
+            let mut footer_buttons = Vec::with_capacity(REVIEW_FOOTER_LABELS.len());
+            for (index, (label, id, response_rect)) in observation.footer_buttons.iter().enumerate()
+            {
+                let (node_id, accesskit_rect) = latest_footer_nodes.get(index)?.as_ref()?;
+                if node_id != id {
+                    return None;
+                }
+                footer_buttons.push(FooterButton {
+                    label: label.clone(),
+                    id: *id,
+                    response_rect: *response_rect,
+                    accesskit_rect: *accesskit_rect,
+                });
+            }
+            Some(Layout {
+                body_id: observation.body_id,
+                body_rect: observation.body_rect,
+                content_size: observation.content_size,
+                scroll_offset: observation.scroll_offset,
+                last_action: observation.last_action.clone()?,
+                footer_clip: observation.footer_clip,
+                footer_buttons,
+            })
+        }
+
+        fn frame_layout(
+            output: &eframe::egui::FullOutput,
+            observation: Option<&ReviewChromeObservation>,
+            latest_footer_nodes: &mut [Option<(eframe::egui::Id, eframe::egui::Rect)>],
+        ) -> Option<Layout> {
+            let observation = observation?;
+            for (index, (label, id, _)) in observation.footer_buttons.iter().enumerate() {
+                let Some(slot) = latest_footer_nodes.get_mut(index) else {
+                    continue;
+                };
+                if let Some((old_id, _)) = *slot
+                    && old_id != *id
+                {
+                    *slot = None;
+                }
+                if let Some(bounds) = response_node_bounds(output, *id, label) {
+                    *slot = Some((*id, bounds));
+                }
+            }
+            layout_from_observation(observation, latest_footer_nodes)
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(directory.path()).unwrap();
+        let mut dialog = MkMacroDialog::new(Arc::new(store));
+        let mut recording = result();
+        recording.suggestions.clear();
+        recording.plan.steps = (0..64)
+            .map(|index| planned(index + 1, index as usize))
+            .collect();
+        dialog.recording_review = Some(RecordingReviewSession::new(recording));
+
+        let draft_before = dialog.draft.clone();
+        let baseline_before = dialog.baseline.clone();
+        let persisted_before = dialog.store.snapshot();
+        let revision_before = dialog.draft_revision();
+        let dirty_before = dialog.dirty;
+        let conflict_before = dialog.conflict;
+        let selected_before = dialog.selected_macro_id;
+        let review_before = dialog.recording_review.as_ref().map(|review| {
+            (
+                review.target,
+                review.literal_steps.clone(),
+                review.cleaned_plan.clone(),
+                review.proposed_steps().to_vec(),
+                review.mode,
+                review.view,
+                review.selection.clone(),
+                review.primary,
+                review.preview_ticket,
+                review.preview_state,
+                review.preview_diagnostic.clone(),
+            )
+        });
+
+        let context = eframe::egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut_of(context.theme(), |style| {
+            style.override_font_id = Some(eframe::egui::FontId::new(
+                22.0,
+                eframe::egui::FontFamily::Proportional,
+            ));
+        });
+        let screen_rect = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(680.0, 430.0),
+        );
+        let input = || eframe::egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+
+        let mut latest_footer_nodes = vec![None; REVIEW_FOOTER_LABELS.len()];
+        let mut previous_layout: Option<Layout> = None;
+        let mut settled_initial_layout: Option<Layout> = None;
+        for _ in 0..8 {
+            let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
+            let observation = dialog
+                .recording_review
+                .as_ref()
+                .and_then(|review| review.test_chrome.as_ref())
+                .cloned();
+            let current_layout =
+                frame_layout(&output, observation.as_ref(), &mut latest_footer_nodes);
+            if let (Some(previous), Some(current)) = (&previous_layout, &current_layout)
+                && same_layout(previous, current)
+            {
+                settled_initial_layout = current_layout.clone();
+            }
+            previous_layout = current_layout;
+            output.drop_without_applying_deltas();
+        }
+
+        let mut requested_scroll = false;
+        if let Some(layout) = &settled_initial_layout
+            && let Some(mut state) =
+                eframe::egui::scroll_area::State::load(&context, layout.body_id)
+        {
+            state.offset.y = (layout.content_size.y - layout.body_rect.height()).max(0.0);
+            state.store(&context, layout.body_id);
+            requested_scroll = true;
+        }
+
+        let mut previous_scrolled_layout: Option<Layout> = None;
+        let mut settled_scrolled_layout: Option<Layout> = None;
+        for _ in 0..8 {
+            let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
+            let observation = dialog
+                .recording_review
+                .as_ref()
+                .and_then(|review| review.test_chrome.as_ref())
+                .cloned();
+            let current_layout =
+                frame_layout(&output, observation.as_ref(), &mut latest_footer_nodes);
+            if let (Some(previous), Some(current)) = (&previous_scrolled_layout, &current_layout)
+                && same_layout(previous, current)
+            {
+                settled_scrolled_layout = current_layout.clone();
+            }
+            previous_scrolled_layout = current_layout;
+            output.drop_without_applying_deltas();
+        }
+
+        let scroll_state_matches = settled_scrolled_layout.as_ref().is_some_and(|layout| {
+            eframe::egui::scroll_area::State::load(&context, layout.body_id).is_some_and(|state| {
+                let max_scroll = (layout.content_size.y - layout.body_rect.height()).max(0.0);
+                state.offset == layout.scroll_offset
+                    && state.offset.y > 0.0
+                    && state.offset.y <= max_scroll + 0.5
+            })
+        });
+        let unchanged = dialog.draft == draft_before
+            && dialog.baseline == baseline_before
+            && dialog.store.snapshot() == persisted_before
+            && dialog.draft_revision() == revision_before
+            && dialog.dirty == dirty_before
+            && dialog.conflict == conflict_before
+            && dialog.selected_macro_id == selected_before
+            && dialog.recording_review.as_ref().map(|review| {
+                (
+                    review.target,
+                    review.literal_steps.clone(),
+                    review.cleaned_plan.clone(),
+                    review.proposed_steps().to_vec(),
+                    review.mode,
+                    review.view,
+                    review.selection.clone(),
+                    review.primary,
+                    review.preview_ticket,
+                    review.preview_state,
+                    review.preview_diagnostic.clone(),
+                )
+            }) == review_before;
+
+        assert!(
+            unchanged,
+            "review layout and scrolling do not commit or alter its plan"
+        );
+        assert!(
+            requested_scroll,
+            "the native body ScrollArea accepted its saved state"
+        );
+        let initial =
+            settled_initial_layout.expect("the review settles with native footer controls");
+        let scrolled = settled_scrolled_layout
+            .expect("the long action list reaches a settled scroll position");
+        assert!(initial.body_rect.is_positive());
+        assert!(screen_rect.contains_rect(initial.body_rect));
+        assert!(screen_rect.contains_rect(initial.footer_clip));
+        assert!(initial.content_size.y > initial.body_rect.height());
+        assert!(initial.scroll_offset.y.abs() <= 0.5);
+        for button in &initial.footer_buttons {
+            assert!(initial.footer_clip.contains_rect(button.response_rect));
+            assert!(screen_rect.contains_rect(button.response_rect));
+            assert!(screen_rect.contains_rect(button.accesskit_rect));
+            assert!(same_rect(button.response_rect, button.accesskit_rect));
+            assert!(initial.body_rect.bottom() <= button.response_rect.top());
+        }
+        assert!(
+            scroll_state_matches,
+            "the saved native body offset remains legal after settling"
+        );
+        let max_scroll = (scrolled.content_size.y - scrolled.body_rect.height()).max(0.0);
+        assert!(scrolled.scroll_offset.y > 0.0);
+        assert!(scrolled.scroll_offset.y <= max_scroll + 0.5);
+        assert!(scrolled.body_rect.contains_rect(scrolled.last_action.2));
+        assert!(
+            scrolled
+                .footer_clip
+                .contains_rect(scrolled.footer_buttons[0].response_rect)
+        );
+        assert!(scrolled.body_rect.bottom() <= scrolled.footer_buttons[0].response_rect.top());
+        assert!(scrolled.last_action.0.starts_with("64. "));
+        assert!(same_rect(initial.body_rect, scrolled.body_rect));
     }
 
     fn suggestion(

@@ -45,6 +45,8 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/mkmacro_dialog/signature_editor.rs` | M5-C19 | accepted wrapped identity/reorder/delete and bounded Name controls, stable IDs/deferred edits/dangling bindings preserved; targeted contract/review pass, native authoring gap explicit |
 | `src/gui/mkmacro_dialog/parameter_prompt.rs` | M5-C19 | accepted existing bounded action/body layout unchanged plus two semantic errors; hidden-root bootstrap/broker/revalidation contracts pass, focus/gates/cancel source owners preserved, native prompt/input gap explicit |
 | `src/gui/mkmacro_dialog/package_ui.rs` | M5-C19 | accepted measured active footer and bounded remaining body; actual shared Help final-content scroll/clip/nonelision and import Cancel/Apply contracts pass, format/I/O owners preserved; native package/import actions unobserved |
+| `src/gui/mkmacro_dialog/recording_review.rs` | M5-C20 | accepted bounded diagnostics/suggestions/proposals above native actions; history/exact-ticket/actual trailing-row/footer/no-commit contracts pass, native recording/play gap explicit |
+| `src/gui/mkmacro_dialog/window_picker.rs` | M5-C20 | accepted bounded mode forms/owning errors/wrapped actions, snapshot/matcher/cancellation/screen-poll state contracts pass; native window selection/poll/input gap explicit |
 | `src/gui/mouse_gesture_settings_dialog.rs` | M5-B7 | accepted boundedbody/nativefooter and transitionopen/pinnedClose/unpinnedClose corrections; focusedactualcontract pass, initialLightcapture inspected; nativeinteraction gap explicit |
 | `src/gui/mouse_gestures_dialog.rs` | M5-B7 | accepted shared editor/picker/status chrome; persistence/read-only/recordinglabel contracts pass; authoredstroke/canvas unchanged, nativecapture/input gap explicit |
 | `src/gui/mouse_settings_dialog.rs` | M5-B7 | accepted semantic forms/session-vs-draft help; existing compact/failedapply/immediate/committedsummary contracts pass; initialDarkcapture inspected, lowernative/input/effect gaps explicit |
@@ -104,7 +106,7 @@ Intentional domain ownership: native radial compositor/skins; Screen Draw canvas
 
 ### Remaining MKMacro review, window picker and search chrome
 
-Read-only reviewer inspection identifies three pending presentation owners, without changing their behavior or claiming native verification:
+Read-only reviewer inspection originally identified three pending presentation owners below. Recording Review/Window Picker subsequently completed at C20; Search remains C23. These historical findings do not override the current table/ledger or claim native verification:
 
 - `recording_review.rs::show`: fixed list/footer estimates can exceed the remaining window when suggestions or diagnostics expand. Reserve actual native Play/Apply/Cancel actions, bound variable content and reflow actions/semantic feedback. Preserve literal baseline, local history, exact preview-ticket diagnostics and recorder ownership. Existing trim/edit and reversible multiselect/history contracts apply.
 - `window_picker.rs::show`: list search/actions and fixed 300-point body, unscrolled preview form and separate unconstrained error Area need bounded owning-form presentation. Preserve snapshots, selection/matcher, request transport and cancellation; reuse filtering, refresh-invalidation and original-matcher cancellation contracts.
