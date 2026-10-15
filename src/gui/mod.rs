@@ -2459,9 +2459,10 @@ impl LauncherApp {
             tempfile_alias_dialog: TempfileAliasDialog::default(),
             tempfile_dialog: TempfileDialog::default(),
             add_bookmark_dialog: AddBookmarkDialog::default(),
-            help_window: HelpWindow {
-                show_examples: settings.show_examples,
-                ..Default::default()
+            help_window: {
+                let mut help_window = HelpWindow::default();
+                help_window.show_examples = settings.show_examples;
+                help_window
             },
             timer_dialog: TimerDialog::default(),
             completion_dialog: TimerCompletionDialog::default(),
@@ -3785,7 +3786,7 @@ impl LauncherApp {
             Panel::FileSearchDialog => self.file_search_dialog.open(),
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
-            Panel::UnusedAssetsDialog => self.unused_assets_dialog.open = true,
+            Panel::UnusedAssetsDialog => self.unused_assets_dialog.ensure_open(),
             Panel::NotePanel => {}
             Panel::ImagePanel => {}
             Panel::ScreenshotEditor => {}
