@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::radial::acceptance_trace::{
     self, ScreenDrawLauncherObservation, ScreenDrawParkingObservation, ScreenDrawParkingState,
     ScreenDrawRootIdentity, ScreenDrawToolbarMode, ScreenDrawToolbarObservation,
@@ -1505,7 +1506,7 @@ fn render_toolbar_contents(
                 actions.push(ToolbarAction::Lifecycle(LifecycleAction::Start));
             }
             if let ScreenDrawState::Failed { message, .. } = state {
-                ui.colored_label(egui::Color32::LIGHT_RED, message);
+                semantic_status(ui, StatusTone::Error, message, None);
             }
             idle_preferences(ui, settings, actions);
             ui.separator();
@@ -1571,9 +1572,11 @@ fn render_toolbar_contents(
             session_controls(ui, actions);
         }
         ScreenDrawState::DisplayChanged { .. } => {
-            ui.colored_label(
-                egui::Color32::YELLOW,
+            semantic_status(
+                ui,
+                StatusTone::Warning,
                 "Display layout changed. The session is safely paused.",
+                None,
             );
             ui.small("Drawing cannot resume, but the original capture and annotations remain exportable.");
             export_controls(
@@ -1684,7 +1687,7 @@ fn export_controls(
         });
     }
     if let Some(error) = export_error {
-        ui.colored_label(egui::Color32::LIGHT_RED, error);
+        semantic_status(ui, StatusTone::Error, error, None);
         ui.small("The session is preserved; choose an export action to retry.");
     }
 }

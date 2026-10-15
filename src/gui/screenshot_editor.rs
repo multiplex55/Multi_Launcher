@@ -251,6 +251,8 @@ pub struct ScreenshotEditor {
     color_index: usize,
     thickness: f32,
     text_size: f32,
+    #[cfg(test)]
+    test_content_clip: Option<Rect>,
 }
 
 impl ScreenshotEditor {
@@ -284,6 +286,8 @@ impl ScreenshotEditor {
             color_index: 0,
             thickness: 4.0,
             text_size: 18.0,
+            #[cfg(test)]
+            test_content_clip: None,
         }
     }
 
@@ -376,7 +380,11 @@ impl ScreenshotEditor {
             .open(&mut open)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                #[cfg(test)]
+                {
+                    self.test_content_clip = Some(ui.clip_rect());
+                }
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Save").clicked() {
                         let mut saved_to: Option<PathBuf> = None;
                         let res = if self.auto_save {
@@ -448,18 +456,31 @@ impl ScreenshotEditor {
                             }
                         }
                     }
-                    ui.add(egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"));
-                    ui.add(egui::Slider::new(&mut self.text_size, 6.0..=48.0).text("Text Size"));
                 });
+                let slider_row_height = ui
+                    .spacing()
+                    .interact_size
+                    .y
+                    .max(ui.text_style_height(&egui::TextStyle::Body));
+                ui.add_sized(
+                    egui::vec2(ui.available_width(), slider_row_height),
+                    egui::Slider::new(&mut self.zoom, 0.1..=4.0).text("Zoom"),
+                );
+                ui.add_sized(
+                    egui::vec2(ui.available_width(), slider_row_height),
+                    egui::Slider::new(&mut self.text_size, 6.0..=48.0).text("Text Size"),
+                );
                 let prev_tool = self.tool;
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Tool");
                     ui.selectable_value(&mut self.tool, MarkupTool::Pen, "Pen");
                     ui.selectable_value(&mut self.tool, MarkupTool::Arrow, "Arrow");
                     ui.selectable_value(&mut self.tool, MarkupTool::Rectangle, "Rect");
                     ui.selectable_value(&mut self.tool, MarkupTool::Highlight, "Highlight");
                     ui.selectable_value(&mut self.tool, MarkupTool::Text, "Text");
-                    ui.separator();
+                });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Color");
                     for (idx, color) in Self::palette().iter().enumerate() {
                         let selected = self.color_index == idx;
@@ -473,7 +494,9 @@ impl ScreenshotEditor {
                             self.color_index = idx;
                         }
                     }
-                    ui.separator();
+                });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
                     ui.label(format!("Thickness {}", self.thickness as i32));
                     if ui.button("−").clicked() {
                         self.thickness = (self.thickness - 1.0).max(1.0);
@@ -810,5 +833,160 @@ impl ScreenshotEditor {
                 }
             });
         self.open = open;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    fn control_bounds(
+        output: &egui::FullOutput,
+        label: &str,
+    ) -> Option<(egui::accesskit::Role, Rect)> {
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()?
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                if node.label() != Some(label) {
+                    return None;
+                }
+                let bounds = node.bounds()?;
+                Some((
+                    node.role(),
+                    Rect::from_min_max(
+                        Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
+                        Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
+                    ),
+                ))
+            })
+    }
+
+    #[test]
+    fn screenshot_chrome_scaled_toolbar_controls_remain_reachable_without_editing_image() {
+        const CONTROLS: [&str; 18] = [
+            "Save",
+            "Copy",
+            "Pen",
+            "Arrow",
+            "Rect",
+            "Highlight",
+            "Text",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "−",
+            "+",
+            "Undo",
+            "Redo",
+            "Zoom",
+            "Text Size",
+        ];
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enable_toasts = false;
+        settings.show_inline_errors = false;
+        settings.show_error_toasts = false;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new(
+            &context,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            root.path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            root.path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        context.style_mut_of(context.theme(), |style| {
+            style.animation_time = 0.0;
+            style.override_font_id = Some(egui::FontId::proportional(22.0));
+        });
+
+        let image = RgbaImage::from_pixel(32, 32, image::Rgba([30, 60, 90, 255]));
+        let source_pixels = image.as_raw().clone();
+        let mut editor = ScreenshotEditor::new(
+            image,
+            root.path().join("unused.png"),
+            false,
+            false,
+            MarkupTool::Pen,
+        );
+        let history_layers = editor.history.layers.clone();
+        let redo_layers = editor.history.redo_stack.clone();
+        let initial_tool = editor.tool;
+        let initial_color = editor.color_index;
+        let initial_thickness = editor.thickness;
+        let initial_zoom = editor.zoom;
+        let initial_text_size = editor.text_size;
+        let screen = Rect::from_min_size(Pos2::ZERO, egui::vec2(440.0, 620.0));
+        let mut settled_controls = [None; CONTROLS.len()];
+        let mut settled_content_clip = None;
+
+        for _ in 0..3 {
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| editor.ui(ctx, &mut app),
+            );
+            let controls = CONTROLS.map(|label| control_bounds(&output, label));
+            let content_clip = editor.test_content_clip;
+            output.drop_without_applying_deltas();
+            settled_content_clip = content_clip.or(settled_content_clip);
+            for (settled, observed) in settled_controls.iter_mut().zip(controls) {
+                *settled = observed.or(*settled);
+            }
+        }
+
+        let content_clip = settled_content_clip.expect("the Screenshot Editor exposes its clip");
+        for (label, observation) in CONTROLS.into_iter().zip(settled_controls) {
+            let (role, bounds) = observation.unwrap_or_else(|| {
+                panic!(
+                    "{label} has no native bound; input screen {screen:?}; window content clip {content_clip:?}"
+                )
+            });
+            let diagnostic = format!(
+                "{label} ({role:?}) bounds {bounds:?}; input screen {screen:?}; window content clip {content_clip:?}"
+            );
+            assert!(bounds.is_positive(), "{diagnostic}");
+            assert!(screen.contains_rect(bounds), "{diagnostic}");
+            assert!(content_clip.contains_rect(bounds), "{diagnostic}");
+        }
+        assert!(editor.open);
+        assert_eq!(editor.image.as_raw(), &source_pixels);
+        assert_eq!(editor.history.layers, history_layers);
+        assert_eq!(editor.history.redo_stack, redo_layers);
+        assert_eq!(editor.tool, initial_tool);
+        assert_eq!(editor.color_index, initial_color);
+        assert_eq!(editor.thickness, initial_thickness);
+        assert_eq!(editor.zoom, initial_zoom);
+        assert_eq!(editor.text_size, initial_text_size);
     }
 }
