@@ -21,6 +21,19 @@ pub struct LauncherActionRequest {
     pub draft_generation: u64,
 }
 
+#[cfg(test)]
+#[derive(Clone)]
+struct LauncherPickerChromeObservation {
+    body_id: egui::Id,
+    body_rect: egui::Rect,
+    content_size: egui::Vec2,
+    scroll_offset: egui::Vec2,
+    last_result: Option<(String, egui::Id, egui::Rect)>,
+    footer_clip: egui::Rect,
+    footer_buttons: Vec<(String, egui::Id, egui::Rect)>,
+    confirmation_label: Option<(egui::Id, egui::Rect)>,
+}
+
 #[derive(Default)]
 pub struct LauncherActionPickerState {
     pub open: bool,
@@ -28,6 +41,8 @@ pub struct LauncherActionPickerState {
     pub selected: Option<usize>,
     pub request: Option<LauncherActionRequest>,
     pub conversion_confirmation: Option<Action>,
+    #[cfg(test)]
+    test_chrome: Option<LauncherPickerChromeObservation>,
 }
 
 impl LauncherActionPickerState {
@@ -272,6 +287,11 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
                 .hint_text("Search command/query suggestions"),
         );
         response.request_focus();
+        let use_label = match purpose {
+            Some(PickerPurpose::LauncherCommand) => "Use Query Suggestion",
+            _ => "Use Selected Program",
+        };
+        let has_conversion_confirmation = state.conversion_confirmation.is_some();
         let eligible: Vec<usize> = actions
             .iter()
             .enumerate()
@@ -291,10 +311,21 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
         } else if visible.is_empty() {
             ui.label("No Launcher command/query suggestions match this search.");
         }
-        egui::ScrollArea::vertical()
-            .max_height(320.0)
+        let footer_height = launcher_action_picker_footer_reserved_height(
+            ui,
+            use_label,
+            has_conversion_confirmation,
+        );
+        let body_max_height = (ui.available_height() - footer_height).max(0.0);
+        #[cfg(test)]
+        let mut last_result = None;
+        let body_output = egui::ScrollArea::vertical()
+            .id_salt("mkmacro_launcher_action_picker_results")
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
+            .max_height(body_max_height)
             .show(ui, |ui| {
-                for &index in &visible {
+                for (visible_index, &index) in visible.iter().enumerate() {
                     let a = &actions[index];
                     let detail = match purpose {
                         Some(PickerPurpose::LauncherCommand) => launcher_query_suggestion(a)
@@ -315,6 +346,8 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
                         ),
                     };
                     let text = format!("{}\n{}\n{}", a.label, a.desc, detail);
+                    #[cfg(test)]
+                    let last_text = (visible_index + 1 == visible.len()).then(|| text.clone());
                     let row = ui.selectable_label(state.selected == Some(index), text);
                     if row.clicked() {
                         state.selected = Some(index);
@@ -322,6 +355,10 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
                     if row.double_clicked() {
                         state.selected = Some(index);
                         choose = true;
+                    }
+                    #[cfg(test)]
+                    if let Some(text) = last_text {
+                        last_result = Some((text, row.id, row.rect));
                     }
                 }
             });
@@ -344,41 +381,77 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             cancel = true;
         }
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
-                    state.selected.is_some(),
-                    egui::Button::new(match purpose {
-                        Some(PickerPurpose::LauncherCommand) => "Use Query Suggestion",
-                        _ => "Use Selected Program",
-                    }),
-                )
-                .clicked()
-            {
+        #[cfg(test)]
+        let footer_clip = ui.clip_rect();
+        #[cfg(test)]
+        let mut footer_buttons = Vec::new();
+        #[cfg(test)]
+        let mut confirmation_label = None;
+        ui.separator();
+        ui.horizontal_wrapped(|ui| {
+            let response = ui.add_enabled(state.selected.is_some(), egui::Button::new(use_label));
+            #[cfg(test)]
+            footer_buttons.push((use_label.to_owned(), response.id, response.rect));
+            if response.clicked() {
                 choose = true;
             }
-            if ui.button("Cancel").clicked() {
+            let response = ui.button("Cancel");
+            #[cfg(test)]
+            footer_buttons.push(("Cancel".to_owned(), response.id, response.rect));
+            if response.clicked() {
                 cancel = true;
             }
         });
         if let Some(action) = state.conversion_confirmation.clone() {
             ui.separator();
-            ui.label("This choice can be stored as a safe Launcher query instead of a program.");
-            if ui.button("Use Launcher Query instead").clicked() {
-                if let Some(request) = state.request.clone() {
-                    dialog.action_editor.apply_launcher_picker_action(
-                        &request,
-                        &action,
-                        dialog.selected_macro_id,
-                        true,
-                    );
+            let response = ui
+                .label("This choice can be stored as a safe Launcher query instead of a program.");
+            #[cfg(test)]
+            {
+                confirmation_label = Some((response.id, response.rect));
+            }
+            ui.horizontal_wrapped(|ui| {
+                let response = ui.button("Use Launcher Query instead");
+                #[cfg(test)]
+                footer_buttons.push((
+                    "Use Launcher Query instead".to_owned(),
+                    response.id,
+                    response.rect,
+                ));
+                if response.clicked() {
+                    if let Some(request) = state.request.clone() {
+                        dialog.action_editor.apply_launcher_picker_action(
+                            &request,
+                            &action,
+                            dialog.selected_macro_id,
+                            true,
+                        );
+                    }
+                    cancel = true;
                 }
-                cancel = true;
-            }
-            if ui.button("Keep Run Program").clicked() {
-                state.conversion_confirmation = None;
-            }
+                let response = ui.button("Keep Run Program");
+                #[cfg(test)]
+                footer_buttons.push(("Keep Run Program".to_owned(), response.id, response.rect));
+                if response.clicked() {
+                    state.conversion_confirmation = None;
+                }
+            });
         }
+        #[cfg(test)]
+        {
+            state.test_chrome = Some(LauncherPickerChromeObservation {
+                body_id: body_output.id,
+                body_rect: body_output.inner_rect,
+                content_size: body_output.content_size,
+                scroll_offset: body_output.state.offset,
+                last_result,
+                footer_clip,
+                footer_buttons,
+                confirmation_label,
+            });
+        }
+        #[cfg(not(test))]
+        let _ = (body_output, footer_height);
     });
     if !open || cancel {
         dialog.launcher_action_picker.cancel();
@@ -406,9 +479,131 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
     }
 }
 
+fn launcher_action_picker_button_group_height(
+    ui: &mut egui::Ui,
+    labels: &[&str],
+    button_font: egui::FontId,
+    frame_margin: egui::Vec2,
+    available_width: f32,
+) -> f32 {
+    let spacing = ui.spacing().clone();
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let mut row_width = 0.0;
+    let mut row_height = 0.0_f32;
+    let mut total_height = 0.0;
+    for label in labels {
+        let text_size = egui::WidgetText::from(*label)
+            .into_galley(ui, Some(wrap_mode), text_width, button_font.clone())
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            total_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    total_height + row_height.max(spacing.interact_size.y)
+}
+
+fn launcher_action_picker_footer_reserved_height(
+    ui: &mut egui::Ui,
+    use_label: &str,
+    has_conversion_confirmation: bool,
+) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        native_button_style.frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    let separator_spacing = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let mut footer_height = launcher_action_picker_button_group_height(
+        ui,
+        &[use_label, "Cancel"],
+        button_font.clone(),
+        frame_margin,
+        available_width,
+    ) + separator_spacing
+        + 2.0 * spacing.item_spacing.y;
+
+    if has_conversion_confirmation {
+        let label_font = style
+            .override_font_id
+            .clone()
+            .or_else(|| {
+                style
+                    .override_text_style
+                    .as_ref()
+                    .map(|text_style| text_style.resolve(&style))
+            })
+            .unwrap_or_else(|| style.text_styles[&egui::TextStyle::Body].clone());
+        let confirmation_height = egui::WidgetText::from(
+            "This choice can be stored as a safe Launcher query instead of a program.",
+        )
+        .into_galley(ui, Some(wrap_mode), available_width, label_font)
+        .size()
+        .y;
+        footer_height += separator_spacing
+            + 3.0 * spacing.item_spacing.y
+            + confirmation_height
+            + launcher_action_picker_button_group_height(
+                ui,
+                &["Use Launcher Query instead", "Keep Run Program"],
+                button_font,
+                frame_margin,
+                available_width,
+            );
+    }
+    (footer_height * pixels_per_point).ceil() / pixels_per_point
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const PICKER_FOOTER_LABELS: [&str; 4] = [
+        "Use Selected Program",
+        "Cancel",
+        "Use Launcher Query instead",
+        "Keep Run Program",
+    ];
+    const CONVERSION_CONFIRMATION: &str =
+        "This choice can be stored as a safe Launcher query instead of a program.";
+
     fn action(label: &str, desc: &str, command: &str, args: Option<&str>) -> Action {
         Action {
             label: label.into(),
@@ -416,6 +611,371 @@ mod tests {
             action: command.into(),
             args: args.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn mkmacro_picker_chrome_keeps_confirmation_and_actions_above_long_results_without_mutation() {
+        use egui::accesskit::{NodeId, Role};
+
+        #[derive(Clone)]
+        struct FooterButton {
+            label: String,
+            id: egui::Id,
+            response_rect: egui::Rect,
+            accesskit_rect: egui::Rect,
+        }
+
+        #[derive(Clone)]
+        struct Layout {
+            body_id: egui::Id,
+            body_rect: egui::Rect,
+            content_size: egui::Vec2,
+            scroll_offset: egui::Vec2,
+            last_result: (String, egui::Id, egui::Rect),
+            footer_clip: egui::Rect,
+            footer_buttons: Vec<FooterButton>,
+            confirmation_label: (egui::Id, egui::Rect, egui::Rect),
+        }
+
+        fn same_rect(left: egui::Rect, right: egui::Rect) -> bool {
+            (left.min.x - right.min.x).abs() < 0.5
+                && (left.min.y - right.min.y).abs() < 0.5
+                && (left.max.x - right.max.x).abs() < 0.5
+                && (left.max.y - right.max.y).abs() < 0.5
+        }
+
+        fn accesskit_button_bounds(
+            output: &egui::FullOutput,
+            response_id: egui::Id,
+            label: &str,
+        ) -> Option<egui::Rect> {
+            let node_id = NodeId(response_id.value());
+            let (_, node) = output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == node_id)?;
+            if node.role() != Role::Button || node.label() != Some(label) {
+                return None;
+            }
+            let bounds = node.bounds()?;
+            Some(egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            ))
+        }
+
+        fn accesskit_value_bounds(
+            output: &egui::FullOutput,
+            response_id: egui::Id,
+            value: &str,
+        ) -> Option<egui::Rect> {
+            let node_id = NodeId(response_id.value());
+            let (_, node) = output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == node_id)?;
+            if node.value() != Some(value) {
+                return None;
+            }
+            let bounds = node.bounds()?;
+            Some(egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            ))
+        }
+
+        fn same_layout(left: &Layout, right: &Layout) -> bool {
+            left.body_id == right.body_id
+                && same_rect(left.body_rect, right.body_rect)
+                && (left.content_size - right.content_size).length() < 0.5
+                && (left.scroll_offset - right.scroll_offset).length() < 0.5
+                && left.last_result.0 == right.last_result.0
+                && left.last_result.1 == right.last_result.1
+                && same_rect(left.last_result.2, right.last_result.2)
+                && same_rect(left.footer_clip, right.footer_clip)
+                && left.footer_buttons.len() == right.footer_buttons.len()
+                && left
+                    .footer_buttons
+                    .iter()
+                    .zip(&right.footer_buttons)
+                    .all(|(left, right)| {
+                        left.label == right.label
+                            && left.id == right.id
+                            && same_rect(left.response_rect, right.response_rect)
+                            && same_rect(left.accesskit_rect, right.accesskit_rect)
+                    })
+                && left.confirmation_label.0 == right.confirmation_label.0
+                && same_rect(left.confirmation_label.1, right.confirmation_label.1)
+                && same_rect(left.confirmation_label.2, right.confirmation_label.2)
+        }
+
+        fn layout_from_observation(
+            observation: &LauncherPickerChromeObservation,
+            latest_footer_nodes: &[Option<(egui::Id, egui::Rect)>],
+            latest_confirmation_node: Option<(egui::Id, egui::Rect)>,
+        ) -> Option<Layout> {
+            if observation.footer_buttons.len() != PICKER_FOOTER_LABELS.len()
+                || !observation
+                    .footer_buttons
+                    .iter()
+                    .zip(PICKER_FOOTER_LABELS)
+                    .all(|((label, _, _), expected)| label == expected)
+            {
+                return None;
+            }
+            let mut footer_buttons = Vec::with_capacity(PICKER_FOOTER_LABELS.len());
+            for (index, (label, id, response_rect)) in observation.footer_buttons.iter().enumerate()
+            {
+                let (node_id, accesskit_rect) = latest_footer_nodes.get(index)?.as_ref()?;
+                if node_id != id {
+                    return None;
+                }
+                footer_buttons.push(FooterButton {
+                    label: label.clone(),
+                    id: *id,
+                    response_rect: *response_rect,
+                    accesskit_rect: *accesskit_rect,
+                });
+            }
+            let (label_id, label_rect) = observation.confirmation_label?;
+            let (node_id, accesskit_label_rect) = latest_confirmation_node?;
+            if node_id != label_id {
+                return None;
+            }
+            Some(Layout {
+                body_id: observation.body_id,
+                body_rect: observation.body_rect,
+                content_size: observation.content_size,
+                scroll_offset: observation.scroll_offset,
+                last_result: observation.last_result.clone()?,
+                footer_clip: observation.footer_clip,
+                footer_buttons,
+                confirmation_label: (label_id, label_rect, accesskit_label_rect),
+            })
+        }
+
+        fn frame_layout(
+            output: &egui::FullOutput,
+            observation: Option<&LauncherPickerChromeObservation>,
+            latest_footer_nodes: &mut [Option<(egui::Id, egui::Rect)>],
+            latest_confirmation_node: &mut Option<(egui::Id, egui::Rect)>,
+        ) -> Option<Layout> {
+            let observation = observation?;
+            for (index, (label, id, _)) in observation.footer_buttons.iter().enumerate() {
+                let Some(slot) = latest_footer_nodes.get_mut(index) else {
+                    continue;
+                };
+                if let Some((old_id, _)) = *slot
+                    && old_id != *id
+                {
+                    *slot = None;
+                }
+                if let Some(bounds) = accesskit_button_bounds(output, *id, label) {
+                    *slot = Some((*id, bounds));
+                }
+            }
+            if let Some((label_id, _)) = observation.confirmation_label {
+                if latest_confirmation_node.is_some_and(|(old_id, _)| old_id != label_id) {
+                    *latest_confirmation_node = None;
+                }
+                if let Some(bounds) =
+                    accesskit_value_bounds(output, label_id, CONVERSION_CONFIRMATION)
+                {
+                    *latest_confirmation_node = Some((label_id, bounds));
+                }
+            }
+            layout_from_observation(observation, latest_footer_nodes, *latest_confirmation_node)
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(directory.path()).unwrap();
+        let actions: Vec<_> = (0..48)
+            .map(|index| {
+                action(
+                    &format!("Candidate {index:02}"),
+                    &format!("Long launcher description for candidate {index:02}"),
+                    &format!("query:launcher item {index:02}"),
+                    None,
+                )
+            })
+            .collect();
+        let context = std::sync::Arc::new(crate::gui::mkmacro_dialog::MkMacroAuthoringContext {
+            launcher_actions: std::sync::Arc::new(actions.clone()),
+        });
+        let mut dialog = super::super::MkMacroDialog::new_with_authoring_context(
+            std::sync::Arc::new(store),
+            (*context).clone(),
+        );
+        dialog.launcher_action_picker.open = true;
+        dialog.launcher_action_picker.search.clear();
+        dialog.launcher_action_picker.selected = Some(0);
+        dialog.launcher_action_picker.request = Some(LauncherActionRequest {
+            purpose: PickerPurpose::Process,
+            macro_id: 7,
+            step_id: Some(8),
+            draft_generation: 3,
+        });
+        dialog.launcher_action_picker.conversion_confirmation = actions.first().cloned();
+
+        let draft_before = dialog.draft.clone();
+        let baseline_before = dialog.baseline.clone();
+        let persisted_before = dialog.store.snapshot();
+        let revision_before = dialog.draft_revision();
+        let dirty_before = dialog.dirty;
+        let conflict_before = dialog.conflict;
+        let selected_before = dialog.selected_macro_id;
+        let editor_draft_before = dialog.action_editor.draft.clone();
+        let picker_before = (
+            dialog.launcher_action_picker.open,
+            dialog.launcher_action_picker.search.clone(),
+            dialog.launcher_action_picker.selected,
+            dialog.launcher_action_picker.request.clone(),
+            dialog
+                .launcher_action_picker
+                .conversion_confirmation
+                .clone(),
+        );
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut_of(context.theme(), |style| {
+            style.override_font_id = Some(egui::FontId::new(22.0, egui::FontFamily::Proportional));
+        });
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(560.0, 420.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+
+        let mut latest_footer_nodes = vec![None; PICKER_FOOTER_LABELS.len()];
+        let mut latest_confirmation_node = None;
+        let mut previous_layout: Option<Layout> = None;
+        let mut settled_initial_layout: Option<Layout> = None;
+        for _ in 0..8 {
+            let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
+            let observation = dialog.launcher_action_picker.test_chrome.clone();
+            let current_layout = frame_layout(
+                &output,
+                observation.as_ref(),
+                &mut latest_footer_nodes,
+                &mut latest_confirmation_node,
+            );
+            if let (Some(previous), Some(current)) = (&previous_layout, &current_layout)
+                && same_layout(previous, current)
+            {
+                settled_initial_layout = current_layout.clone();
+            }
+            previous_layout = current_layout;
+            output.drop_without_applying_deltas();
+        }
+
+        let mut requested_scroll = false;
+        if let Some(layout) = &settled_initial_layout
+            && let Some(mut state) = egui::scroll_area::State::load(&context, layout.body_id)
+        {
+            state.offset.y = (layout.content_size.y - layout.body_rect.height()).max(0.0);
+            state.store(&context, layout.body_id);
+            requested_scroll = true;
+        }
+
+        let mut previous_scrolled_layout: Option<Layout> = None;
+        let mut settled_scrolled_layout: Option<Layout> = None;
+        for _ in 0..8 {
+            let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
+            let observation = dialog.launcher_action_picker.test_chrome.clone();
+            let current_layout = frame_layout(
+                &output,
+                observation.as_ref(),
+                &mut latest_footer_nodes,
+                &mut latest_confirmation_node,
+            );
+            if let (Some(previous), Some(current)) = (&previous_scrolled_layout, &current_layout)
+                && same_layout(previous, current)
+            {
+                settled_scrolled_layout = current_layout.clone();
+            }
+            previous_scrolled_layout = current_layout;
+            output.drop_without_applying_deltas();
+        }
+
+        let scroll_state_matches = settled_scrolled_layout.as_ref().is_some_and(|layout| {
+            egui::scroll_area::State::load(&context, layout.body_id).is_some_and(|state| {
+                let max_scroll = (layout.content_size.y - layout.body_rect.height()).max(0.0);
+                state.offset == layout.scroll_offset
+                    && state.offset.y > 0.0
+                    && state.offset.y <= max_scroll + 0.5
+            })
+        });
+        let unchanged = dialog.draft == draft_before
+            && dialog.baseline == baseline_before
+            && dialog.store.snapshot() == persisted_before
+            && dialog.draft_revision() == revision_before
+            && dialog.dirty == dirty_before
+            && dialog.conflict == conflict_before
+            && dialog.selected_macro_id == selected_before
+            && dialog.action_editor.draft == editor_draft_before
+            && (
+                dialog.launcher_action_picker.open,
+                dialog.launcher_action_picker.search.clone(),
+                dialog.launcher_action_picker.selected,
+                dialog.launcher_action_picker.request.clone(),
+                dialog
+                    .launcher_action_picker
+                    .conversion_confirmation
+                    .clone(),
+            ) == picker_before;
+
+        assert!(
+            unchanged,
+            "picker layout and scrolling do not transfer an action"
+        );
+        assert!(
+            requested_scroll,
+            "the native results ScrollArea accepted its saved state"
+        );
+        let initial =
+            settled_initial_layout.expect("the constrained picker settles with its footer");
+        let scrolled =
+            settled_scrolled_layout.expect("long results reach a settled scroll position");
+        assert!(initial.body_rect.is_positive());
+        assert!(screen_rect.contains_rect(initial.body_rect));
+        assert!(screen_rect.contains_rect(initial.footer_clip));
+        assert!(initial.content_size.y > initial.body_rect.height());
+        assert!(initial.scroll_offset.y.abs() <= 0.5);
+        for button in &initial.footer_buttons {
+            assert!(initial.footer_clip.contains_rect(button.response_rect));
+            assert!(screen_rect.contains_rect(button.response_rect));
+            assert!(screen_rect.contains_rect(button.accesskit_rect));
+            assert!(same_rect(button.response_rect, button.accesskit_rect));
+            assert!(initial.body_rect.bottom() <= button.response_rect.top());
+        }
+        assert!(
+            initial
+                .footer_clip
+                .contains_rect(initial.confirmation_label.1)
+        );
+        assert!(screen_rect.contains_rect(initial.confirmation_label.1));
+        assert!(same_rect(
+            initial.confirmation_label.1,
+            initial.confirmation_label.2,
+        ));
+        assert!(
+            scroll_state_matches,
+            "native results state uses a legal trailing offset"
+        );
+        let max_scroll = (scrolled.content_size.y - scrolled.body_rect.height()).max(0.0);
+        assert!(scrolled.scroll_offset.y > 0.0);
+        assert!(scrolled.scroll_offset.y <= max_scroll + 0.5);
+        assert!(scrolled.body_rect.contains_rect(scrolled.last_result.2));
+        assert!(scrolled.last_result.0.starts_with("Candidate 47\n"));
+        assert!(scrolled.body_rect.bottom() <= scrolled.footer_buttons[0].response_rect.top());
+        assert!(same_rect(initial.body_rect, scrolled.body_rect));
     }
 
     #[test]

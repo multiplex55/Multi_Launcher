@@ -3,6 +3,7 @@
 //! Previewing deliberately has three phases: cache inspection, background file
 //! validation/decoding, and UI-thread texture creation.  In particular, the
 //! egui data lock is never held while doing I/O, image work, or loading a texture.
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::{MkImageRef, MkMacroStore};
 use eframe::egui;
 use image::ImageDecoder;
@@ -324,7 +325,7 @@ fn show_sized(
 ) {
     let lookup_key = PreviewLookupKey::new_for_store(store, image.clone());
     let Ok(path) = store.image_path(image) else {
-        ui.colored_label(egui::Color32::RED, "No reference image selected");
+        semantic_status(ui, StatusTone::Info, "No reference image selected", None);
         return;
     };
     let ctx = ui.ctx().clone();
@@ -377,14 +378,12 @@ fn show_sized(
             ));
         }
     } else if let Some(error) = inspection.failed {
-        ui.colored_label(
-            egui::Color32::RED,
-            if details {
-                format!("{error} ({})", image.filename())
-            } else {
-                "Unavailable".into()
-            },
-        );
+        let message = if details {
+            format!("{error} ({})", image.filename())
+        } else {
+            "Unavailable".into()
+        };
+        semantic_status(ui, StatusTone::Error, &message, None);
     } else {
         ui.small(if details {
             "Loading reference image preview..."

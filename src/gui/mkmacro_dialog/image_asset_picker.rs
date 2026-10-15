@@ -154,10 +154,7 @@ pub fn show_browser(
                         egui::WidgetType::SelectableLabel,
                         ui.is_enabled(),
                         selected,
-                        format!(
-                            "{}; {}",
-                            asset.filename, asset.filename
-                        ),
+                        asset.filename.to_owned(),
                     )
                 });
                 if response.clicked() {
