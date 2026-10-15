@@ -12,7 +12,7 @@ Approved contract: `multi_launcher_ui_polish_codex_plan_20261015.md`.
 
 | Milestone | State | Commit / evidence |
 |---|---|---|
-| UP-HK | in_progress | A `474e6377`, B1 `17ad560c`; B2 tests/review and native acceptance in progress |
+| UP-HK | complete | A `474e6377`, B1 `17ad560c`, B2 `4ff437eb`; targeted source gates and user-confirmed native acceptance passed |
 | UP-MK | pending | |
 | UP-BR | pending | |
 | UP-PA | pending | |
@@ -154,3 +154,28 @@ cargo nextest run -p multi_launcher --lib --bin multi_launcher --test settings_e
 - Final retirement audit: `cargo clippy -p multi_launcher --lib --bin multi_launcher --message-format=json` exited 0; 375 warnings. Parent independently intersected normalized primary spans against all modified Rust hunks and new files: zero hits. Log `target/ui-polish-evidence/hk-b2-hotkey-retirement-clippy.jsonl`.
 - Final ordinary executable build PASS: `cargo build -p multi_launcher --bin multi_launcher`, 48.36s; target/debug/multi_launcher.exe, 118,444,544 bytes, 2026-10-15T19:38:29Z. Not yet copied over running isolated process. Source frozen and independently accepted.
 - B2 is a coherent source checkpoint: immutable coordinated Save, guarded persistence/reconciliation, acknowledged publication and shutdown lifecycle. Full UP-HK remains in_progress pending meaningful Windows Save/input smoke; UP-MK has not started.
+
+- UP-HK-B2 committed: `4ff437ebaace786232eed1b1c516216c20a191b4`. Clean working tree immediately after commit; no push.
+- Native refresh: old PID12616 path/start/hash matched retained launch identity before stopping; settings backed up inside isolated profile. Latest committed binary copied and launched as PID34272 at 2026-10-15T19:40:24.2822332Z. SHA256 `02AE1CDDFCB624D00A659479B4A0CB0A56660A5086C1DBBE6EDC720B64F428A7`; identity in target/ui-polish-evidence/native-hk-20261015/b2-launch.json.
+- Fresh committed-build window was returned by Computer Use, but graphics capture failed FrameArrived timeout. Fresh window selection/activation and one retry failed window capture timeout. User-visible-window/Settings handoff remains pending. No native Save/input acceptance claimed; later sequential milestones remain pending.
+
+- Blocked audit: same native capture/input blocker persisted across three consecutive goal turns. Final revalidation confirms exact committed-build PID34272 is still responding and its unique window is returned; accessibility shows launcher search, no Settings editor. Supported capture recovery exhausted, and no successful control input established. Required Windows Save/hotkey smoke needs user handoff or restored Computer Use capture/input. Goal blocked; no UP-MK source started. Source checkpoints and all approved remaining scope are preserved.
+
+- User resumed with Settings manually opened. Accessibility confirms real editor controls and initial Ctrl+F2. Graphics capture still FrameArrived timeout, but focused keyboard input now works. UIA set_value focused launcher field without changing it; Control+A/type_text staged Ctrl+F3. Independent disk read while staged remained Ctrl+F2.
+- Keyboard navigation activated Save; accessibility showed disabled Save and Saving settings, then normal Save again. Disk now Ctrl+F3 without relaunch (same committed-build process). User visual confirmation requested for F2 inactive and F3 hide/show exactly once. Remaining native rejection/shared-route/threshold/quit checks pending.
+
+- Resumed blocked audit: three consecutive resumed turns still lack actual old/new shortcut visual result. Save/persistence evidence is retained, but it does not prove physical delivery or visibility transitions. Latest check confirms same PID34272 responding; no restart, source change, or additional input sent while user test pending. Goal blocked awaiting user observation or restored graphics capture. Shared/threshold/error/control native checks and UP-MK through UP-QA remain required.
+
+- User explicitly visually confirmed: Ctrl+F2 does nothing; Ctrl+F3 works as expected without restart. This proves old/new native launcher input transition for the same process.
+- Native legacy rejection: staged F13 in actual Settings control and activated Save. Accessible error and stderr state preparation failed before persistence because F13 is unsupported by selected legacy polling listener. Disk verified still Ctrl+F3/shared=false. Restored draft Ctrl+F3.
+- Native shared enablement: staged radial.enabled=true/shared_tap_hold=true, threshold350ms and activated Save. Observed disabled Saving then enabled Save; disk confirms true/true/350 withCtrl+F3, sameprocess. User asked physical tap/release/hold/radial/visible-grid observations; no unsupported hold API or synthetic workaround used.
+
+- User explicitly confirmed all three shared native checks passed: quick tap toggles on release; hidden-launcher hold opens radial once and release leaves launcher hidden; hold while launcher visible leaves launcher visible with no radial.
+- Final bounded physical smoke requested: change threshold350->1000ms through Settings Save and distinguish approximately0.5s vs2s holds; Save sharedOFF thenON and verify singleactivation; F1Help whilevisible and Ctrl+Shift+F10Quit last. Manual configuration/input is used because graphicscapture remains unavailable and supported API cannot hold keys. UP-MK packet refreshed by Planner against4ff437eb; no architectural uncertainty, awaiting parent HK acceptance.
+
+- Final-native-gate blocked audit: three consecutive resumed turns still lack threshold1000/off-on/Help/Quit observations. Old/new live shortcut and initialsharedhold checks are user-confirmed passes; unsupportedF13 is verified by actual UI/error/disk. Latest read still350ms, shared/enabledtrue, samePID34272responding. No input sent while requested human test is pending. Goal blocked at remaining nativegate, not declared complete; later milestones unchangedpending.
+
+### UP-HK final acceptance
+
+- User explicitly confirmed: All of the hotkey related changes have worked, proceed. mark that as complete. This closes the remaining native threshold/off-on/Help/Quit acceptance gate. Prior direct user observations confirmed old/new live binding and shared tap/hold/release/visible-grid behavior; actual UI/disk evidence confirmed Save and safe unsupported-key rejection. No further hotkey native acceptance requested.
+- Source checkpoints474e6377/17ad560c/4ff437eb remain reviewed and verified (targeted43-caseunion and final3actualowner tests, check/build, scoped formatting, zero new/changed-line Clippy warnings; inherited debt documented). UP-HK complete. Full project goal remains active; UP-MK through UP-QA remain required.
