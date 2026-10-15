@@ -1010,6 +1010,8 @@ pub struct LauncherApp {
     pub help_hotkey_str: Option<String>,
     pub query_scale: f32,
     pub list_scale: f32,
+    pub(crate) show_launcher_icon: bool,
+    pub(crate) show_launcher_title: bool,
     /// Number of user defined commands at the start of `actions`.
     pub custom_len: usize,
     pub history_limit: usize,
@@ -2574,6 +2576,8 @@ impl LauncherApp {
             help_hotkey_str: settings.help_hotkey.clone(),
             query_scale,
             list_scale,
+            show_launcher_icon: settings.show_launcher_icon,
+            show_launcher_title: settings.show_launcher_title,
             custom_len,
             history_limit: settings.history_limit,
             clipboard_limit: settings.clipboard_limit,

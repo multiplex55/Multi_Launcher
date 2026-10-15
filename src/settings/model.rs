@@ -586,6 +586,10 @@ pub struct Settings {
     pub hide_after_run: bool,
     #[serde(default = "default_always_on_top")]
     pub always_on_top: bool,
+    #[serde(default = "default_true")]
+    pub show_launcher_icon: bool,
+    #[serde(default = "default_true")]
+    pub show_launcher_title: bool,
     #[serde(default = "default_timer_refresh")]
     pub timer_refresh: f32,
     #[serde(default)]
@@ -951,6 +955,8 @@ impl Default for Settings {
             static_size: None,
             hide_after_run: false,
             always_on_top: default_always_on_top(),
+            show_launcher_icon: true,
+            show_launcher_title: true,
             timer_refresh: default_timer_refresh(),
             net_refresh: default_net_refresh(),
             net_unit: NetUnit::Auto,
@@ -1592,6 +1598,30 @@ mod tests {
     fn legacy_settings_default_to_confirming_discard() {
         let parsed: Settings = serde_json::from_str("{}").expect("deserialize legacy settings");
         assert!(parsed.note_confirm_discard_unsaved_changes);
+    }
+
+    #[test]
+    fn launcher_brand_visibility_defaults_on_and_round_trips() {
+        let legacy: Settings = serde_json::from_str("{}").expect("deserialize legacy settings");
+        assert!(legacy.show_launcher_icon);
+        assert!(legacy.show_launcher_title);
+
+        let mut settings = legacy;
+        settings.show_launcher_icon = false;
+        settings.show_launcher_title = true;
+        let serialized = serde_json::to_string(&settings).expect("serialize launcher settings");
+        let restored: Settings =
+            serde_json::from_str(&serialized).expect("deserialize launcher settings");
+        assert!(!restored.show_launcher_icon);
+        assert!(restored.show_launcher_title);
+
+        let old_defaults: Settings = serde_json::from_value(serde_json::json!({
+            "show_launcher_icon": false,
+            "show_launcher_title": false,
+        }))
+        .expect("missing unrelated settings retain defaults");
+        assert!(!old_defaults.show_launcher_icon);
+        assert!(!old_defaults.show_launcher_title);
     }
 
     #[test]

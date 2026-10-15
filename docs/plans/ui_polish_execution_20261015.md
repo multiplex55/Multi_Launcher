@@ -14,8 +14,8 @@ Approved contract: `multi_launcher_ui_polish_codex_plan_20261015.md`.
 | Milestone | State | Commit / evidence |
 |---|---|---|
 | UP-HK | complete | A `474e6377`, B1 `17ad560c`, B2 `4ff437eb`; targeted source gates and user-confirmed native acceptance passed |
-| UP-MK | complete | Reviewed source, 32 targeted cases, lint/build/native checks and user-confirmed visual smoke passed |
-| UP-BR | pending | |
+| UP-MK | complete | `4423b47c5bdc3942a3d74b3d854844102a21bb58`; reviewed source, 32 targeted cases, lint/build/native checks and user-confirmed visual smoke passed |
+| UP-BR | complete | Reviewed; 8 targeted cases plus strengthened rerun passed; scoped lint/fmt/build; four native PNGs and live Save/restart verified |
 | UP-PA | pending | |
 | UP-TX | pending | |
 | UP-FL | pending | Reference videos not located; diagnosis must precede fix |
@@ -225,3 +225,33 @@ Next: finish native smoke, inspect final source/Git state, commit UP-MK, then de
 - Blocked audit: final visual smoke remains unavailable across three consecutive goal turns. Latest revalidation checked the specific isolated candidate and sample macro file; no reported manual result has arrived. Capture recovery was exhausted with the documented graphics errors. Source and automated native gates remain passed; source files and this ledger are intentionally uncommitted pending acceptance. Goal blocked at this external observation gate; no UP-BR source work has started.
 
 - User explicitly confirmed UP-MK smoke/user test passed and the collapse/expand feature is successful. This closes the visual smoke gate. UP-MK complete; future human manual verification is deferred to after the full goal, per the user amendment above.
+
+### UP-BR — complete
+
+- UP-MK committed at `4423b47c5bdc3942a3d74b3d854844102a21bb58`; user explicitly accepted the successful MkMacro smoke test.
+- Implementer owns the single source milestone: independent default-on launcher icon/title settings, acknowledged Save publication, optional brand-row geometry and directly affected tests.
+- Planner's UP-PA handoff is prepared read-only and held until UP-BR completes.
+- Isolated native fixture prepared at `target/ui-polish-evidence/native-br-20261015`; fixture manifest SHA-256 `26d319eeafcd46fdb0c3220e7a9f7f645bf04ec82088a54054eef7ecb4bd811e`.
+- Existing `qa-framebuffer-capture` feature supports single-use ROOT PNG capture via a startup request manifest and F11. Feature build is delegated after source verification; no new capture subsystem. Each screenshot must have a saved receipt and inspected PNG before being reported as captured.
+- Windows Graphics Capture timeouts remain recorded; future human screenshot/manual review occurs after full goal completion and is not a per-milestone gate.- UP-BR Reviewer accepted frozen source with no substantive findings. Confirmed serde default-on, staging/acknowledged publication, field-owned rollback, independent MkMacro preference preservation, complete row removal, and optional-brand/query/menu toast geometry including inline errors. Geometry assertions inspect actual title glyphs/icon texture, focus, all four combinations, DPI 1.5/query scale 1.35/narrow width and toast containment. Acceptance pending targeted tests/lint/autonomous native evidence.
+- Targeted Nextest compile started by Implementer (exec session `26546`); no full suite requested. Root will not overlap Cargo or restart a live build.
+- Previous isolated UP-MK process `17596` was confirmed absent; no process stop was needed and normal user processes were untouched.- Focused UP-BR Nextest run `c305da50-42ec-436e-a834-d577aae2cdfd`: PASS, 8/8 cases / 5,344 skipped; build 6m24s, tests 4.054s. Covered branding defaults/mapping, General ownership/rollback, acknowledged publication/hidden reopen, root toast cases and all four rendered branding combinations. Exact filter to be recorded from Implementer's final report. No source changes since reviewed freeze; root verified all eight file hashes unchanged.- `cargo clippy -p multi_launcher --lib --bin multi_launcher --message-format=json`: exit 0, 55.98s. Root independently ran `python target/ui-polish-evidence/audit_changed_clippy.py target/ui-polish-evidence/mk-br-clippy-20261015.jsonl`: 372 warning diagnostics / 7 primary spans in touched files / **zero changed-line hits**. Inherited debt remains; this is not a strict-clean claim. No new blanket allows.
+- Parent scoped `rustfmt --edition 2024 --check --config skip_children=true` over the eight modified Rust files: PASS.
+- The known test-generated clipboard artifact regenerated with the exact historical SHA-256 `e8a60851b2043c2dc68ec51768bdb93f105949a938a762d0beb93244a3a53c65`; after tests ended it was hash-backed up to ignored `target/ui-polish-evidence/br-generated-clipboard-e8a60851b204.json` and only the verified generated root copy removed. No user data discarded.
+- Feature build `cargo build -p multi_launcher --bin multi_launcher --features qa-framebuffer-capture` started by Implementer for native PNG evidence. Root prepared an F11 request manifest; native launch awaits successful build and executable identity.
+UP-BR exact targeted commands:
+
+```text
+cargo nextest run -p multi_launcher --lib -E 'test(launcher_brand_visibility_defaults_on_and_round_trips) | test(launcher_brand_visibility_round_trips_through_settings_editor) | test(general_intent_changes_only_editor_owned_fields_and_plugin_keys) | test(rollback_restores_owned_fields_and_plugin_keys_without_replacing_latest_map) | test(hidden_settings_editor_completes_and_a_second_save_uses_the_new_baseline) | test(optional_launcher_brand_reflows_query_and_toasts_for_all_visibility_pairs) | test(root_toast_long_startup_notice_fits_below_header_and_dismisses) | test(root_toasts_preserve_anchor_stack_hover_pause_and_configured_duration)'
+cargo nextest run -p multi_launcher --lib -E 'test(optional_launcher_brand_reflows_query_and_toasts_for_all_visibility_pairs)'
+cargo clippy -p multi_launcher --lib --bin multi_launcher --message-format=json
+cargo build -p multi_launcher --bin multi_launcher --features qa-framebuffer-capture
+```
+
+- Second one-test run `8fc4e1cb-1ca7-46c8-a4fc-7d596f0a243a`: PASS, 1/1, incremental build 1m02s / tests 3.899s. Added only a direct painted inline-error-above-query assertion to the existing all-four geometry case; Reviewer accepted this test-only delta without findings. No production changes after reviewed feature build. Final source fingerprint recorded in `native-br-20261015/source-final.json`.
+- Feature build: PASS, exit 0, 2m26s. Executable 118,727,168 bytes, SHA-256 `391a2e33cc7a0610233e4598ab4eb5537fb43a7f4121834b59b28eb9057757e5`. Root uses the previously approved isolated executable path, with separate BR profile; normal user settings are untouched.
+- Native observed: both branding checkboxes are under Launcher Window & Appearance; editing both off leaves the committed title visible until Save. Save persists both false and removes title live; menus/query remain reachable. Escape closes Settings. Relaunch honors both false; typed `mkmacro` query produces the existing macro action.
+- Initial framebuffer request was honestly rejected because child environment contained an empty `ML_TRACK_C_BENCH_MODE`. Root corrected the fixture launcher with explicit `Start-Process -Environment` null overrides (removes child variables). Capture now saves PNGs successfully through the existing Glow path. No application workaround or source changes were needed.
+- Verified PNG receipts and inspected images so far: neither after restart, both enabled, icon only. Native framebuffers are 1100x800 at DPI 1.0. Neither shows query directly beneath menu without brand placeholder; both shows the original icon/title, icon-only has no title. Narrow title-only capture follows.
+- Repeated generated clipboard file from the one-test rerun matched the preserved evidence backup hash and only that verified generated copy was removed. Final scoped formatting and diff checks pass.
+- UP-BR native evidence complete: all four saved PNG receipts verified against actual file/executable hashes and images inspected; title-only narrow image is 640x480 with Query Scale 1.35. Index: `target/ui-polish-evidence/native-br-20261015/screenshot-index.json`. Human review remains deferred as requested. No remaining milestone blocker.

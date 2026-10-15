@@ -3143,17 +3143,30 @@ impl LauncherApp {
                 return;
             }
             let mut deferred_activation: Option<DeferredActivation> = None;
-            let brand = ui.horizontal(|ui| {
-                crate::gui::theme::paint_brand_badge(ui);
-                ui.label(
-                    egui::RichText::new("Multi Launcher")
-                        .text_style(crate::gui::theme::text_style_for_role(
-                            crate::gui::theme::TextRole::SectionHeading,
-                        ))
-                        .strong(),
-                );
-            });
-            let mut query_rect = brand.response.rect;
+            let brand_bottom = if self.show_launcher_icon || self.show_launcher_title {
+                Some(
+                    ui.horizontal(|ui| {
+                        if self.show_launcher_icon {
+                            crate::gui::theme::paint_brand_badge(ui);
+                        }
+                        if self.show_launcher_title {
+                            ui.label(
+                                egui::RichText::new("Multi Launcher")
+                                    .text_style(crate::gui::theme::text_style_for_role(
+                                        crate::gui::theme::TextRole::SectionHeading,
+                                    ))
+                                    .strong(),
+                            );
+                        }
+                    })
+                    .response
+                    .rect
+                    .bottom(),
+                )
+            } else {
+                None
+            };
+            let mut query_bottom = menu_bar_rect.bottom();
             if self.should_render_inline_error()
                 && let Some(err) = &self.error
             {
@@ -3205,7 +3218,7 @@ impl LauncherApp {
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
-                query_rect = query_response.rect;
+                query_bottom = query_response.rect.bottom();
                 if first_ui_pass
                     && Self::launcher_query_focus_should_be_requested(
                     just_became_visible,
@@ -3355,10 +3368,11 @@ impl LauncherApp {
                 }
             });
 
-            let header_bottom = menu_bar_rect
-                .bottom()
-                .max(brand.response.rect.bottom())
-                .max(query_rect.bottom());
+            let header_bottom = brand_bottom
+                .map_or(menu_bar_rect.bottom(), |bottom| {
+                    menu_bar_rect.bottom().max(bottom)
+                })
+                .max(query_bottom);
             if let Some(bounds) = Self::root_toast_region(
                 ctx.content_rect(),
                 header_bottom,
@@ -5832,6 +5846,180 @@ mod tests {
             !visible(&ctx, 1),
             "the short toast expires after hover ends"
         );
+    }
+
+    #[test]
+    fn optional_launcher_brand_reflows_query_and_toasts_for_all_visibility_pairs() {
+        fn toast_layer() -> egui::LayerId {
+            egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("__toasts").with("toast").with(0),
+            )
+        }
+
+        fn accessible_rect(
+            output: &egui::FullOutput,
+            predicate: impl Fn(&egui::accesskit::Node) -> bool,
+            pixels_per_point: f32,
+        ) -> Option<egui::Rect> {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .filter(|(_, node)| predicate(node))
+                .find_map(|(_, node)| {
+                    let bounds = node.bounds()?;
+                    Some(egui::Rect::from_min_max(
+                        egui::pos2(
+                            bounds.x0 as f32 / pixels_per_point,
+                            bounds.y0 as f32 / pixels_per_point,
+                        ),
+                        egui::pos2(
+                            bounds.x1 as f32 / pixels_per_point,
+                            bounds.y1 as f32 / pixels_per_point,
+                        ),
+                    ))
+                })
+        }
+
+        fn painted_text_rect(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+            output.shapes.iter().find_map(|clipped| {
+                if let egui::epaint::Shape::Text(text) = &clipped.shape
+                    && text.galley.text() == label
+                {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
+                } else {
+                    None
+                }
+            })
+        }
+
+        fn frame(
+            ctx: &egui::Context,
+            app: &mut LauncherApp,
+            screen_rect: egui::Rect,
+            time: f64,
+        ) -> egui::FullOutput {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    time: Some(time),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| app.render_root_ui(ui),
+            )
+        }
+
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(460.0, 360.0));
+        let mut query_tops = Vec::new();
+        for (show_icon, show_title) in [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            ctx.set_pixels_per_point(1.5);
+
+            let mut settings = Settings::default();
+            settings.dashboard.enabled = false;
+            settings.query_scale = Some(1.35);
+            settings.show_inline_errors = true;
+            settings.show_launcher_icon = show_icon;
+            settings.show_launcher_title = show_title;
+            let mut app = new_app_with_settings(&ctx, settings);
+            app.enable_toasts = true;
+            app.error = Some("Optional branding diagnostic".into());
+            app.focus_query = true;
+            app.root_frame_logic = Some(RootFrameLogic {
+                should_be_visible: true,
+                just_became_visible: true,
+                ..Default::default()
+            });
+            app.toasts.add(Toast {
+                text: "Launcher header geometry notice".into(),
+                kind: ToastKind::Info,
+                options: ToastOptions::default().duration_in_seconds(30.0),
+                style: Default::default(),
+            });
+
+            let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
+            let brand_texture_id = crate::gui::theme::brand_texture_id(&ctx)
+                .expect("the root theme loads its bundled brand icon");
+            let edge_spacing = ctx.style_of(ctx.theme()).spacing.item_spacing;
+            let mut settled = None;
+            for time in [0.0, 0.1, 0.2] {
+                let output = frame(&ctx, &mut app, screen_rect, time);
+                let query_rect = accessible_rect(
+                    &output,
+                    |node| node.role() == egui::accesskit::Role::TextInput,
+                    pixels_per_point,
+                )
+                .expect("the query editor remains visible in every branding mode");
+                let inline_error_rect =
+                    painted_text_rect(&output, "Error: Optional branding diagnostic")
+                        .expect("the inline error remains visible in every branding mode");
+                assert!(inline_error_rect.bottom() <= query_rect.top());
+                let menu_bottom = ["File", "Settings", "Help"]
+                    .into_iter()
+                    .filter_map(|label| {
+                        accessible_rect(
+                            &output,
+                            |node| node.label() == Some(label),
+                            pixels_per_point,
+                        )
+                    })
+                    .map(|rect| rect.bottom())
+                    .reduce(f32::max)
+                    .expect("the menu bar remains visible");
+                let title_rect = painted_text_rect(&output, "Multi Launcher");
+                let icon_rect = output.shapes.iter().find_map(|clipped| {
+                    if let egui::epaint::Shape::Mesh(mesh) = &clipped.shape
+                        && mesh.texture_id == brand_texture_id
+                    {
+                        Some(mesh.calc_bounds())
+                    } else {
+                        None
+                    }
+                });
+                assert_eq!(title_rect.is_some(), show_title);
+                assert_eq!(icon_rect.is_some(), show_icon);
+                assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("query_input"))));
+
+                let header_bottom = menu_bottom
+                    .max(query_rect.bottom())
+                    .max(title_rect.map_or(f32::NEG_INFINITY, |rect| rect.bottom()))
+                    .max(icon_rect.map_or(f32::NEG_INFINITY, |rect| rect.bottom()));
+                let bounds =
+                    LauncherApp::root_toast_region(ctx.content_rect(), header_bottom, edge_spacing)
+                        .expect("the narrow window retains room below the current header");
+                let toast_rect = ctx
+                    .memory(|memory| memory.area_rect(toast_layer().id))
+                    .expect("the root toast uses the recomputed header bounds");
+                assert!(bounds.contains_rect(toast_rect));
+                assert!(toast_rect.top() >= header_bottom + edge_spacing.y - 0.5);
+
+                settled = Some(query_rect.top());
+                output.drop_without_applying_deltas();
+            }
+            query_tops.push((show_icon, show_title, settled.unwrap()));
+        }
+
+        let query_top = |icon: bool, title: bool| {
+            query_tops
+                .iter()
+                .find_map(|(has_icon, has_title, top)| {
+                    (*has_icon == icon && *has_title == title).then_some(*top)
+                })
+                .unwrap()
+        };
+        let neither = query_top(false, false);
+        let icon_only = query_top(true, false);
+        let title_only = query_top(false, true);
+        let both = query_top(true, true);
+        assert!(neither + 1.0 < title_only);
+        assert!(title_only + 1.0 < icon_only);
+        assert!((both - icon_only).abs() < 1.0);
     }
 
     #[test]

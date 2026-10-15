@@ -134,6 +134,8 @@ impl SettingsEditor {
             static_h: settings.static_size.unwrap_or((400, 220)).1,
             hide_after_run: settings.hide_after_run,
             always_on_top: settings.always_on_top,
+            show_launcher_icon: settings.show_launcher_icon,
+            show_launcher_title: settings.show_launcher_title,
             timer_refresh: settings.timer_refresh,
             disable_timer_updates: settings.disable_timer_updates,
             preserve_command: settings.preserve_command,
@@ -293,6 +295,8 @@ impl SettingsEditor {
             static_size,
             hide_after_run: self.hide_after_run,
             always_on_top: self.always_on_top,
+            show_launcher_icon: self.show_launcher_icon,
+            show_launcher_title: self.show_launcher_title,
             timer_refresh: self.timer_refresh,
             disable_timer_updates: self.disable_timer_updates,
             preserve_command: self.preserve_command,
@@ -474,6 +478,24 @@ mod tests {
             restored.mkmacro_properties, current.mkmacro_properties,
             "a stale General Settings draft must preserve independent MkMacro view choices"
         );
+    }
+
+    #[test]
+    fn launcher_brand_visibility_round_trips_through_settings_editor() {
+        let mut settings = Settings::default();
+        settings.show_launcher_icon = false;
+        settings.show_launcher_title = true;
+
+        let mut editor = SettingsEditor::from_settings(&settings);
+        assert!(!editor.show_launcher_icon);
+        assert!(editor.show_launcher_title);
+
+        editor.show_launcher_icon = true;
+        editor.show_launcher_title = false;
+        let restored = editor.to_settings(&settings);
+        assert!(restored.show_launcher_icon);
+        assert!(!restored.show_launcher_title);
+        assert_eq!(restored.mkmacro_properties, settings.mkmacro_properties);
     }
 
     #[test]

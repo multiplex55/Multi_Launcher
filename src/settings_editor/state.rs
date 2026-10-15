@@ -81,6 +81,8 @@ pub struct SettingsEditor {
     pub(crate) static_h: i32,
     pub(crate) hide_after_run: bool,
     pub always_on_top: bool,
+    pub(crate) show_launcher_icon: bool,
+    pub(crate) show_launcher_title: bool,
     pub(crate) timer_refresh: f32,
     pub(crate) disable_timer_updates: bool,
     pub(crate) preserve_command: bool,

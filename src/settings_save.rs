@@ -109,6 +109,8 @@ define_general_settings_fields!(
     static_size,
     hide_after_run,
     always_on_top,
+    show_launcher_icon,
+    show_launcher_title,
     timer_refresh,
     disable_timer_updates,
     preserve_command,
@@ -1405,6 +1407,8 @@ mod tests {
             .insert("unrelated".into(), serde_json::json!({"x": 1}));
         let mut desired = baseline.clone();
         desired.hotkey = Some("F7".into());
+        desired.show_launcher_icon = false;
+        desired.show_launcher_title = false;
         desired
             .plugin_settings
             .insert("one".into(), serde_json::json!({"v": 2}));
@@ -1421,6 +1425,8 @@ mod tests {
         intent.apply(&mut latest);
 
         assert_eq!(latest.hotkey.as_deref(), Some("F7"));
+        assert!(!latest.show_launcher_icon);
+        assert!(!latest.show_launcher_title);
         assert_eq!(latest.theme.mode, crate::settings::ThemeMode::Dark);
         assert_eq!(latest.enabled_plugins, Some(HashSet::from(["new".into()])));
         assert_eq!(latest.plugin_settings["one"], serde_json::json!({"v": 2}));
@@ -1437,6 +1443,8 @@ mod tests {
         let before = Settings::default();
         let mut desired = before.clone();
         desired.hotkey = Some("F7".into());
+        desired.show_launcher_icon = false;
+        desired.show_launcher_title = false;
         desired
             .plugin_settings
             .insert("owned".into(), serde_json::json!({"v": 2}));
@@ -1453,6 +1461,8 @@ mod tests {
 
         assert!(conflicts.is_empty());
         assert_eq!(latest.hotkey, before.hotkey);
+        assert!(latest.show_launcher_icon);
+        assert!(latest.show_launcher_title);
         assert!(!latest.plugin_settings.contains_key("owned"));
         assert_eq!(
             latest.plugin_settings["independent"],
@@ -2030,11 +2040,16 @@ mod tests {
         let mut baseline = Settings::default();
         baseline.hotkey = Some("F2".into());
         baseline.enable_toasts = false;
+        baseline.mkmacro_properties.master_open = true;
         baseline.save(&path).unwrap();
         let (context, mut app) = test_app(directory.path(), baseline.clone());
         app.settings_editor.hotkey = "F7".into();
+        app.settings_editor.show_launcher_icon = false;
+        app.settings_editor.show_launcher_title = false;
         let mut first_desired = baseline.clone();
         first_desired.hotkey = Some("F7".into());
+        first_desired.show_launcher_icon = false;
+        first_desired.show_launcher_title = false;
         let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
         let first_client = client.clone();
         app.begin_settings_save_with_prepare(
@@ -2049,9 +2064,13 @@ mod tests {
         let HotkeyRuntimeMessage::Apply(application) = next_runtime_message(&owner) else {
             panic!("expected first apply")
         };
+        let staged = Settings::load(&path).unwrap();
+        assert!(!staged.show_launcher_icon && !staged.show_launcher_title);
+        assert!(app.show_launcher_icon && app.show_launcher_title);
         app.show_settings = false;
         app.drain_settings_save(&context);
         assert_eq!(app.hotkey_str, baseline.hotkey);
+        assert!(app.show_launcher_icon && app.show_launcher_title);
         assert_eq!(
             app.settings_editor.baseline_settings.hotkey,
             baseline.hotkey
@@ -2066,13 +2085,24 @@ mod tests {
         application.complete_applied(applied).unwrap();
         drain_until_complete(&mut app, &context);
         assert_eq!(app.hotkey_str.as_deref(), Some("F7"));
+        assert!(!app.show_launcher_icon && !app.show_launcher_title);
         assert_eq!(
             app.settings_editor.baseline_settings.hotkey.as_deref(),
             Some("F7")
         );
+        assert!(!app.settings_editor.baseline_settings.show_launcher_icon);
+        assert!(!app.settings_editor.baseline_settings.show_launcher_title);
+        assert!(
+            app.settings_editor
+                .baseline_settings
+                .mkmacro_properties
+                .master_open
+        );
 
         let second_baseline = app.settings_editor.baseline_settings.clone();
         app.settings_editor.hotkey = "F8".into();
+        app.settings_editor.show_launcher_icon = true;
+        app.settings_editor.show_launcher_title = true;
         let second_desired = app.settings_editor.to_settings(&second_baseline);
         let second_client = client.clone();
         app.begin_settings_save_with_prepare(
@@ -2087,6 +2117,7 @@ mod tests {
         let HotkeyRuntimeMessage::Apply(application) = next_runtime_message(&owner) else {
             panic!("expected second apply")
         };
+        assert!(!app.show_launcher_icon && !app.show_launcher_title);
         let applied = AppliedHotkeyReconfiguration {
             request_id: application.request_id(),
             generation: application.generation(),
@@ -2094,6 +2125,17 @@ mod tests {
         application.complete_applied(applied).unwrap();
         drain_until_complete(&mut app, &context);
         assert_eq!(app.hotkey_str.as_deref(), Some("F8"));
+        assert!(app.show_launcher_icon && app.show_launcher_title);
+        let persisted = Settings::load(&path).unwrap();
+        let (_, relaunched_app) = test_app(directory.path(), persisted.clone());
+        assert!(relaunched_app.show_launcher_icon && relaunched_app.show_launcher_title);
+        assert!(persisted.mkmacro_properties.master_open);
+        assert!(
+            relaunched_app
+                .mkmacro_dialog
+                .mkmacro_properties_preferences
+                .master_open
+        );
         assert_eq!(
             app.settings_editor.baseline_settings.hotkey.as_deref(),
             Some("F8")

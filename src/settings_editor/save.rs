@@ -102,6 +102,8 @@ impl SettingsEditor {
         app.help_hotkey_str = new_settings.help_hotkey.clone();
         app.query_scale = new_settings.query_scale.unwrap_or(1.0).min(5.0);
         app.list_scale = new_settings.list_scale.unwrap_or(1.0).min(5.0);
+        app.show_launcher_icon = new_settings.show_launcher_icon;
+        app.show_launcher_title = new_settings.show_launcher_title;
         app.history_limit = new_settings.history_limit;
         app.clipboard_limit = new_settings.clipboard_limit;
         app.page_jump = new_settings.page_jump;

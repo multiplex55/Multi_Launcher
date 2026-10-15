@@ -618,6 +618,10 @@ impl SettingsEditor {
 
     fn render_launcher_window_section(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
         ui.checkbox(&mut self.always_on_top, "Always on top");
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.show_launcher_icon, "Show Launcher Icon");
+            ui.checkbox(&mut self.show_launcher_title, "Show Launcher Title");
+        });
         crate::gui::theme::widgets::labeled_form_row(ui, "Off-screen position", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label("X");
