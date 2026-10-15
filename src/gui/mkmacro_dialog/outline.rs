@@ -65,9 +65,10 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
             state.last_matches = Some(matches);
             state.last_show_all = state.show_all;
         }
+        let row_height = navigation::selectable_row_height(ui);
         eframe::egui::ScrollArea::vertical()
             .id_salt("mkmacro_outline")
-            .show_rows(ui, 24.0, state.visible.len(), |ui, range| {
+            .show_rows(ui, row_height, state.visible.len(), |ui, range| {
                 for index in range {
                     let row = &rows[state.visible[index]];
                     ui.horizontal(|ui| {

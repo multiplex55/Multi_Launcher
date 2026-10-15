@@ -1,4 +1,5 @@
 use super::{MkMacroDialog, navigation};
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::authoring_fields::ReplacementPreview;
 use eframe::egui::{self, Key, Modifiers};
 
@@ -144,6 +145,98 @@ fn apply_preview(
     Ok(())
 }
 
+fn native_button_font(ui: &egui::Ui) -> (egui::FontId, egui::Vec2) {
+    let style = ui.style().clone();
+    let button = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let font_id = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| button.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        button.frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    (font_id, frame_margin)
+}
+
+fn wrapped_button_size(ui: &egui::Ui, label: &str, available_width: f32) -> egui::Vec2 {
+    let (font_id, frame_margin) = native_button_font(ui);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let text_size = egui::WidgetText::from(label)
+        .into_galley(ui, Some(egui::TextWrapMode::Wrap), text_width, font_id)
+        .size();
+    let spacing = ui.spacing();
+    egui::vec2(
+        (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width),
+        (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y),
+    )
+}
+
+fn wrapped_button_row_height(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    let available_width = ui.available_width().max(1.0);
+    let spacing = ui.spacing();
+    let mut row_width = 0.0;
+    let mut row_height = 0.0_f32;
+    let mut total_height = 0.0;
+    for label in labels {
+        let size = wrapped_button_size(ui, label, available_width);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + size.x > available_width {
+            total_height += row_height + spacing.item_spacing.y;
+            row_width = size.x;
+            row_height = size.y;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += size.x;
+            row_height = row_height.max(size.y);
+        }
+    }
+    total_height += row_height;
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (total_height * pixels_per_point).ceil() / pixels_per_point
+}
+
+fn footer_reserved_height(ui: &egui::Ui, mode: SearchMode, has_preview: bool) -> f32 {
+    let close_label = if mode == SearchMode::Replace {
+        "Cancel"
+    } else {
+        "Close"
+    };
+    let spacing_y = ui.spacing().item_spacing.y;
+    let close_height = wrapped_button_row_height(ui, &[close_label]);
+    let height = if mode == SearchMode::Replace && has_preview {
+        // Include the ScrollArea-to-actions gap and the actions-to-Cancel gap.
+        wrapped_button_row_height(ui, &["Replace Current", "Replace All"])
+            + close_height
+            + 2.0 * spacing_y
+    } else {
+        // Include the ScrollArea-to-Close/Cancel gap.
+        close_height + spacing_y
+    };
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
+}
+
+fn search_body_max_height(ui: &egui::Ui, mode: SearchMode, has_preview: bool) -> f32 {
+    (ui.available_height() - footer_reserved_height(ui, mode, has_preview))
+        .max(0.0)
+        .min(320.0)
+}
+
 pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     let Some(mode) = d.navigation.search.mode else {
         return;
@@ -176,43 +269,44 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 .selected_macro()
                 .map_or("No macro selected", |m| m.name.as_str());
             ui.strong(format!("Current macro: {macro_name}"));
-            ui.horizontal(|ui| {
-                ui.label(if mode == SearchMode::Replace {
-                    "Find text"
-                } else {
-                    "Search"
-                });
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut state.query)
-                        .id(query_id())
-                        .desired_width(f32::INFINITY),
-                );
-                if state.focus_query {
-                    response.request_focus();
-                    state.focus_query = false;
-                }
-                if response.changed() {
+            ui.label(if mode == SearchMode::Replace {
+                "Find text"
+            } else {
+                "Search"
+            });
+            let query_width = ui.available_width().max(1.0);
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut state.query)
+                    .id(query_id())
+                    .desired_width(query_width),
+            );
+            if state.focus_query {
+                response.request_focus();
+                state.focus_query = false;
+            }
+            if response.changed() {
+                state.preview = None;
+                state.error = None;
+            }
+            if mode == SearchMode::Replace {
+                ui.label("Replace with");
+                let replacement_width = ui.available_width().max(1.0);
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut state.replacement)
+                            .id(replacement_id())
+                            .desired_width(replacement_width),
+                    )
+                    .changed()
+                {
                     state.preview = None;
                     state.error = None;
                 }
-            });
-            if mode == SearchMode::Replace {
-                ui.horizontal(|ui| {
-                    ui.label("Replace with");
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut state.replacement)
-                                .id(replacement_id())
-                                .desired_width(f32::INFINITY),
-                        )
-                        .changed()
-                    {
-                        state.preview = None;
-                        state.error = None;
-                    }
-                });
                 ui.weak("Exact, case-sensitive text. Only editable fields are replaced.");
-                if ui.button("Preview replacements").clicked() {
+                if ui
+                    .add(egui::Button::new("Preview replacements").wrap())
+                    .clicked()
+                {
                     state.preview = None;
                     state.error = None;
                     match d
@@ -240,22 +334,29 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         Err(error) => state.error = Some(error),
                     }
                 }
+                if let Some(error) = &state.error {
+                    semantic_status(ui, StatusTone::Error, error, None);
+                }
                 if let Some(preview) = &mut state.preview {
                     let stale = preview.revision != d.draft_revision()
                         || d.selected_macro_id != Some(preview.plan.macro_id);
                     ui.label(format!("{} affected fields", preview.plan.edits.len()));
                     if stale {
-                        ui.colored_label(
-                            egui::Color32::YELLOW,
+                        semantic_status(
+                            ui,
+                            StatusTone::Warning,
                             "The draft or selected macro changed. Preview again before applying.",
+                            None,
                         );
                     }
                     if let Some(error) = &preview.all_error {
-                        ui.colored_label(egui::Color32::RED, error);
+                        semantic_status(ui, StatusTone::Error, error, None);
                     }
+                    let max_height = search_body_max_height(ui, mode, true);
                     egui::ScrollArea::vertical()
                         .id_salt("mkmacro_replace_preview")
-                        .max_height(320.0)
+                        .max_height(max_height)
+                        .min_scrolled_height(0.0)
                         .show(ui, |ui| {
                             for (index, edit) in preview.plan.edits.iter().enumerate() {
                                 let row = preview
@@ -292,10 +393,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                                 });
                             }
                         });
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         let can_apply = !stale && !preview.plan.edits.is_empty();
                         if ui
-                            .add_enabled(can_apply, egui::Button::new("Replace Current"))
+                            .add_enabled(can_apply, egui::Button::new("Replace Current").wrap())
                             .on_hover_text("Apply the selected field change from the preview")
                             .clicked()
                         {
@@ -304,7 +405,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         if ui
                             .add_enabled(
                                 can_apply && preview.all_error.is_none(),
-                                egui::Button::new("Replace All"),
+                                egui::Button::new("Replace All").wrap(),
                             )
                             .clicked()
                         {
@@ -314,26 +415,29 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 }
             } else {
                 ui.weak("Search types, details, annotations, variables, text, and Call targets.");
+                if let Some(error) = &state.error {
+                    semantic_status(ui, StatusTone::Error, error, None);
+                }
                 let matches = state
                     .filter
                     .matches(&rows, &state.query, mode == SearchMode::Jump);
                 let position = matches
                     .iter()
                     .position(|&index| Some(rows[index].step_id) == d.selection.primary);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(match position {
                         Some(index) => format!("{} of {} results", index + 1, matches.len()),
                         None => format!("{} results", matches.len()),
                     });
                     let mut direction = None;
                     if ui
-                        .add_enabled(!matches.is_empty(), egui::Button::new("Previous"))
+                        .add_enabled(!matches.is_empty(), egui::Button::new("Previous").wrap())
                         .clicked()
                     {
                         direction = Some(false);
                     }
                     if ui
-                        .add_enabled(!matches.is_empty(), egui::Button::new("Next"))
+                        .add_enabled(!matches.is_empty(), egui::Button::new("Next").wrap())
                         .clicked()
                     {
                         direction = Some(true);
@@ -374,10 +478,13 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 if state.query.trim().is_empty() && mode == SearchMode::Find {
                     ui.weak("Enter text to find matching steps.");
                 }
+                let max_height = search_body_max_height(ui, mode, false);
+                let row_height = navigation::selectable_row_height(ui);
                 egui::ScrollArea::vertical()
                     .id_salt("mkmacro_search_results")
-                    .max_height(320.0)
-                    .show_rows(ui, 24.0, matches.len(), |ui, range| {
+                    .max_height(max_height)
+                    .min_scrolled_height(0.0)
+                    .show_rows(ui, row_height, matches.len(), |ui, range| {
                         for index in range {
                             let row = &rows[matches[index]];
                             if ui
@@ -391,16 +498,12 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         }
                     });
             }
-            if let Some(error) = &state.error {
-                ui.colored_label(egui::Color32::RED, error);
-            }
-            if ui
-                .button(if mode == SearchMode::Replace {
-                    "Cancel"
-                } else {
-                    "Close"
-                })
-                .clicked()
+            let close_label = if mode == SearchMode::Replace {
+                "Cancel"
+            } else {
+                "Close"
+            };
+            if ui.add(egui::Button::new(close_label).wrap()).clicked()
                 || (owns_keyboard(ctx, d.selected_macro_id, true)
                     && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)))
             {
@@ -547,5 +650,254 @@ mod tests {
         d.close_children();
         assert!(!super::super::step_table::table_modal_open(&d));
         assert!(!d.dirty);
+    }
+
+    #[test]
+    fn native_scaled_metrics_keep_search_and_table_controls_visible_without_mutation() {
+        use egui::{accesskit::Role, pos2, vec2};
+
+        fn accessible_rect(bounds: egui::accesskit::Rect) -> egui::Rect {
+            egui::Rect::from_min_max(
+                pos2(bounds.x0 as f32, bounds.y0 as f32),
+                pos2(bounds.x1 as f32, bounds.y1 as f32),
+            )
+        }
+
+        fn same_rect(left: egui::Rect, right: egui::Rect) -> bool {
+            (left.min.x - right.min.x).abs() < 0.5
+                && (left.min.y - right.min.y).abs() < 0.5
+                && (left.max.x - right.max.x).abs() < 0.5
+                && (left.max.y - right.max.y).abs() < 0.5
+        }
+
+        let (_directory, mut d) = dialog();
+        d.selected_macro_mut().unwrap().steps = (1..=40)
+            .map(|id| MkStep {
+                id,
+                enabled: true,
+                breakpoint: false,
+                repeat: 12_345,
+                delay_after_ms: 1_234_567,
+                on_error: Default::default(),
+                metadata: Default::default(),
+                action: MkAction::Delay(Default::default()),
+            })
+            .collect();
+        d.mark_dirty();
+        d.dirty = false;
+        let before_draft = d.draft.clone();
+        let before_revision = d.draft_revision();
+        let before_selection = (
+            d.selection.ids.clone(),
+            d.selection.anchor,
+            d.selection.primary,
+        );
+
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(760.0, 600.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+
+        let mut default_metrics = None;
+        let default_output = ctx.run_ui(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                default_metrics = Some((
+                    navigation::selectable_row_height(ui),
+                    super::super::step_table::table_header_row_height(ui),
+                    super::super::step_table::table_body_row_height(ui),
+                ));
+            });
+        });
+        default_output.drop_without_applying_deltas();
+
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.override_font_id = Some(egui::FontId::new(28.0, egui::FontFamily::Proportional));
+        });
+
+        open(&mut d, SearchMode::Find);
+        d.navigation.search.query = "delay".into();
+        let mut close_bounds = None;
+        let mut previous_bounds = None;
+        let mut next_bounds = None;
+        for _ in 0..4 {
+            let output = ctx.run_ui(input(), |ctx| show(ctx, &mut d));
+            if let Some(update) = output.platform_output.accesskit_update.as_ref() {
+                for (_, node) in &update.nodes {
+                    let Some(bounds) = node.bounds().map(accessible_rect) else {
+                        continue;
+                    };
+                    if node.role() != Role::Button {
+                        continue;
+                    }
+                    match node.label() {
+                        Some("Close") => close_bounds = Some(bounds),
+                        Some("Previous") => previous_bounds = Some(bounds),
+                        Some("Next") => next_bounds = Some(bounds),
+                        _ => {}
+                    }
+                }
+            }
+            output.drop_without_applying_deltas();
+        }
+
+        let rows = navigation::rows(&d);
+        let mut search_row_geometry = None;
+        let row_output = ctx.run_ui(input(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let row_height = navigation::selectable_row_height(ui);
+                egui::ScrollArea::vertical()
+                    .id_salt("mkmacro_search_results")
+                    .max_height(row_height * 3.0)
+                    .min_scrolled_height(0.0)
+                    .show_rows(ui, row_height, rows.len(), |ui, range| {
+                        for index in range {
+                            let response = ui.add(rows[index].selectable(ui, false));
+                            if index == 0 {
+                                search_row_geometry =
+                                    Some((response.rect, ui.clip_rect(), row_height));
+                            }
+                        }
+                    });
+            });
+        });
+        row_output.drop_without_applying_deltas();
+        d.navigation.search.mode = None;
+
+        let mut previous_viewport = None;
+        let mut table_viewport = None;
+        let mut table_metrics = None;
+        let mut stable_viewport_observed = false;
+        let mut enabled_header_bounds = std::collections::HashMap::new();
+        let mut checkbox_bounds = std::collections::HashMap::new();
+        let mut spin_button_bounds = std::collections::HashMap::new();
+        for _ in 0..4 {
+            let mut viewport = None;
+            let mut metrics = None;
+            let output = ctx.run_ui(input(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    metrics = Some((
+                        super::super::step_table::table_header_row_height(ui),
+                        super::super::step_table::table_body_row_height(ui),
+                    ));
+                    viewport = super::super::step_table::show(ui, &mut d);
+                });
+            });
+            if let Some(update) = output.platform_output.accesskit_update.as_ref() {
+                for (node_id, node) in &update.nodes {
+                    let Some(bounds) = node.bounds().map(accessible_rect) else {
+                        continue;
+                    };
+                    if node.role() == Role::Label
+                        && (node.label() == Some("Enabled") || node.value() == Some("Enabled"))
+                    {
+                        enabled_header_bounds.insert(*node_id, bounds);
+                    }
+                    match node.role() {
+                        Role::CheckBox => {
+                            checkbox_bounds.insert(*node_id, bounds);
+                        }
+                        Role::SpinButton => {
+                            spin_button_bounds.insert(*node_id, bounds);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if let (Some(previous), Some(current), Some(current_metrics)) =
+                (previous_viewport, viewport, metrics)
+            {
+                stable_viewport_observed = same_rect(previous, current);
+                table_viewport = Some(current);
+                table_metrics = Some(current_metrics);
+            }
+            previous_viewport = viewport;
+            output.drop_without_applying_deltas();
+        }
+
+        let (default_row, default_header, default_body) =
+            default_metrics.expect("the default native metrics are measured");
+        let (scaled_header, scaled_body) =
+            table_metrics.expect("the scaled table viewport settles");
+        assert!(
+            stable_viewport_observed,
+            "the scaled main-table viewport settles"
+        );
+        let table_viewport = table_viewport.expect("the table has an actual viewport");
+        assert!(
+            table_viewport.is_positive() && screen_rect.contains_rect(table_viewport),
+            "the table viewport {table_viewport:?} fits the actual screen {screen_rect:?}"
+        );
+        let (search_row, search_clip, scaled_row) =
+            search_row_geometry.expect("the first shared search result is rendered");
+        assert!(
+            scaled_row > default_row,
+            "scaled selectable row: {scaled_row} vs {default_row}"
+        );
+        assert!(
+            scaled_header > default_header,
+            "scaled table header: {scaled_header} vs {default_header}"
+        );
+        assert!(
+            scaled_body > default_body,
+            "scaled table body: {scaled_body} vs {default_body}"
+        );
+        assert!(
+            search_row.height() <= scaled_row + 0.5,
+            "native search row height {} fits its measured stride {scaled_row}",
+            search_row.height()
+        );
+        assert!(
+            search_clip.contains_rect(search_row),
+            "native search row {search_row:?} is inside its actual scroll clip {search_clip:?}"
+        );
+        assert!(
+            enabled_header_bounds.values().any(|bounds| {
+                bounds.is_positive()
+                    && table_viewport.contains_rect(*bounds)
+                    && bounds.height() <= scaled_header + 0.5
+            }),
+            "the native Enabled header fits its measured row height {scaled_header}: {enabled_header_bounds:?}, {table_viewport:?}"
+        );
+        for (name, bounds) in [
+            ("Close", close_bounds),
+            ("Previous", previous_bounds),
+            ("Next", next_bounds),
+        ] {
+            let bounds = bounds.expect("the search window exposes its native footer controls");
+            assert!(
+                bounds.is_positive() && screen_rect.contains_rect(bounds),
+                "search {name} bounds {bounds:?} fit the actual screen {screen_rect:?}"
+            );
+        }
+        assert!(
+            checkbox_bounds.values().any(|bounds| {
+                bounds.is_positive()
+                    && table_viewport.contains_rect(*bounds)
+                    && bounds.height() <= scaled_body + 0.5
+            }),
+            "a native checkbox fits the table viewport and row height {scaled_body}: {checkbox_bounds:?}, {table_viewport:?}"
+        );
+        assert!(
+            spin_button_bounds.values().any(|bounds| {
+                bounds.is_positive()
+                    && table_viewport.contains_rect(*bounds)
+                    && bounds.height() <= scaled_body + 0.5
+            }),
+            "a native DragValue fits the table viewport and row height {scaled_body}: {spin_button_bounds:?}, {table_viewport:?}"
+        );
+        assert_eq!(d.draft, before_draft);
+        assert_eq!(d.draft_revision(), before_revision);
+        assert!(!d.dirty);
+        assert_eq!(
+            (
+                d.selection.ids.clone(),
+                d.selection.anchor,
+                d.selection.primary,
+            ),
+            before_selection
+        );
     }
 }

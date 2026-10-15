@@ -75,6 +75,92 @@ const BREAKPOINT_HOVER_TEXT: &str = "Breakpoint\nPauses before this step during 
 const BREAKPOINT_LOCKED_HOVER_TEXT: &str = "Stop the current playback before changing breakpoints.";
 const ACTIVE_BREAKPOINT_STATUS_TEXT: &str = "Paused at breakpoint\nThis step has not executed yet.";
 
+fn effective_font_id(
+    ui: &eframe::egui::Ui,
+    fallback: eframe::egui::FontId,
+) -> eframe::egui::FontId {
+    let style = ui.style();
+    style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(style))
+        })
+        .unwrap_or(fallback)
+}
+
+fn pixel_ceil(ui: &eframe::egui::Ui, points: f32) -> f32 {
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (points * pixels_per_point).ceil() / pixels_per_point
+}
+
+pub(super) fn table_header_row_height(ui: &mut eframe::egui::Ui) -> f32 {
+    let spacing = ui.spacing().clone();
+    let font_id = effective_font_id(ui, eframe::egui::TextStyle::Body.resolve(ui.style()));
+    let label_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + spacing.extra_text_line_spacing;
+    pixel_ceil(ui, label_height.max(spacing.interact_size.y))
+}
+
+pub(super) fn table_body_row_height(ui: &mut eframe::egui::Ui) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let button = style.button_style(
+        &eframe::egui::widget_style::Classes::default(),
+        eframe::egui::widget_style::WidgetState::Inactive,
+    );
+    let checkbox = style.checkbox_style(
+        &eframe::egui::widget_style::Classes::default(),
+        eframe::egui::widget_style::WidgetState::Inactive,
+    );
+    let body_font = effective_font_id(ui, eframe::egui::TextStyle::Body.resolve(&style));
+    let button_font = effective_font_id(ui, button.text_style.font_id.clone());
+    let drag_value_font = style.drag_value_text_style.resolve(&style);
+    let drag_value_button_font = style
+        .override_font_id
+        .clone()
+        .unwrap_or_else(|| drag_value_font.clone());
+    let small_font = effective_font_id(ui, eframe::egui::TextStyle::Small.resolve(&style));
+    let body_text_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&body_font)) + spacing.extra_text_line_spacing;
+    let button_frame_margin = if ui.visuals().button_frame {
+        button.frame.total_margin().sum().y
+    } else {
+        0.0
+    };
+    let button_text_height = ui.fonts_mut(|fonts| {
+        fonts
+            .row_height(&button_font)
+            .max(fonts.row_height(&small_font))
+    }) + spacing.extra_text_line_spacing;
+    let button_height = (button_text_height + button_frame_margin).max(spacing.interact_size.y);
+    let drag_value_text_height = ui.fonts_mut(|fonts| {
+        fonts
+            .row_height(&drag_value_font)
+            .max(fonts.row_height(&drag_value_button_font))
+    }) + spacing.extra_text_line_spacing;
+    // DragValue uses the drag_value_text_style in both its native button and
+    // focused TextEdit forms. The latter receives button_padding as its edit
+    // margin, so reserve the larger of those two native heights.
+    let drag_value_button_height =
+        (drag_value_text_height + button_frame_margin).max(spacing.interact_size.y);
+    let drag_value_edit_height =
+        (drag_value_text_height + 2.0 * spacing.button_padding.y).max(spacing.interact_size.y);
+    let checkbox_height = checkbox.checkbox_size.max(spacing.interact_size.y);
+    pixel_ceil(
+        ui,
+        body_text_height
+            .max(button_height)
+            .max(drag_value_button_height)
+            .max(drag_value_edit_height)
+            .max(checkbox_height)
+            .max(spacing.interact_size.y),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BreakpointVisual {
     glyph: &'static str,
@@ -537,6 +623,8 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
         |ui| {
     ui.push_id(("mkmacro_steps", mid), |ui| {
     let max_scroll_height = ui.available_height().max(MIN_TABLE_VIEWPORT_HEIGHT);
+    let header_row_height = table_header_row_height(ui);
+    let body_row_height = table_body_row_height(ui);
     let mut table = egui_extras::TableBuilder::new(ui)
         .striped(true)
         .auto_shrink([false, false])
@@ -550,12 +638,13 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
         .column(egui_extras::Column::exact(55.0))
         .column(egui_extras::Column::initial(90.0));
     if let Some(row) = scroll_row { table = table.scroll_to_row(row, Some(eframe::egui::Align::Center)); }
-    table.header(20.0, |mut h| {
+    table.header(header_row_height, |mut h| {
             for x in [
                 "●", "#", "Enabled", "Action", "Details", "Repeat", "Delay", "Status",
             ] {
                 h.col(|ui| {
-                    ui.label(x);
+                    ui.add(eframe::egui::Label::new(x).truncate())
+                        .on_hover_text(x);
                 });
             }
         })
@@ -563,7 +652,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
             for &i in &visible {
                 let source = &m.steps[i];
                 let mut s = source.clone();
-                body.row(22.0, |mut r| {
+                body.row(body_row_height, |mut r| {
                     r.set_selected(d.selection.ids.contains(&s.id) || d.selection.primary == Some(s.id));
                     r.col(|ui| {
                         let visual = breakpoint_visual(s.breakpoint);

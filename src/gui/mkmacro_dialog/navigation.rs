@@ -34,11 +34,22 @@ impl SearchRow {
         ui: &eframe::egui::Ui,
         selected: bool,
     ) -> eframe::egui::Button<'a> {
+        let style = ui.style().clone();
+        let button_style = style.button_style(
+            &eframe::egui::widget_style::Classes::default(),
+            eframe::egui::widget_style::WidgetState::Inactive,
+        );
+        let font_id = effective_font_id(ui, button_style.text_style.font_id.clone());
+        let frame_margin = if ui.visuals().button_frame {
+            button_style.frame.total_margin().sum()
+        } else {
+            eframe::egui::Vec2::ZERO
+        };
         let mut text = eframe::egui::text::LayoutJob::simple(
             self.caption.clone(),
-            eframe::egui::TextStyle::Button.resolve(ui.style()),
+            font_id,
             ui.visuals().text_color(),
-            (ui.available_width() - 2.0 * ui.spacing().button_padding.x).max(1.0),
+            (ui.available_width() - frame_margin.x).max(1.0),
         );
         text.wrap.max_rows = 1;
         text.wrap.break_anywhere = true;
@@ -60,6 +71,45 @@ impl SearchRow {
             }
         }
     }
+}
+
+fn effective_font_id(
+    ui: &eframe::egui::Ui,
+    fallback: eframe::egui::FontId,
+) -> eframe::egui::FontId {
+    let style = ui.style();
+    style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(style))
+        })
+        .unwrap_or(fallback)
+}
+
+/// The fixed virtual stride used by Search and Outline follows the effective
+/// native selectable-button font and frame for the current UI style.
+pub(super) fn selectable_row_height(ui: &mut eframe::egui::Ui) -> f32 {
+    let style = ui.style().clone();
+    let button = style.button_style(
+        &eframe::egui::widget_style::Classes::default(),
+        eframe::egui::widget_style::WidgetState::Inactive,
+    );
+    let font_id = effective_font_id(ui, button.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        button.frame.total_margin().sum().y
+    } else {
+        0.0
+    };
+    let spacing = ui.spacing();
+    let text_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + spacing.extra_text_line_spacing;
+    let height = (text_height + frame_margin).max(spacing.interact_size.y);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
 }
 
 #[derive(Default)]
