@@ -183,7 +183,6 @@ impl SettingsEditor {
         {
             app.clipboard_modify_hide_launcher_after_apply = cfg.hide_launcher_after_apply;
         }
-        crate::request_hotkey_restart(new_settings);
         if app.enable_toasts {
             app.add_toast(Toast {
                 text: "Settings saved".into(),

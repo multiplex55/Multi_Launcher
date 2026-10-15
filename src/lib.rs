@@ -103,7 +103,3 @@ fn startup_index_coordinator_for_owner()
         None => indexer::coordinator::IndexCoordinator::new(),
     }
 }
-
-pub fn request_hotkey_restart(_settings: settings::Settings) {
-    // no-op stub for library context
-}

@@ -10,9 +10,9 @@ use super::executor::{
 };
 use super::{
     EventEnricher, KeyboardTranslator, MkInvocation, MkInvocationSubset, MkInvocationValues,
-    MkMacroStore, MkValue, NormalizationConfig, Operation, RecorderObserverSession,
-    RecorderRuntime, RecorderSnapshot, RecordingResult, RecordingTarget, RuntimeVariables,
-    SharedOperationGuard, SystemRecorderClock, production_hook_service,
+    MkMacroDocument, MkMacroStore, MkValue, NormalizationConfig, Operation,
+    RecorderObserverSession, RecorderRuntime, RecorderSnapshot, RecordingResult, RecordingTarget,
+    RuntimeVariables, SharedOperationGuard, SystemRecorderClock, production_hook_service,
 };
 use anyhow::{Result, anyhow};
 use once_cell::sync::Lazy;
@@ -1400,6 +1400,16 @@ pub fn refresh_shared_hotkey_reservations(reserved: &[(&str, &str)]) -> Result<(
         .clone()
         .ok_or_else(|| "shared macro hotkey service is not initialized".to_string())?;
     service.replace_reserved(reserved)
+}
+
+/// Reads the document currently owned by the shared macro hotkey service.
+/// This is a read-only preflight input; callers must not refresh reservations
+/// while merely validating a proposed launcher route.
+pub fn shared_hotkey_document_snapshot() -> Result<Option<Arc<MkMacroDocument>>, String> {
+    let service = HOTKEYS
+        .read()
+        .map_err(|_| "shared macro hotkey service lock is poisoned".to_string())?;
+    Ok(service.as_ref().map(|service| service.document_snapshot()))
 }
 /// Installs a shared runtime with injected effects (intended for tests).
 pub fn set_shared_store_with_backends(store: Arc<MkMacroStore>, backends: Backends) {

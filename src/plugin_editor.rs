@@ -166,8 +166,6 @@ impl PluginEditor {
                 tracing::debug!(available=?app.plugins.plugin_names(), "plugins reloaded");
                 self.available = Self::gather_available(&dirs);
                 app.search();
-
-                crate::request_hotkey_restart(s);
             }
             Err(e) => app.report_error("ui operation", format!("Failed to save settings: {e}")),
         }

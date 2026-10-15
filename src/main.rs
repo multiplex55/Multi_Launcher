@@ -48,7 +48,6 @@ use startup_catalog::{StartupIndexingTransfer, startup_action_catalog};
 use startup_catalog::{startup_indexed_actions, track_c_startup_phase_observer};
 
 use eframe::{egui, icon_data};
-use once_cell::sync::Lazy;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -99,9 +98,6 @@ fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::Vie
 
     viewport
 }
-
-static RESTART_TX: Lazy<Mutex<Option<Sender<Settings>>>> = Lazy::new(|| Mutex::new(None));
-static EVENT_TX: Lazy<Mutex<Option<Sender<()>>>> = Lazy::new(|| Mutex::new(None));
 
 fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
     let mut reserved = Vec::new();
@@ -218,24 +214,7 @@ fn hotkeys_can_cofire(
     left: multi_launcher::hotkey::Hotkey,
     right: multi_launcher::hotkey::Hotkey,
 ) -> bool {
-    // HotkeyTrigger treats configured modifiers as required subsets: extra
-    // modifiers remain accepted. Two chords with the same primary key can
-    // therefore fire together under the union of their modifier sets.
-    if left.key != right.key {
-        return false;
-    }
-    let unmodified_caps_lock = |hotkey: multi_launcher::hotkey::Hotkey| {
-        hotkey.key == multi_launcher::hotkey::Key::CapsLock
-            && !hotkey.ctrl
-            && !hotkey.shift
-            && !hotkey.alt
-            && !hotkey.alt_gr
-            && !hotkey.win
-    };
-    let left_exact_caps_lock = unmodified_caps_lock(left);
-    let right_exact_caps_lock = unmodified_caps_lock(right);
-    (!left_exact_caps_lock && !right_exact_caps_lock)
-        || (left_exact_caps_lock && right_exact_caps_lock)
+    multi_launcher::hotkey::validation::hotkeys_can_cofire(left, right)
 }
 
 fn screen_draw_launch_trigger(settings: &Settings) -> Option<Arc<HotkeyTrigger>> {
@@ -260,6 +239,7 @@ fn screen_draw_emergency_trigger(settings: &Settings) -> Option<Arc<HotkeyTrigge
     }
 }
 
+#[cfg(test)]
 fn rebuild_screen_draw_triggers(
     settings: &Settings,
     launch: &mut Option<Arc<HotkeyTrigger>>,
@@ -501,7 +481,6 @@ struct PendingLauncherRoute {
 }
 
 struct RadialRoutePlan {
-    shared_invocation: bool,
     config: InvocationConfig,
     related: Vec<RelatedBinding>,
     start_legacy: bool,
@@ -682,7 +661,6 @@ fn radial_route_plan(
 ) -> RadialRoutePlan {
     let shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     RadialRoutePlan {
-        shared_invocation,
         config: radial_invocation_config(settings, document, shared_invocation, generation),
         related: if settings.radial.enabled {
             related_launcher_bindings(settings, document, shared_invocation)
@@ -818,21 +796,75 @@ fn reconcile_screen_draw_cycle_notices(
     }
 }
 
-pub fn request_hotkey_restart(settings: Settings) {
-    match RESTART_TX.lock() {
-        Ok(guard) => {
-            if let Some(tx) = guard.as_ref() {
-                let _ = tx.send(settings);
+fn process_hotkey_runtime_message(
+    message: multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage,
+    radial_document: &RadialDocument,
+    settings_generation: u64,
+    event_tx: &Sender<()>,
+    prepared_listeners: &mut HashMap<
+        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationId,
+        HotkeyListener,
+    >,
+) {
+    use multi_launcher::hotkey::reconfiguration::{
+        HotkeyReconfigurationError, HotkeyRuntimeGeneration, HotkeyRuntimeMessage,
+        PreparedHotkeyReconfiguration,
+    };
+
+    match message {
+        HotkeyRuntimeMessage::Cancel(request_id) => {
+            prepared_listeners.remove(&request_id);
+        }
+        HotkeyRuntimeMessage::Prepare(request) => {
+            let request_id = request.request_id();
+            let preparation = (|| {
+                let macro_document =
+                    multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
+                        .map_err(HotkeyReconfigurationError::Validation)?;
+                let routes = multi_launcher::hotkey::validation::validate_hotkey_routes(
+                    request.settings(),
+                    radial_document,
+                    macro_document.as_deref(),
+                )
+                .map_err(|issues| {
+                    HotkeyReconfigurationError::Validation(
+                        issues
+                            .into_iter()
+                            .map(|issue| format!("{}: {}", issue.field, issue.message))
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    )
+                })?;
+                let shared_invocation = routes.shared_invocation;
+                let triggers = routes
+                    .legacy_triggers
+                    .into_iter()
+                    .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)))
+                    .collect();
+                let listener =
+                    HotkeyTrigger::prepare_listener(triggers, "prepared", event_tx.clone())
+                        .map_err(HotkeyReconfigurationError::ListenerPreparation)?;
+                let prepared = PreparedHotkeyReconfiguration {
+                    request_id,
+                    generation: HotkeyRuntimeGeneration(
+                        settings_generation.checked_add(1).unwrap_or(1),
+                    ),
+                    shared_invocation,
+                };
+                Ok((prepared, listener))
+            })();
+
+            match preparation {
+                Ok((prepared, listener)) => {
+                    if request.complete(Ok(prepared)).is_ok() {
+                        prepared_listeners.insert(request_id, listener);
+                    }
+                }
+                Err(error) => {
+                    let _ = request.complete(Err(error));
+                }
             }
         }
-        Err(e) => {
-            tracing::error!("failed to lock RESTART_TX: {e}");
-        }
-    }
-    if let Ok(guard) = EVENT_TX.lock()
-        && let Some(tx) = guard.as_ref()
-    {
-        let _ = tx.send(());
     }
 }
 
@@ -1125,17 +1157,9 @@ fn main() -> anyhow::Result<()> {
     }
     actions_timer.finish("startup.action_load");
 
-    let (restart_tx, restart_rx) = channel::<Settings>();
-    if let Ok(mut guard) = RESTART_TX.lock() {
-        *guard = Some(restart_tx);
-    } else {
-        tracing::error!("failed to lock RESTART_TX while starting");
-    }
-
     let (event_tx, event_rx) = channel::<()>();
-    if let Ok(mut guard) = EVENT_TX.lock() {
-        *guard = Some(event_tx.clone());
-    }
+    let hotkey_runtime_receiver =
+        multi_launcher::hotkey::reconfiguration::install_main_runtime(event_tx.clone())?;
     install_exclusive_wake(event_tx.clone());
 
     let index_timer = multi_launcher::performance::Timer::start();
@@ -1150,15 +1174,15 @@ fn main() -> anyhow::Result<()> {
 
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
-    let mut trigger = Arc::new(HotkeyTrigger::new(hotkey));
-    let mut quit_trigger = settings
+    let trigger = Arc::new(HotkeyTrigger::new(hotkey));
+    let quit_trigger = settings
         .quit_hotkey()
         .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-    let mut help_trigger = settings
+    let help_trigger = settings
         .help_hotkey()
         .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-    let mut screen_draw_trigger = screen_draw_launch_trigger(&settings);
-    let mut emergency_trigger = screen_draw_emergency_trigger(&settings);
+    let screen_draw_trigger = screen_draw_launch_trigger(&settings);
+    let emergency_trigger = screen_draw_emergency_trigger(&settings);
 
     let mut shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     let mut settings_generation = 1u64;
@@ -1348,6 +1372,7 @@ fn main() -> anyhow::Result<()> {
     let mut queued_visibility: Option<bool> = None;
     let mut previous_exclusive = false;
     let mut pending_launcher_route: Option<PendingLauncherRoute> = None;
+    let mut prepared_hotkey_listeners = HashMap::new();
     let mut external_radial_invocations: HashMap<InvocationId, ExternalRadialMetadata> =
         HashMap::new();
 
@@ -1542,6 +1567,24 @@ fn main() -> anyhow::Result<()> {
             // If the asset tree was created after watcher acquisition, rebuild
             // the narrow watch set so subsequent descendants are observed.
             radial_resources.refresh_watcher();
+        }
+
+        loop {
+            let message = match hotkey_runtime_receiver.try_recv() {
+                Ok(Some(message)) => message,
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::error!(%error, "hotkey reconfiguration receiver disconnected");
+                    break;
+                }
+            };
+            process_hotkey_runtime_message(
+                message,
+                &radial_document,
+                settings_generation,
+                &event_tx,
+                &mut prepared_hotkey_listeners,
+            );
         }
 
         while let Ok(demand) = authoring_endpoint.resource_rx.try_recv() {
@@ -2874,195 +2917,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        if let Ok(new_settings) = restart_rx.try_recv() {
-            let _ =
-                multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
-            radial_controller.close(
-                multi_launcher::radial::native::CloseReason::SettingsReload,
-                None,
-            );
-            listener.stop();
-            let mut runtime_settings = new_settings.clone();
-            let radial_settings_issues = multi_launcher::radial::settings::validate(
-                &runtime_settings.radial,
-                &radial_document,
-                &reserved_launcher_hotkeys(&runtime_settings),
-            );
-            if !radial_settings_issues.is_empty() {
-                runtime_settings.radial.enabled = false;
-                for issue in radial_settings_issues {
-                    tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings; radial runtime disabled fail-closed");
-                    multi_launcher::gui::send_event(
-                        multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(issue.message),
-                    );
-                }
-            }
-            settings = runtime_settings;
-            let tooltip_preferences =
-                multi_launcher::radial::tooltip::TooltipPreferences::from(&settings.radial);
-            for event in radial_controller.set_tooltip_preferences(tooltip_preferences) {
-                if let ControllerEvent::Diagnostic(diagnostic) = event {
-                    multi_launcher::gui::send_event(
-                        multi_launcher::gui::WatchEvent::RadialDiagnostic(diagnostic),
-                    );
-                }
-            }
-            match native_preview.set_tooltip_preferences(tooltip_preferences) {
-                Ok(Some(diagnostics)) => {
-                    if let Some(lease) = native_preview.active_lease() {
-                        let _ = authoring_endpoint.reply_tx.send(
-                            AuthoringReply::NativePreviewDiagnostics {
-                                editor_session: lease.editor_session,
-                                lease,
-                                diagnostics,
-                            },
-                        );
-                    }
-                }
-                Ok(None) => {}
-                Err(message) => multi_launcher::gui::send_event(
-                    multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
-                        "Native radial preview could not apply tooltip settings: {message}"
-                    )),
-                ),
-            }
-            radial_control_endpoint.set_enabled(settings.radial.enabled);
-            settings_generation = settings_generation.checked_add(1).unwrap_or(1);
-            if let Ok(document) = radial_store.reload() {
-                radial_document = document;
-                multi_launcher::gui::install_radial_published_document(Arc::clone(
-                    &radial_document,
-                ));
-                radial_controller.replace_document(Arc::clone(&radial_document));
-            }
-            trigger = Arc::new(HotkeyTrigger::new(settings.hotkey()));
-            quit_trigger = settings
-                .quit_hotkey()
-                .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-            help_trigger = settings
-                .help_hotkey()
-                .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-            rebuild_screen_draw_triggers(
-                &settings,
-                &mut screen_draw_trigger,
-                &mut emergency_trigger,
-            );
-            refresh_macro_hotkey_reservations(&settings, &radial_document);
-            let route_plan = radial_route_plan(&settings, &radial_document, settings_generation);
-            shared_invocation = route_plan.shared_invocation;
-            if !settings.radial.enabled {
-                radial_controller.disable();
-            }
-            radial_resources.set_runtime_enabled(settings.radial.enabled);
-            radial_resources.reconcile(&mut radial_controller);
-            pending_launcher_route = None;
-            if let Some(service) = invocation_service.as_ref() {
-                let cancellation = if route_plan.stop_service {
-                    LifecycleCancellation::FeatureDisabled
-                } else {
-                    LifecycleCancellation::SettingsReload
-                };
-                match service.begin_route_handoff(
-                    route_plan.config,
-                    route_plan.related,
-                    cancellation,
-                ) {
-                    Ok(handoff) => {
-                        pending_launcher_route = Some(PendingLauncherRoute {
-                            settings_generation,
-                            handoff,
-                            start_legacy: route_plan.start_legacy,
-                            stop_service: route_plan.stop_service,
-                        });
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "launcher route handoff could not be started; remaining fail-closed");
-                        settings.radial.enabled = false;
-                        radial_control_endpoint.set_enabled(false);
-                        radial_controller.disable();
-                        if let Some(mut service) = invocation_service.take() {
-                            service.stop();
-                        }
-                        listener = HotkeyTrigger::start_listener(
-                            legacy_listener_triggers(
-                                false,
-                                &trigger,
-                                quit_trigger.as_ref(),
-                                help_trigger.as_ref(),
-                                screen_draw_trigger.as_ref(),
-                                emergency_trigger.as_ref(),
-                            ),
-                            "main",
-                            event_tx.clone(),
-                        );
-                    }
-                }
-            } else if settings.radial.enabled {
-                let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
-                match LauncherInvocationService::start(
-                    route_plan.config,
-                    route_plan.related,
-                    Arc::new(move || {
-                        if let Some(lifetime) = owner_bridge.active_lifetime() {
-                            PriorityOwner::ScreenDrawRecovery(lifetime)
-                        } else if exclusive_owners() != 0 {
-                            PriorityOwner::ExclusiveTool
-                        } else {
-                            PriorityOwner::Launcher
-                        }
-                    }),
-                    event_tx.clone(),
-                ) {
-                    Ok(service) => {
-                        invocation_service = Some(service);
-                        if !shared_invocation {
-                            listener = HotkeyTrigger::start_listener(
-                                legacy_listener_triggers(
-                                    false,
-                                    &trigger,
-                                    quit_trigger.as_ref(),
-                                    help_trigger.as_ref(),
-                                    screen_draw_trigger.as_ref(),
-                                    emergency_trigger.as_ref(),
-                                ),
-                                "main",
-                                event_tx.clone(),
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(%error,"shared radial invocation reload failed; disabling radial runtime and restoring legacy launcher route");
-                        fail_closed_radial_route(
-                            &mut settings,
-                            &radial_control_endpoint,
-                            &mut radial_controller,
-                            &mut invocation_service,
-                            &mut listener,
-                            &trigger,
-                            quit_trigger.as_ref(),
-                            help_trigger.as_ref(),
-                            screen_draw_trigger.as_ref(),
-                            emergency_trigger.as_ref(),
-                            &event_tx,
-                        );
-                    }
-                }
-            } else {
-                listener = HotkeyTrigger::start_listener(
-                    legacy_listener_triggers(
-                        false,
-                        &trigger,
-                        quit_trigger.as_ref(),
-                        help_trigger.as_ref(),
-                        screen_draw_trigger.as_ref(),
-                        emergency_trigger.as_ref(),
-                    ),
-                    "main",
-                    event_tx.clone(),
-                );
-            }
-        }
-
         // Consolidate every fail-closed path through the same demand owner.
         // This is idempotent, so repeated disable/error notifications cannot
         // construct or retire a resource set more than once.
@@ -4101,7 +3955,6 @@ mod tests {
         let document = RadialDocument::starter();
         let enabled = Settings::default();
         let enabled_plan = radial_route_plan(&enabled, &document, 41);
-        assert!(enabled_plan.shared_invocation);
         assert!(!enabled_plan.start_legacy);
         assert!(!enabled_plan.stop_service);
         assert!(enabled_plan.config.launcher_enabled);
@@ -4110,7 +3963,6 @@ mod tests {
         let mut disabled = enabled;
         disabled.radial.enabled = false;
         let disabled_plan = radial_route_plan(&disabled, &document, 42);
-        assert!(!disabled_plan.shared_invocation);
         assert!(disabled_plan.start_legacy);
         assert!(disabled_plan.stop_service);
         assert!(!disabled_plan.config.launcher_enabled);
@@ -4321,6 +4173,77 @@ mod tests {
                 Ok(Some(emergency.into()))
             );
         }
+    }
+
+    #[test]
+    fn main_hotkey_preparation_is_dormant_and_does_not_write_settings_or_disk() {
+        let (wake_tx, wake_rx) = channel();
+        let receiver =
+            multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
+        let mut settings = Settings::default();
+        settings.hotkey = Some("Ctrl+F2".into());
+        settings.radial.enabled = false;
+        settings.radial.shared_tap_hold = false;
+        let settings_before = serde_json::to_value(&settings).unwrap();
+        let radial_document = RadialDocument::starter();
+        let radial_before = serde_json::to_value(&radial_document).unwrap();
+        let directory = tempdir().unwrap();
+        let settings_file = directory.path().join("settings.json");
+        std::fs::write(&settings_file, b"keep persisted bytes").unwrap();
+        let (old_wake_tx, old_wake_rx) = channel();
+        let existing_trigger = Arc::new(HotkeyTrigger::new(parse_hotkey("Ctrl+F2").unwrap()));
+        let mut existing_listener =
+            HotkeyTrigger::start_listener(vec![existing_trigger], "existing-test", old_wake_tx);
+        assert!(existing_listener.is_active());
+
+        let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
+            settings.clone(),
+        )
+        .unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let message = receiver.try_recv().unwrap().unwrap();
+        let mut prepared_listeners = HashMap::new();
+        process_hotkey_runtime_message(
+            message,
+            &radial_document,
+            4,
+            &wake_tx,
+            &mut prepared_listeners,
+        );
+
+        let prepared = ticket.try_complete().unwrap().unwrap();
+        assert_eq!(prepared.generation.0, 5);
+        assert_eq!(prepared.request_id, ticket.request_id());
+        assert!(existing_listener.is_active());
+        assert!(
+            !prepared_listeners
+                .get(&prepared.request_id)
+                .unwrap()
+                .is_active()
+        );
+        assert_eq!(serde_json::to_value(&settings).unwrap(), settings_before);
+        assert_eq!(
+            serde_json::to_value(&radial_document).unwrap(),
+            radial_before
+        );
+        assert_eq!(
+            std::fs::read(&settings_file).unwrap(),
+            b"keep persisted bytes"
+        );
+
+        drop(ticket);
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let cancel = receiver.try_recv().unwrap().unwrap();
+        process_hotkey_runtime_message(
+            cancel,
+            &radial_document,
+            4,
+            &wake_tx,
+            &mut prepared_listeners,
+        );
+        assert!(prepared_listeners.is_empty());
+        existing_listener.stop();
+        drop(old_wake_rx);
     }
 
     #[test]

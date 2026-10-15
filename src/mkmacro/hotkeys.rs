@@ -158,7 +158,7 @@ fn reserved_modifier(token: &str) -> Option<MkKey> {
     match token {
         "CTRL" | "CONTROL" | "LCTRL" | "LEFTCTRL" | "LEFTCONTROL" | "RCTRL" | "RIGHTCTRL"
         | "RIGHTCONTROL" => Some(MkKey::Control),
-        "ALT" | "LALT" | "LEFTALT" | "RALT" | "RIGHTALT" => Some(MkKey::Alt),
+        "ALT" | "ALTGR" | "ALT-GR" | "LALT" | "LEFTALT" | "RALT" | "RIGHTALT" => Some(MkKey::Alt),
         "SHIFT" | "LSHIFT" | "LEFTSHIFT" | "RSHIFT" | "RIGHTSHIFT" => Some(MkKey::Shift),
         "WIN" | "WINDOWS" | "META" | "SUPER" | "CMD" | "COMMAND" | "LWIN" | "LEFTWIN"
         | "LEFTWINDOWS" | "LMETA" | "LEFTMETA" | "RWIN" | "RIGHTWIN" | "RIGHTWINDOWS" | "RMETA"
@@ -727,6 +727,13 @@ impl MkMacroHotkeyService {
                 .map(|(name, chord)| ((*name).to_string(), (*chord).to_string()))
                 .collect(),
         )
+    }
+
+    /// Returns the immutable authoring snapshot used by this service, so a
+    /// proposed launcher binding can be checked without refreshing or
+    /// disabling any existing macro hotkeys.
+    pub fn document_snapshot(&self) -> Arc<MkMacroDocument> {
+        self.store.snapshot()
     }
 
     pub fn shutdown(&self) {
