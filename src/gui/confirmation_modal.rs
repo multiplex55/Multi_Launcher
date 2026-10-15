@@ -4,6 +4,7 @@ use crate::commands::{
     ActivationSource, BrowserTabCommand, ClipboardCommand, Command, NoteCommand, StorageCommand,
     TodoCommand, TodoCompatibilityKind,
 };
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfirmationResult {
@@ -136,6 +137,7 @@ mod tests {
         ActionAvailability, ActionPresentation, ActionSafety, ActionTarget, UniversalAction,
         UniversalActionOperation, action_ids,
     };
+    use eframe::egui;
 
     fn command(raw: &str) -> Command {
         parse_action(&Action {
@@ -186,6 +188,121 @@ mod tests {
             Some(ActivationSource::Macro),
         );
         assert_eq!(modal.source_label.as_deref(), Some("Triggered by macro"));
+    }
+
+    #[test]
+    fn long_confirmation_keeps_actions_visible_and_window_close_cancels_once() {
+        fn button_bounds(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .filter(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
+                })
+                .find_map(|(_, node)| {
+                    let bounds = node.bounds()?;
+                    Some(egui::Rect::from_min_max(
+                        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    ))
+                })
+        }
+
+        fn input(screen_rect: egui::Rect, events: Vec<egui::Event>) -> egui::RawInput {
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events,
+                ..Default::default()
+            }
+        }
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 280.0));
+        let mut modal = ConfirmationModal::default();
+        modal.open = true;
+        modal.description = "Remove the selected item and its saved data. ".repeat(60);
+        modal.source_label =
+            Some("Triggered by a macro from a long source description. ".repeat(28));
+        modal.warning =
+            "This action cannot be undone; current data may not be recoverable. ".repeat(32);
+
+        let mut final_bounds = None;
+        for _ in 0..3 {
+            let mut result = super::ConfirmationResult::None;
+            let output = ctx.run_ui(input(screen_rect, Vec::new()), |ctx| {
+                result = modal.ui(ctx);
+            });
+            let bounds = (
+                button_bounds(&output, "Confirm"),
+                button_bounds(&output, "Cancel"),
+                button_bounds(&output, "Close window"),
+            );
+            if bounds.0.is_some() && bounds.1.is_some() && bounds.2.is_some() {
+                final_bounds = Some(bounds);
+            }
+            output.drop_without_applying_deltas();
+            assert_eq!(result, super::ConfirmationResult::None);
+        }
+        assert!(modal.is_open());
+        let (confirm_bounds, cancel_bounds, close_bounds) =
+            final_bounds.expect("the settled confirmation frame has accessibility bounds");
+        let confirm_bounds = confirm_bounds.expect("Confirm button is exposed");
+        let cancel_bounds = cancel_bounds.expect("Cancel button is exposed");
+        let close_bounds = close_bounds.expect("the window close button is exposed");
+        assert!(screen_rect.contains_rect(confirm_bounds));
+        assert!(screen_rect.contains_rect(cancel_bounds));
+        assert!(screen_rect.contains_rect(close_bounds));
+        assert!(!confirm_bounds.intersects(cancel_bounds));
+
+        let close_point = close_bounds.center();
+        let mut press_result = super::ConfirmationResult::None;
+        let press_output = ctx.run_ui(
+            input(
+                screen_rect,
+                vec![
+                    egui::Event::PointerMoved(close_point),
+                    egui::Event::PointerButton {
+                        pos: close_point,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::default(),
+                    },
+                ],
+            ),
+            |ctx| press_result = modal.ui(ctx),
+        );
+        press_output.drop_without_applying_deltas();
+        assert_eq!(press_result, super::ConfirmationResult::None);
+        assert!(modal.is_open());
+
+        let mut release_result = super::ConfirmationResult::None;
+        let release_output = ctx.run_ui(
+            input(
+                screen_rect,
+                vec![egui::Event::PointerButton {
+                    pos: close_point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                }],
+            ),
+            |ctx| release_result = modal.ui(ctx),
+        );
+        release_output.drop_without_applying_deltas();
+        assert_eq!(release_result, super::ConfirmationResult::Cancelled);
+        assert!(!modal.is_open());
+
+        let mut after_close_result = super::ConfirmationResult::None;
+        let after_close_output = ctx.run_ui(input(screen_rect, Vec::new()), |ctx| {
+            after_close_result = modal.ui(ctx);
+        });
+        after_close_output.drop_without_applying_deltas();
+        assert_eq!(after_close_result, super::ConfirmationResult::None);
     }
 
     #[test]
@@ -296,15 +413,29 @@ impl ConfirmationModal {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                if !self.description.is_empty() {
-                    ui.label(&self.description);
-                }
-                if let Some(label) = &self.source_label {
-                    ui.label(label);
-                }
-                ui.colored_label(egui::Color32::YELLOW, &self.warning);
-                ui.horizontal(|ui| {
-                    if ui.button(&self.confirm_label).clicked() {
+                let footer_height = confirmation_footer_reserved_height(
+                    ui,
+                    &[&self.confirm_label, &self.cancel_label],
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("destructive_confirmation_content")
+                    .min_scrolled_height(0.0)
+                    .max_height((ui.available_height() - footer_height).max(0.0))
+                    .show(ui, |ui| {
+                        if !self.description.is_empty() {
+                            ui.label(&self.description);
+                        }
+                        if let Some(label) = &self.source_label {
+                            widgets::secondary_help(ui, label);
+                        }
+                        widgets::semantic_status(ui, StatusTone::Warning, &self.warning, None);
+                    });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    let confirm = ui.button(&self.confirm_label);
+                    let confirm =
+                        widgets::with_button_emphasis(ui, confirm, ButtonEmphasis::Destructive);
+                    if confirm.clicked() {
                         result = ConfirmationResult::Confirmed;
                     }
                     if ui.button(&self.cancel_label).clicked() {
@@ -353,34 +484,52 @@ impl DiffCopyConfirmation {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "{} files, {} directories",
-                    plan.totals.files_copied, plan.totals.directories_created
-                ));
-                ui.label(format!(
-                    "{} overwrites, {} conflicts, {} skipped",
-                    plan.totals.overwrites, plan.totals.conflicts, plan.totals.skips
-                ));
-                for conflict in &plan.conflicts {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        format!("{}: {}", conflict.relative.display(), conflict.message),
+                let footer_height = confirmation_footer_reserved_height(ui, &["Confirm", "Cancel"]);
+                egui::ScrollArea::vertical()
+                    .id_salt("diff_copy_confirmation_content")
+                    .min_scrolled_height(0.0)
+                    .max_height((ui.available_height() - footer_height).max(0.0))
+                    .show(ui, |ui| {
+                        ui.label(format!(
+                            "{} files, {} directories",
+                            plan.totals.files_copied, plan.totals.directories_created
+                        ));
+                        ui.label(format!(
+                            "{} overwrites, {} conflicts, {} skipped",
+                            plan.totals.overwrites, plan.totals.conflicts, plan.totals.skips
+                        ));
+                        for conflict in &plan.conflicts {
+                            widgets::semantic_status(
+                                ui,
+                                StatusTone::Warning,
+                                &format!("{}: {}", conflict.relative.display(), conflict.message),
+                                None,
+                            );
+                        }
+                        for error in &plan.errors {
+                            widgets::semantic_status(ui, StatusTone::Error, &error.message, None);
+                        }
+                        if plan.totals.overwrites > 0 {
+                            widgets::semantic_status(
+                                ui,
+                                StatusTone::Warning,
+                                "Existing differing files will be overwritten.",
+                                None,
+                            );
+                        }
+                    });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    let confirm_button = ui.add_enabled(
+                        !plan.has_fatal_errors(),
+                        egui::Button::new("Confirm").wrap_mode(ui.wrap_mode()),
                     );
-                }
-                for error in &plan.errors {
-                    ui.colored_label(egui::Color32::RED, &error.message);
-                }
-                if plan.totals.overwrites > 0 {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Existing differing files will be overwritten.",
+                    let confirm_button = widgets::with_button_emphasis(
+                        ui,
+                        confirm_button,
+                        ButtonEmphasis::Destructive,
                     );
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!plan.has_fatal_errors(), egui::Button::new("Confirm"))
-                        .clicked()
-                    {
+                    if confirm_button.clicked() {
                         confirm = true;
                     }
                     if ui.button("Cancel").clicked() {
@@ -396,4 +545,67 @@ impl DiffCopyConfirmation {
         }
         None
     }
+}
+
+fn confirmation_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let button_frame = native_button_style.frame;
+    let frame_margin = if ui.visuals().button_frame {
+        button_frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    let mut row_width = 0.0;
+    let mut row_height = 0.0f32;
+    let mut actions_height = 0.0;
+
+    for label in labels {
+        let text_size = egui::WidgetText::from(*label)
+            .into_galley(ui, Some(wrap_mode), text_width, button_font.clone())
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            actions_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    actions_height += row_height.max(spacing.interact_size.y);
+    let separator_spacing = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let footer_height = actions_height + 2.0 * spacing.item_spacing.y + separator_spacing;
+    (footer_height * pixels_per_point).ceil() / pixels_per_point
 }

@@ -18,13 +18,16 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/calendar_popover.rs` | M5-C8 | accepted bounded Calendar chrome;3 transaction/layout contracts/review pass, Editor001/corrected Popover002 images inspected; expanded/native details/input/event/close gaps explicit |
 | `src/gui/clipboard_dialog.rs` | M5-B2 | accepted semantic chrome/bounded previews/actions;15scoped contracts across B2 chain; populated History002 framebuffer inspected; native input/close gaps explicit |
 | `src/gui/clipboard_modify_dialog.rs` | M5-B2 | accepted semantic sections/status/footer/native constrained scrolling; scoped layout/state/persistence contracts and review pass; native visual/input coverage unobserved |
-| `src/gui/confirmation_modal.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/confirmation_modal.rs` | M5-C10 | accepted bounded content/actions/semantic statuses;21 contracts/review pass, corrected Recovery003/empty ToastLog003 images inspected; tabs/scroll/confirm/nativeactions/focus/close gaps explicit |
 | `src/gui/convert_panel.rs` | M5-C5 | inspected coherent existing native presentation accepted unchanged; session/clipboard/parser owners preserved, native interaction unobserved |
 | `src/gui/cpu_list_dialog.rs` | M5-C6 | accepted bounded labels/native footer, refresh/sort/count unchanged; scoped compilation/review pass, native visual gap and preexisting pinned count0 documented |
 | `src/gui/crop_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/dashboard_editor_dialog.rs` | M5-C9 | accepted wrapped/bounded chrome;12 contracts/review pass, initial NoteGraph controls inspected; populated graph/details/Dashboard preview/nativeinput/close gaps explicit |
-| `src/gui/data_recovery_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/data_recovery_dialog.rs` | M5-C10 | accepted bounded content/actions/semantic statuses;21 contracts/review pass, corrected Recovery003/empty ToastLog003 images inspected; tabs/scroll/confirm/nativeactions/focus/close gaps explicit |
 | `src/gui/diff_dialog/mod.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/diff_dialog/text_view.rs` | M5-C remaining Diff chrome | Source-reviewed pending: command/Find rows need horizontal access/reflow and text_details fixed30 header needs actual allocation; content/IDs/shortcuts unchanged. |
+| `src/gui/diff_dialog/folder_view.rs` | M5-C remaining Diff chrome | Source-reviewed pending: command/mutation/navigation rows reflow and semantic Rescan status; existing scrolling paths/status summary coherent. |
+| `src/gui/diff_dialog/binary_view.rs` | M5-C remaining Diff chrome | Source-reviewed pending: horizontal toolbar/content coherent, fixed interact_size-only header needs actual effective native metrics. |
 | `src/gui/fav_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
 | `src/gui/file_search_dialog.rs` | M5-B5 | accepted wrapped chrome/font-aware highlight/table metrics;14distinctcontracts/review pass; initialDark002 framebuffer inspected, populatednative/input gaps explicit |
 | `src/gui/file_search_preview_dialog.rs` | M5-B5 | accepted wrapped header/status/measured native rows; scoped line-map/payload/row-stride contracts pass; native selected-preview capture/input gap explicit |
@@ -53,7 +56,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/tempfile_dialog.rs` | M5-C4 | accepted responsive labeled forms/native footer; Unicode scroll/draft contract/review pass, initial Dark Tempfile/Light Bookmark images inspected; native input/create/open/close gaps explicit |
 | `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | M5-A complete at94b4724d;21contracts and Dark/Light852x460 rendered footer reviewed; physical native gaps remain |
 | `src/gui/timer_dialog.rs` | M5-C7 | accepted scoped task/time chrome and collection opening;21 contracts/review pass; initial Todo/Timer002 images inspected, lower rows/TodoView/Alarm/nativeinput/close gaps explicit |
-| `src/gui/toast_log_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/toast_log_dialog.rs` | M5-C10 | accepted bounded content/actions/semantic statuses;21 contracts/review pass, corrected Recovery003/empty ToastLog003 images inspected; tabs/scroll/confirm/nativeactions/focus/close gaps explicit |
 | `src/gui/todo_dialog.rs` | M5-C7 | accepted scoped task/time chrome and collection opening;21 contracts/review pass; initial Todo/Timer002 images inspected, lower rows/TodoView/Alarm/nativeinput/close gaps explicit |
 | `src/gui/todo_view_dialog.rs` | M5-C7 | accepted scoped task/time chrome and collection opening;21 contracts/review pass; initial Todo/Timer002 images inspected, lower rows/TodoView/Alarm/nativeinput/close gaps explicit |
 | `src/gui/unused_assets_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -85,6 +88,8 @@ Read-only local presentation review; unchanged dispositions are source review, n
 | screenshot | Pending: screenshot directory label/editor/Browse row needs bounded reflow in settings_ui; preserve file dialog/serialization. |
 
 Mouse/Clipboard settings were inspected with their completed surface checkpoints. Vertical scrolling of the Settings shell alone does not solve the three remaining horizontal-overflow cases. These three settings owners form one bounded later checkpoint; no extra dependency, persistence or native-effects work.
+
+Diff ordinary-chrome source review after C9 also identified mod.rs conflict/error feedback and its long Reload/Keep row for bounded follow-up. Preserve measured window_chrome/inner_work_area and bounded path header. The three renderer rows above are explicit pending owners, separate from C14 rule/operation forms. No semantic content/projection/operations audit or native verification was performed for this read-only review.
 
 Intentional domain ownership: native radial compositor/skins; Screen Draw canvas; coordinate effects; sampling/capture overlays; image pixels/selection/annotations; regex source/capture highlights; diff semantics; Markdown syntax/callouts/code/images. Theme surrounding chrome only, never globally recolor these meaningful outputs or alter transparency/focus/hook transport. QR/Regex immediate viewports, Radial deferred viewport, macro prompts, Screen Draw toolbar and radial-placement recovery must inherit Context changes without parent geometry reset. Native capture/input/DPI qualification remains separate.
 

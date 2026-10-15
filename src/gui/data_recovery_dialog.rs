@@ -1,4 +1,6 @@
 use crate::commands::{DataDialogFocus, DataRecoveryCommand, DataRecoveryConfirmation};
+use crate::gui::theme::widgets::{self, StatusTone};
+use crate::gui::theme::{TextRole, text_style_for_role};
 use crate::persistence::{
     BackupPolicy, DataRequestId, DataService, DataServiceActivity, DataServiceFailure,
     DataServiceRequest, DataServiceResult, PersistentStoreId, RecoveryGroupId, RecoveryTarget,
@@ -422,7 +424,7 @@ impl DataRecoveryDialog {
 
     fn health_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<DataRecoveryUiAction>) {
         let busy = self.any_request_busy();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(!busy, egui::Button::new("Refresh"))
                 .clicked()
@@ -432,69 +434,109 @@ impl DataRecoveryDialog {
                 }
             }
             if busy {
-                ui.label("Checking storage…");
+                widgets::secondary_help(ui, "Checking storage…");
             }
         });
         if let Some(error) = &self.service_error {
-            ui.colored_label(egui::Color32::RED, error);
+            widgets::semantic_status(ui, StatusTone::Error, error, None);
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            egui::Grid::new("data-health-grid")
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.strong("Store");
-                    ui.strong("Status");
-                    ui.strong("Ownership");
-                    ui.strong("Backup");
-                    ui.strong("Actions");
-                    ui.strong("Path");
-                    ui.end_row();
-                    for report in &self.health {
-                        ui.label(report.label);
-                        ui.label(health_label(&report.health));
-                        ui.label(format!("{:?}", report.ownership));
-                        ui.label(format!("{:?}", report.backup_policy));
-                        let targets = store_open_targets(report);
-                        ui.horizontal(|ui| {
-                            if report.ownership == StoreOwnership::External {
-                                ui.label("Inspect only");
-                            }
-                            if targets.is_empty() {
-                                ui.label("Unavailable");
-                            }
-                            for target in targets {
-                                match target {
-                                    StoreOpenTarget::File(path) => {
-                                        if ui.button("Open file").clicked() {
-                                            actions.push(DataRecoveryUiAction::OpenPath(path));
+        egui::ScrollArea::both()
+            .id_salt("data_recovery_health_grid")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("data-health-grid")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Store");
+                        ui.strong("Status");
+                        ui.strong("Ownership");
+                        ui.strong("Backup");
+                        ui.strong("Actions");
+                        ui.strong("Path");
+                        ui.end_row();
+                        for report in &self.health {
+                            ui.label(report.label);
+                            let tone = match &report.health {
+                                StoreHealth::Healthy => StatusTone::Success,
+                                StoreHealth::Missing | StoreHealth::Empty => StatusTone::Warning,
+                                StoreHealth::Malformed { .. }
+                                | StoreHealth::Unreadable { .. }
+                                | StoreHealth::UnsupportedSchema { .. } => StatusTone::Error,
+                            };
+                            let label = health_label(&report.health);
+                            let text_size = egui::WidgetText::from(label.as_str())
+                                .into_galley(
+                                    ui,
+                                    Some(egui::TextWrapMode::Extend),
+                                    f32::INFINITY,
+                                    egui::TextStyle::Body.resolve(ui.style()),
+                                )
+                                .size();
+                            let marker_width = (ui
+                                .text_style_height(&text_style_for_role(TextRole::Metadata))
+                                * 0.48)
+                                .clamp(5.0, 8.0);
+                            let pixels_per_point = ui.ctx().pixels_per_point();
+                            let status_width =
+                                ((text_size.x + marker_width + ui.spacing().item_spacing.x)
+                                    * pixels_per_point)
+                                    .ceil()
+                                    / pixels_per_point;
+                            // Teach Grid the intrinsic status width; the table itself scrolls.
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(
+                                    status_width,
+                                    text_size.y.max(ui.spacing().interact_size.y),
+                                ),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                                    widgets::semantic_status(ui, tone, &label, None);
+                                },
+                            );
+                            ui.label(format!("{:?}", report.ownership));
+                            ui.label(format!("{:?}", report.backup_policy));
+                            let targets = store_open_targets(report);
+                            ui.horizontal(|ui| {
+                                if report.ownership == StoreOwnership::External {
+                                    widgets::secondary_help(ui, "Inspect only");
+                                }
+                                if targets.is_empty() {
+                                    widgets::secondary_help(ui, "Unavailable");
+                                }
+                                for target in targets {
+                                    match target {
+                                        StoreOpenTarget::File(path) => {
+                                            if ui.button("Open file").clicked() {
+                                                actions.push(DataRecoveryUiAction::OpenPath(path));
+                                            }
                                         }
-                                    }
-                                    StoreOpenTarget::Folder(path) => {
-                                        if ui.button("Open folder").clicked() {
-                                            actions.push(DataRecoveryUiAction::OpenPath(path));
+                                        StoreOpenTarget::Folder(path) => {
+                                            if ui.button("Open folder").clicked() {
+                                                actions.push(DataRecoveryUiAction::OpenPath(path));
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        });
-                        ui.label(report.path.display().to_string()).on_hover_text(
-                            match (report.restore_eligible, report.reset_eligible) {
-                                (true, true) => "Recovery actions: Restore / Reset",
-                                (true, false) => "Recovery actions: Restore",
-                                (false, true) => "Recovery actions: Reset",
-                                (false, false) => "No automatic recovery actions",
-                            },
-                        );
-                        ui.end_row();
-                    }
-                });
-        });
+                            });
+                            ui.label(report.path.display().to_string()).on_hover_text(
+                                match (report.restore_eligible, report.reset_eligible) {
+                                    (true, true) => "Recovery actions: Restore / Reset",
+                                    (true, false) => "Recovery actions: Restore",
+                                    (false, true) => "Recovery actions: Reset",
+                                    (false, false) => "No automatic recovery actions",
+                                },
+                            );
+                            ui.end_row();
+                        }
+                    });
+            });
     }
 
     fn backups_ui(&mut self, ui: &mut egui::Ui) {
         let backup_busy = self.any_request_busy();
         let list_busy = backup_busy;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(!backup_busy, egui::Button::new("Create backup"))
                 .clicked()
@@ -513,96 +555,110 @@ impl DataRecoveryDialog {
             }
         });
         if backup_busy {
-            ui.label("Backup worker is active…");
+            widgets::secondary_help(ui, "Backup worker is active…");
         }
         if let Some(summary) = &self.backup_summary {
-            ui.label(summary);
+            widgets::semantic_status(ui, StatusTone::Warning, summary, None);
         }
-        for snapshot in &self.snapshots {
-            ui.radio_value(
-                &mut self.selected_snapshot,
-                Some(snapshot.manifest.snapshot_id.clone()),
-                format!(
-                    "{} — {:?} — {} stores",
-                    snapshot.manifest.snapshot_id,
-                    snapshot.manifest.status,
-                    snapshot.manifest.included.len()
-                ),
-            );
-        }
+        egui::ScrollArea::vertical()
+            .id_salt("data_recovery_backup_snapshots")
+            .min_scrolled_height(0.0)
+            .max_height(ui.available_height().max(0.0))
+            .show(ui, |ui| {
+                for snapshot in &self.snapshots {
+                    ui.radio_value(
+                        &mut self.selected_snapshot,
+                        Some(snapshot.manifest.snapshot_id.clone()),
+                        format!(
+                            "{} — {:?} — {} stores",
+                            snapshot.manifest.snapshot_id,
+                            snapshot.manifest.status,
+                            snapshot.manifest.included.len()
+                        ),
+                    );
+                }
+            });
     }
 
     fn recovery_ui(&mut self, ui: &mut egui::Ui, actions: &mut Vec<DataRecoveryUiAction>) {
-        ui.label("Restore or reset is validated now, staged without changing live data, and applied on the next launch. Multi Launcher preserves current data before replacement.");
+        widgets::secondary_help(
+            ui,
+            "Restore or reset is validated now, staged without changing live data, and applied on the next launch. Multi Launcher preserves current data before replacement.",
+        );
         if let Some(summary) = &self.recovery_summary {
-            ui.colored_label(egui::Color32::YELLOW, summary);
+            widgets::semantic_status(ui, StatusTone::Warning, summary, None);
         }
         let selected = self.selected_snapshot.clone();
         let recovery_busy = self.any_request_busy();
         if recovery_busy {
-            ui.label("Recovery validation is active…");
+            widgets::secondary_help(ui, "Recovery validation is active…");
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for store in &self.health {
-                let Some(target) = recovery_target_for_row(store.id) else {
-                    continue;
-                };
-                let target_eligible = target.members().into_iter().all(|member| {
-                    self.health.iter().any(|report| {
-                        report.id == member
-                            && report.ownership == StoreOwnership::ApplicationOwned
-                            && report.restore_eligible
-                    })
-                });
-                let restore = restore_enabled(
-                    target,
-                    store.ownership,
-                    target_eligible,
-                    selected.as_deref(),
-                    &self.snapshots,
-                );
-                let reset =
-                    store.ownership == StoreOwnership::ApplicationOwned && store.reset_eligible;
-                ui.horizontal(|ui| {
-                    let label = recovery_target_label(target, store.label);
-                    ui.label(label)
-                        .on_hover_text(store.path.display().to_string());
-                    if ui
-                        .add_enabled(
-                            restore && !recovery_busy,
-                            egui::Button::new("Restore selected backup"),
-                        )
-                        .clicked()
-                    {
-                        actions.push(DataRecoveryUiAction::Confirm(
-                            PendingRecoveryIntent::Restore {
-                                target,
-                                snapshot_id: selected
-                                    .clone()
-                                    .expect("enabled restore has snapshot"),
-                            },
-                        ));
-                    }
-                    if ui
-                        .add_enabled(reset && !recovery_busy, egui::Button::new("Reset"))
-                        .clicked()
-                    {
-                        actions.push(DataRecoveryUiAction::Confirm(
-                            PendingRecoveryIntent::Reset { store_id: store.id },
-                        ));
-                    }
-                    if store.ownership == StoreOwnership::External {
-                        ui.label("External path — automatic backup/restore disabled");
-                    }
-                });
-            }
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("data_recovery_action_rows")
+            .min_scrolled_height(0.0)
+            .max_height(ui.available_height().max(0.0))
+            .show(ui, |ui| {
+                for store in &self.health {
+                    let Some(target) = recovery_target_for_row(store.id) else {
+                        continue;
+                    };
+                    let target_eligible = target.members().into_iter().all(|member| {
+                        self.health.iter().any(|report| {
+                            report.id == member
+                                && report.ownership == StoreOwnership::ApplicationOwned
+                                && report.restore_eligible
+                        })
+                    });
+                    let restore = restore_enabled(
+                        target,
+                        store.ownership,
+                        target_eligible,
+                        selected.as_deref(),
+                        &self.snapshots,
+                    );
+                    let reset =
+                        store.ownership == StoreOwnership::ApplicationOwned && store.reset_eligible;
+                    ui.horizontal_wrapped(|ui| {
+                        let label = recovery_target_label(target, store.label);
+                        ui.label(label)
+                            .on_hover_text(store.path.display().to_string());
+                        if ui
+                            .add_enabled(
+                                restore && !recovery_busy,
+                                egui::Button::new("Restore selected backup"),
+                            )
+                            .clicked()
+                        {
+                            actions.push(DataRecoveryUiAction::Confirm(
+                                PendingRecoveryIntent::Restore {
+                                    target,
+                                    snapshot_id: selected
+                                        .clone()
+                                        .expect("enabled restore has snapshot"),
+                                },
+                            ));
+                        }
+                        if ui
+                            .add_enabled(reset && !recovery_busy, egui::Button::new("Reset"))
+                            .clicked()
+                        {
+                            actions.push(DataRecoveryUiAction::Confirm(
+                                PendingRecoveryIntent::Reset { store_id: store.id },
+                            ));
+                        }
+                        if store.ownership == StoreOwnership::External {
+                            widgets::secondary_help(
+                                ui,
+                                "External path — automatic backup/restore disabled",
+                            );
+                        }
+                    });
+                }
+            });
     }
 
     fn diagnostics_ui(&self, ui: &mut egui::Ui, actions: &mut Vec<DataRecoveryUiAction>) {
-        ui.label(format!("Multi Launcher {}", env!("CARGO_PKG_VERSION")));
-        ui.label(format!("Data root: {}", self.root.path().display()));
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Open data folder").clicked() {
                 actions.push(DataRecoveryUiAction::OpenPath(
                     self.root.path().to_path_buf(),
@@ -618,27 +674,46 @@ impl DataRecoveryDialog {
             }
         });
         ui.separator();
-        for diagnostic in &self.startup_diagnostics {
-            ui.strong(&diagnostic.label);
-            if let Some(path) = &diagnostic.path {
-                ui.label(path.display().to_string());
-            }
-            ui.label(&diagnostic.summary);
-        }
-        if let Some(summary) = &self.backup_summary {
-            ui.label(format!("Backup: {summary}"));
-        }
-        if let Some(summary) = &self.recovery_summary {
-            ui.label(format!("Recovery: {summary}"));
-        }
-        for report in &self.health {
-            ui.label(format!(
-                "{} | {} | {}",
-                report.label,
-                report.path.display(),
-                health_label(&report.health)
-            ));
-        }
+        egui::ScrollArea::both()
+            .id_salt("data_recovery_diagnostics")
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
+            .max_height(ui.available_height().max(0.0))
+            .show(ui, |ui| {
+                ui.label(format!("Multi Launcher {}", env!("CARGO_PKG_VERSION")));
+                ui.label(format!("Data root: {}", self.root.path().display()));
+                for diagnostic in &self.startup_diagnostics {
+                    widgets::compact_section_heading(ui, &diagnostic.label, None);
+                    if let Some(path) = &diagnostic.path {
+                        ui.label(path.display().to_string());
+                    }
+                    widgets::semantic_status(ui, StatusTone::Warning, &diagnostic.summary, None);
+                }
+                if let Some(summary) = &self.backup_summary {
+                    widgets::semantic_status(
+                        ui,
+                        StatusTone::Warning,
+                        &format!("Backup: {summary}"),
+                        None,
+                    );
+                }
+                if let Some(summary) = &self.recovery_summary {
+                    widgets::semantic_status(
+                        ui,
+                        StatusTone::Warning,
+                        &format!("Recovery: {summary}"),
+                        None,
+                    );
+                }
+                for report in &self.health {
+                    ui.label(format!(
+                        "{} | {} | {}",
+                        report.label,
+                        report.path.display(),
+                        health_label(&report.health)
+                    ));
+                }
+            });
     }
 
     pub(crate) fn safe_diagnostics_text(&self) -> String {
