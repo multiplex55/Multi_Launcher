@@ -7,7 +7,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | Presentation owner | Group | Status / evidence |
 |---|---|---|
 | `src/gui/render.rs` | M4-A/B | M4-A/B accepted; Dark/Light852x460 ROOT framebuffer inspected, receipts/m4b-root-visual-review.md; physical focus/IME/DPI gaps remain |
-| `src/gui/actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/actions_editor.rs` | M5-C1 | pending App Editor presentation; src/gui/actions.rs domain dispatch remains unchanged |
 | `src/gui/add_action_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/add_bookmark_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -42,7 +42,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/notes_dialog.rs` | M5-B1 | implemented/source reviewed;13 targeted contracts plus Notes002 app-native after-image atda0ca08c; receipts/m5b1-notes-presentation.md |
 | `src/gui/qr_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/radial_editor/mod.rs` | M5-B6 | pending surface polish/review; runtime inheritance available |
+| `src/gui/radial_editor/mod.rs` | M5-B6 | accepted surrounding chrome/shared native actions,7targetedcontracts/review pass; authoredcanvas/skins unchanged; deferrednativeDesigner visual/input gap explicit |
 | `src/gui/regex_tester_dialog.rs` | M5-B8 | pending surface polish/review; runtime inheritance available |
 | `src/gui/screen_draw_toolbar.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/screenshot_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |

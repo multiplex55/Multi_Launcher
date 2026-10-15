@@ -11,6 +11,10 @@ mod skin_editor;
 mod work_area;
 
 use crate::gui::LauncherApp;
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
+    semantic_status, with_button_emphasis,
+};
 use crate::radial::acceptance_trace::{
     self, BodyBlock, Correlation, DesignerAuthoringRole, DesignerAuthoringScrollOwner,
     DesignerAuthoringScrollViewport, DesignerAuthoringTarget, DesignerCloseState,
@@ -3397,11 +3401,12 @@ impl RadialEditorState {
                     {
                         decision = Some(PropertiesNavigationDecision::Apply);
                     }
-                    let response = ui.button(if current {
+                    let button = ui.button(if current {
                         "Discard and continue"
                     } else {
                         "Discard action and cancel stale change"
                     });
+                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
                     if current {
                         trace_designer_authoring_control(
                             ui,
@@ -4643,12 +4648,16 @@ impl RadialEditorState {
                 "Radial configuration changed externally",
             );
             ui.label(reason);
-            ui.small("Choose how to reconcile the open draft before continuing to edit.");
-            ui.horizontal(|ui| {
+            secondary_help(
+                ui,
+                "Choose how to reconcile the open draft before continuing to edit.",
+            );
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Reload external").clicked() {
                     self.resolve_conflict(ConflictResolution::Reload);
                 }
-                if ui.button("Discard draft").clicked() {
+                let discard = ui.button("Discard draft");
+                if with_button_emphasis(ui, discard, ButtonEmphasis::Destructive).clicked() {
                     self.resolve_conflict(ConflictResolution::DiscardDraft);
                 }
                 if ui.button("Rebase local draft").clicked() {
@@ -4767,9 +4776,10 @@ impl RadialEditorState {
             .default_width(300.0)
             .open(&mut popup_open)
             .show(ctx, |ui| {
-                ui.label("Cell properties");
+                compact_section_heading(ui, "Cell properties", None);
                 if self.radial_add_request.is_some() {
-                    ui.small(
+                    secondary_help(
+                        ui,
                         "Add to radial is waiting. Apply or cancel these staged properties first; the add request will resume afterward.",
                     );
                 }
@@ -4886,26 +4896,29 @@ impl RadialEditorState {
                             }
                         });
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Icon");
                     ui.selectable_value(&mut draft.icon_kind, 0, "Inherit");
                     ui.selectable_value(&mut draft.icon_kind, 1, "Clear");
                     ui.selectable_value(&mut draft.icon_kind, 2, "Keep value");
                 });
-                ui.small(
+                secondary_help(
+                    ui,
                     "Action bindings and advanced appearance options are available in Inspector.",
                 );
                 if draft.action_editor.has_unassigned_text() {
-                    ui.small(
+                    secondary_help(
+                        ui,
                         "Save query or Use exact command before applying, or discard the pending action input.",
                     );
                 }
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let can_apply_popup = !draft.action_editor.has_unassigned_text();
-                    let response = ui.add_enabled(
+                    let button = ui.add_enabled(
                         can_apply_popup,
                         egui::Button::new("Apply"),
                     );
+                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -4960,10 +4973,12 @@ impl RadialEditorState {
                     ui.label("Apply popup edits before opening Inspector?");
                     ui.horizontal_wrapped(|ui| {
                         let can_apply_popup = !draft.action_editor.has_unassigned_text();
-                        let response = ui.add_enabled(
+                        let button = ui.add_enabled(
                             can_apply_popup,
                             egui::Button::new("Apply and open"),
                         );
+                        let response =
+                            with_button_emphasis(ui, button, ButtonEmphasis::Primary);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -4980,7 +4995,9 @@ impl RadialEditorState {
                             open_inspector_after_apply = true;
                             self.properties_handoff_prompt = false;
                         }
-                        let response = ui.button("Discard and open");
+                        let button = ui.button("Discard and open");
+                        let response =
+                            with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -5034,7 +5051,8 @@ impl RadialEditorState {
                         "The requested change is stale. Cancel it and review the current draft."
                     });
                     if properties_action_pending {
-                        ui.small(
+                        secondary_help(
+                            ui,
                             "Save query or Use exact command before applying; Discard and continue abandons this action input.",
                         );
                     }
@@ -5045,7 +5063,7 @@ impl RadialEditorState {
                             .is_some_and(|pending| {
                                 !pending.intent.apply_and_continue_is_safe()
                             });
-                        if ui
+                        let apply = ui
                             .add_enabled(
                                 can_apply_navigation,
                                 egui::Button::new(if apply_only {
@@ -5053,19 +5071,16 @@ impl RadialEditorState {
                                 } else {
                                     "Apply and continue"
                                 }),
-                            )
-                            .clicked()
-                        {
+                            );
+                        if with_button_emphasis(ui, apply, ButtonEmphasis::Primary).clicked() {
                             navigation_decision = Some(PropertiesNavigationDecision::Apply);
                         }
-                        if ui
-                            .button(if pending_scope_change_current {
+                        let discard = ui.button(if pending_scope_change_current {
                                 "Discard and continue"
                             } else {
                                 "Discard edits and cancel stale change"
-                            })
-                            .clicked()
-                        {
+                            });
+                        if with_button_emphasis(ui, discard, ButtonEmphasis::Destructive).clicked() {
                             navigation_decision = Some(PropertiesNavigationDecision::Discard);
                         }
                         if ui.button("Cancel navigation").clicked() {
@@ -5465,7 +5480,7 @@ impl RadialEditorState {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let pending = self
                 .session
                 .as_ref()
@@ -5510,17 +5525,17 @@ impl RadialEditorState {
                 .as_ref()
                 .and_then(|session| crate::radial::validation::validate(&session.draft).err());
             let valid = validation.is_none();
-            if ui
+            let apply = ui
                 .add_enabled(!pending && valid, egui::Button::new("Apply"))
-                .on_disabled_hover_text("Resolve the inline validation diagnostics before Apply")
-                .clicked()
-            {
+                .on_disabled_hover_text("Resolve the inline validation diagnostics before Apply");
+            if with_button_emphasis(ui, apply, ButtonEmphasis::Primary).clicked() {
                 self.send_commit(CommitDisposition::Apply);
             }
             let save = ui
                 .add_enabled(!pending && valid, egui::Button::new("Save"))
                 .on_disabled_hover_text("Resolve the inline validation diagnostics before Save")
                 .on_hover_text("Save and close (Ctrl+S)");
+            let save = with_button_emphasis(ui, save, ButtonEmphasis::Primary);
             trace_designer_authoring_control(
                 ui,
                 &save,
@@ -5539,17 +5554,19 @@ impl RadialEditorState {
             if ui.button("Cancel").clicked() {
                 self.cancel();
             }
-            if let Some(session) = &self.session {
-                ui.label(if session.is_dirty() {
-                    "Modified"
-                } else {
-                    "Saved"
-                });
-                if let Some(error) = &session.last_error {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("Error: {error}"));
-                }
-            }
         });
+        if let Some(session) = &self.session {
+            ui.horizontal_wrapped(|ui| {
+                if session.is_dirty() {
+                    semantic_status(ui, StatusTone::Warning, "Modified", None);
+                } else {
+                    semantic_status(ui, StatusTone::Success, "Saved", None);
+                }
+                if let Some(error) = &session.last_error {
+                    semantic_status(ui, StatusTone::Error, "Error", Some(error));
+                }
+            });
+        }
         if let Some(errors) = self
             .session
             .as_ref()
@@ -5663,7 +5680,7 @@ impl RadialEditorState {
 
     fn preview_controls(&mut self, ui: &mut egui::Ui, show_expected_layout_diagnostics: bool) {
         ui.horizontal_wrapped(|ui| {
-            ui.label("Preview");
+            compact_section_heading(ui, "Preview", None);
             egui::ComboBox::from_id_salt("radial-preview-preset")
                 .selected_text(format!("{:?}", self.preview_preset))
                 .show_ui(ui, |ui| {
@@ -5705,7 +5722,7 @@ impl RadialEditorState {
                 self.show_resources = !self.show_resources;
                 self.mark_preferences_changed();
             }
-            ui.small("Preview controls are UI-only");
+            secondary_help(ui, "Preview controls are UI-only");
             ui.separator();
             ui.checkbox(&mut self.sample_native_context, "Sample external context");
             let native_active = self
@@ -5785,15 +5802,18 @@ impl RadialEditorState {
             self.appearance
                 .ui(ui, session, self.client.as_ref(), viewport, prepared);
             ui.separator();
-            ui.heading("Advanced style, assets and packages");
+            compact_section_heading(ui, "Advanced style, assets and packages", None);
         }
         let Some(session) = self.session.as_mut() else {
             return;
         };
         let mut navigation = None;
-        ui.heading("Skins, assets, import and export");
-        ui.small("Application defaults (read-only) → user defaults → skin → menu → ring → cell");
-        ui.horizontal(|ui| {
+        compact_section_heading(ui, "Skins, assets, import and export", None);
+        secondary_help(
+            ui,
+            "Application defaults (read-only) → user defaults → skin → menu → ring → cell",
+        );
+        ui.horizontal_wrapped(|ui| {
             ui.label("Skin:");
             if ui.button("User defaults").clicked() {
                 navigation = Some(DesignerNavigationIntent::ClearSelection);
@@ -5844,7 +5864,8 @@ impl RadialEditorState {
                 }
                 let impact = crate::radial::store::references_to_skin(&session.draft, &skin_id);
                 if impact.paths.is_empty() {
-                    if ui.button("Delete skin").clicked() {
+                    let delete = ui.button("Delete skin");
+                    if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
                         let _ = skin_editor::delete_skin(session, &skin_id);
                     }
                 } else {
@@ -5870,7 +5891,7 @@ impl RadialEditorState {
             _ => Some(skin_editor::StyleScope::UserDefaults),
         };
         if let Some(scope) = scope {
-            ui.label(format!("Style scope: {scope:?}"));
+            labeled_form_row(ui, "Style scope", |ui| ui.label(format!("{scope:?}")));
             if ui.button("Reset this scope to inherited values").clicked() {
                 let _ = skin_editor::reset_scope(session, &scope);
             }
@@ -5895,7 +5916,7 @@ impl RadialEditorState {
                                         &format!("{}.{}", row.section, row.field),
                                     ),
                                     |ui| {
-                                        ui.horizontal(|ui| {
+                                        ui.horizontal_wrapped(|ui| {
                                             ui.label(format!("{}.{}", row.section, row.field));
                                             if ui.button("Inherit").clicked() {
                                                 let _ = skin_editor::set_override(
@@ -6022,8 +6043,8 @@ impl RadialEditorState {
         }
         document_rule_controls(ui, session, &mut self.preferences.expanded_sections);
         ui.separator();
-        ui.label("Managed assets");
-        ui.horizontal(|ui| {
+        compact_section_heading(ui, "Managed assets", None);
+        ui.horizontal_wrapped(|ui| {
             for (label, kind, extensions) in [
                 (
                     "Import managed image",
@@ -6086,7 +6107,8 @@ impl RadialEditorState {
                 }
                 let impact = asset_picker::delete_impact(session, &asset.id);
                 if impact.paths.is_empty() {
-                    if ui.button("Delete").clicked() {
+                    let delete = ui.button("Delete");
+                    if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
                         let _ = asset_picker::delete_managed_asset(session, &asset.id);
                     }
                 } else {
@@ -6115,7 +6137,7 @@ impl RadialEditorState {
             return;
         };
         ui.separator();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Preview .mlradial import").clicked() {
                 self.intent_bridge
                     .enqueue_file_dialog(DesignerFileDialogRequest::PreviewPackage);
@@ -6205,10 +6227,11 @@ impl RadialEditorState {
                     }
                 });
                 let ready = self.replace_confirmed && self.replace_backup_path.is_some();
-                if ui
-                    .add_enabled(ready, egui::Button::new("Replace using verified backup"))
-                    .clicked()
-                {
+                let replace = ui.add_enabled(
+                    ready,
+                    egui::Button::new("Replace using verified backup"),
+                );
+                if with_button_emphasis(ui, replace, ButtonEmphasis::Destructive).clicked() {
                     let backup_path = self.replace_backup_path.clone().unwrap_or_default();
                     match session.request_replace_package(
                         replace_plan.clone().expect("replace UI requires a menu package"),
@@ -6315,6 +6338,7 @@ impl RadialEditorState {
         let correlation = trace_correlation(self.session.as_ref());
 
         ui.group(|ui| {
+            compact_section_heading(ui, "Design actions", None);
             ui.horizontal_wrapped(|ui| {
                 let response = ui.button("New Menu");
                 trace_designer_authoring_control(
@@ -6466,11 +6490,12 @@ impl RadialEditorState {
                         ui.spinner();
                         ui.small("Preparing candidate preview…");
                     }
-                    let response = ui
+                    let button = ui
                         .add_enabled(proposal_ready, egui::Button::new("Apply proposal"))
                         .on_disabled_hover_text(
                             "Apply is available only after this exact candidate is prepared and visible",
                         );
+                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
                     trace_designer_authoring_control(
                         ui,
                         &response,
@@ -6883,7 +6908,7 @@ impl RadialEditorState {
         _defaults: &crate::radial::model::RadialFeatureSettings,
         viewport: ViewportClass,
     ) {
-        ui.heading("Menus and rings");
+        compact_section_heading(ui, "Menus and rings", None);
         let pending_scope_change = &mut self.pending_scope_change;
         let filter = &mut self.tree_filter;
         let drag_source = &mut self.drag_source;
@@ -6895,7 +6920,7 @@ impl RadialEditorState {
             return;
         };
         let menus = session.draft.menus.clone();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Search");
             let response = ui.add(
                 egui::TextEdit::singleline(filter)
@@ -6939,7 +6964,7 @@ impl RadialEditorState {
         });
         if !filter.trim().is_empty() {
             let hits = authored_search_hits(&session.draft, filter);
-            ui.small(format!("{} authored results", hits.len()));
+            secondary_help(ui, &format!("{} authored results", hits.len()));
             show_designer_scroll_area(
                 ui,
                 egui::ScrollArea::vertical().id_salt("radial-designer-search-results"),
@@ -7274,7 +7299,10 @@ impl RadialEditorState {
                 }
             },
         );
-        ui.small("Use the Design toolbar for New Menu, Add Ring, and slot-count proposals.");
+        secondary_help(
+            ui,
+            "Use the Design toolbar for New Menu, Add Ring, and slot-count proposals.",
+        );
     }
 
     fn inspector(
@@ -7299,7 +7327,7 @@ impl RadialEditorState {
             })
         });
         self.reconcile_bulk_edit_stage(bulk_stage_scope);
-        ui.heading("Inspector");
+        compact_section_heading(ui, "Inspector", None);
         if let Some(selection) = self.projected_selection.clone() {
             self.projected_selection_ui(ui, &selection);
             ui.separator();
@@ -7311,7 +7339,7 @@ impl RadialEditorState {
         else {
             self.inspector_action_editor.invalidate_visit();
             self.inspector_action_editor_scope = None;
-            ui.label("Select a menu, ring, or cell.");
+            secondary_help(ui, "Select a menu, ring, or cell.");
             return;
         };
         match selection {
@@ -7359,7 +7387,8 @@ impl RadialEditorState {
         };
         let previous_name = found.name.clone();
         let mut name = previous_name.clone();
-        ui.label(format!("ID: {}", menu_id));
+        compact_section_heading(ui, "Menu", None);
+        labeled_form_row(ui, "ID", |ui| ui.label(menu_id.to_string()));
         let response = ui
             .push_id(menu::widget_key("menu", menu_id.as_str(), "name"), |ui| {
                 ui.text_edit_singleline(&mut name)
@@ -7497,11 +7526,10 @@ impl RadialEditorState {
                 menu::duplicate_menu(session, &menu_id, SubmenuDuplication::CloneSubmenuClosure);
         }
         let configured_default = configured_default == Some(&menu_id);
-        if ui
+        let delete = ui
             .add_enabled(!configured_default, egui::Button::new("Delete menu"))
-            .on_disabled_hover_text("This menu is selected as the default in Settings")
-            .clicked()
-        {
+            .on_disabled_hover_text("This menu is selected as the default in Settings");
+        if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
             if let Err(error) = menu::delete_menu(session, &menu_id) {
                 self.delete_message = Some(format!("Delete blocked: {error:?}"));
             }
@@ -7594,8 +7622,9 @@ impl RadialEditorState {
             .find(|menu| menu.id == menu_id)
             .and_then(|menu| menu.rings.iter().find(|ring| ring.id == ring_id))
             .map_or(0, |ring| ring.cells.len());
-        ui.label(format!("ID: {}", ring_id));
-        ui.label(format!("{count} cells"));
+        compact_section_heading(ui, "Ring layout", None);
+        labeled_form_row(ui, "ID", |ui| ui.label(ring_id.to_string()));
+        labeled_form_row(ui, "Cells", |ui| ui.label(count.to_string()));
         if let Some(mut edited) = session
             .draft
             .menus
@@ -7677,8 +7706,12 @@ impl RadialEditorState {
                 }
             }
         });
-        ui.small("Change authored slot count through the proposal controls above the board.");
-        if ui.button("Delete ring").clicked() {
+        secondary_help(
+            ui,
+            "Change authored slot count through the proposal controls above the board.",
+        );
+        let delete = ui.button("Delete ring");
+        if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
             if count == 0 {
                 if let Err(error) = menu::delete_ring(session, &menu_id, &ring_id) {
                     session.last_error = Some(format!("Delete ring failed: {error:?}"));
@@ -8430,7 +8463,8 @@ impl RadialEditorState {
                 content: CellContent::Spacer,
             });
         }
-        if ui.button("Delete cell").clicked() {
+        let delete = ui.button("Delete cell");
+        if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
             deferred_operation = Some(DeferredEditorOperation::DeleteCell {
                 menu_id: menu_id.clone(),
                 ring_id: ring_id.clone(),
@@ -9498,15 +9532,16 @@ impl RadialEditorState {
                         "Save, discard, or keep editing?"
                     });
                     ui.horizontal(|ui| {
-                        if ui
+                        let save = ui
                             .add_enabled(!popup_dirty, egui::Button::new("Save"))
-                            .on_disabled_hover_text("Apply or cancel the open cell properties first")
-                            .clicked()
-                        {
+                            .on_disabled_hover_text("Apply or cancel the open cell properties first");
+                        if with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
                             self.close_prompt = false;
                             self.send_commit(CommitDisposition::Save);
                         }
-                        let response = ui.button("Discard");
+                        let button = ui.button("Discard");
+                        let response =
+                            with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
                         trace_designer_authoring_control(
                             ui,
                             &response,
@@ -9602,7 +9637,8 @@ impl RadialEditorState {
                         }
                     }
                 }
-                if ui.button("Discard populated cells and delete").clicked() {
+                let discard = ui.button("Discard populated cells and delete");
+                if with_button_emphasis(ui, discard, ButtonEmphasis::Destructive).clicked() {
                     if let Some(session) = self.session.as_mut() {
                         match menu::delete_ring(session, &menu_id, &ring_id) {
                             Ok(()) => self.delete_ring_prompt = None,
@@ -9694,7 +9730,8 @@ impl RadialEditorState {
                         }
                     }
                 }
-                let response = ui.button("Discard cells");
+                let button = ui.button("Discard cells");
+                let response = with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
                 trace_designer_authoring_control(
                     ui,
                     &response,
