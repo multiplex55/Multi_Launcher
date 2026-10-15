@@ -1,4 +1,5 @@
 use crate::gui::LauncherApp;
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::multi_manager::bindings;
 use crate::multi_manager::model::{
     MmBindingStatus, MmHotkey, MmHotkeyValidation, MmRect, MmWindow, MmWorkspace,
@@ -75,7 +76,10 @@ impl MultiManagerDialog {
                         if ui.button("Add Workspace").clicked() {
                             add_workspace(app);
                         }
-                        if ui.button("Save").clicked() {
+                        let save = ui.button("Save");
+                        if widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary)
+                            .clicked()
+                        {
                             app.multi_manager_save();
                         }
                         if ui.button("Reload").clicked() {
@@ -118,11 +122,11 @@ impl MultiManagerDialog {
                         {
                             toggle_expand_all(&mut self.all_expanded, &mut self.expand_all_signal);
                         }
-                        ui.label(if app.multi_manager.dirty {
-                            "● dirty"
+                        if app.multi_manager.dirty {
+                            widgets::semantic_status(ui, StatusTone::Warning, "● dirty", None);
                         } else {
-                            "saved"
-                        });
+                            widgets::semantic_status(ui, StatusTone::Success, "saved", None);
+                        }
                         let last = app
                             .multi_manager
                             .last_hotkey_info
@@ -131,15 +135,24 @@ impl MultiManagerDialog {
                             .and_then(|g| g.clone())
                             .map(|(s, _)| s)
                             .unwrap_or_else(|| "none".into());
-                        ui.label(format!("last hotkey: {last}"));
+                        widgets::semantic_status(ui, StatusTone::Info, "last hotkey", Some(&last));
                     });
                     if self.confirm.reload {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(
-                                egui::Color32::YELLOW,
+                        ui.horizontal_wrapped(|ui| {
+                            widgets::semantic_status(
+                                ui,
+                                StatusTone::Warning,
                                 "Reload and discard unsaved changes?",
+                                None,
                             );
-                            if ui.button("Confirm").clicked() {
+                            let confirm = ui.button("Confirm");
+                            if widgets::with_button_emphasis(
+                                ui,
+                                confirm,
+                                ButtonEmphasis::Destructive,
+                            )
+                            .clicked()
+                            {
                                 app.multi_manager_reload();
                                 self.confirm.reload = false;
                             }
@@ -148,6 +161,11 @@ impl MultiManagerDialog {
                             }
                         });
                     }
+                    widgets::compact_section_heading(
+                        ui,
+                        "Workspaces",
+                        Some("Capture windows, review bindings, and manage positions."),
+                    );
                     let ids = app
                         .multi_manager
                         .workspaces
@@ -165,7 +183,7 @@ impl MultiManagerDialog {
 
     fn capture_banner(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) {
         if let Some(action) = &app.multi_manager.pending_capture {
-            ui.colored_label(egui::Color32::LIGHT_BLUE, capture_banner_text(action));
+            widgets::semantic_status(ui, StatusTone::Info, capture_banner_text(action), None);
             match action {
                 PendingCaptureAction::CaptureOneWindow { workspace_id } => {
                     ui.label(format!("Capturing one window for workspace {workspace_id}"));
@@ -195,7 +213,7 @@ impl MultiManagerDialog {
             ..Default::default()
         });
         let label = workspace_header_label(&workspace);
-        let color = workspace_header_color(&workspace);
+        let tone = workspace_header_tone(&workspace);
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             egui::Id::new(("multi_manager_workspace_header", id)),
@@ -206,17 +224,19 @@ impl MultiManagerDialog {
         }
         state
             .show_header(ui, |ui| {
-                ui.label(egui::RichText::new(label).color(color));
+                widgets::semantic_status(ui, tone, &label, None);
             })
             .body(|ui| {
                 ui.push_id(("multi_manager_workspace", id), |ui| {
-                    ui.horizontal(|ui| {
+                    widgets::compact_section_heading(ui, "Workspace", None);
+                    ui.horizontal_wrapped(|ui| {
                         if self.rename.workspace_id == id {
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.rename.value)
-                                    .id_salt(("mm_workspace_rename", id)),
-                            )
-                            .changed();
+                            widgets::labeled_form_row(ui, "Name", |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.rename.value)
+                                        .id_salt(("mm_workspace_rename", id)),
+                                )
+                            });
                             if ui.button("Apply").clicked() {
                                 let val = self.rename.value.clone();
                                 app.multi_manager.with_workspace_mut(id, |w| w.name = val);
@@ -255,9 +275,21 @@ impl MultiManagerDialog {
                     self.hotkey_ui(ui, app, id);
                     self.virtual_desktop_ui(ui, app, id, &workspace);
                     if self.confirm.workspace_id.as_deref() == Some(id) {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(egui::Color32::RED, "Confirm delete workspace?");
-                            if ui.button("Delete").clicked() {
+                        ui.horizontal_wrapped(|ui| {
+                            widgets::semantic_status(
+                                ui,
+                                StatusTone::Warning,
+                                "Confirm delete workspace?",
+                                None,
+                            );
+                            let delete = ui.button("Delete");
+                            if widgets::with_button_emphasis(
+                                ui,
+                                delete,
+                                ButtonEmphasis::Destructive,
+                            )
+                            .clicked()
+                            {
                                 delete_workspace(app, id);
                                 self.confirm.workspace_id = None;
                             }
@@ -307,7 +339,7 @@ impl MultiManagerDialog {
         workspace: &MmWorkspace,
     ) {
         ui.horizontal_wrapped(|ui| {
-            ui.label("Virtual desktop:");
+            widgets::compact_section_heading(ui, "Virtual desktop", None);
             match &workspace.virtual_desktop {
                 Some(binding) => {
                     let cached = binding
@@ -316,23 +348,37 @@ impl MultiManagerDialog {
                         .unwrap_or_else(|| binding.id.to_string());
                     match &self.virtual_desktops {
                         VirtualDesktopSnapshotState::Unverified => {
-                            ui.label(format!("{cached} (not refreshed)"));
+                            widgets::semantic_status(
+                                ui,
+                                StatusTone::Info,
+                                &format!("{cached} (not refreshed)"),
+                                None,
+                            );
                         }
                         VirtualDesktopSnapshotState::Failed(_) => {
-                            ui.colored_label(
-                                egui::Color32::YELLOW,
-                                format!("{cached} (refresh failed; status unknown)"),
+                            widgets::semantic_status(
+                                ui,
+                                StatusTone::Warning,
+                                &format!("{cached} (refresh failed; status unknown)"),
+                                None,
                             );
                         }
                         VirtualDesktopSnapshotState::Ready(desktops) => {
                             if let Some(desktop) =
                                 desktops.iter().find(|desktop| desktop.id == binding.id)
                             {
-                                ui.label(desktop.display_name());
+                                widgets::semantic_status(
+                                    ui,
+                                    StatusTone::Info,
+                                    &desktop.display_name(),
+                                    None,
+                                );
                             } else {
-                                ui.colored_label(
-                                    egui::Color32::YELLOW,
-                                    format!("{cached} (stale: {})", binding.id),
+                                widgets::semantic_status(
+                                    ui,
+                                    StatusTone::Warning,
+                                    &format!("{cached} (stale: {})", binding.id),
+                                    None,
                                 );
                             }
                         }
@@ -342,7 +388,7 @@ impl MultiManagerDialog {
                     }
                 }
                 None => {
-                    ui.label("unbound");
+                    widgets::semantic_status(ui, StatusTone::Info, "unbound", None);
                 }
             }
             egui::ComboBox::from_id_salt(("mm_virtual_desktop", id))
@@ -373,13 +419,13 @@ impl MultiManagerDialog {
                 });
         });
         if let VirtualDesktopSnapshotState::Failed(error) = &self.virtual_desktops {
-            ui.colored_label(egui::Color32::YELLOW, error);
+            widgets::semantic_status(ui, StatusTone::Error, error, None);
         }
     }
 
     fn hotkey_ui(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, id: &str) {
         if self.hotkey_editor.workspace_id != id {
-            if ui.button("Edit hotkey").clicked() {
+            if widgets::labeled_form_row(ui, "Hotkey", |ui| ui.button("Edit hotkey")).clicked() {
                 begin_hotkey_edit(
                     &mut self.hotkey_editor,
                     id,
@@ -399,53 +445,63 @@ impl MultiManagerDialog {
             return;
         }
 
-        ui.horizontal(|ui| {
-            ui.checkbox(&mut self.hotkey_editor.ctrl, "Ctrl");
-            ui.checkbox(&mut self.hotkey_editor.shift, "Shift");
-            ui.checkbox(&mut self.hotkey_editor.alt, "Alt");
-            ui.checkbox(&mut self.hotkey_editor.win, "Win");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.hotkey_editor.key)
-                    .id_salt(("mm_workspace_hotkey_key", id)),
-            );
-            if self.hotkey_editor_needs_focus {
-                response.request_focus();
-                self.hotkey_editor_needs_focus = false;
-            }
+        widgets::labeled_form_row(ui, "Hotkey", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut self.hotkey_editor.ctrl, "Ctrl");
+                ui.checkbox(&mut self.hotkey_editor.shift, "Shift");
+                ui.checkbox(&mut self.hotkey_editor.alt, "Alt");
+                ui.checkbox(&mut self.hotkey_editor.win, "Win");
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.hotkey_editor.key)
+                        .id_salt(("mm_workspace_hotkey_key", id)),
+                );
+                if self.hotkey_editor_needs_focus {
+                    response.request_focus();
+                    self.hotkey_editor_needs_focus = false;
+                }
 
-            let candidate = hotkey_from_editor(&self.hotkey_editor);
-            match candidate.validate() {
-                MmHotkeyValidation::Valid => {
-                    ui.colored_label(egui::Color32::GREEN, MmHotkeyValidation::Valid.label());
+                let candidate = hotkey_from_editor(&self.hotkey_editor);
+                match candidate.validate() {
+                    MmHotkeyValidation::Valid => {
+                        widgets::semantic_status(
+                            ui,
+                            StatusTone::Success,
+                            MmHotkeyValidation::Valid.label(),
+                            None,
+                        );
+                    }
+                    validation if hotkey_editor_is_empty(&self.hotkey_editor) => {
+                        widgets::semantic_status(ui, StatusTone::Info, "no hotkey set", None);
+                        let _ = validation;
+                    }
+                    validation => {
+                        widgets::semantic_status(ui, StatusTone::Error, validation.label(), None);
+                    }
                 }
-                validation if hotkey_editor_is_empty(&self.hotkey_editor) => {
-                    ui.colored_label(egui::Color32::GRAY, "no hotkey set");
-                    let _ = validation;
-                }
-                validation => {
-                    ui.colored_label(egui::Color32::RED, validation.label());
-                }
-            }
 
-            if ui
-                .add_enabled(
-                    hotkey_set_enabled(&self.hotkey_editor),
-                    egui::Button::new("Set"),
-                )
-                .clicked()
-            {
-                app.multi_manager
-                    .with_workspace_mut(id, |w| w.hotkey = Some(candidate));
-                self.hotkey_editor = Default::default();
-            }
-            if ui.button("Reset").clicked() {
-                app.multi_manager
-                    .with_workspace_mut(id, reset_workspace_hotkey);
-                self.hotkey_editor = Default::default();
-            }
-            if ui.button("Cancel").clicked() {
-                cancel_hotkey_edit(&mut self.hotkey_editor);
-            }
+                if ui
+                    .add_enabled(
+                        hotkey_set_enabled(&self.hotkey_editor),
+                        egui::Button::new("Set"),
+                    )
+                    .clicked()
+                {
+                    app.multi_manager
+                        .with_workspace_mut(id, |w| w.hotkey = Some(candidate));
+                    self.hotkey_editor = Default::default();
+                }
+                if ui.button("Reset").clicked() {
+                    app.multi_manager
+                        .with_workspace_mut(id, reset_workspace_hotkey);
+                    self.hotkey_editor = Default::default();
+                }
+                let cancel = ui.button("Cancel");
+                if cancel.clicked() {
+                    cancel_hotkey_edit(&mut self.hotkey_editor);
+                }
+                cancel
+            })
+            .inner
         });
     }
 
@@ -455,15 +511,16 @@ impl MultiManagerDialog {
                 let win = get_ws(app, id)
                     .and_then(|w| w.windows.get(index).cloned())
                     .unwrap_or_default();
-                ui.label(format!("Window {}", index + 1));
+                widgets::compact_section_heading(ui, &format!("Window {}", index + 1), None);
                 let mut alias = win.alias.clone();
-                if ui
-                    .add(egui::TextEdit::singleline(&mut alias).id_salt((
+                if widgets::labeled_form_row(ui, "Alias", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut alias).id_salt((
                         "mm_window_alias",
                         id,
                         index,
                     )))
-                    .changed()
+                })
+                .changed()
                 {
                     app.multi_manager.with_workspace_mut(id, |w| {
                         if let Some(x) = w.windows.get_mut(index) {
@@ -471,11 +528,10 @@ impl MultiManagerDialog {
                         }
                     });
                 }
-                ui.label(format!("HWND: {}", win.hwnd));
-                let (status_text, status_color) = window_status_text_color(&win);
-                ui.colored_label(status_color, status_text);
+                widgets::labeled_form_row(ui, "HWND", |ui| ui.label(win.hwnd.to_string()));
+                window_status_ui(ui, &win);
                 if is_duplicate_hwnd(app, win.hwnd, id, index) {
-                    ui.colored_label(egui::Color32::YELLOW, "⚠ duplicate HWND");
+                    widgets::semantic_status(ui, StatusTone::Warning, "⚠ duplicate HWND", None);
                 }
                 window_metadata_ui(ui, &win);
                 rect_ui(ui, ("home_rect", id, index), "Home", win.home_rect, |r| {
@@ -537,9 +593,17 @@ impl MultiManagerDialog {
                     .as_ref()
                     .is_some_and(|(wid, i)| wid == id && *i == index)
                 {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::RED, "Confirm delete window?");
-                        if ui.button("Delete").clicked() {
+                    ui.horizontal_wrapped(|ui| {
+                        widgets::semantic_status(
+                            ui,
+                            StatusTone::Warning,
+                            "Confirm delete window?",
+                            None,
+                        );
+                        let delete = ui.button("Delete");
+                        if widgets::with_button_emphasis(ui, delete, ButtonEmphasis::Destructive)
+                            .clicked()
+                        {
                             app.multi_manager.with_workspace_mut(id, |w| {
                                 if index < w.windows.len() {
                                     w.windows.remove(index);
@@ -665,48 +729,160 @@ fn workspace_header_label(workspace: &MmWorkspace) -> String {
     label
 }
 
-fn workspace_header_color(workspace: &MmWorkspace) -> egui::Color32 {
+fn workspace_header_tone(workspace: &MmWorkspace) -> StatusTone {
     if workspace.disabled {
-        egui::Color32::YELLOW
+        StatusTone::Warning
     } else if workspace.valid
         && workspace
             .hotkey
             .as_ref()
             .is_some_and(|hotkey| hotkey.is_valid())
     {
-        egui::Color32::GREEN
+        StatusTone::Success
     } else {
-        egui::Color32::RED
+        StatusTone::Error
     }
 }
 
-fn window_status_text_color(win: &MmWindow) -> (&'static str, egui::Color32) {
-    binding_status_text_color(win.binding_status)
-}
-
-fn binding_status_text_color(status: MmBindingStatus) -> (&'static str, egui::Color32) {
+fn binding_status_presentation(status: MmBindingStatus) -> (&'static str, StatusTone) {
     match status {
-        MmBindingStatus::Bound => ("Bound", egui::Color32::GREEN),
-        MmBindingStatus::Reconnected => ("Reconnected", egui::Color32::LIGHT_GREEN),
-        MmBindingStatus::Missing => ("Missing", egui::Color32::RED),
-        MmBindingStatus::Closed => ("Closed", egui::Color32::YELLOW),
-        MmBindingStatus::Ambiguous => ("Ambiguous", egui::Color32::YELLOW),
-        MmBindingStatus::MetadataMismatch => ("Metadata mismatch", egui::Color32::RED),
+        MmBindingStatus::Bound => ("Bound", StatusTone::Success),
+        MmBindingStatus::Reconnected => ("Reconnected", StatusTone::Success),
+        MmBindingStatus::Missing => ("Missing", StatusTone::Error),
+        MmBindingStatus::Closed => ("Closed", StatusTone::Warning),
+        MmBindingStatus::Ambiguous => ("Ambiguous", StatusTone::Warning),
+        MmBindingStatus::MetadataMismatch => ("Metadata mismatch", StatusTone::Error),
     }
+}
+
+fn window_status_presentation(win: &MmWindow) -> (&'static str, StatusTone) {
+    binding_status_presentation(win.binding_status)
+}
+
+fn window_status_ui(ui: &mut egui::Ui, win: &MmWindow) {
+    let (label, tone) = window_status_presentation(win);
+    widgets::semantic_status(ui, tone, label, None);
 }
 
 fn window_metadata_ui(ui: &mut egui::Ui, win: &MmWindow) {
-    ui.label(format!("Title: {}", win.current_display_title()));
+    widgets::compact_section_heading(ui, "Window metadata", None);
+    widgets::labeled_form_row(ui, "Title", |ui| ui.label(win.current_display_title()));
     if !win.live_title.trim().is_empty() && win.live_title.trim() != win.captured_title.trim() {
-        ui.label(format!("Captured title: {}", win.fallback_title()));
+        widgets::labeled_form_row(ui, "Captured title", |ui| ui.label(win.fallback_title()));
     }
-    ui.label(format!("Class: {}", win.class_name));
-    ui.label(format!("Executable: {}", win.executable));
+    widgets::labeled_form_row(ui, "Class", |ui| ui.label(&win.class_name));
+    widgets::labeled_form_row(ui, "Executable", |ui| ui.label(&win.executable));
     if !win.process_path.trim().is_empty() {
         ui.collapsing("Process", |ui| {
-            ui.label(format!("Process: {}", win.process_path));
+            widgets::labeled_form_row(ui, "Process", |ui| ui.label(&win.process_path));
         });
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SettingsFormLayout {
+    #[cfg(test)]
+    scroll_id: egui::Id,
+    #[cfg(test)]
+    scroll_offset: egui::Vec2,
+    #[cfg(test)]
+    content_size: egui::Vec2,
+    #[cfg(test)]
+    viewport: egui::Rect,
+    #[cfg(test)]
+    save_rect: egui::Rect,
+    changed: bool,
+    save_clicked: bool,
+}
+
+fn show_settings_form(
+    ui: &mut egui::Ui,
+    settings: &mut crate::settings::MultiManagerSettings,
+) -> SettingsFormLayout {
+    let max_height = ui.available_height().max(0.0);
+    let output = egui::ScrollArea::vertical()
+        .id_salt("multi_manager_settings_scroll")
+        .max_height(max_height)
+        .min_scrolled_height(0.0)
+        .auto_shrink([true, true])
+        .show(ui, |ui| settings_form_contents(ui, settings));
+    let (changed, save) = output.inner;
+    SettingsFormLayout {
+        #[cfg(test)]
+        scroll_id: output.id,
+        #[cfg(test)]
+        scroll_offset: output.state.offset,
+        #[cfg(test)]
+        content_size: output.content_size,
+        #[cfg(test)]
+        viewport: output.inner_rect,
+        #[cfg(test)]
+        save_rect: save.rect,
+        changed,
+        save_clicked: save.clicked(),
+    }
+}
+
+fn settings_form_contents(
+    ui: &mut egui::Ui,
+    settings: &mut crate::settings::MultiManagerSettings,
+) -> (bool, egui::Response) {
+    widgets::compact_section_heading(ui, "Settings", Some("Changes apply immediately."));
+    let mut changed = false;
+    changed |= ui.checkbox(&mut settings.enabled, "Enabled").changed();
+    changed |= widgets::labeled_form_row(ui, "Workspace file path", |ui| {
+        ui.text_edit_singleline(&mut settings.workspaces_path)
+    })
+    .changed();
+    changed |= widgets::labeled_form_row(ui, "Bindings file path", |ui| {
+        ui.text_edit_singleline(&mut settings.bindings_path)
+    })
+    .changed();
+    changed |= ui.checkbox(&mut settings.auto_save, "Auto-save").changed();
+    changed |= ui
+        .checkbox(&mut settings.save_on_exit, "Save on launcher exit")
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut settings.show_force_recapture_prompt,
+            "Show force recapture prompt",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(&mut settings.developer_debugging, "Developer debugging")
+        .changed();
+    changed |= widgets::labeled_form_row(ui, "Hotkey poll interval", |ui| {
+        ui.add(
+            egui::DragValue::new(&mut settings.hotkey_poll_ms)
+                .range(10..=5000)
+                .suffix(" ms"),
+        )
+    })
+    .changed();
+    changed |= ui
+        .checkbox(
+            &mut settings.auto_reconnect_on_load,
+            "Auto-reconnect windows on load",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut settings.ignore_launcher_window_on_capture,
+            "Ignore launcher window on capture",
+        )
+        .changed();
+    changed |= ui
+        .checkbox(
+            &mut settings.hide_launcher_before_toggle,
+            "Hide launcher before toggle",
+        )
+        .changed();
+    ui.separator();
+    let save = ui.button("Save MultiManager Settings");
+    (
+        changed,
+        widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary),
+    )
 }
 
 impl MultiManagerSettingsDialog {
@@ -719,60 +895,15 @@ impl MultiManagerSettingsDialog {
             .open(&mut open)
             .show(ctx, |ui| {
                 let mut s = app.multi_manager_settings.clone();
-                let mut changed = false;
-                changed |= ui.checkbox(&mut s.enabled, "Enabled").changed();
-                ui.label("Workspace file path");
-                changed |= ui.text_edit_singleline(&mut s.workspaces_path).changed();
-                ui.label("Bindings file path");
-                changed |= ui.text_edit_singleline(&mut s.bindings_path).changed();
-                changed |= ui.checkbox(&mut s.auto_save, "Auto-save").changed();
-                changed |= ui
-                    .checkbox(&mut s.save_on_exit, "Save on launcher exit")
-                    .changed();
-                changed |= ui
-                    .checkbox(
-                        &mut s.show_force_recapture_prompt,
-                        "Show force recapture prompt",
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(&mut s.developer_debugging, "Developer debugging")
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut s.hotkey_poll_ms)
-                            .range(10..=5000)
-                            .prefix("Hotkey poll interval ")
-                            .suffix(" ms"),
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(
-                        &mut s.auto_reconnect_on_load,
-                        "Auto-reconnect windows on load",
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(
-                        &mut s.ignore_launcher_window_on_capture,
-                        "Ignore launcher window on capture",
-                    )
-                    .changed();
-                changed |= ui
-                    .checkbox(
-                        &mut s.hide_launcher_before_toggle,
-                        "Hide launcher before toggle",
-                    )
-                    .changed();
-                if changed {
+                let form = show_settings_form(ui, &mut s);
+                if form.changed {
                     app.multi_manager_settings = s.clone();
                     app.multi_manager.auto_save = s.auto_save;
                     app.multi_manager.auto_reconnect_on_load = s.auto_reconnect_on_load;
                     let control = &app.multi_manager.runtime.control;
                     control.enabled.store(s.enabled, Ordering::Relaxed);
                 }
-                ui.separator();
-                if ui.button("Save MultiManager Settings").clicked() {
+                if form.save_clicked {
                     match crate::multi_manager::settings::save_multi_manager_settings(
                         &app.settings_path,
                         app.multi_manager_settings.clone(),
@@ -859,21 +990,24 @@ fn rect_ui(
         h: 600,
     });
     ui.push_id(id_source, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(label);
-            let mut changed = false;
-            changed |= ui.add(egui::DragValue::new(&mut r.x)).changed();
-            changed |= ui.add(egui::DragValue::new(&mut r.y)).changed();
+        let mut changed = false;
+        widgets::labeled_form_row(ui, label, |ui| {
             changed |= ui
-                .add(egui::DragValue::new(&mut r.w).range(1..=10000))
+                .add(egui::DragValue::new(&mut r.x).prefix("x "))
                 .changed();
             changed |= ui
-                .add(egui::DragValue::new(&mut r.h).range(1..=10000))
+                .add(egui::DragValue::new(&mut r.y).prefix("y "))
                 .changed();
-            if changed {
-                let _ = set(r);
-            }
+            changed |= ui
+                .add(egui::DragValue::new(&mut r.w).range(1..=10000).prefix("w "))
+                .changed();
+            let height = ui.add(egui::DragValue::new(&mut r.h).range(1..=10000).prefix("h "));
+            changed |= height.changed();
+            height
         });
+        if changed {
+            let _ = set(r);
+        }
     });
 }
 fn capture_rect(app: &mut LauncherApp, id: &str, index: usize, home: bool) {
@@ -1140,44 +1274,44 @@ mod tests {
     }
 
     #[test]
-    fn every_binding_status_maps_to_expected_label_and_color() {
+    fn every_binding_status_maps_to_expected_label_and_semantic_tone() {
         let cases = [
-            (MmBindingStatus::Bound, ("Bound", egui::Color32::GREEN)),
+            (MmBindingStatus::Bound, ("Bound", StatusTone::Success)),
             (
                 MmBindingStatus::Reconnected,
-                ("Reconnected", egui::Color32::LIGHT_GREEN),
+                ("Reconnected", StatusTone::Success),
             ),
-            (MmBindingStatus::Missing, ("Missing", egui::Color32::RED)),
-            (MmBindingStatus::Closed, ("Closed", egui::Color32::YELLOW)),
+            (MmBindingStatus::Missing, ("Missing", StatusTone::Error)),
+            (MmBindingStatus::Closed, ("Closed", StatusTone::Warning)),
             (
                 MmBindingStatus::Ambiguous,
-                ("Ambiguous", egui::Color32::YELLOW),
+                ("Ambiguous", StatusTone::Warning),
             ),
             (
                 MmBindingStatus::MetadataMismatch,
-                ("Metadata mismatch", egui::Color32::RED),
+                ("Metadata mismatch", StatusTone::Error),
             ),
         ];
 
         for (status, expected) in cases {
-            assert_eq!(binding_status_text_color(status), expected);
+            assert_eq!(binding_status_presentation(status), expected);
         }
     }
 
     #[test]
-    fn ambiguous_and_metadata_mismatch_are_displayed_by_window_status_rendering() {
+    fn ambiguous_and_metadata_mismatch_keep_window_status_warning_and_error_tones() {
         let mut ambiguous = MmWindow::default();
         ambiguous.mark_ambiguous();
         let mut metadata_mismatch = MmWindow::default();
         metadata_mismatch.mark_metadata_mismatch();
 
         assert_eq!(
-            window_status_text_color(&ambiguous),
-            ("Ambiguous", egui::Color32::YELLOW)
+            window_status_presentation(&ambiguous),
+            ("Ambiguous", StatusTone::Warning)
         );
         assert_eq!(
-            window_status_text_color(&metadata_mismatch),
-            ("Metadata mismatch", egui::Color32::RED)
+            window_status_presentation(&metadata_mismatch),
+            ("Metadata mismatch", StatusTone::Error)
         );
     }
 
@@ -1191,9 +1325,84 @@ mod tests {
         };
 
         assert_eq!(
-            window_status_text_color(&window),
-            ("Bound", egui::Color32::GREEN)
+            window_status_presentation(&window),
+            ("Bound", StatusTone::Success)
         );
+    }
+
+    #[test]
+    fn settings_form_auto_shrinks_and_scrolls_to_save_without_mutating_settings() {
+        let ctx = egui::Context::default();
+        let mut settings = crate::settings::MultiManagerSettings::default();
+        let original_settings = settings.clone();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 720.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        let render_frame =
+            |window_rect: egui::Rect, settings: &mut crate::settings::MultiManagerSettings| {
+                let mut sizing_pass = true;
+                let mut visible = false;
+                let mut rendered_window_rect = egui::Rect::NOTHING;
+                let mut layout = None;
+                let output = ctx.run_ui(input(), |ctx| {
+                    let window_output = egui::Window::new("MultiManager Settings layout contract")
+                        .fixed_rect(window_rect)
+                        .resizable(false)
+                        .show(ctx, |ui| {
+                            sizing_pass = ui.is_sizing_pass();
+                            visible = ui.is_visible();
+                            layout = Some(show_settings_form(ui, settings));
+                        });
+                    if let Some(window_output) = window_output {
+                        rendered_window_rect = window_output.response.rect;
+                    }
+                });
+                let frame = (
+                    sizing_pass,
+                    visible,
+                    rendered_window_rect,
+                    layout.expect("settings form should render in its Window"),
+                );
+                output.drop_without_applying_deltas();
+                frame
+            };
+
+        let normal_window_rect =
+            egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(520.0, 600.0));
+        let _ = render_frame(normal_window_rect, &mut settings);
+        let (normal_sizing_pass, normal_visible, normal_window, normal) =
+            render_frame(normal_window_rect, &mut settings);
+
+        let constrained_window_rect =
+            egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(520.0, 180.0));
+        let _ = render_frame(constrained_window_rect, &mut settings);
+        let (bounded_sizing_pass, bounded_visible, bounded_window, bounded) =
+            render_frame(constrained_window_rect, &mut settings);
+
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, bounded.scroll_id)
+            .expect("settings form stores its native scroll state");
+        let legal_max_scroll_offset = (bounded.content_size.y - bounded.viewport.height()).max(0.0);
+        scroll_state.offset.y = legal_max_scroll_offset;
+        scroll_state.store(&ctx, bounded.scroll_id);
+        let (scrolled_sizing_pass, scrolled_visible, scrolled_window, scrolled) =
+            render_frame(constrained_window_rect, &mut settings);
+
+        assert!(!normal_sizing_pass && normal_visible);
+        assert!(!bounded_sizing_pass && bounded_visible);
+        assert!(!scrolled_sizing_pass && scrolled_visible);
+        assert!(screen_rect.contains_rect(normal_window));
+        assert!(screen_rect.contains_rect(bounded_window));
+        assert!(screen_rect.contains_rect(scrolled_window));
+        assert!(normal.content_size.y <= normal.viewport.height() + 1.0);
+        assert!(bounded.content_size.y > bounded.viewport.height());
+        assert!(!bounded.viewport.contains_rect(bounded.save_rect));
+        assert_eq!(bounded.scroll_id, scrolled.scroll_id);
+        assert!(scrolled.scroll_offset.y > 0.0);
+        assert!(scrolled.scroll_offset.y <= legal_max_scroll_offset + 1.0);
+        assert!(scrolled.viewport.contains_rect(scrolled.save_rect));
+        assert_eq!(settings, original_settings);
     }
 
     #[test]

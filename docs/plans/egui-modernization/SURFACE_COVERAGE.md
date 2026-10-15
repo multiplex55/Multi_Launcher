@@ -36,7 +36,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/mouse_gesture_settings_dialog.rs` | M5-B7 | pending surface polish/review; runtime inheritance available |
 | `src/gui/mouse_gestures_dialog.rs` | M5-B7 | pending surface polish/review; runtime inheritance available |
 | `src/gui/mouse_settings_dialog.rs` | M5-B7 | pending surface polish/review; runtime inheritance available |
-| `src/gui/multi_manager_actions.rs` | M5-B4 | pending surface polish/review; runtime inheritance available |
+| `src/gui/multi_manager_actions.rs` | M5-B4 | inspected behavior owner unchanged; presentation remains src/multi_manager/ui.rs |
 | `src/gui/note_graph_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/note_panel.rs` | M5-B1 | implemented/source reviewed; strict window/save/discard/narrow tests pass; native after-image gap |
 | `src/gui/notes_dialog.rs` | M5-B1 | implemented/source reviewed;13 targeted contracts plus Notes002 app-native after-image atda0ca08c; receipts/m5b1-notes-presentation.md |
@@ -59,7 +59,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/unused_assets_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/volume_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/help_window.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/multi_manager/ui.rs` | M5-B4 | pending surface polish/review; runtime inheritance available |
+| `src/multi_manager/ui.rs` | M5-B4 | accepted shared main/settings chrome;9targeted contracts/review pass; Dark main/Light Settings initial framebuffers inspected, native input/scroll/close gaps explicit |
 | `src/settings_editor/render.rs` | M5-A | complete at94b4724d; section identity/collapse/footer and mapping tests, Dark852x460 rendered review |
 
 Plugin settings_ui owners also require local presentation review alongside their surface group: browser_tabs, network, history, mkmacro, mouse_gestures, file_search, omni_search, virtual_desktop, note, diff, clipboard_modify, color_picker, screenshot, shell, clipboard and stopwatch. Preserve mappings/ranges and native control behavior.
