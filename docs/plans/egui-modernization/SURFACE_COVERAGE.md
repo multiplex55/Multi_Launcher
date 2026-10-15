@@ -104,3 +104,5 @@ M5-B2 also updates Clipboard/Modify settings_ui labeled rows with unchanged rang
 M5-B3 covers main only. Remaining MKMacro presentation review in M5-C includes action/condition/call editors, action/launcher/window pickers, parameter prompts/package/recording review, image/OCR surrounding controls and runtime-inspector/outline chrome; authored images/canvas/native overlays remain domain exceptions. Review scaled table row fit (current body row22) and pinned-panel menu display labels (currently enum Debug names) during that existing chrome pass; these are not completed coverage or performance-backlog work.
 
 MouseGestures plugin settings_ui local shared presentation accepted underM5-B7; ranges/changedguards/authoredtrailcolor retained, no nativecapture/effect verification.
+
+M5-C2 Snippets/Prompt/Favorites accepted: eleven privacy/input/transaction/layout contracts pass; Dark Snippets and populated Light Favorites initial app-native images inspected. Prompt session/long-edit native coverage absent. See receipts/m5c2-snippets-favorites.md. No Computer Use.

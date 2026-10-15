@@ -3725,7 +3725,7 @@ impl LauncherApp {
             Panel::MouseGestureSettingsDialog => self.mouse_gesture_settings_dialog.open(),
             Panel::MouseSettingsDialog => self.open_mouse_settings_dialog(),
             Panel::ThemeSettingsDialog => self.open_theme_settings_dialog(),
-            Panel::FavDialog => self.fav_dialog.open = true,
+            Panel::FavDialog => self.fav_dialog.ensure_open(),
             Panel::FileSearchDialog => self.file_search_dialog.open(),
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,

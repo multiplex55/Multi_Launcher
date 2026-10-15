@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use crate::actions::Action;
 use crate::commands::{ActivationSource, SnippetPromptIntent};
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
+};
+use crate::gui::theme::{TextRole, text_style_for_role};
 use crate::plugins::snippet_template::{
     RenderErrorKind, RenderIssueKind, RenderedPreview, TemplateRenderError, render_for_copy,
     render_preview,
@@ -312,16 +316,25 @@ impl SnippetPromptDialog {
                     return;
                 };
                 if preview_only {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Preview mode — copying is disabled.",
+                    semantic_status(
+                        ui,
+                        StatusTone::Warning,
+                        "Preview mode",
+                        Some("Copying is disabled."),
                     );
                 }
 
-                let footer_height = ui.spacing().interact_size.y + 12.0;
-                let feedback_height = if feedback.is_some() { 22.0 } else { 0.0 };
-                let body_height =
-                    (ui.available_height() - footer_height - feedback_height).max(24.0);
+                let footer_height = prompt_button_height(ui);
+                let feedback_height = feedback.map_or(0.0, |error| {
+                    prompt_status_height(ui, "Prompt issue", error.message())
+                });
+                let vertical_spacing = ui.spacing().item_spacing.y
+                    * if feedback.is_some() { 2.0 } else { 1.0 };
+                let body_height = (ui.available_height()
+                    - footer_height
+                    - feedback_height
+                    - vertical_spacing)
+                    .max(24.0);
                 let _body_output = egui::ScrollArea::vertical()
                     .id_salt(("snippet_prompt_body", generation))
                     .auto_shrink([false, false])
@@ -331,7 +344,7 @@ impl SnippetPromptDialog {
                             ui.horizontal_wrapped(|ui| {
                                 ui.strong(field.display_label().as_ref());
                                 if field.required {
-                                    ui.colored_label(egui::Color32::LIGHT_RED, "* required");
+                                    semantic_status(ui, StatusTone::Warning, "Required", None);
                                 }
                             });
 
@@ -362,7 +375,7 @@ impl SnippetPromptDialog {
                         }
 
                         ui.separator();
-                        ui.strong("Preview");
+                        compact_section_heading(ui, "Preview", None);
                         match render_preview(
                             &session.prepared.parsed,
                             &session.prepared.fields,
@@ -377,12 +390,11 @@ impl SnippetPromptDialog {
                                             .iter()
                                             .find(|field| field.name == issue.key)
                                     {
-                                        ui.colored_label(
-                                            egui::Color32::LIGHT_RED,
-                                            format!(
-                                                "{}: enter a value for this required field.",
-                                                field.display_label()
-                                            ),
+                                        semantic_status(
+                                            ui,
+                                            StatusTone::Error,
+                                            field.display_label().as_ref(),
+                                            Some("Enter a value for this required field."),
                                         );
                                     }
                                 }
@@ -402,7 +414,12 @@ impl SnippetPromptDialog {
                                     });
                             }
                             Err(error) => {
-                                ui.colored_label(egui::Color32::LIGHT_RED, error.to_string());
+                                semantic_status(
+                                    ui,
+                                    StatusTone::Error,
+                                    "Preview unavailable",
+                                    Some(&error.to_string()),
+                                );
                             }
                         }
 
@@ -423,7 +440,12 @@ impl SnippetPromptDialog {
                 }
 
                 if let Some(error) = feedback {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error.message());
+                    semantic_status(
+                        ui,
+                        StatusTone::Error,
+                        "Prompt issue",
+                        Some(error.message()),
+                    );
                 }
                 ui.horizontal(|ui| {
                     if !preview_only {
@@ -441,7 +463,9 @@ impl SnippetPromptDialog {
                         if matches!(&focus_target, Some(PromptFocusTarget::Copy)) {
                             response.request_focus();
                         }
-                        if response.clicked() && action.is_none() {
+                        if with_button_emphasis(ui, response, ButtonEmphasis::Primary).clicked()
+                            && action.is_none()
+                        {
                             action = Some(SnippetPromptUiAction::Submit);
                         }
                     }
@@ -466,7 +490,12 @@ impl SnippetPromptDialog {
                     if matches!(&focus_target, Some(PromptFocusTarget::Cancel)) {
                         response.request_focus();
                     }
-                    if response.clicked() {
+                    let emphasis = if preview_only {
+                        ButtonEmphasis::Primary
+                    } else {
+                        ButtonEmphasis::Ordinary
+                    };
+                    if with_button_emphasis(ui, response, emphasis).clicked() {
                         action = Some(SnippetPromptUiAction::Cancel);
                     }
                 });
@@ -664,6 +693,60 @@ fn preview_widget_id(generation: u64) -> egui::Id {
 
 fn button_widget_id(generation: u64, name: &str) -> egui::Id {
     egui::Id::new(("snippet_prompt_button", generation, name))
+}
+
+fn prompt_font_id(style: &egui::Style) -> egui::FontId {
+    style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(style))
+        })
+        .unwrap_or_else(|| egui::TextStyle::Body.resolve(style))
+}
+
+fn prompt_button_height(ui: &mut egui::Ui) -> f32 {
+    let style = ui.style().clone();
+    let spacing = style.spacing.clone();
+    let button_frame = style
+        .button_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Inactive,
+        )
+        .frame;
+    let height = (ui.fonts_mut(|fonts| fonts.row_height(&prompt_font_id(&style)))
+        + spacing.extra_text_line_spacing
+        + button_frame.total_margin().sum().y)
+        .max(spacing.interact_size.y);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
+}
+
+fn prompt_status_height(ui: &mut egui::Ui, label: &str, details: &str) -> f32 {
+    let style = ui.style().clone();
+    let font_id = prompt_font_id(&style);
+    let spacing = style.spacing.clone();
+    let marker_style = text_style_for_role(TextRole::Metadata);
+    let marker_height = ui.fonts_mut(|fonts| fonts.row_height(&marker_style.resolve(&style)));
+    let marker_size = (marker_height * 0.48).clamp(5.0, 8.0);
+    let text_width = (ui.available_width() - marker_size - spacing.item_spacing.x).max(1.0);
+    let text = format!("{label}: {details}");
+    let text_color = ui.visuals().text_color();
+    let galley = ui.fonts_mut(|fonts| {
+        fonts.layout_job(egui::text::LayoutJob::simple(
+            text, font_id, text_color, text_width,
+        ))
+    });
+    let height = galley
+        .size()
+        .y
+        .max(marker_size)
+        .max(spacing.interact_size.y);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
 }
 
 impl SnippetPromptSession {

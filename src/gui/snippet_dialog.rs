@@ -1,4 +1,8 @@
 use super::{LauncherApp, push_toast};
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
+    semantic_status, with_button_emphasis,
+};
 use crate::plugins::snippet_template::{TemplateError, parse_template};
 use crate::plugins::snippets::{
     SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition, SnippetInputKind, SnippetPreparationError,
@@ -355,31 +359,48 @@ impl SnippetDialog {
     fn show_prompt_field_settings(&mut self, ui: &mut egui::Ui) {
         if !self.prompt_for_fields {
             if !self.fields.is_empty() {
-                ui.small("Field settings are retained while prompting is off.");
+                secondary_help(ui, "Field settings are retained while prompting is off.");
             }
             return;
         }
 
-        ui.separator();
-        ui.label("Prompt fields");
+        compact_section_heading(
+            ui,
+            "Prompt fields",
+            Some("Configure the inputs requested by this template."),
+        );
         if !self.body_revealed {
-            ui.small("Field settings are hidden until contents are revealed.");
+            secondary_help(ui, "Field settings are hidden until contents are revealed.");
             return;
         }
         if let Some(error) = &self.template_error {
-            ui.colored_label(egui::Color32::RED, format!("Template error: {error}"));
-            ui.small("Existing field settings remain in this draft until the template is valid.");
+            semantic_status(
+                ui,
+                StatusTone::Error,
+                "Template error",
+                Some(&error.to_string()),
+            );
+            secondary_help(
+                ui,
+                "Existing field settings remain in this draft until the template is valid.",
+            );
             return;
         }
         if self.discovered_field_keys.is_empty() {
-            ui.small("Add at least one placeholder, for example {{name}}, to enable prompting.");
+            secondary_help(
+                ui,
+                "Add at least one placeholder, for example {{name}}, to enable prompting.",
+            );
             if !self.fields.is_empty() {
-                ui.small("Previously configured field settings are retained until Save.");
+                secondary_help(
+                    ui,
+                    "Previously configured field settings are retained until Save.",
+                );
             }
             return;
         }
 
-        ui.small("Fields follow their first appearance in the text.");
+        secondary_help(ui, "Fields follow their first appearance in the text.");
         let body_edit_session = self.body_edit_session;
         egui::Grid::new(("snippet_prompt_field_grid", body_edit_session))
             .striped(true)
@@ -410,7 +431,10 @@ impl SnippetDialog {
             .iter()
             .any(|field| !self.discovered_field_keys.contains(&field.name))
         {
-            ui.small("Settings for removed keys stay in this draft if you re-add them; Save prunes absent keys.");
+            secondary_help(
+                ui,
+                "Settings for removed keys stay in this draft if you re-add them; Save prunes absent keys.",
+            );
         }
     }
 
@@ -757,30 +781,40 @@ impl SnippetDialog {
                 // Only controls set the minimum scrollable width, never the body.
                 ui.set_min_width(280.0);
                 if let Some(error) = &self.load_error {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        format!("Snippets are read-only because loading failed: {error}"),
+                    compact_section_heading(ui, "Saved snippets", None);
+                    semantic_status(
+                        ui,
+                        StatusTone::Error,
+                        "Snippets are read-only because loading failed",
+                        Some(error),
                     );
-                    if ui.button("Close").clicked() {
+                    let close_response = ui.button("Close");
+                    if with_button_emphasis(ui, close_response, ButtonEmphasis::Primary).clicked() {
                         close = true;
                     }
                     return;
                 }
                 if self.edit_idx.is_some() {
-                    ui.horizontal(|ui| {
-                        ui.label("Alias");
+                    compact_section_heading(
+                        ui,
+                        if self.edit_idx == Some(self.entries.len()) {
+                            "New snippet"
+                        } else {
+                            "Edit snippet"
+                        },
+                        Some("Aliases are matched exactly, including case and surrounding spaces."),
+                    );
+                    let alias = labeled_form_row(ui, "Alias", |ui| {
                         let width = ui.available_width().max(80.0);
-                        if ui
-                            .add_sized(
-                                [width, ui.spacing().interact_size.y],
-                                egui::TextEdit::singleline(&mut self.alias)
-                                    .desired_width(f32::INFINITY),
-                            )
-                            .changed()
-                        {
-                            self.inline_error = None;
-                        }
+                        ui.add_sized(
+                            [width, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(&mut self.alias)
+                                .desired_width(f32::INFINITY),
+                        )
                     });
+                    if alias.changed() {
+                        self.inline_error = None;
+                    }
                     let mut hide_contents = self.hide_contents;
                     if ui
                         .checkbox(&mut hide_contents, "Hide contents")
@@ -791,6 +825,10 @@ impl SnippetDialog {
                     {
                         self.set_hide_contents(hide_contents);
                     }
+                    secondary_help(
+                        ui,
+                        "Hiding replaces previews only; saved text and copied clipboard/history remain plaintext. This is not encryption.",
+                    );
                     let mut prompt_for_fields = self.prompt_for_fields;
                     if ui
                         .checkbox(&mut prompt_for_fields, "Prompt for fields")
@@ -803,7 +841,7 @@ impl SnippetDialog {
                     }
                     ui.small(r"Use {{field}} for an input; prefix with \{{...}} to keep braces literal.");
                     ui.small(r"Example: Hello {{name}}. {{date}} is an ordinary input, not a computed date.");
-                    ui.label("Text");
+                    compact_section_heading(ui, "Text", None);
                     let action_height = ui.spacing().interact_size.y
                         + ui.spacing().button_padding.y * 2.0
                         + ui.spacing().item_spacing.y;
@@ -845,7 +883,8 @@ impl SnippetDialog {
                     }
                     self.show_prompt_field_settings(ui);
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        let save = ui.button("Save");
+                        if with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
                             if self.alias.trim().is_empty()
                                 || (!self.prompt_for_fields && self.text.trim().is_empty())
                             {
@@ -854,13 +893,11 @@ impl SnippetDialog {
                                 save_request = true;
                             }
                         }
-                        if ui
-                            .add_enabled(
+                        let preview = ui.add_enabled(
                                 self.prompt_for_fields && self.body_revealed,
                                 egui::Button::new("Test / Preview"),
-                            )
-                            .clicked()
-                        {
+                            );
+                        if with_button_emphasis(ui, preview, ButtonEmphasis::Primary).clicked() {
                             preview_request = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -868,16 +905,22 @@ impl SnippetDialog {
                         }
                     });
                     if !self.prompt_for_fields {
-                        ui.small(
+                        secondary_help(
+                            ui,
                             "Plain snippets remain literal; enable Prompt for fields to test inputs.",
                         );
                     } else if !self.body_revealed {
-                        ui.small("Reveal contents before testing this prompted snippet.");
+                        secondary_help(ui, "Reveal contents before testing this prompted snippet.");
                     }
                     if let Some(error) = &self.inline_error {
-                        ui.colored_label(egui::Color32::RED, error);
+                        semantic_status(ui, StatusTone::Error, "Snippet could not be saved", Some(error));
                     }
                 } else {
+                    compact_section_heading(
+                        ui,
+                        "Saved snippets",
+                        Some("Review, edit, or test your saved snippets."),
+                    );
                     ui.horizontal(|ui| {
                         ui.label("Filter");
                         let clear_filter_width = 116.0;
@@ -910,13 +953,16 @@ impl SnippetDialog {
                         }
                     });
                     let matching_indices = matching_snippet_indices(&self.entries, &self.filter);
-                    ui.label(format!(
-                        "{} of {} snippets",
-                        matching_indices.len(),
-                        self.entries.len()
-                    ));
+                    secondary_help(
+                        ui,
+                        &format!(
+                            "{} of {} snippets",
+                            matching_indices.len(),
+                            self.entries.len()
+                        ),
+                    );
                     if let Some(error) = &self.inline_error {
-                        ui.colored_label(egui::Color32::RED, error);
+                        semantic_status(ui, StatusTone::Error, "Snippet could not be updated", Some(error));
                     }
                     if matching_indices.is_empty() {
                         ui.label("No snippets match filter");
@@ -985,12 +1031,16 @@ impl SnippetDialog {
                                             .as_ref()
                                             .is_some_and(|pending| pending.index == idx);
                                         if confirming {
-                                            if ui
-                                                .add_sized(
+                                            let confirm = ui.add_sized(
                                                     egui::vec2(edit_width, row_height),
                                                     egui::Button::new("Confirm"),
-                                                )
-                                                .clicked()
+                                                );
+                                            if with_button_emphasis(
+                                                ui,
+                                                confirm,
+                                                ButtonEmphasis::Destructive,
+                                            )
+                                            .clicked()
                                             {
                                                 confirm_removal = true;
                                             }
@@ -1027,7 +1077,8 @@ impl SnippetDialog {
                                 }
                             });
                     }
-                    if ui.button("Add Snippet").clicked() {
+                    let add = ui.button("Add Snippet");
+                    if with_button_emphasis(ui, add, ButtonEmphasis::Primary).clicked() {
                         self.begin_new("");
                     }
                     if ui.button("Close").clicked() {
