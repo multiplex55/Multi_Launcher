@@ -14,15 +14,15 @@ Documented regressions are acceptable. Judge absolute cost, cold/warm/repeated f
 
 Blocking findings must identify an observed serious defect: crash/deadlock/data loss, broken hotkeys/input/focus or duplicate execution, lifecycle defects, repeated visible freezes/severely degraded ordinary interaction, sustained genuinely idle work, unbounded resources, or broken virtualization/geometry affecting function. Slower historical benchmarks alone are insufficient. Missing environmental coverage is a documented qualification gap, neither a failure nor a pass; continue safe implementation with explicit manual QA follow-up.
 
-## Current source and acceptance decision
+## Directive-receipt source audit and acceptance decision
 
 Audit at directive receipt: branch `egui-modernization`, HEAD `6cf92f6b398a035b54018ff8682c56402b9d8043`. Tracked working tree clean; unrelated `Workspaces/` and an unexecuted cycle-diagnostic proposal were untracked. No agent owned active source writes and no cargo/rustc/launcher verification process was running. Keep `.gitignore` restored exactly; keep checkpoints local, without push.
 
-Integrated application source remains `6527ddc15b6aa0c83fb2cbe41f5ceef9e4104669`, following measurement/cache source `79653eca51c80c8777b1b7e9ddaf6fd9a826e823`. Keep integrated work. ThemeSettings/ClipboardModify/radial closed-presentation guards and the strict radial fixture are provisional only because actual live compilation/affected contract execution remain pending; validate them rather than port another isolated candidate. Earlier compatible dependency/lifecycle/cache/layout evidence is reusable where source matches.
+At directive receipt, integrated application source was `6527ddc15b6aa0c83fb2cbe41f5ceef9e4104669`, following measurement/cache source `79653eca51c80c8777b1b7e9ddaf6fd9a826e823`. The then-provisional ThemeSettings/ClipboardModify/radial guards were subsequently validated at71a41051; migration-only checkpoint af9d11838db9448461be920790d926cb22b1cd40 was accepted with documented native QA gaps. Integrated work is retained. The CURRENT STATUS / NEXT ACTION in status.md governs subsequent themed checkpoints; this audit does not direct a reset or another validation of unchanged historical sources. Earlier compatible dependency/lifecycle/cache/layout evidence is reusable where source matches.
 
 | Measurement | Previous disposition | Current disposition |
 |---|---|---|
-| Source796 release Full ROOT, original→migrated10k cold p50 127.5695→166.2805ms (+38.7110ms, +30.345%); warm0.2003→0.3171ms (+0.1168ms, +58.313%) | Failed original no-regression policy | `accepted_with_documented_regression`, subject to live correctness/functional closeout |
+| Source796 release Full ROOT, original→migrated10k cold p50 127.5695→166.2805ms (+38.7110ms, +30.345%); warm0.2003→0.3171ms (+0.1168ms, +58.313%) | Failed original no-regression policy | `accepted_with_documented_regression`; scoped live correctness and functional closeout subsequently completed with explicit native QA gaps |
 | Other retained release ROOT/list measurements | Historical failures/HOLD under the old policy remain unchanged | Known performance debt, not a Track B prerequisite |
 | Isolated compact/row-storage/ASCII/shaping candidates | Experimental correctness and performance findings, including adverse samples | Deferred; not integrated and not required for modernization |
 

@@ -24,6 +24,9 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/crop_dialog.rs` | M5-C13 | accepted bounded standalone full-path overwrite confirmation, pending/temp flags and persistence owners preserved; six contracts/review pass, native loaded-session/actions gap explicit |
 | `src/gui/dashboard_editor_dialog.rs` | M5-C9 | accepted wrapped/bounded chrome;12 contracts/review pass, initial NoteGraph controls inspected; populated graph/details/Dashboard preview/nativeinput/close gaps explicit |
 | `src/gui/data_recovery_dialog.rs` | M5-C10 | accepted bounded content/actions/semantic statuses;21 contracts/review pass, corrected Recovery003/empty ToastLog003 images inspected; tabs/scroll/confirm/nativeactions/focus/close gaps explicit |
+| `src/gui/diff_dialog/rules_dialog.rs` | M5-C14 | accepted bounded rule form/native footer/semantic validation; exact candidate/publication contracts pass, native loaded-session gap explicit |
+| `src/gui/diff_dialog/folder_rules_dialog.rs` | M5-C14 | accepted responsive include/exclude and bounded native form/actions; cancellation snapshot contract/review pass, native loaded-session gap explicit |
+| `src/gui/diff_dialog/operation_preview.rs` | M5-C14 | accepted bounded full details above native gated actions; blocked long-preview/plan-preservation contract/review pass, no native file operation executed |
 | `src/gui/diff_dialog/mod.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/diff_dialog/text_view.rs` | M5-C remaining Diff chrome | Source-reviewed pending: command/Find rows need horizontal access/reflow and text_details fixed30 header needs actual allocation; content/IDs/shortcuts unchanged. |
 | `src/gui/diff_dialog/folder_view.rs` | M5-C remaining Diff chrome | Source-reviewed pending: command/mutation/navigation rows reflow and semantic Rescan status; existing scrolling paths/status summary coherent. |

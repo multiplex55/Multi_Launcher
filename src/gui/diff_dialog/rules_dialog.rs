@@ -1,5 +1,8 @@
 use crate::diff::model::TextViewModel;
 use crate::diff::text_compare::{CompiledRules, RegexReplacement, TextComparisonRules};
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
+};
 use eframe::egui;
 
 #[derive(Clone)]
@@ -86,34 +89,64 @@ pub fn show(ctx: &egui::Context, view: u64, model: &mut TextViewModel) {
         .collapsible(false)
         .resizable(true)
         .open(&mut open)
+        .max_width(ctx.content_rect().width().max(1.0))
+        .max_height(ctx.content_rect().height().max(1.0))
         .show(ctx, |ui| {
-            ui.checkbox(
-                &mut state.draft.ignore_leading_whitespace,
-                "Ignore leading whitespace",
-            );
-            ui.checkbox(
-                &mut state.draft.ignore_trailing_whitespace,
-                "Ignore trailing whitespace",
-            );
-            ui.checkbox(
-                &mut state.draft.ignore_all_whitespace,
-                "Ignore all whitespace",
-            );
-            ui.checkbox(&mut state.draft.ignore_blank_lines, "Ignore blank lines");
-            ui.checkbox(&mut state.draft.case_sensitive, "Case sensitive");
-            ui.checkbox(
-                &mut state.draft.line_ending_equivalence,
-                "Treat line endings as equivalent",
-            );
-            ui.label("Replacement rules (PATTERN => REPLACEMENT)");
-            ui.text_edit_multiline(&mut state.replacements);
-            ui.label("Unimportant-section regexes (one per line)");
-            ui.text_edit_multiline(&mut state.unimportant);
-            if let Some(error) = &state.error {
-                ui.colored_label(egui::Color32::RED, error);
-            }
-            ui.horizontal(|ui| {
-                if ui.button("Apply").clicked() {
+            let footer_height = action_footer_reserved_height(ui, &["Apply", "Cancel"]);
+            let body_height = (ui.available_height() - footer_height).max(0.0);
+            egui::ScrollArea::vertical()
+                .id_salt("diff_rules_form_body")
+                .auto_shrink([false, true])
+                .min_scrolled_height(0.0)
+                .max_height(body_height)
+                .show(ui, |ui| {
+                    ui.checkbox(
+                        &mut state.draft.ignore_leading_whitespace,
+                        "Ignore leading whitespace",
+                    );
+                    ui.checkbox(
+                        &mut state.draft.ignore_trailing_whitespace,
+                        "Ignore trailing whitespace",
+                    );
+                    ui.checkbox(
+                        &mut state.draft.ignore_all_whitespace,
+                        "Ignore all whitespace",
+                    );
+                    ui.checkbox(&mut state.draft.ignore_blank_lines, "Ignore blank lines");
+                    ui.checkbox(&mut state.draft.case_sensitive, "Case sensitive");
+                    ui.checkbox(
+                        &mut state.draft.line_ending_equivalence,
+                        "Treat line endings as equivalent",
+                    );
+                    compact_section_heading(
+                        ui,
+                        "Replacement rules",
+                        Some("One PATTERN => REPLACEMENT per line."),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut state.replacements)
+                            .desired_width(ui.available_width())
+                            .desired_rows(4),
+                    );
+                    compact_section_heading(
+                        ui,
+                        "Unimportant-section regexes",
+                        Some("One regex per line."),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut state.unimportant)
+                            .desired_width(ui.available_width())
+                            .desired_rows(4),
+                    );
+                    if let Some(error) = &state.error {
+                        semantic_status(ui, StatusTone::Error, "Invalid rules", Some(error));
+                    }
+                });
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                let apply_button = ui.button("Apply");
+                let apply = with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary);
+                if apply.clicked() {
                     state.apply(model);
                 }
                 if ui.button("Cancel").clicked() {
@@ -123,6 +156,69 @@ pub fn show(ctx: &egui::Context, view: u64, model: &mut TextViewModel) {
         });
     state.open &= open;
     ctx.data_mut(|d| d.insert_temp(id, state));
+}
+
+pub(super) fn action_footer_reserved_height(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        native_button_style.frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let mut row_width = 0.0;
+    let mut row_height = 0.0_f32;
+    let mut actions_height = 0.0;
+    for label in labels {
+        let text_size = egui::WidgetText::from(*label)
+            .into_galley(ui, Some(wrap_mode), text_width, button_font.clone())
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            actions_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    let separator_spacing = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let height = actions_height
+        + row_height.max(spacing.interact_size.y)
+        + 2.0 * spacing.item_spacing.y
+        + separator_spacing;
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
 }
 
 #[cfg(test)]
