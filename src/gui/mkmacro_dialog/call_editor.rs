@@ -3,6 +3,7 @@ use super::{
     typed_value,
     variable_catalog::{VariableCatalog, VariableValueType},
 };
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::*;
 use eframe::egui;
 use std::collections::HashSet;
@@ -21,7 +22,7 @@ fn source_ui(
 ) {
     let variable = matches!(source, MkValueSource::Variable { .. });
     let mut next_variable = variable;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.selectable_value(&mut next_variable, false, "Literal");
         ui.selectable_value(&mut next_variable, true, "Variable");
     });
@@ -50,9 +51,11 @@ fn source_ui(
                     *value = typed_value::initial_value(kind);
                 }
             } else {
-                ui.colored_label(
-                    ui.visuals().error_fg_color,
+                semantic_status(
+                    ui,
+                    StatusTone::Error,
                     "The referenced definition no longer exists; this literal is preserved.",
+                    None,
                 );
                 typed_value::value_controls(ui, value);
             }
@@ -100,10 +103,10 @@ pub(super) fn call_ui(
 ) -> CallUiOutcome {
     let mut outcome = CallUiOutcome::default();
     ui.heading("Call Macro");
-    ui.label(target_caption(document, call.macro_id));
-    ui.horizontal(|ui| {
+    ui.add(egui::Label::new(target_caption(document, call.macro_id)).wrap());
+    ui.horizontal_wrapped(|ui| {
         ui.label("Find target");
-        ui.text_edit_singleline(search);
+        ui.add(egui::TextEdit::singleline(search).desired_width(ui.available_width().max(1.0)));
     });
     let query = search.trim().to_lowercase();
     egui::ScrollArea::vertical()
@@ -129,7 +132,7 @@ pub(super) fn call_ui(
                 if ui
                     .add_enabled(
                         target.id != caller_id,
-                        egui::Button::selectable(*pending_target == Some(target.id), label),
+                        egui::Button::selectable(*pending_target == Some(target.id), label).wrap(),
                     )
                     .on_hover_text(&target.description)
                     .clicked()
@@ -139,8 +142,13 @@ pub(super) fn call_ui(
             }
         });
     if let Some(target) = *pending_target {
-        ui.colored_label(egui::Color32::YELLOW, "Changing target clears all argument and output bindings so equal numeric IDs cannot be reinterpreted.");
-        ui.horizontal(|ui| {
+        semantic_status(
+            ui,
+            StatusTone::Warning,
+            "Changing target clears all argument and output bindings so equal numeric IDs cannot be reinterpreted.",
+            None,
+        );
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Replace Target & Clear Bindings").clicked() {
                 replace_target(call, target);
                 *pending_target = None;
@@ -171,13 +179,19 @@ pub(super) fn call_ui(
         let definition = parameters.iter().find(|p| p.id == binding.parameter_id);
         let duplicate = !seen.insert(binding.parameter_id);
         ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.strong(definition.map_or_else(
-                    || format!("Obsolete parameter #{}", binding.parameter_id.0),
-                    |p| format!("{} · #{} · {}", p.name, p.id.0, p.value_type.label()),
-                ));
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(definition.map_or_else(
+                            || format!("Obsolete parameter #{}", binding.parameter_id.0),
+                            |p| format!("{} · #{} · {}", p.name, p.id.0, p.value_type.label()),
+                        ))
+                        .strong(),
+                    )
+                    .wrap(),
+                );
                 if duplicate {
-                    ui.colored_label(ui.visuals().error_fg_color, "duplicate");
+                    semantic_status(ui, StatusTone::Error, "Duplicate binding", None);
                 }
                 if ui.small_button("Remove").clicked() {
                     remove = Some(index);
@@ -201,17 +215,20 @@ pub(super) fn call_ui(
             .iter()
             .any(|b| b.parameter_id == parameter.id)
         {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{} · {}{}",
-                    parameter.name,
-                    parameter.value_type.label(),
-                    if parameter.default_value.is_some() {
-                        " · uses default when omitted"
-                    } else {
-                        " · required"
-                    }
-                ));
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(format!(
+                        "{} · {}{}",
+                        parameter.name,
+                        parameter.value_type.label(),
+                        if parameter.default_value.is_some() {
+                            " · uses default when omitted"
+                        } else {
+                            " · required"
+                        }
+                    ))
+                    .wrap(),
+                );
                 if ui.small_button("Bind").clicked() {
                     call.arguments.push(MkCallArgumentBinding {
                         parameter_id: parameter.id,
@@ -232,21 +249,30 @@ pub(super) fn call_ui(
         let definition = outputs.iter().find(|o| o.id == binding.output_id);
         let duplicate = !seen.insert(binding.output_id);
         ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.strong(definition.map_or_else(
-                    || format!("Obsolete output #{}", binding.output_id.0),
-                    |o| format!("{} · #{} · {}", o.name, o.id.0, o.value_type.label()),
-                ));
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(definition.map_or_else(
+                            || format!("Obsolete output #{}", binding.output_id.0),
+                            |o| format!("{} · #{} · {}", o.name, o.id.0, o.value_type.label()),
+                        ))
+                        .strong(),
+                    )
+                    .wrap(),
+                );
                 if duplicate {
-                    ui.colored_label(ui.visuals().error_fg_color, "duplicate");
+                    semantic_status(ui, StatusTone::Error, "Duplicate binding", None);
                 }
                 if ui.small_button("Remove").clicked() {
                     remove = Some(index);
                 }
             });
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Caller variable");
-                ui.text_edit_singleline(&mut binding.caller_variable);
+                ui.add(
+                    egui::TextEdit::singleline(&mut binding.caller_variable)
+                        .desired_width(ui.available_width().max(1.0)),
+                );
             });
         });
     }
@@ -288,13 +314,19 @@ pub(super) fn return_ui(
         let definition = signature.outputs.iter().find(|o| o.id == binding.output_id);
         let duplicate = !seen.insert(binding.output_id);
         ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.strong(definition.map_or_else(
-                    || format!("Obsolete output #{}", binding.output_id.0),
-                    |o| format!("{} · #{} · {}", o.name, o.id.0, o.value_type.label()),
-                ));
+            ui.horizontal_wrapped(|ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(definition.map_or_else(
+                            || format!("Obsolete output #{}", binding.output_id.0),
+                            |o| format!("{} · #{} · {}", o.name, o.id.0, o.value_type.label()),
+                        ))
+                        .strong(),
+                    )
+                    .wrap(),
+                );
                 if duplicate {
-                    ui.colored_label(ui.visuals().error_fg_color, "duplicate");
+                    semantic_status(ui, StatusTone::Error, "Duplicate binding", None);
                 }
                 if ui.small_button("Remove").clicked() {
                     remove = Some(index);

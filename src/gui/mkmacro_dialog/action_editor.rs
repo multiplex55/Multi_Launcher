@@ -10,6 +10,7 @@ use super::{
     MkMacroDialog,
     key_capture::{CapturedChord, captured_chord, key_name},
 };
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::variables::{MkPoint, MkValue};
 use crate::mkmacro::*;
 use eframe::egui;
@@ -283,6 +284,16 @@ pub struct ActionEditorState {
     variable_consumer_id: Option<u64>,
     call_target_search: String,
     pending_call_target: Option<u64>,
+    #[cfg(test)]
+    test_body_clip: Option<egui::Rect>,
+    #[cfg(test)]
+    test_body_scroll: Option<(egui::Rect, egui::Vec2, egui::Vec2)>,
+    #[cfg(test)]
+    test_footer_clip: Option<egui::Rect>,
+    #[cfg(test)]
+    test_apply_response: Option<(egui::Id, egui::Rect)>,
+    #[cfg(test)]
+    test_cancel_response: Option<(egui::Id, egui::Rect)>,
 }
 
 #[derive(Clone)]
@@ -609,6 +620,16 @@ impl ActionEditorState {
             variable_consumer_id: None,
             call_target_search: String::new(),
             pending_call_target: None,
+            #[cfg(test)]
+            test_body_clip: None,
+            #[cfg(test)]
+            test_body_scroll: None,
+            #[cfg(test)]
+            test_footer_clip: None,
+            #[cfg(test)]
+            test_apply_response: None,
+            #[cfg(test)]
+            test_cancel_response: None,
         }
     }
 
@@ -5047,6 +5068,69 @@ fn apply_and_open_call_target(d: &mut MkMacroDialog, target: u64) -> bool {
     applied
 }
 
+fn action_editor_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let button_frame = native_button_style.frame;
+    let frame_margin = if ui.visuals().button_frame {
+        button_frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    let mut row_width = 0.0;
+    let mut row_height = 0.0_f32;
+    let mut actions_height = 0.0;
+
+    for label in labels {
+        let text_size = egui::WidgetText::from(*label)
+            .into_galley(ui, Some(wrap_mode), text_width, button_font.clone())
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            actions_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    actions_height += row_height.max(spacing.interact_size.y);
+    let separator_spacing = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let footer_height = actions_height + 2.0 * spacing.item_spacing.y + separator_spacing;
+    (footer_height * pixels_per_point).ceil() / pixels_per_point
+}
+
 pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
     reduce_image_search_test_completion(d);
     if d.action_editor.draft.is_none() {
@@ -5072,6 +5156,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .visual_capture
         .as_ref()
         .is_some_and(|w| w.active());
+    let cancel_label = if workflow_active {
+        "Cancel visual capture"
+    } else {
+        "Cancel"
+    };
     if workflow_active {
         ctx.request_repaint();
     }
@@ -5107,7 +5196,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     .unwrap_or_else(|_| state.capture_filename.clone());
                 ui.label(format!("mkmacro_assets/{display_filename}"));
                 ui.text_edit_singleline(&mut state.capture_filename);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Replace Existing").clicked() {
                         match normalize_image_filename(&state.capture_filename) {
                             Ok(image) => {
@@ -5176,7 +5265,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     }
                 });
                 if let Some(message) = &state.capture_message {
-                    ui.colored_label(egui::Color32::YELLOW, message);
+                    semantic_status(ui, StatusTone::Warning, "Reference image", Some(message));
                 }
             });
     }
@@ -5189,7 +5278,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 ui.label("A shared library image with this filename already exists.");
                 ui.label("Choose whether to replace it or save the imported bytes under another filename.");
                 ui.text_edit_singleline(&mut state.image_import_filename);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Replace Existing").clicked() {
                         let result = state.resolve_pending_image_import(
                             d.store.clone(),
@@ -5321,8 +5410,19 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         .default_size(egui::vec2(640.0, 720.0))
         .resizable(true)
         .show(ctx, |ui| {
-          egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+          let footer_height = action_editor_footer_reserved_height(ui, &["Apply", cancel_label]);
+          let body_max_height = (ui.available_height() - footer_height).max(0.0);
+          let mut apply_enabled = false;
+          let body_output = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
+            .max_height(body_max_height)
+            .show(ui, |ui| {
             let state = &mut d.action_editor;
+            #[cfg(test)]
+            {
+                state.test_body_clip = Some(ui.clip_rect());
+            }
             let mut draft_generation = state.draft_generation;
             let point_pick_active = state.active_point_pick.is_some()
                 || state.visual_overlay.operation_id().is_some();
@@ -5588,13 +5688,22 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 d.launcher_action_picker.open(request);
             }
             if state.position_capture.is_some() {
-                ui.colored_label(egui::Color32::YELLOW, "Move the mouse to the desired location. Left-click or press Enter to capture. Escape cancels.");
+                semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    "Position capture",
+                    Some("Move the mouse to the desired location. Left-click or press Enter to capture. Escape cancels."),
+                );
             }
-            if let Some(message) = &state.capture_message { ui.colored_label(egui::Color32::RED, message); }
+            if let Some(message) = &state.capture_message {
+                semantic_status(ui, StatusTone::Error, "Capture error", Some(message));
+            }
             if state.capture_keys {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "Press the next real key or chord. Escape cancels capture.",
+                semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    "Key capture",
+                    Some("Press the next real key or chord. Escape cancels capture."),
                 );
                 if let Some(result) = ui.input(captured_chord) {
                     match result {
@@ -5607,7 +5716,7 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             annotations_ui(ui, &mut step.metadata);
             ui.separator();
             ui.heading("Step settings");
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Repeat");
                 ui.add(egui::DragValue::new(&mut step.repeat).range(1..=1_000_000));
                 ui.label("Delay after (ms)");
@@ -5646,11 +5755,45 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                     }
                 });
             ui.separator();
-            ui.horizontal(|ui| {
-                let valid = draft_apply_valid(step, state.image_search.as_ref());
-                apply = ui.add_enabled(valid && !workflow_active && !importing && !crop_open, egui::Button::new("Apply")).clicked();
-                cancel = ui.button(if workflow_active { "Cancel visual capture" } else { "Cancel" }).on_hover_text("Cancel editing; during playback Cancel stops the macro").clicked();
-            });
+            apply_enabled =
+                draft_apply_valid(step, state.image_search.as_ref())
+                    && !workflow_active
+                    && !importing
+                    && !crop_open;
+          });
+          #[cfg(test)]
+          {
+              d.action_editor.test_body_scroll = Some((
+                  body_output.inner_rect,
+                  body_output.content_size,
+                  body_output.state.offset,
+              ));
+          }
+          #[cfg(not(test))]
+          let _ = body_output;
+          ui.separator();
+          #[cfg(test)]
+          {
+              d.action_editor.test_footer_clip = Some(ui.clip_rect());
+          }
+          ui.horizontal_wrapped(|ui| {
+              let apply_response =
+                  ui.add_enabled(apply_enabled, egui::Button::new("Apply"));
+              apply = apply_response.clicked();
+              #[cfg(test)]
+              {
+                  d.action_editor.test_apply_response =
+                      Some((apply_response.id, apply_response.rect));
+              }
+              let cancel_response = ui
+                  .button(cancel_label)
+                  .on_hover_text("Cancel editing; during playback Cancel stops the macro");
+              cancel = cancel_response.clicked();
+              #[cfg(test)]
+              {
+                  d.action_editor.test_cancel_response =
+                      Some((cancel_response.id, cancel_response.rect));
+              }
           });
           if let Some(request) = related_action_request.take() {
               related_action_notice = reduce_related_action_request(&mut d.action_editor, request);
@@ -7463,6 +7606,177 @@ mod tests {
         dialog.action_editor = ActionEditorState::new(dialog.visual_overlay.clone());
         dialog.create_macro();
         (dir, dialog, fixture)
+    }
+
+    #[test]
+    fn mkmacro_authoring_chrome_keeps_long_body_below_native_actions_without_mutation() {
+        use egui::accesskit::{NodeId, Role};
+
+        fn response_node_bounds(
+            output: &egui::FullOutput,
+            response: Option<(egui::Id, egui::Rect)>,
+            label: &str,
+        ) -> Option<egui::Rect> {
+            let (response_id, _) = response?;
+            let node_id = NodeId(response_id.value());
+            let (_, node) = output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == node_id)?;
+            if node.role() != Role::Button || node.label() != Some(label) {
+                return None;
+            }
+            let bounds = node.bounds()?;
+            Some(egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            ))
+        }
+
+        fn same_rect(left: egui::Rect, right: egui::Rect) -> bool {
+            (left.min.x - right.min.x).abs() < 0.5
+                && (left.min.y - right.min.y).abs() < 0.5
+                && (left.max.x - right.max.x).abs() < 0.5
+                && (left.max.y - right.max.y).abs() < 0.5
+        }
+
+        #[derive(Clone, Copy)]
+        struct Layout {
+            body_clip: egui::Rect,
+            body_scroll: (egui::Rect, egui::Vec2, egui::Vec2),
+            footer_clip: egui::Rect,
+            apply_response: (egui::Id, egui::Rect),
+            cancel_response: (egui::Id, egui::Rect),
+            apply_node: egui::Rect,
+            cancel_node: egui::Rect,
+        }
+
+        let (_dir, mut dialog, _fixture) = shared_dialog();
+        let conditions = (0..20)
+            .map(|index| MkCondition::Variable {
+                name: format!("long_variable_name_for_scroll_boundary_{index}"),
+                op: MkCompareOp::Eq,
+                value: MkValue::String(format!(
+                    "long expected string value used to make the body scroll {index}"
+                )),
+            })
+            .collect();
+        dialog
+            .action_editor
+            .begin_new(MkAction::If(MkCondition::All { conditions }));
+        let draft_before = dialog.action_editor.draft.clone();
+        let revision_before = dialog.draft_revision();
+        let selected_before = dialog.selected_macro_id;
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut_of(context.theme(), |style| {
+            style.override_font_id = Some(egui::FontId::new(22.0, egui::FontFamily::Proportional));
+        });
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(520.0, 420.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+
+        let mut previous_layout: Option<Layout> = None;
+        let mut settled_layout: Option<Layout> = None;
+        let mut last_apply_node = None;
+        let mut last_cancel_node = None;
+        for _ in 0..6 {
+            let output = context.run_ui(input(), |ctx| super::show(ctx, &mut dialog));
+            let apply_response = dialog.action_editor.test_apply_response;
+            let cancel_response = dialog.action_editor.test_cancel_response;
+            if let Some(response) = apply_response {
+                if let Some(bounds) = response_node_bounds(&output, Some(response), "Apply") {
+                    last_apply_node = Some((response.0, bounds));
+                }
+            }
+            if let Some(response) = cancel_response {
+                if let Some(bounds) = response_node_bounds(&output, Some(response), "Cancel") {
+                    last_cancel_node = Some((response.0, bounds));
+                }
+            }
+            let layout = match (
+                dialog.action_editor.test_body_clip,
+                dialog.action_editor.test_body_scroll,
+                dialog.action_editor.test_footer_clip,
+                apply_response,
+                cancel_response,
+                last_apply_node,
+                last_cancel_node,
+            ) {
+                (
+                    Some(body_clip),
+                    Some(body_scroll),
+                    Some(footer_clip),
+                    Some(apply_response),
+                    Some(cancel_response),
+                    Some((apply_id, apply_node)),
+                    Some((cancel_id, cancel_node)),
+                ) if apply_id == apply_response.0 && cancel_id == cancel_response.0 => {
+                    Some(Layout {
+                        body_clip,
+                        body_scroll,
+                        footer_clip,
+                        apply_response,
+                        cancel_response,
+                        apply_node,
+                        cancel_node,
+                    })
+                }
+                _ => None,
+            };
+            if let (Some(previous), Some(current)) = (previous_layout, layout)
+                && same_rect(previous.body_clip, current.body_clip)
+                && same_rect(previous.body_scroll.0, current.body_scroll.0)
+                && (previous.body_scroll.1 - current.body_scroll.1).length() < 0.5
+                && (previous.body_scroll.2 - current.body_scroll.2).length() < 0.5
+                && same_rect(previous.footer_clip, current.footer_clip)
+                && same_rect(previous.apply_response.1, current.apply_response.1)
+                && same_rect(previous.cancel_response.1, current.cancel_response.1)
+                && same_rect(previous.apply_node, current.apply_node)
+                && same_rect(previous.cancel_node, current.cancel_node)
+            {
+                settled_layout = Some(current);
+            }
+            previous_layout = layout;
+            output.drop_without_applying_deltas();
+        }
+
+        let unchanged = draft_before == dialog.action_editor.draft
+            && revision_before == dialog.draft_revision()
+            && selected_before == dialog.selected_macro_id;
+        let layout = settled_layout;
+        assert!(
+            unchanged,
+            "layout-only authoring must preserve the draft and owner"
+        );
+        let layout = layout.expect("the long-form editor settles with native footer controls");
+        assert!(layout.body_clip.is_positive());
+        assert!(layout.body_scroll.0.is_positive());
+        assert!(layout.body_scroll.1.y > layout.body_scroll.0.height());
+        assert!(layout.body_scroll.2.y >= 0.0);
+        assert!(
+            layout.body_scroll.2.y
+                <= (layout.body_scroll.1.y - layout.body_scroll.0.height()).max(0.0) + 0.5
+        );
+        assert!(screen_rect.contains_rect(layout.body_clip));
+        assert!(screen_rect.contains_rect(layout.footer_clip));
+        assert!(screen_rect.contains_rect(layout.apply_response.1));
+        assert!(screen_rect.contains_rect(layout.cancel_response.1));
+        assert!(screen_rect.contains_rect(layout.apply_node));
+        assert!(screen_rect.contains_rect(layout.cancel_node));
+        assert!(layout.footer_clip.contains_rect(layout.apply_response.1));
+        assert!(layout.footer_clip.contains_rect(layout.cancel_response.1));
+        assert!(same_rect(layout.apply_response.1, layout.apply_node));
+        assert!(same_rect(layout.cancel_response.1, layout.cancel_node));
+        assert!(layout.body_clip.max.y <= layout.apply_response.1.min.y);
+        assert!(layout.body_clip.max.y <= layout.cancel_response.1.min.y);
+        assert_ne!(layout.apply_response.0, layout.cancel_response.0);
     }
 
     fn begin_owned_preview(editor: &mut ActionEditorState) -> OperationId {

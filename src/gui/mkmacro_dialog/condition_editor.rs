@@ -273,10 +273,10 @@ pub(super) fn condition_ui_with_assets(
         }
         match condition {
             MkCondition::Variable { name, op, value } => {
-                ui.horizontal(|ui| {
-                    ui.label("Variable name");
-                    ui.text_edit_singleline(name);
-                });
+                ui.label("Variable name");
+                ui.add(
+                    egui::TextEdit::singleline(name).desired_width(ui.available_width().max(1.0)),
+                );
                 egui::ComboBox::from_label("Comparison")
                     .selected_text(op_label(op))
                     .show_ui(ui, |ui| {
@@ -344,7 +344,7 @@ pub(super) fn condition_ui_with_assets(
             }
             MkCondition::OcrTextSearch { search, found } => {
                 super::ocr_controls::search_match_ui(ui, &mut search.search);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("Test OCR").clicked() {
                         requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
                             path: ConditionPath::root(),
@@ -432,9 +432,11 @@ pub(super) fn condition_ui_with_assets(
                     context,
                     TargetUiOptions::standard("Pixel Result condition"),
                 );
-                ui.horizontal(|ui| {
-                    ui.label("Color");
-                    ui.text_edit_singleline(color);
+                ui.label("Color");
+                ui.add(
+                    egui::TextEdit::singleline(color).desired_width(ui.available_width().max(1.0)),
+                );
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Tolerance");
                     ui.add(egui::DragValue::new(tolerance));
                 });
@@ -557,7 +559,7 @@ fn condition_ui_context_at(
                 }
             }
             search.search.region = region_state.selected_region();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Refresh OCR languages").clicked() {
                     requested = Some(ConditionEditorRequest::Ocr(ConditionOcrRequest {
                         path: path.clone(),
