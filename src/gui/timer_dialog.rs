@@ -1,4 +1,5 @@
 use crate::gui::LauncherApp;
+use crate::gui::theme::widgets::{ButtonEmphasis, secondary_help, with_button_emphasis};
 use crate::plugins::timer::{parse_duration, parse_hhmm, start_alarm_named, start_timer_named};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -46,12 +47,16 @@ impl TimerDialog {
         }
     }
 
-    fn duration_ui(&mut self, ui: &mut egui::Ui) {
-        let response = ui.text_edit_singleline(&mut self.duration);
+    fn duration_ui(&mut self, ui: &mut egui::Ui) -> egui::Response {
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.duration)
+                .desired_width(ui.available_width().min(220.0).max(72.0)),
+        );
         if self.focus_duration_next_frame {
             response.request_focus();
             self.focus_duration_next_frame = false;
         }
+        response
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
@@ -63,28 +68,40 @@ impl TimerDialog {
         egui::Window::new(self.title())
             .open(&mut open_val)
             .resizable(false)
+            .max_width(ctx.content_rect().width().max(1.0))
             .show(ctx, |ui| {
                 match self.mode {
                     Mode::Timer => {
-                        ui.horizontal(|ui| {
-                            ui.label("Duration (Ns/Nm/Nh or hh:mm:ss)");
-                            self.duration_ui(ui);
+                        ui.horizontal_wrapped(|ui| {
+                            let label = ui.label("Duration");
+                            self.duration_ui(ui).labelled_by(label.id);
                         });
+                        secondary_help(ui, "Use Ns, Nm, Nh, mm:ss, or hh:mm:ss.");
                     }
                     Mode::Alarm => {
-                        ui.horizontal(|ui| {
-                            ui.label("Time (HH:MM, Nd HH:MM or YYYY-MM-DD HH:MM)");
-                            ui.text_edit_singleline(&mut self.time);
+                        ui.horizontal_wrapped(|ui| {
+                            let label = ui.label("Time");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.time)
+                                    .desired_width(ui.available_width().min(220.0).max(72.0)),
+                            )
+                            .labelled_by(label.id);
                         });
+                        secondary_help(ui, "Use HH:MM, Nd HH:MM, or YYYY-MM-DD HH:MM.");
                     }
                 }
-                ui.horizontal(|ui| {
-                    ui.label("Name");
-                    ui.text_edit_singleline(&mut self.label);
+                ui.horizontal_wrapped(|ui| {
+                    let label = ui.label("Name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.label)
+                            .desired_width(ui.available_width().min(220.0).max(72.0)),
+                    )
+                    .labelled_by(label.id);
                 });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Sound");
                     egui::ComboBox::from_id_salt("sound_select")
+                        .width(ui.available_width().min(160.0).max(72.0))
                         .selected_text(crate::sound::SOUND_NAMES[self.sound_idx])
                         .show_ui(ui, |ui| {
                             for (idx, name) in crate::sound::SOUND_NAMES.iter().enumerate() {
@@ -109,8 +126,11 @@ impl TimerDialog {
                         }
                     }
                 });
-                ui.horizontal(|ui| {
-                    if ui.button("Start").clicked() {
+                ui.horizontal_wrapped(|ui| {
+                    let start_button = ui.button("Start");
+                    let start_button =
+                        with_button_emphasis(ui, start_button, ButtonEmphasis::Primary);
+                    if start_button.clicked() {
                         match self.mode {
                             Mode::Timer => {
                                 if let Some(d) = parse_duration(&self.duration) {

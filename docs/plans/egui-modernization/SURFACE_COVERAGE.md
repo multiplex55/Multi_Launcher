@@ -52,10 +52,10 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/tempfile_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/tempfile_dialog.rs` | M5-C4 | accepted responsive labeled forms/native footer; Unicode scroll/draft contract/review pass, initial Dark Tempfile/Light Bookmark images inspected; native input/create/open/close gaps explicit |
 | `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | M5-A complete at94b4724d;21contracts and Dark/Light852x460 rendered footer reviewed; physical native gaps remain |
-| `src/gui/timer_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/timer_dialog.rs` | M5-C7 | accepted scoped task/time chrome and collection opening;21 contracts/review pass; initial Todo/Timer002 images inspected, lower rows/TodoView/Alarm/nativeinput/close gaps explicit |
 | `src/gui/toast_log_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/todo_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/todo_view_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/todo_dialog.rs` | M5-C7 | accepted scoped task/time chrome and collection opening;21 contracts/review pass; initial Todo/Timer002 images inspected, lower rows/TodoView/Alarm/nativeinput/close gaps explicit |
+| `src/gui/todo_view_dialog.rs` | M5-C7 | accepted scoped task/time chrome and collection opening;21 contracts/review pass; initial Todo/Timer002 images inspected, lower rows/TodoView/Alarm/nativeinput/close gaps explicit |
 | `src/gui/unused_assets_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/volume_dialog.rs` | M5-C6 | accepted bounded snapshot rows/unique session IDs/pinned opening; four contracts/review pass, initial Light systemcontrols image inspected; native approws/actions/input/close unobserved |
 | `src/help_window.rs` | M5-C | pending surface polish/review; runtime inheritance available |

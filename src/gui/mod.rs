@@ -3734,8 +3734,8 @@ impl LauncherApp {
             Panel::ImagePanel => {}
             Panel::ScreenshotEditor => {}
             Panel::CropDialog => {}
-            Panel::TodoDialog => self.todo_dialog.open = true,
-            Panel::TodoViewDialog => self.todo_view_dialog.open = true,
+            Panel::TodoDialog => self.todo_dialog.ensure_open(),
+            Panel::TodoViewDialog => self.todo_view_dialog.ensure_open(),
             Panel::ClipboardDialog => self.clipboard_dialog.ensure_open(),
             Panel::ClipboardModifyDialog => self
                 .clipboard_modify_dialog

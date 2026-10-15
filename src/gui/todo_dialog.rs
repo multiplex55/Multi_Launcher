@@ -1,5 +1,8 @@
 use crate::common::entity_ref::EntityRef;
 use crate::gui::LauncherApp;
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
+};
 use crate::plugins::note::load_notes;
 use crate::plugins::todo::{TODO_FILE, TodoEntry, load_todos, replace_todos};
 use eframe::egui;
@@ -15,17 +18,33 @@ pub struct TodoDialog {
     pub persist_tags: bool,
     pending_clear_confirm: bool,
     load_error: Option<String>,
+    #[cfg(test)]
+    test_window_close_requested: bool,
 }
 
 impl TodoDialog {
     pub fn open(&mut self) {
-        let _ = self.load_from(TODO_FILE);
+        self.open_from(TODO_FILE);
+    }
+
+    fn open_from(&mut self, path: &str) {
+        let _ = self.load_from(path);
         self.open = true;
         self.text.clear();
         self.priority = 0;
         self.tags.clear();
         self.filter.clear();
         self.pending_clear_confirm = false;
+    }
+
+    pub fn ensure_open(&mut self) {
+        self.ensure_open_from(TODO_FILE);
+    }
+
+    fn ensure_open_from(&mut self, path: &str) {
+        if !self.open {
+            self.open_from(path);
+        }
     }
 
     fn load_from(&mut self, path: &str) -> anyhow::Result<()> {
@@ -158,24 +177,32 @@ impl TodoDialog {
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        #[cfg(test)]
+        {
+            self.test_window_close_requested = false;
+        }
         if !self.open {
             return;
         }
+        let pinned = app.pinned_panels.contains(&crate::gui::Panel::TodoDialog);
+        let mut window_open = self.open;
         let mut save_now = false;
         let mut add_now = false;
         let mut clear_confirmed: Option<bool> = None;
         let mut candidate_entries = self.entries.clone();
         egui::Window::new("Todos")
-            .open(&mut self.open)
+            .open(&mut window_open)
             .resizable(true)
             .default_size((320.0, 200.0))
             .min_width(200.0)
             .min_height(150.0)
             .show(ctx, |ui| {
                 if let Some(error) = &self.load_error {
-                    ui.colored_label(
-                        egui::Color32::RED,
-                        format!("Todos are read-only because loading failed: {error}"),
+                    semantic_status(
+                        ui,
+                        StatusTone::Error,
+                        "Todos are read-only because loading failed",
+                        Some(error),
                     );
                     return;
                 }
@@ -184,28 +211,33 @@ impl TodoDialog {
                 let mut remove: Option<usize> = None;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.checkbox(&mut self.persist_tags, "Persist Tags");
+                    let field_width = (ui.available_width() - 72.0).clamp(80.0, 240.0);
                     egui::Grid::new("todo_add_grid")
                         .num_columns(2)
                         .spacing([4.0, 2.0])
                         .striped(false)
                         .show(ui, |ui| {
-                            ui.label(egui::RichText::new("New Todo").strong());
-                            let text_resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.text)
-                                    .desired_width(f32::INFINITY),
-                            );
+                            let text_label = ui.label(egui::RichText::new("New Todo").strong());
+                            let text_resp = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.text)
+                                        .desired_width(field_width),
+                                )
+                                .labelled_by(text_label.id);
                             ui.end_row();
 
-                            ui.label("Tags");
-                            let tags_resp = ui.add(
-                                egui::TextEdit::singleline(&mut self.tags)
-                                    .desired_width(f32::INFINITY),
-                            );
+                            let tags_label = ui.label("Tags");
+                            let tags_resp = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut self.tags)
+                                        .desired_width(field_width),
+                                )
+                                .labelled_by(tags_label.id);
                             ui.end_row();
 
-                            ui.label("Priority");
+                            let priority_label = ui.label("Priority");
                             let (prio_resp, add_resp) = ui
-                                .horizontal(|ui| {
+                                .horizontal_wrapped(|ui| {
                                     (
                                         ui.add(
                                             egui::DragValue::new(&mut self.priority).range(0..=255),
@@ -214,6 +246,9 @@ impl TodoDialog {
                                     )
                                 })
                                 .inner;
+                            let prio_resp = prio_resp.labelled_by(priority_label.id);
+                            let add_resp =
+                                with_button_emphasis(ui, add_resp, ButtonEmphasis::Primary);
 
                             if text_resp.changed() {
                                 tracing::debug!("Todo text updated: '{}'", self.text);
@@ -239,15 +274,21 @@ impl TodoDialog {
                             }
                             ui.end_row();
                         });
-                    ui.horizontal(|ui| {
-                        if ui.button("Clear Completed").clicked() {
+                    ui.horizontal_wrapped(|ui| {
+                        let clear_button = ui.button("Clear Completed");
+                        let clear_button =
+                            with_button_emphasis(ui, clear_button, ButtonEmphasis::Destructive);
+                        if clear_button.clicked() {
                             self.pending_clear_confirm = true;
                         }
                     });
                     if self.pending_clear_confirm {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label("Clear completed todos?");
-                            if ui.button("Confirm").clicked() {
+                            let confirm = ui.button("Confirm");
+                            let confirm =
+                                with_button_emphasis(ui, confirm, ButtonEmphasis::Destructive);
+                            if confirm.clicked() {
                                 clear_confirmed = Some(true);
                             }
                             if ui.button("Cancel").clicked() {
@@ -256,10 +297,15 @@ impl TodoDialog {
                         });
                     }
                     ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Filter");
-                        ui.text_edit_singleline(&mut self.filter);
+                    ui.horizontal_wrapped(|ui| {
+                        let filter_label = ui.label("Filter");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.filter)
+                                .desired_width(ui.available_width().min(240.0).max(72.0)),
+                        )
+                        .labelled_by(filter_label.id);
                     });
+                    compact_section_heading(ui, "Todo list", None);
                     let indices = Self::filtered_indices(&candidate_entries, &self.filter);
                     egui::ScrollArea::both()
                         .max_height(area_height)
@@ -291,6 +337,11 @@ impl TodoDialog {
                                         save_now = true;
                                     }
                                     let remove_btn = ui.button("Remove");
+                                    let remove_btn = with_button_emphasis(
+                                        ui,
+                                        remove_btn,
+                                        ButtonEmphasis::Destructive,
+                                    );
                                     remove_btn.context_menu(|ui| {
                                         ui.label("Link note");
                                         for note in
@@ -335,6 +386,12 @@ impl TodoDialog {
                     save_now = true;
                 }
             });
+
+        #[cfg(test)]
+        {
+            self.test_window_close_requested = !window_open;
+        }
+        self.open = window_open || pinned;
 
         if self.open
             && self.load_error.is_none()
@@ -420,6 +477,99 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    fn todo_entry(id: &str, text: &str, tags: &[&str]) -> TodoEntry {
+        TodoEntry {
+            id: id.to_owned(),
+            text: text.to_owned(),
+            done: false,
+            priority: 2,
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            entity_refs: Vec::new(),
+        }
+    }
+
+    fn write_todos(path: &std::path::Path, entries: &[TodoEntry]) {
+        std::fs::write(path, serde_json::to_vec_pretty(entries).unwrap()).unwrap();
+    }
+
+    fn window_close_button_bounds(output: &egui::FullOutput) -> Option<egui::Rect> {
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()?
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button && node.label() == Some("Close window")
+            })
+            .and_then(|(_, node)| node.bounds())
+            .map(|bounds| {
+                egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                )
+            })
+    }
+
+    fn render_todo_frame(
+        ctx: &egui::Context,
+        dialog: &mut TodoDialog,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) -> (Option<egui::Rect>, bool) {
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 480.0),
+                )),
+                focused: true,
+                events,
+                ..Default::default()
+            },
+            |ctx| dialog.ui(ctx, app),
+        );
+        let close_button = window_close_button_bounds(&output);
+        let close_requested = dialog.test_window_close_requested;
+        output.drop_without_applying_deltas();
+        (close_button, close_requested)
+    }
+
+    fn click_todo_window_x(
+        ctx: &egui::Context,
+        dialog: &mut TodoDialog,
+        app: &mut LauncherApp,
+        rect: egui::Rect,
+    ) -> bool {
+        let point = rect.center();
+        let _ = render_todo_frame(
+            ctx,
+            dialog,
+            app,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_todo_frame(
+            ctx,
+            dialog,
+            app,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        )
+        .1
     }
 
     #[test]
@@ -574,6 +724,85 @@ mod tests {
                 .is_err()
         );
         assert_eq!(dialog.entries, initial);
+        assert_eq!(std::fs::read(path).unwrap(), invalid);
+    }
+
+    #[test]
+    fn pinned_open_preserves_drafts_and_reload_waits_for_a_real_close() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("todo.json");
+        let path_text = path.to_string_lossy().into_owned();
+        let initial = vec![todo_entry("initial-id", "initial task", &["saved"])];
+        write_todos(&path, &initial);
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        ctx.set_pixels_per_point(1.0);
+        let mut app = new_app(&ctx);
+        let mut dialog = TodoDialog::default();
+        dialog.ensure_open_from(&path_text);
+        assert_eq!(dialog.entries, initial);
+
+        dialog.text = "unsaved task".into();
+        dialog.priority = 8;
+        dialog.tags = "draft, tags".into();
+        dialog.filter = "draft filter".into();
+        dialog.persist_tags = true;
+        dialog.pending_clear_confirm = true;
+        let replacement = vec![todo_entry("replacement-id", "replacement task", &["new"])];
+        write_todos(&path, &replacement);
+
+        dialog.ensure_open_from(&path_text);
+        assert_eq!(dialog.entries, initial);
+        assert_eq!(dialog.text, "unsaved task");
+        assert_eq!(dialog.priority, 8);
+        assert_eq!(dialog.tags, "draft, tags");
+        assert_eq!(dialog.filter, "draft filter");
+        assert!(dialog.persist_tags);
+        assert!(dialog.pending_clear_confirm);
+
+        app.pinned_panels.push(crate::gui::Panel::TodoDialog);
+        let _ = render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new());
+        let (window_x, _) = render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new());
+        let window_x = window_x.expect("the native window X has accessible bounds");
+        assert!(
+            click_todo_window_x(&ctx, &mut dialog, &mut app, window_x),
+            "the simulated click reached the native X and closed its local window state"
+        );
+        assert!(dialog.open, "a pinned window X retains the dialog");
+        dialog.ensure_open_from(&path_text);
+        assert_eq!(dialog.entries, initial);
+        assert_eq!(dialog.text, "unsaved task");
+        assert_eq!(dialog.tags, "draft, tags");
+        assert_eq!(dialog.filter, "draft filter");
+        assert!(dialog.pending_clear_confirm);
+
+        app.pinned_panels.clear();
+        let (window_x, _) = render_todo_frame(&ctx, &mut dialog, &mut app, Vec::new());
+        let window_x = window_x.expect("the native X remains available after unpinning");
+        assert!(click_todo_window_x(&ctx, &mut dialog, &mut app, window_x));
+        assert!(!dialog.open, "an unpinned window X ends the dialog session");
+
+        dialog.ensure_open_from(&path_text);
+        assert!(dialog.open);
+        assert_eq!(dialog.entries, replacement);
+        assert!(dialog.text.is_empty());
+        assert_eq!(dialog.priority, 0);
+        assert!(dialog.tags.is_empty());
+        assert!(dialog.filter.is_empty());
+        assert!(!dialog.pending_clear_confirm);
+        assert!(
+            dialog.persist_tags,
+            "open keeps the existing tag preference"
+        );
+
+        let invalid = b"malformed todo fixture";
+        std::fs::write(&path, invalid).unwrap();
+        dialog.open = false;
+        dialog.ensure_open_from(&path_text);
+        assert!(dialog.open);
+        assert_eq!(dialog.entries, replacement);
+        assert!(dialog.load_error.is_some());
         assert_eq!(std::fs::read(path).unwrap(), invalid);
     }
 }
