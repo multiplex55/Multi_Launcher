@@ -11,6 +11,7 @@ use crate::clipboard_modify::parser::{
     ClipboardModifyIntent, ClipboardModifyParseResult, ModifySection, PartialQuery, parse,
 };
 use crate::clipboard_modify::store::SharedClipboardModifierCatalog;
+use crate::gui::theme::widgets::labeled_form_row;
 use crate::plugin::Plugin;
 
 pub use crate::settings::ClipboardModifyPluginSettings;
@@ -102,33 +103,27 @@ impl Plugin for ClipboardModifyPlugin {
             &mut cfg.hide_launcher_after_apply,
             "Hide Launcher after applying template or pipeline",
         );
-        ui.horizontal(|ui| {
-            ui.label("Dialog size");
+        labeled_form_row(ui, "Dialog size", |ui| {
             ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_width).range(320.0..=2400.0));
-            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_height).range(240.0..=1600.0));
+            ui.add(eframe::egui::DragValue::new(&mut cfg.dialog_height).range(240.0..=1600.0))
         });
-        ui.horizontal(|ui| {
-            ui.label("Navigation width");
-            ui.add(eframe::egui::DragValue::new(&mut cfg.navigation_width).range(80.0..=500.0));
+        labeled_form_row(ui, "Navigation width", |ui| {
+            ui.add(eframe::egui::DragValue::new(&mut cfg.navigation_width).range(80.0..=500.0))
         });
-        ui.horizontal(|ui| {
-            ui.label("Source/preview split");
+        labeled_form_row(ui, "Source/preview split", |ui| {
             ui.add(eframe::egui::Slider::new(
                 &mut cfg.source_preview_split_ratio,
                 0.1..=0.9,
-            ));
+            ))
         });
-        ui.horizontal(|ui| {
-            ui.label("Template filter");
-            ui.text_edit_singleline(&mut cfg.template_filter);
+        labeled_form_row(ui, "Template filter", |ui| {
+            ui.text_edit_singleline(&mut cfg.template_filter)
         });
-        ui.horizontal(|ui| {
-            ui.label("Pipeline filter");
-            ui.text_edit_singleline(&mut cfg.pipeline_filter);
+        labeled_form_row(ui, "Pipeline filter", |ui| {
+            ui.text_edit_singleline(&mut cfg.pipeline_filter)
         });
-        ui.horizontal(|ui| {
-            ui.label("Management sort");
-            ui.text_edit_singleline(&mut cfg.management_sort_field);
+        labeled_form_row(ui, "Management sort", |ui| {
+            ui.text_edit_singleline(&mut cfg.management_sort_field)
         });
         ui.checkbox(&mut cfg.management_sort_ascending, "Sort ascending");
         *value = serde_json::to_value(cfg).unwrap_or(serde_json::Value::Null);

@@ -3,6 +3,7 @@ use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::persistence::{
     LoadState, PersistenceError, load_json, save_json_atomic_replaceable,
 };
+use crate::gui::theme::widgets::labeled_form_row;
 use crate::plugin::Plugin;
 use arboard::Clipboard;
 use eframe::egui;
@@ -321,9 +322,8 @@ impl Plugin for ClipboardPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: ClipboardPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.label("Clipboard limit");
-            ui.add(egui::DragValue::new(&mut cfg.max_entries).range(1..=200));
+        labeled_form_row(ui, "Clipboard limit", |ui| {
+            ui.add(egui::DragValue::new(&mut cfg.max_entries).range(1..=200))
         });
         match serde_json::to_value(&cfg) {
             Ok(v) => *value = v,

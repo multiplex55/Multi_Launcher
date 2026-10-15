@@ -1,5 +1,7 @@
 # Multi Launcher — egui 0.27 → 0.36.2 Modernization and Correctness-First Visual Redesign
 
+Current user desktop policy: **Do not use Computer Use for this goal.** Application screenshots remain requested; use the existing app-native framebuffer capture and ordinary process/build/test tooling, without synthetic desktop mouse/keyboard/window automation. Record native/manual gaps honestly. This clarification overrides any historical desktop-tool procedure.
+
 **Policy amended 2026-10-14:** [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](egui-modernization/PERFORMANCE_ACCEPTANCE_ADDENDUM.md) is authoritative under the user's explicit revised requirements. Continue the existing `egui-modernization` branch, complete BOTH tracks, and accept documented performance debt. Do not restart, reconstruct historical baselines, or ask for permission between tracks. The current status/next action is in `egui-modernization/status.md`; older evidence remains historical. Archive identity remains an honestly recorded gap, not a reason to reset current work.
 
 **Priority:** correctness/data/function; stable responsive interaction; finish migration and theming; low-complexity performance hygiene; comprehensive optimization/benchmarking as future work. Exact original-version performance parity is not required.

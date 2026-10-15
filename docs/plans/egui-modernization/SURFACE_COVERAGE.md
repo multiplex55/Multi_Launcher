@@ -16,8 +16,8 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/calendar_event_details.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/calendar_event_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/calendar_popover.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/clipboard_dialog.rs` | M5-B2 | pending surface polish/review; runtime inheritance available |
-| `src/gui/clipboard_modify_dialog.rs` | M5-B2 | pending surface polish/review; runtime inheritance available |
+| `src/gui/clipboard_dialog.rs` | M5-B2 | accepted semantic chrome/bounded previews/actions;15scoped contracts across B2 chain; populated History002 framebuffer inspected; native input/close gaps explicit |
+| `src/gui/clipboard_modify_dialog.rs` | M5-B2 | accepted semantic sections/status/footer/native constrained scrolling; scoped layout/state/persistence contracts and review pass; native visual/input coverage unobserved |
 | `src/gui/confirmation_modal.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/convert_panel.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/cpu_list_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -39,7 +39,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/multi_manager_actions.rs` | M5-B4 | pending surface polish/review; runtime inheritance available |
 | `src/gui/note_graph_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/note_panel.rs` | M5-B1 | implemented/source reviewed; strict window/save/discard/narrow tests pass; native after-image gap |
-| `src/gui/notes_dialog.rs` | M5-B1 | implemented/source reviewed;13 targeted contracts, after-image pending Escape/approval restriction; receipts/m5b1-notes-presentation.md |
+| `src/gui/notes_dialog.rs` | M5-B1 | implemented/source reviewed;13 targeted contracts plus Notes002 app-native after-image atda0ca08c; receipts/m5b1-notes-presentation.md |
 | `src/gui/qr_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_editor/mod.rs` | M5-B6 | pending surface polish/review; runtime inheritance available |
@@ -93,4 +93,10 @@ Settings/theme-editor local shell work complete with21 targeted contracts, revie
 
 ### M5-B1 implementation and qualification
 
-Notes chrome/header/edit-footer implementation and shared ThemeRuntime scroll-padding ownership correction accepted by source review;13distinct targeted contracts pass004/005chain. Native after-image is unobserved due Escape stop/automatic approval restriction, not a passing visual check. FixturePID27204 remains running; theme-after fixture unlaunched. See receipts/m5b1-notes-presentation.md. Continue safe B2 source work; retain visual/manual follow-up.
+Notes chrome/header/edit-footer implementation and shared ThemeRuntime scroll-padding ownership correction accepted by source review;13distinct targeted contracts pass004/005chain. At checkpoint commit the native after-image was unobserved due Escape/approval restriction; later app-native follow-up below supersedes that visual gap. Originalfixture27204 was retired; no normal UI-close proof. See receipts/m5b1-notes-presentation.md. Continue safe B2 source work; retain visual/manual follow-up.
+
+### Notes app-native visual follow-up
+
+At da0ca08c, immutable65EE QA binary produced Notes002 and Theme001852x460 images without Computer Use; inspected readable stacked metadata and reachablethemefooter. Original interruption retained separately. See receipts/m5b1-notes-presentation.md. Native focus/hotkey/normal-close gaps remain; all fixture processes retired after saved receipts. User permanently forbids Computer Use for this goal.
+
+M5-B2 also updates Clipboard/Modify settings_ui labeled rows with unchanged ranges/serialization. App-native History001 exposed the pinned load bypass; transition-only State::ensure_open and LauncherApp delegation fixed it, repeated drafts/pinned close retained. History002 confirms populated saved entries; raw001 and all earlier failures preserved. See receipts/m5b2-clipboard-presentation.md. No Computer Use.

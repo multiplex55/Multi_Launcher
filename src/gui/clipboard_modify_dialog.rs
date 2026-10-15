@@ -9,6 +9,9 @@ use crate::clipboard_modify::model::{
 use crate::clipboard_modify::parser::ClipboardModifyIntent;
 use crate::clipboard_modify::pipeline::find_template;
 use crate::clipboard_modify::store::ClipboardModifierStore;
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
+};
 use eframe::egui;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -21,9 +24,9 @@ pub const CLIPBOARD_MODIFY_MIN_WIDTH: f32 = 520.0;
 pub const CLIPBOARD_MODIFY_MIN_HEIGHT: f32 = 360.0;
 pub const CLIPBOARD_MODIFY_VIEWPORT_MARGIN: f32 = 16.0;
 pub const CLIPBOARD_MODIFY_MULTILINE_ROWS: usize = 10;
-const CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT: f32 = 44.0;
-
 const CLIPBOARD_MODIFY_WINDOW_ID: &str = "clipboard_modify_dialog_window";
+const CLIPBOARD_MODIFY_CONSTRAINED_CONTENT_SCROLL_ID: &str =
+    "clipboard_modify_constrained_content_scroll";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ClipboardModifyDialogSection {
@@ -36,11 +39,47 @@ pub enum ClipboardModifyDialogSection {
     Help,
 }
 
+const CLIPBOARD_MODIFY_TAB_LABELS: [(ClipboardModifyDialogSection, &str); 6] = [
+    (ClipboardModifyDialogSection::Modify, "Modify"),
+    (ClipboardModifyDialogSection::Templates, "Templates"),
+    (
+        ClipboardModifyDialogSection::SavedPipelines,
+        "Saved Pipelines",
+    ),
+    (
+        ClipboardModifyDialogSection::ManageTemplates,
+        "Manage Templates",
+    ),
+    (
+        ClipboardModifyDialogSection::ManagePipelines,
+        "Manage Pipelines",
+    ),
+    (ClipboardModifyDialogSection::Help, "Help"),
+];
+
 #[derive(Debug, Clone)]
 pub struct DialogStage {
     pub id: u64,
     pub spec: StageSpec,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct NativeScrollObservation {
+    id: egui::Id,
+    inner_rect: egui::Rect,
+    clip_rect: egui::Rect,
+    content_size: egui::Vec2,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+struct SectionLayoutObservation {
+    navigation_overflows: bool,
+    body_rect: egui::Rect,
+    body_max_height: f32,
+    constrained_scroll: Option<NativeScrollObservation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +120,10 @@ pub struct ClipboardModifyDialogState {
     pub pipeline_editor_error: Option<String>,
     pub pipeline_delete_confirmation: Option<String>,
     pub duplicate_save_confirmation: Option<String>,
+    #[cfg(test)]
+    section_layout_observation: Option<SectionLayoutObservation>,
+    #[cfg(test)]
+    apply_footer_clip_rect: Option<egui::Rect>,
 }
 
 impl Default for ClipboardModifyDialogState {
@@ -119,6 +162,10 @@ impl Default for ClipboardModifyDialogState {
             pipeline_editor_error: None,
             pipeline_delete_confirmation: None,
             duplicate_save_confirmation: None,
+            #[cfg(test)]
+            section_layout_observation: None,
+            #[cfg(test)]
+            apply_footer_clip_rect: None,
         }
     }
 }
@@ -274,17 +321,8 @@ impl ClipboardModifyDialogState {
             .open(&mut open)
             .show(ctx, |ui| {
                 self.shortcuts(ui, service, catalog.clone());
-                self.render_tab_navigation(ui);
-                ui.separator();
-
-                let footer_reserved_height = section_footer_reserved_height(self.section);
-                let body_max_height = clipboard_modify_body_max_height(
-                    ui.available_height(),
-                    0.0,
-                    footer_reserved_height,
-                );
-                self.render_section_body(ui, body_max_height, service, catalog.clone(), store);
-                self.render_section_footer(ui, service, catalog.clone(), store);
+                let _footer_response =
+                    self.render_section_contents(ui, service, catalog.clone(), store);
             });
         if let Some(response) = response {
             self.persisted_window_size = clamp_clipboard_modify_size(
@@ -298,14 +336,14 @@ impl ClipboardModifyDialogState {
             self.cleanup_after_close();
         }
     }
-    fn render_tab_navigation(&mut self, ui: &mut egui::Ui) {
-        let tab_row_height = clipboard_modify_tab_navigation_height(ui.spacing().interact_size.y);
-        ui.allocate_ui_with_layout(
+    fn render_tab_navigation(&mut self, ui: &mut egui::Ui) -> bool {
+        let tab_row_height = tab_navigation_reserved_height(ui);
+        let response = ui.allocate_ui_with_layout(
             egui::vec2(ui.available_width(), tab_row_height),
             egui::Layout::left_to_right(egui::Align::Min),
             |ui| {
                 ui.set_max_height(tab_row_height);
-                egui::ScrollArea::horizontal()
+                let scroll = egui::ScrollArea::horizontal()
                     .id_salt("clipboard_modify_tab_navigation")
                     .auto_shrink([false, true])
                     .max_height(tab_row_height)
@@ -313,23 +351,7 @@ impl ClipboardModifyDialogState {
                         ui.set_max_height(tab_row_height);
                         ui.horizontal(|ui| {
                             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                            for (section, label) in [
-                                (ClipboardModifyDialogSection::Modify, "Modify"),
-                                (ClipboardModifyDialogSection::Templates, "Templates"),
-                                (
-                                    ClipboardModifyDialogSection::SavedPipelines,
-                                    "Saved Pipelines",
-                                ),
-                                (
-                                    ClipboardModifyDialogSection::ManageTemplates,
-                                    "Manage Templates",
-                                ),
-                                (
-                                    ClipboardModifyDialogSection::ManagePipelines,
-                                    "Manage Pipelines",
-                                ),
-                                (ClipboardModifyDialogSection::Help, "Help"),
-                            ] {
+                            for (section, label) in CLIPBOARD_MODIFY_TAB_LABELS {
                                 if ui
                                     .selectable_label(self.section == section, label)
                                     .clicked()
@@ -339,48 +361,57 @@ impl ClipboardModifyDialogState {
                             }
                         });
                     });
+                scroll.content_size.x > scroll.inner_rect.width()
             },
         );
+        response.inner
     }
 
     fn render_section_body(
         &mut self,
         ui: &mut egui::Ui,
         available_height: f32,
+        available_width: f32,
         service: &Arc<ProductionClipboardService>,
         catalog: Arc<ClipboardModifierCatalog>,
         store: Option<&ClipboardModifierStore>,
-    ) {
-        egui::ScrollArea::vertical()
+    ) -> egui::Rect {
+        let output = egui::ScrollArea::both()
             .id_salt(section_scroll_id(self.section))
             .auto_shrink([false, false])
+            .min_scrolled_height(0.0)
+            .max_width(available_width.max(0.0))
             .max_height(available_height.max(0.0))
-            .show(ui, |ui| match self.section {
-                ClipboardModifyDialogSection::Modify => {
-                    self.modify_ui(ui, service, catalog.clone())
-                }
-                ClipboardModifyDialogSection::Templates => {
-                    self.templates_ui(ui, service, catalog.clone())
-                }
-                ClipboardModifyDialogSection::SavedPipelines => {
-                    self.saved_pipelines_ui(ui, service, catalog.clone())
-                }
-                ClipboardModifyDialogSection::ManageTemplates => {
-                    if let Some(store) = store {
-                        self.manage_templates_ui(ui, catalog.clone(), store)
-                    } else {
-                        ui.label("Template management is unavailable.");
+            .show(ui, |ui| {
+                ui.set_max_width(available_width.max(0.0));
+                match self.section {
+                    ClipboardModifyDialogSection::Modify => {
+                        self.modify_ui(ui, service, catalog.clone())
                     }
-                }
-                ClipboardModifyDialogSection::ManagePipelines => {
-                    if let Some(store) = store {
-                        self.manage_pipelines_ui(ui, catalog.clone(), store)
-                    } else {
-                        ui.label("Pipeline management is unavailable.");
+                    ClipboardModifyDialogSection::Templates => {
+                        self.templates_ui(ui, service, catalog.clone())
                     }
+                    ClipboardModifyDialogSection::SavedPipelines => {
+                        self.saved_pipelines_ui(ui, service, catalog.clone())
+                    }
+                    ClipboardModifyDialogSection::ManageTemplates => {
+                        if let Some(store) = store {
+                            self.manage_templates_ui(ui, catalog.clone(), store)
+                        } else {
+                            ui.label("Template management is unavailable.");
+                        }
+                    }
+                    ClipboardModifyDialogSection::ManagePipelines => {
+                        if let Some(store) = store {
+                            self.manage_pipelines_ui(ui, catalog.clone(), store)
+                        } else {
+                            ui.label("Pipeline management is unavailable.");
+                        }
+                    }
+                    ClipboardModifyDialogSection::Help => self.help_ui(ui, catalog.clone()),
                 }
-                ClipboardModifyDialogSection::Help => self.help_ui(ui, catalog.clone()),
             });
+        output.inner_rect
     }
 
     fn render_section_footer(
@@ -389,11 +420,11 @@ impl ClipboardModifyDialogState {
         service: &Arc<ProductionClipboardService>,
         catalog: Arc<ClipboardModifierCatalog>,
         store: Option<&ClipboardModifierStore>,
-    ) {
+    ) -> Option<egui::Response> {
         match self.section {
             ClipboardModifyDialogSection::Modify => {
                 ui.separator();
-                self.modify_footer_ui(ui, service);
+                Some(self.modify_footer_ui(ui, service))
             }
             ClipboardModifyDialogSection::Templates => {
                 if let Some(id) = self
@@ -402,37 +433,181 @@ impl ClipboardModifyDialogState {
                     .filter(|id| find_template(catalog.as_ref(), id).is_some())
                 {
                     ui.separator();
-                    if ui.button("Apply Template").clicked() {
+                    let button = ui.button("Apply Template");
+                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                    if response.clicked() {
                         self.apply_template_through_commit_path(&id, catalog.clone());
                         self.commit(service, false, false);
                     }
+                    Some(response)
+                } else {
+                    None
                 }
             }
             ClipboardModifyDialogSection::ManageTemplates => {
                 if let Some(store) = store {
                     ui.separator();
-                    if ui
-                        .add_enabled(
-                            self.can_save_template_draft(catalog.as_ref()),
-                            egui::Button::new("Save"),
-                        )
-                        .clicked()
-                    {
+                    let button = ui.add_enabled(
+                        self.can_save_template_draft(catalog.as_ref()),
+                        egui::Button::new("Save"),
+                    );
+                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                    if response.clicked() {
                         let _ = self.save_template_draft(catalog.as_ref(), store);
                     }
+                    Some(response)
+                } else {
+                    None
                 }
             }
             ClipboardModifyDialogSection::ManagePipelines => {
                 if let Some(store) = store {
                     ui.separator();
-                    if ui.button("Save").clicked() {
+                    let button = ui.button("Save");
+                    let response = with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                    if response.clicked() {
                         let _ = self.save_pipeline_draft(catalog.as_ref(), store);
                         self.duplicate_save_confirmation = None;
                     }
+                    Some(response)
+                } else {
+                    None
                 }
             }
-            ClipboardModifyDialogSection::SavedPipelines | ClipboardModifyDialogSection::Help => {}
+            ClipboardModifyDialogSection::SavedPipelines | ClipboardModifyDialogSection::Help => {
+                None
+            }
         }
+    }
+
+    fn render_section_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        service: &Arc<ProductionClipboardService>,
+        catalog: Arc<ClipboardModifierCatalog>,
+        store: Option<&ClipboardModifierStore>,
+    ) -> Option<egui::Response> {
+        let contents_id = ui.id();
+        let available_height = ui.available_height();
+        let available_width = ui.available_width();
+        let available_rect = ui.available_rect_before_wrap();
+        let navigation_height = tab_navigation_reserved_height(ui);
+        // A tab click changes `self.section` before the body and footer render
+        // later in this same frame. The Modify action row is the widest footer,
+        // so reserving it conservatively covers every section transition.
+        let footer_reserved_height =
+            section_footer_reserved_height(ui, ClipboardModifyDialogSection::Modify, true);
+        let spacing = ui.spacing().clone();
+        let separator_height = ui
+            .style()
+            .separator_style(
+                &egui::widget_style::Classes::default(),
+                egui::widget_style::WidgetState::Noninteractive,
+            )
+            .spacing;
+        let navigation_separator_height = spacing.item_spacing.y + separator_height;
+        let constrained_overflow = available_height.is_finite()
+            && navigation_height + navigation_separator_height + footer_reserved_height
+                > available_height;
+
+        // Both paths use the Window content's original identity for section
+        // widgets. The constrained outer ScrollArea can therefore wrap them
+        // without changing their existing scroll and editor state IDs.
+        let mut render_contents = |ui: &mut egui::Ui, constrained: bool| {
+            let navigation_overflows = self.render_tab_navigation(ui);
+            ui.separator();
+            let has_footer = match self.section {
+                ClipboardModifyDialogSection::Modify | ClipboardModifyDialogSection::Templates => {
+                    true
+                }
+                ClipboardModifyDialogSection::ManageTemplates
+                | ClipboardModifyDialogSection::ManagePipelines => store.is_some(),
+                ClipboardModifyDialogSection::SavedPipelines
+                | ClipboardModifyDialogSection::Help => false,
+            };
+            let footer_reserved_height =
+                section_footer_reserved_height(ui, self.section, has_footer);
+            let body_max_height = if constrained {
+                available_height.max(1.0)
+            } else {
+                clipboard_modify_body_max_height(ui.available_height(), 0.0, footer_reserved_height)
+            };
+            let body_rect = self.render_section_body(
+                ui,
+                body_max_height,
+                available_width,
+                service,
+                catalog.clone(),
+                store,
+            );
+            let footer_response = self.render_section_footer(ui, service, catalog.clone(), store);
+            (
+                navigation_overflows,
+                body_rect,
+                body_max_height,
+                footer_response,
+            )
+        };
+
+        #[cfg(test)]
+        let mut constrained_scroll = None;
+        let (navigation_overflows, body_rect, body_max_height, footer_response) =
+            if constrained_overflow {
+                #[cfg(test)]
+                let mut scroll_clip_rect = egui::Rect::NOTHING;
+                let output = egui::ScrollArea::both()
+                    .id_salt(CLIPBOARD_MODIFY_CONSTRAINED_CONTENT_SCROLL_ID)
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(0.0)
+                    .max_width(available_width.max(0.0))
+                    .max_height(available_height.max(0.0))
+                    .show(ui, |ui| {
+                        let constrained_contents_rect = egui::Rect::from_min_size(
+                            ui.available_rect_before_wrap().min,
+                            egui::vec2(available_width.max(0.0), available_height.max(0.0)),
+                        );
+                        let contents = ui.scope_builder(
+                            egui::UiBuilder::new()
+                                .id(contents_id)
+                                .max_rect(constrained_contents_rect),
+                            |ui| render_contents(ui, true),
+                        );
+                        #[cfg(test)]
+                        {
+                            scroll_clip_rect = ui.clip_rect();
+                        }
+                        contents.inner
+                    });
+                #[cfg(test)]
+                {
+                    constrained_scroll = Some(NativeScrollObservation {
+                        id: output.id,
+                        inner_rect: output.inner_rect,
+                        clip_rect: scroll_clip_rect,
+                        content_size: output.content_size,
+                    });
+                }
+                output.inner
+            } else {
+                let contents = ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .id(contents_id)
+                        .max_rect(available_rect),
+                    |ui| render_contents(ui, false),
+                );
+                contents.inner
+            };
+
+        #[cfg(test)]
+        {
+            self.section_layout_observation = Some(SectionLayoutObservation {
+                navigation_overflows,
+                body_rect,
+                body_max_height,
+                constrained_scroll,
+            });
+        }
+        footer_response
     }
 
     pub fn filtered_templates<'a>(
@@ -582,7 +757,8 @@ impl ClipboardModifyDialogState {
     }
 
     fn help_ui(&mut self, ui: &mut egui::Ui, catalog: Arc<ClipboardModifierCatalog>) {
-        ui.horizontal(|ui| {
+        compact_section_heading(ui, "Clipboard Modify help", None);
+        ui.horizontal_wrapped(|ui| {
             ui.label("Search help");
             ui.text_edit_singleline(&mut self.help_filter);
         });
@@ -624,7 +800,12 @@ impl ClipboardModifyDialogState {
         _service: &Arc<ProductionClipboardService>,
         catalog: Arc<ClipboardModifierCatalog>,
     ) {
-        ui.horizontal(|ui| {
+        compact_section_heading(
+            ui,
+            "Templates",
+            Some("Select a template to preview it against the current source."),
+        );
+        ui.horizontal_wrapped(|ui| {
             ui.label("Filter");
             ui.text_edit_singleline(&mut self.template_filter);
             if ui.button("Manage Templates").clicked() {
@@ -753,19 +934,26 @@ impl ClipboardModifyDialogState {
         catalog: Arc<ClipboardModifierCatalog>,
         store: &ClipboardModifierStore,
     ) {
+        compact_section_heading(
+            ui,
+            "Manage templates",
+            Some("Aliases are comma-separated. Saved changes update the template catalog."),
+        );
         if self.template_draft.is_empty() && !catalog.templates.is_empty() {
             self.begin_template_edit(catalog.as_ref());
         }
-        if ui.button("Add template").clicked() {
-            self.template_draft.push(ClipboardTemplate {
-                id: "new-template".into(),
-                label: "New Template".into(),
-                aliases: vec![],
-                template: "{{clipboard}}".into(),
-                processor: Some(TemplateProcessor::Literal),
-            });
-            self.unsaved_template_draft = true;
-        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add template").clicked() {
+                self.template_draft.push(ClipboardTemplate {
+                    id: "new-template".into(),
+                    label: "New Template".into(),
+                    aliases: vec![],
+                    template: "{{clipboard}}".into(),
+                    processor: Some(TemplateProcessor::Literal),
+                });
+                self.unsaved_template_draft = true;
+            }
+        });
         let mut remove = None;
         let mut moved = false;
         let mut edited = false;
@@ -773,33 +961,39 @@ impl ClipboardModifyDialogState {
             let record_id =
                 egui::Id::new(("cm_template_record", self.template_draft[i].id.as_str()));
             ui.push_id(record_id, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("ID");
                     edited |= ui
                         .push_id("template_id", |ui| {
                             ui.text_edit_singleline(&mut self.template_draft[i].id)
                         })
                         .inner
                         .changed();
+                    ui.label("Label");
                     edited |= ui
                         .push_id("template_label", |ui| {
                             ui.text_edit_singleline(&mut self.template_draft[i].label)
                         })
                         .inner
                         .changed();
-                    if ui.button("↑").clicked() && i > 0 {
-                        self.template_draft.swap(i, i - 1);
-                        moved = true;
-                    }
-                    if ui.button("↓").clicked() && i + 1 < self.template_draft.len() {
-                        self.template_draft.swap(i, i + 1);
-                        moved = true;
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.template_delete_confirmation = Some(self.template_draft[i].id.clone());
-                        remove = Some(self.template_draft[i].id.clone());
-                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("↑").clicked() && i > 0 {
+                            self.template_draft.swap(i, i - 1);
+                            moved = true;
+                        }
+                        if ui.button("↓").clicked() && i + 1 < self.template_draft.len() {
+                            self.template_draft.swap(i, i + 1);
+                            moved = true;
+                        }
+                        if ui.button("Delete").clicked() {
+                            self.template_delete_confirmation =
+                                Some(self.template_draft[i].id.clone());
+                            remove = Some(self.template_draft[i].id.clone());
+                        }
+                    });
                 });
                 let mut aliases = self.template_draft[i].aliases.join(", ");
+                ui.label("Aliases");
                 if ui
                     .push_id("template_aliases", |ui| {
                         ui.text_edit_singleline(&mut aliases)
@@ -815,6 +1009,7 @@ impl ClipboardModifyDialogState {
                         .collect();
                     edited = true;
                 }
+                ui.label("Template body");
                 edited |= editable_multiline_ten_rows(
                     ui,
                     egui::Id::new(format!(
@@ -852,6 +1047,7 @@ impl ClipboardModifyDialogState {
         if let Some(id) = &self.template_delete_confirmation
             && let Some(message) = Self::template_delete_confirmation_text(catalog.as_ref(), id)
         {
+            semantic_status(ui, StatusTone::Warning, "Template deletion", None);
             readonly_multiline_preview(
                 ui,
                 egui::Id::new("cm_template_delete_confirmation"),
@@ -866,9 +1062,11 @@ impl ClipboardModifyDialogState {
             self.unsaved_template_draft = true;
         }
         if let Err(e) = self.validate_template_draft(catalog.as_ref()) {
+            semantic_status(ui, StatusTone::Error, "Template validation failed", None);
             readonly_multiline_preview(ui, egui::Id::new("cm_template_validation_error"), &e, true);
         }
         if let Some(e) = &self.template_editor_error {
+            semantic_status(ui, StatusTone::Error, "Template save failed", None);
             readonly_multiline_preview(ui, egui::Id::new("cm_template_editor_error"), e, true);
         }
     }
@@ -879,6 +1077,11 @@ impl ClipboardModifyDialogState {
         service: &Arc<ProductionClipboardService>,
         catalog: Arc<ClipboardModifierCatalog>,
     ) {
+        compact_section_heading(
+            ui,
+            "Saved pipelines",
+            Some("Preview a pipeline against the current source before running it."),
+        );
         if ui.button("Manage Pipelines").clicked() {
             self.begin_pipeline_edit(catalog.as_ref());
             self.section = ClipboardModifyDialogSection::ManagePipelines;
@@ -911,10 +1114,15 @@ impl ClipboardModifyDialogState {
         catalog: Arc<ClipboardModifierCatalog>,
         store: &ClipboardModifierStore,
     ) {
+        compact_section_heading(
+            ui,
+            "Manage pipelines",
+            Some("Aliases are comma-separated. Changes are written to the saved pipeline catalog."),
+        );
         if self.pipeline_draft.is_empty() && !catalog.pipelines.is_empty() {
             self.begin_pipeline_edit(catalog.as_ref());
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Add pipeline").clicked() {
                 self.pipeline_draft.push(SavedPipeline {
                     id: Self::duplicate_pipeline_id(catalog.as_ref(), "new-pipeline"),
@@ -934,7 +1142,7 @@ impl ClipboardModifyDialogState {
         for i in 0..self.pipeline_draft.len() {
             let pipeline_field_id = format!("cm_pipeline_{}_record", self.pipeline_draft[i].id);
             ui.push_id(&pipeline_field_id, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("ID");
                     edited |= ui
                         .push_id("pipeline_id", |ui| {
@@ -949,27 +1157,36 @@ impl ClipboardModifyDialogState {
                         })
                         .inner
                         .changed();
-                    if ui.button("Duplicate").clicked() {
-                        let mut p = self.pipeline_draft[i].clone();
-                        p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
-                        p.label = format!("{} Copy", p.label);
-                        self.duplicate_save_confirmation = Some(p.id.clone());
-                        self.pipeline_draft.push(p);
-                        self.unsaved_pipeline_draft = true;
-                    }
-                    if ui.button("↑").clicked() && i > 0 {
-                        swap = Some((i, i - 1));
-                    }
-                    if ui.button("↓").clicked() && i + 1 < self.pipeline_draft.len() {
-                        swap = Some((i, i + 1));
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.pipeline_delete_confirmation = Some(self.pipeline_draft[i].id.clone());
-                        remove = Some(self.pipeline_draft[i].id.clone());
-                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Duplicate").clicked() {
+                            let mut p = self.pipeline_draft[i].clone();
+                            p.id = Self::duplicate_pipeline_id(catalog.as_ref(), &p.id);
+                            p.label = format!("{} Copy", p.label);
+                            self.duplicate_save_confirmation = Some(p.id.clone());
+                            self.pipeline_draft.push(p);
+                            self.unsaved_pipeline_draft = true;
+                        }
+                        if ui.button("↑").clicked() && i > 0 {
+                            swap = Some((i, i - 1));
+                        }
+                        if ui.button("↓").clicked() && i + 1 < self.pipeline_draft.len() {
+                            swap = Some((i, i + 1));
+                        }
+                        if ui.button("Delete").clicked() {
+                            self.pipeline_delete_confirmation =
+                                Some(self.pipeline_draft[i].id.clone());
+                            remove = Some(self.pipeline_draft[i].id.clone());
+                        }
+                    });
                 });
                 let mut aliases = self.pipeline_draft[i].aliases.join(", ");
-                if ui.text_edit_singleline(&mut aliases).changed() {
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut aliases)
+                            .hint_text("Aliases (comma-separated)"),
+                    )
+                    .changed()
+                {
                     self.pipeline_draft[i].aliases = aliases
                         .split(',')
                         .map(str::trim)
@@ -979,12 +1196,17 @@ impl ClipboardModifyDialogState {
                     self.unsaved_pipeline_draft = true;
                 }
                 for j in 0..self.pipeline_draft[i].stages.len() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!(
-                            "Stage {} {:?}",
-                            j + 1,
-                            self.pipeline_draft[i].stages[j].operation
-                        ));
+                    ui.horizontal_wrapped(|ui| {
+                        compact_section_heading(
+                            ui,
+                            &format!(
+                                "Stage {} {:?}",
+                                j + 1,
+                                self.pipeline_draft[i].stages[j].operation
+                            ),
+                            None,
+                        );
+                        ui.label("Prefix");
                         let a = &mut self.pipeline_draft[i].stages[j].arguments;
                         edited |= ui
                             .push_id(format!("stage_{j}_prefix"), |ui| {
@@ -996,6 +1218,7 @@ impl ClipboardModifyDialogState {
                             })
                             .inner
                             .changed();
+                        ui.label("Suffix");
                         edited |= ui
                             .push_id(format!("stage_{j}_suffix"), |ui| {
                                 stage_argument_editor(
@@ -1006,6 +1229,7 @@ impl ClipboardModifyDialogState {
                             })
                             .inner
                             .changed();
+                        ui.label("Template or pipeline");
                         edited |= ui
                             .push_id(format!("stage_{j}_name"), |ui| {
                                 stage_argument_editor(
@@ -1016,6 +1240,7 @@ impl ClipboardModifyDialogState {
                             })
                             .inner
                             .changed();
+                        ui.label("Language");
                         edited |= ui
                             .push_id(format!("stage_{j}_language"), |ui| {
                                 stage_argument_editor(
@@ -1067,6 +1292,12 @@ impl ClipboardModifyDialogState {
             );
         }
         if let Some(id) = &self.duplicate_save_confirmation {
+            semantic_status(
+                ui,
+                StatusTone::Warning,
+                "Duplicate pipeline needs confirmation",
+                Some(id),
+            );
             readonly_multiline_preview(
                 ui,
                 egui::Id::new("cm_duplicate_save_confirmation"),
@@ -1075,6 +1306,7 @@ impl ClipboardModifyDialogState {
             );
         }
         if let Some(e) = &self.pipeline_editor_error {
+            semantic_status(ui, StatusTone::Error, "Pipeline save failed", None);
             readonly_multiline_preview(ui, egui::Id::new("cm_pipeline_editor_error"), e, true);
         }
     }
@@ -1118,8 +1350,9 @@ impl ClipboardModifyDialogState {
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
     ) {
         if let Some(e) = &self.source_error {
-            ui.colored_label(egui::Color32::RED, e);
+            semantic_status(ui, StatusTone::Error, "Clipboard source error", Some(e));
         }
+        compact_section_heading(ui, "Modify clipboard", None);
         ui.horizontal(|ui| {
             if ui.button("Add uppercase stage").clicked() {
                 self.add_stage(OperationId::Uppercase, catalog.clone())
@@ -1144,23 +1377,25 @@ impl ClipboardModifyDialogState {
         catalog: Arc<crate::clipboard_modify::model::ClipboardModifierCatalog>,
     ) {
         if self.large_confirmation_open {
-            ui.label(format!(
-                "Large clipboard source: {} bytes. Preview is paused.",
-                self.source.len()
-            ));
+            semantic_status(
+                ui,
+                StatusTone::Warning,
+                "Preview paused for large source",
+                Some(&format!("{} bytes", self.source.len())),
+            );
             if ui.button("Preview this source").clicked() {
                 self.acknowledge_large_source(catalog.clone());
             }
             return;
         }
 
-        ui.label("Source");
+        compact_section_heading(ui, "Source", None);
         if editable_multiline_ten_rows(ui, egui::Id::new("cm_source"), &mut self.source).changed() {
             self.mark_dirty(catalog.clone());
         }
 
         ui.separator();
-        ui.label("Stages");
+        compact_section_heading(ui, "Stages", None);
         let mut remove = None;
         let mut changed = false;
         for i in 0..self.stages.len() {
@@ -1194,6 +1429,7 @@ impl ClipboardModifyDialogState {
         }
 
         ui.separator();
+        compact_section_heading(ui, "Result", None);
         self.modify_preview_ui(ui);
         self.external_change_warning_ui(ui, service);
     }
@@ -1205,29 +1441,39 @@ impl ClipboardModifyDialogState {
     fn preview_state_ui(&mut self, ui: &mut egui::Ui, preview_id: egui::Id) {
         match self.preview.state() {
             PreviewState::Completed { display, .. } => {
-                ui.label(result_preview_summary(
+                let summary = result_preview_summary(
                     display.metadata.bytes,
                     display.metadata.chars,
                     display.metadata.lines,
                     display.truncated,
-                ));
+                );
+                semantic_status(
+                    ui,
+                    if display.truncated {
+                        StatusTone::Warning
+                    } else {
+                        StatusTone::Success
+                    },
+                    &summary,
+                    None,
+                );
                 ui.checkbox(&mut self.wrap_preview, "Wrap preview");
                 readonly_multiline_preview(ui, preview_id, &display.text, self.wrap_preview);
             }
             PreviewState::Failed { error, .. } => {
-                ui.colored_label(egui::Color32::RED, format!("Preview failed: {error}"));
+                semantic_status(ui, StatusTone::Error, "Preview failed", Some(error));
             }
             PreviewState::PendingDebounce { .. } => {
-                ui.label("Preview pending…");
+                semantic_status(ui, StatusTone::Info, "Preview pending", None);
             }
             PreviewState::Running { .. } => {
-                ui.label("Preview running…");
+                semantic_status(ui, StatusTone::Info, "Preview running", None);
             }
             PreviewState::Cancelled { .. } => {
-                ui.label("Preview cancelled.");
+                semantic_status(ui, StatusTone::Info, "Preview cancelled", None);
             }
             PreviewState::IdleMissing => {
-                ui.label("Preview not requested.");
+                semantic_status(ui, StatusTone::Info, "Preview not requested", None);
             }
         }
     }
@@ -1240,13 +1486,21 @@ impl ClipboardModifyDialogState {
         if let Some(cur) = &self.external_change {
             ui.separator();
             let message = external_clipboard_change_warning(cur);
+            semantic_status(
+                ui,
+                StatusTone::Warning,
+                "Clipboard changed",
+                Some("Confirm before overwriting the current clipboard."),
+            );
             readonly_multiline_preview(
                 ui,
                 egui::Id::new("cm_external_change_warning"),
                 &message,
                 true,
             );
-            if ui.button("Overwrite clipboard").clicked() {
+            let button = ui.button("Overwrite clipboard");
+            let response = with_button_emphasis(ui, button, ButtonEmphasis::Destructive);
+            if response.clicked() {
                 let close = matches!(
                     self.pending_action,
                     Some(PendingDialogAction::ApplyAndClose)
@@ -1257,24 +1511,72 @@ impl ClipboardModifyDialogState {
         }
     }
 
-    fn modify_footer_ui(&mut self, ui: &mut egui::Ui, service: &Arc<ProductionClipboardService>) {
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(self.can_apply(), |ui| {
-                if ui.button("Apply").clicked() {
-                    self.commit(service, false, false)
+    fn modify_footer_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        service: &Arc<ProductionClipboardService>,
+    ) -> egui::Response {
+        let labels = section_footer_action_labels(ClipboardModifyDialogSection::Modify);
+        let (button_height, content_width) = footer_button_row_metrics(ui, labels);
+        let needs_scroll = content_width > ui.available_width();
+        let scroll_height = button_height
+            + if needs_scroll {
+                ui.spacing().scroll.bar_width
+            } else {
+                0.0
+            };
+        let visibility = if needs_scroll {
+            egui::scroll_area::ScrollBarVisibility::AlwaysVisible
+        } else {
+            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded
+        };
+        #[cfg(test)]
+        let mut footer_clip_rect = egui::Rect::NOTHING;
+        let output = egui::ScrollArea::horizontal()
+            .id_salt("clipboard_modify_footer_actions")
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(visibility)
+            .max_height(scroll_height)
+            .show(ui, |ui| {
+                #[cfg(test)]
+                {
+                    footer_clip_rect = ui.clip_rect();
                 }
-                if ui.button("Apply and Close").clicked() {
-                    self.commit(service, true, false)
-                }
-                if ui.button("Copy Result").clicked() {
-                    self.commit(service, false, true)
-                }
+                ui.set_max_height(button_height);
+                ui.horizontal(|ui| {
+                    let enabled = self.can_apply();
+                    let apply_response = ui
+                        .add_enabled_ui(enabled, |ui| {
+                            let button = ui.button("Apply");
+                            let response =
+                                with_button_emphasis(ui, button, ButtonEmphasis::Primary);
+                            if response.clicked() {
+                                self.commit(service, false, false);
+                            }
+                            response
+                        })
+                        .inner;
+                    let apply_close = ui.add_enabled(enabled, egui::Button::new("Apply and Close"));
+                    if apply_close.clicked() {
+                        self.commit(service, true, false);
+                    }
+                    let copy_result = ui.add_enabled(enabled, egui::Button::new("Copy Result"));
+                    if copy_result.clicked() {
+                        self.commit(service, false, true);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.open = false;
+                        self.cleanup_after_close();
+                    }
+                    apply_response
+                })
+                .inner
             });
-            if ui.button("Cancel").clicked() {
-                self.open = false;
-                self.cleanup_after_close();
-            }
-        });
+        #[cfg(test)]
+        {
+            self.apply_footer_clip_rect = Some(footer_clip_rect);
+        }
+        output.inner
     }
     pub fn commit(
         &mut self,
@@ -1417,8 +1719,19 @@ pub fn tab_scroll_id(section: ClipboardModifyDialogSection) -> &'static str {
     }
 }
 
-pub fn clipboard_modify_tab_navigation_height(interact_height: f32) -> f32 {
-    interact_height.max(1.0) + 8.0
+pub fn clipboard_modify_tab_navigation_height(button_height: f32) -> f32 {
+    button_height.max(1.0) + 8.0
+}
+
+fn tab_navigation_reserved_height(ui: &mut egui::Ui) -> f32 {
+    let labels = CLIPBOARD_MODIFY_TAB_LABELS.map(|(_, label)| label);
+    let (button_height, content_width) = footer_button_row_metrics(ui, &labels);
+    let scrollbar_height = if content_width > ui.available_width() {
+        ui.spacing().scroll.bar_width
+    } else {
+        0.0
+    };
+    clipboard_modify_tab_navigation_height(button_height) + scrollbar_height
 }
 
 pub fn clipboard_modify_body_max_height(
@@ -1429,14 +1742,84 @@ pub fn clipboard_modify_body_max_height(
     (available_height - navigation_reserved_height - footer_reserved_height).max(0.0)
 }
 
-pub fn section_footer_reserved_height(section: ClipboardModifyDialogSection) -> f32 {
-    match section {
-        ClipboardModifyDialogSection::Modify
-        | ClipboardModifyDialogSection::Templates
-        | ClipboardModifyDialogSection::ManageTemplates
-        | ClipboardModifyDialogSection::ManagePipelines => CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT,
-        ClipboardModifyDialogSection::SavedPipelines | ClipboardModifyDialogSection::Help => 0.0,
+fn section_footer_reserved_height(
+    ui: &mut egui::Ui,
+    section: ClipboardModifyDialogSection,
+    has_footer: bool,
+) -> f32 {
+    if !has_footer {
+        return 0.0;
     }
+    let labels = section_footer_action_labels(section);
+    let (button_height, content_width) = footer_button_row_metrics(ui, labels);
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let separator_height = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let scrollbar_height = if content_width > ui.available_width() {
+        spacing.scroll.bar_width
+    } else {
+        0.0
+    };
+    button_height + scrollbar_height + 2.0 * spacing.item_spacing.y + separator_height
+}
+
+fn section_footer_action_labels(section: ClipboardModifyDialogSection) -> &'static [&'static str] {
+    match section {
+        ClipboardModifyDialogSection::Modify => {
+            &["Apply", "Apply and Close", "Copy Result", "Cancel"]
+        }
+        ClipboardModifyDialogSection::Templates => &["Apply Template"],
+        ClipboardModifyDialogSection::ManageTemplates
+        | ClipboardModifyDialogSection::ManagePipelines => &["Save"],
+        ClipboardModifyDialogSection::SavedPipelines | ClipboardModifyDialogSection::Help => &[],
+    }
+}
+
+fn footer_button_row_metrics(ui: &mut egui::Ui, labels: &[&str]) -> (f32, f32) {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let font_id = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| egui::TextStyle::Body.resolve(&style));
+    let text_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + spacing.extra_text_line_spacing;
+    let button_frame = style
+        .button_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Inactive,
+        )
+        .frame;
+    let button_height =
+        (text_height + button_frame.total_margin().sum().y).max(spacing.interact_size.y);
+    let text_color = ui.visuals().text_color();
+    let mut content_width = 0.0;
+    for label in labels {
+        let text_width = ui.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap((*label).to_owned(), font_id.clone(), text_color)
+                .size()
+                .x
+        });
+        let button_width =
+            (text_width + button_frame.total_margin().sum().x).max(spacing.interact_size.x);
+        if content_width > 0.0 {
+            content_width += spacing.item_spacing.x;
+        }
+        content_width += button_width;
+    }
+    (button_height, content_width)
 }
 
 pub fn section_scroll_id(section: ClipboardModifyDialogSection) -> &'static str {
@@ -1568,18 +1951,207 @@ mod tests {
 
     #[test]
     fn footer_reservation_matches_fixed_control_sections() {
-        assert_eq!(
-            section_footer_reserved_height(ClipboardModifyDialogSection::Modify),
-            CLIPBOARD_MODIFY_FOOTER_RESERVED_HEIGHT
+        let ctx = egui::Context::default();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0));
+        let mut reservations = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ui| {
+                let modify =
+                    section_footer_reserved_height(ui, ClipboardModifyDialogSection::Modify, true);
+                let apply_template = section_footer_reserved_height(
+                    ui,
+                    ClipboardModifyDialogSection::Templates,
+                    true,
+                );
+                let manage = section_footer_reserved_height(
+                    ui,
+                    ClipboardModifyDialogSection::ManageTemplates,
+                    true,
+                );
+                let no_footer = section_footer_reserved_height(
+                    ui,
+                    ClipboardModifyDialogSection::SavedPipelines,
+                    false,
+                );
+                let button_height = footer_button_row_metrics(
+                    ui,
+                    section_footer_action_labels(ClipboardModifyDialogSection::Modify),
+                )
+                .0;
+                reservations = Some((modify, apply_template, manage, no_footer, button_height));
+            },
         );
-        assert_eq!(
-            section_footer_reserved_height(ClipboardModifyDialogSection::SavedPipelines),
-            0.0
+        let (modify, apply_template, manage, no_footer, button_height) =
+            reservations.expect("the UI pass records its footer measurements");
+        output.drop_without_applying_deltas();
+        assert!(modify >= button_height);
+        assert!(apply_template >= button_height);
+        assert!(manage >= button_height);
+        assert_eq!(no_footer, 0.0);
+    }
+
+    #[test]
+    fn modify_constrained_navigation_body_footer_and_disabled_apply_remain_usable() {
+        use crate::clipboard_modify::clipboard::{
+            ArboardClipboardBackend, ProductionClipboardService,
+        };
+        use crate::gui::theme::initialize_runtime;
+        use crate::settings::ThemeSettings;
+        use std::sync::Arc;
+
+        let ctx = egui::Context::default();
+        let mut theme = ThemeSettings::default();
+        theme.preferences.typography_scale = 1.75;
+        initialize_runtime(&ctx, &theme);
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(240.0, 160.0));
+        let window_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, screen_rect.size());
+        let mut state = ClipboardModifyDialogState::default();
+        state.open = true;
+        state.section = ClipboardModifyDialogSection::Modify;
+        state.source = "clipboard source".into();
+        let service = Arc::new(ProductionClipboardService::new(ArboardClipboardBackend));
+        let catalog = Arc::new(cat());
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        let render_frame = |state: &mut ClipboardModifyDialogState| {
+            let mut apply_enabled = true;
+            let mut apply_rect = egui::Rect::NOTHING;
+            let mut window_content_rect = egui::Rect::NOTHING;
+            let mut rendered_window_rect = egui::Rect::NOTHING;
+            let mut sizing_pass = true;
+            let mut visible = false;
+            let output = ctx.run_ui(input(), |ctx| {
+                let window_output = egui::Window::new("Clipboard Modify constrained layout")
+                    .fixed_rect(window_rect)
+                    .resizable(false)
+                    .min_size(effective_clipboard_modify_min_size(
+                        clipboard_modify_usable_viewport_size(screen_rect.size()),
+                    ))
+                    .show(ctx, |ui| {
+                        window_content_rect = ui.max_rect();
+                        sizing_pass = ui.is_sizing_pass();
+                        visible = ui.is_visible();
+                        let apply = state
+                            .render_section_contents(ui, &service, catalog.clone(), None)
+                            .expect("Modify always has a footer");
+                        apply_enabled = apply.enabled();
+                        apply_rect = apply.rect;
+                    });
+                if let Some(window_output) = window_output {
+                    rendered_window_rect = window_output.response.rect;
+                }
+            });
+            (
+                output,
+                sizing_pass,
+                visible,
+                apply_enabled,
+                apply_rect,
+                window_content_rect,
+                rendered_window_rect,
+            )
+        };
+        let (first_frame_output, first_frame_sizing_pass, first_frame_visible, _, _, _, _) =
+            render_frame(&mut state);
+        first_frame_output.drop_without_applying_deltas();
+
+        let (
+            output,
+            sizing_pass,
+            visible,
+            apply_enabled,
+            initial_apply_rect,
+            initial_window_content_rect,
+            rendered_window_rect,
+        ) = render_frame(&mut state);
+        let initial_layout = state
+            .section_layout_observation
+            .expect("the rendered section records its constrained layout");
+        let outer_scroll = initial_layout
+            .constrained_scroll
+            .expect("navigation and footer use native outer scrolling when they cannot fit");
+        output.drop_without_applying_deltas();
+
+        assert!(
+            first_frame_sizing_pass && !first_frame_visible,
+            "first Window frame should be the invisible sizing pass"
         );
-        assert_eq!(
-            section_footer_reserved_height(ClipboardModifyDialogSection::Help),
-            0.0
+        assert!(
+            !sizing_pass && visible,
+            "Modify geometry must come from a visible non-sizing frame"
         );
+        assert!(
+            initial_layout.navigation_overflows,
+            "the existing tabs remain horizontally scrollable"
+        );
+        assert!(
+            initial_layout.body_max_height > 0.0
+                && initial_layout.body_rect.height() <= initial_layout.body_max_height + 0.5,
+            "the source and forms retain a bounded positive body viewport"
+        );
+        assert!(
+            outer_scroll.content_size.y > outer_scroll.inner_rect.height(),
+            "constrained chrome remains reachable through native vertical scrolling"
+        );
+
+        let mut scroll_state = egui::scroll_area::State::load(&ctx, outer_scroll.id)
+            .expect("constrained content stores native scroll state");
+        scroll_state.offset.y = (scroll_state.offset.y + initial_apply_rect.center().y
+            - outer_scroll.inner_rect.center().y)
+            .max(0.0);
+        scroll_state.store(&ctx, outer_scroll.id);
+        let (
+            scrolled_output,
+            scrolled_sizing_pass,
+            scrolled_visible,
+            _,
+            scrolled_apply_rect,
+            scrolled_window_content_rect,
+            scrolled_window_rect,
+        ) = render_frame(&mut state);
+        let scrolled_layout = state
+            .section_layout_observation
+            .expect("the scrolled section records its native viewport");
+        let scrolled_outer_scroll = scrolled_layout
+            .constrained_scroll
+            .expect("the constrained content keeps the native overflow owner");
+        let apply_footer_clip = state
+            .apply_footer_clip_rect
+            .expect("Apply records the native horizontal footer clip");
+        let apply_visible_clip = scrolled_window_content_rect
+            .intersect(scrolled_outer_scroll.inner_rect)
+            .intersect(scrolled_outer_scroll.clip_rect)
+            .intersect(apply_footer_clip);
+        let apply_is_fully_visible = apply_visible_clip.contains_rect(scrolled_apply_rect);
+        let window_fits_screen = screen_rect.contains_rect(initial_window_content_rect)
+            && screen_rect.contains_rect(scrolled_window_content_rect)
+            && screen_rect.contains_rect(rendered_window_rect)
+            && screen_rect.contains_rect(scrolled_window_rect)
+            && rendered_window_rect.width() <= screen_rect.width()
+            && rendered_window_rect.height() <= screen_rect.height()
+            && scrolled_window_rect.width() <= screen_rect.width()
+            && scrolled_window_rect.height() <= screen_rect.height();
+        scrolled_output.drop_without_applying_deltas();
+        assert!(!scrolled_sizing_pass && scrolled_visible);
+        assert!(
+            window_fits_screen,
+            "the native overflow owner keeps the window within its viewport"
+        );
+        assert!(
+            apply_is_fully_visible,
+            "Apply is fully visible within the native scrolled window and footer clips"
+        );
+        assert!(
+            !apply_enabled,
+            "Apply stays disabled without a completed preview"
+        );
+        assert!(!state.can_apply());
     }
 
     #[test]

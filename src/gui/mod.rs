@@ -295,6 +295,9 @@ impl AppEventSender {
 
 const APP_EVENT_PENDING_CAPACITY: usize = 256;
 
+#[cfg(test)]
+pub(crate) static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
 struct AppEventRegistry {
     sinks: Vec<AppEventSink>,
     /// Events emitted before the first GUI owner registers. Once an owner has
@@ -3733,7 +3736,7 @@ impl LauncherApp {
             Panel::CropDialog => {}
             Panel::TodoDialog => self.todo_dialog.open = true,
             Panel::TodoViewDialog => self.todo_view_dialog.open = true,
-            Panel::ClipboardDialog => self.clipboard_dialog.open = true,
+            Panel::ClipboardDialog => self.clipboard_dialog.ensure_open(),
             Panel::ClipboardModifyDialog => self
                 .clipboard_modify_dialog
                 .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
@@ -4327,7 +4330,6 @@ mod tests {
     };
     use eframe::egui;
     use image::RgbaImage;
-    use once_cell::sync::Lazy;
     use serde_json::json;
     use std::sync::{
         Arc, Mutex,
@@ -4335,8 +4337,6 @@ mod tests {
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
-
-    static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn reset_event_registry_for_test() {
         let mut registry = super::APP_EVENT_REGISTRY.lock().unwrap();
