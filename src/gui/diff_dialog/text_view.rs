@@ -2,152 +2,151 @@ use crate::diff::model::{DiffSide, TextViewModel};
 use crate::diff::text_compare::{
     ChangeImportance, DiffRowKind, FindScope, NavigationDirection, RowProjectionMode,
 };
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use eframe::egui::{self, Color32, RichText};
 use std::hash::{Hash, Hasher};
 
 pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewModel) {
     model.poll();
     shortcuts(ui, model);
-    let command_height = ui.spacing().interact_size.y;
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), command_height),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            if ui.button("◀ Previous (F7)").clicked() {
-                model.navigate(NavigationDirection::Previous)
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("◀ Previous (F7)").clicked() {
+            model.navigate(NavigationDirection::Previous)
+        }
+        if ui.button("Next (F8) ▶").clicked() {
+            model.navigate(NavigationDirection::Next)
+        }
+        let merge = model.comparison.is_some() && !model.external_conflict.iter().any(|x| *x);
+        if ui
+            .add_enabled(merge, egui::Button::new("Copy →"))
+            .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
+            .clicked()
+            && let Err(e) = model.copy_hunk(DiffSide::Left)
+        {
+            model.right_error = Some(e)
+        }
+        if ui
+            .add_enabled(merge, egui::Button::new("← Copy"))
+            .on_hover_text(
+                "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
+            )
+            .clicked()
+            && let Err(e) = model.copy_hunk(DiffSide::Right)
+        {
+            model.left_error = Some(e)
+        }
+        if ui.button("Find").clicked() {
+            model.find_open = true;
+        }
+        let mut sync = model.scroll.sync_vertical && model.scroll.sync_horizontal;
+        if ui.checkbox(&mut sync, "Sync Scroll").changed() {
+            model.scroll.set_sync(sync, sync);
+        }
+        ui.menu_button("View", |ui| {
+            if ui.checkbox(&mut model.wrap, "Wrap").changed() {
+                model.scroll.wrapped = model.wrap;
             }
-            if ui.button("Next (F8) ▶").clicked() {
-                model.navigate(NavigationDirection::Next)
+            let mut vertical = model.scroll.sync_vertical;
+            let mut horizontal = model.scroll.sync_horizontal;
+            let changed = ui.checkbox(&mut vertical, "Sync Vertical").changed()
+                | ui.checkbox(&mut horizontal, "Sync Horizontal").changed();
+            if changed {
+                model.scroll.set_sync(vertical, horizontal);
             }
-            let merge = model.comparison.is_some() && !model.external_conflict.iter().any(|x| *x);
+            ui.add_enabled(
+                model.large_file_tier.syntax_enabled(),
+                egui::Checkbox::new(&mut model.syntax, "Syntax"),
+            );
+            ui.checkbox(&mut model.visible_whitespace, "Visible Whitespace");
+            ui.add_enabled_ui(model.visible_whitespace, |ui| {
+                ui.checkbox(&mut model.visible_line_endings, "Line Endings");
+            });
+            ui.checkbox(&mut model.text_details_open, "Text Details");
+            ui.selectable_value(
+                &mut model.projection_mode,
+                RowProjectionMode::All,
+                "All rows",
+            );
+            ui.selectable_value(
+                &mut model.projection_mode,
+                RowProjectionMode::DifferencesOnly,
+                "Differences only",
+            );
+            let mut ignore = model.rules.ignore_all_whitespace;
             if ui
-                .add_enabled(merge, egui::Button::new("Copy →"))
-                .on_hover_text("Copy current difference left-to-right (Ctrl+Alt+Right)")
-                .clicked()
-                && let Err(e) = model.copy_hunk(DiffSide::Left)
+                .selectable_value(&mut ignore, false, "All differences")
+                .changed()
+                || ui
+                    .selectable_value(&mut ignore, true, "Important differences")
+                    .changed()
             {
-                model.right_error = Some(e)
+                model.set_ignore_all_whitespace(ignore);
+            }
+        });
+        ui.menu_button("More", |ui| {
+            super::export::text_menu(ui, model);
+            if ui.button("Rules…").clicked() {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(
+                        egui::Id::new(("diff-rules", view)),
+                        super::rules_dialog::RulesDialogState::new(&model.rules),
+                    )
+                });
+                ui.close();
+            }
+            if ui.button("First").clicked() {
+                model.navigate(NavigationDirection::First);
+            }
+            if ui.button("Last").clicked() {
+                model.navigate(NavigationDirection::Last);
+            }
+            if ui.button("Previous Intraline Difference").clicked() {
+                model.navigate_intraline(NavigationDirection::Previous);
+            }
+            if ui.button("Next Intraline Difference").clicked() {
+                model.navigate_intraline(NavigationDirection::Next);
             }
             if ui
-                .add_enabled(merge, egui::Button::new("← Copy"))
-                .on_hover_text(
-                    "Copy current difference right-to-left (Ctrl+Alt+Left; Alt+Left is Back)",
+                .add_enabled(
+                    model.left.can_undo() || model.right.can_undo(),
+                    egui::Button::new("Undo"),
                 )
                 .clicked()
-                && let Err(e) = model.copy_hunk(DiffSide::Right)
             {
-                model.left_error = Some(e)
+                model.undo();
             }
-            if ui.button("Find").clicked() {
-                model.find_open = true;
+            if ui
+                .add_enabled(
+                    model.left.can_redo() || model.right.can_redo(),
+                    egui::Button::new("Redo"),
+                )
+                .clicked()
+            {
+                model.redo();
             }
-            let mut sync = model.scroll.sync_vertical && model.scroll.sync_horizontal;
-            if ui.checkbox(&mut sync, "Sync Scroll").changed() {
-                model.scroll.set_sync(sync, sync);
+            if ui.button("Save Left").clicked() {
+                model.save(DiffSide::Left);
             }
-            ui.menu_button("View", |ui| {
-                if ui.checkbox(&mut model.wrap, "Wrap").changed() {
-                    model.scroll.wrapped = model.wrap;
-                }
-                let mut vertical = model.scroll.sync_vertical;
-                let mut horizontal = model.scroll.sync_horizontal;
-                let changed = ui.checkbox(&mut vertical, "Sync Vertical").changed()
-                    | ui.checkbox(&mut horizontal, "Sync Horizontal").changed();
-                if changed {
-                    model.scroll.set_sync(vertical, horizontal);
-                }
-                ui.add_enabled(
-                    model.large_file_tier.syntax_enabled(),
-                    egui::Checkbox::new(&mut model.syntax, "Syntax"),
-                );
-                ui.checkbox(&mut model.visible_whitespace, "Visible Whitespace");
-                ui.add_enabled_ui(model.visible_whitespace, |ui| {
-                    ui.checkbox(&mut model.visible_line_endings, "Line Endings");
-                });
-                ui.checkbox(&mut model.text_details_open, "Text Details");
-                ui.selectable_value(
-                    &mut model.projection_mode,
-                    RowProjectionMode::All,
-                    "All rows",
-                );
-                ui.selectable_value(
-                    &mut model.projection_mode,
-                    RowProjectionMode::DifferencesOnly,
-                    "Differences only",
-                );
-                let mut ignore = model.rules.ignore_all_whitespace;
-                if ui
-                    .selectable_value(&mut ignore, false, "All differences")
-                    .changed()
-                    || ui
-                        .selectable_value(&mut ignore, true, "Important differences")
-                        .changed()
-                {
-                    model.set_ignore_all_whitespace(ignore);
-                }
-            });
-            ui.menu_button("More", |ui| {
-                super::export::text_menu(ui, model);
-                if ui.button("Rules…").clicked() {
-                    ui.ctx().data_mut(|d| {
-                        d.insert_temp(
-                            egui::Id::new(("diff-rules", view)),
-                            super::rules_dialog::RulesDialogState::new(&model.rules),
-                        )
-                    });
-                    ui.close();
-                }
-                if ui.button("First").clicked() {
-                    model.navigate(NavigationDirection::First);
-                }
-                if ui.button("Last").clicked() {
-                    model.navigate(NavigationDirection::Last);
-                }
-                if ui.button("Previous Intraline Difference").clicked() {
-                    model.navigate_intraline(NavigationDirection::Previous);
-                }
-                if ui.button("Next Intraline Difference").clicked() {
-                    model.navigate_intraline(NavigationDirection::Next);
-                }
-                if ui
-                    .add_enabled(
-                        model.left.can_undo() || model.right.can_undo(),
-                        egui::Button::new("Undo"),
-                    )
-                    .clicked()
-                {
-                    model.undo();
-                }
-                if ui
-                    .add_enabled(
-                        model.left.can_redo() || model.right.can_redo(),
-                        egui::Button::new("Redo"),
-                    )
-                    .clicked()
-                {
-                    model.redo();
-                }
-                if ui.button("Save Left").clicked() {
+            if ui.button("Save Right").clicked() {
+                model.save(DiffSide::Right);
+            }
+            if ui.button("Save All Modified").clicked() {
+                if model.left.is_dirty() {
                     model.save(DiffSide::Left);
                 }
-                if ui.button("Save Right").clicked() {
+                if model.right.is_dirty() {
                     model.save(DiffSide::Right);
                 }
-                if ui.button("Save All Modified").clicked() {
-                    if model.left.is_dirty() {
-                        model.save(DiffSide::Left);
-                    }
-                    if model.right.is_dirty() {
-                        model.save(DiffSide::Right);
-                    }
-                }
-            });
-        },
-    );
+            }
+        });
+    });
     if model.find_open {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Find:");
-            let changed = ui.text_edit_singleline(&mut model.find_query).changed();
+            let find_width = ui.available_width().max(ui.spacing().interact_size.x);
+            let changed = ui
+                .add(egui::TextEdit::singleline(&mut model.find_query).desired_width(find_width))
+                .changed();
             egui::ComboBox::from_id_salt((view, "find-scope"))
                 .selected_text(format!("{:?}", model.find_scope))
                 .show_ui(ui, |ui| {
@@ -184,33 +183,29 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
             .current_row
             .and_then(|r| c.difference_number(r, false))
     });
-    egui::ScrollArea::horizontal()
-        .max_height(command_height)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(number.map_or("Difference —/—".into(), |(n, t)| {
-                    format!("Difference {n}/{t}")
-                }));
-                side_status(
-                    ui,
-                    "Left",
-                    &model.left,
-                    model.external_conflict[0],
-                    model.left_error.as_deref(),
-                );
-                side_status(
-                    ui,
-                    "Right",
-                    &model.right,
-                    model.external_conflict[1],
-                    model.right_error.as_deref(),
-                );
-                if model.recalculating {
-                    ui.label("⏳ Recalculating… (showing last valid alignment)");
-                }
-                ui.label(model.large_file_tier.explanation());
-            });
-        });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(number.map_or("Difference —/—".into(), |(n, t)| {
+            format!("Difference {n}/{t}")
+        }));
+        side_status(
+            ui,
+            "Left",
+            &model.left,
+            model.external_conflict[0],
+            model.left_error.as_deref(),
+        );
+        side_status(
+            ui,
+            "Right",
+            &model.right,
+            model.external_conflict[1],
+            model.right_error.as_deref(),
+        );
+        if model.recalculating {
+            ui.label("⏳ Recalculating… (showing last valid alignment)");
+        }
+        ui.label(model.large_file_tier.explanation());
+    });
     ui.separator();
     let available = ui.available_width().max(0.0);
     let total_height = ui.available_height().max(0.0);
@@ -797,8 +792,9 @@ fn render_pane_contents(
 }
 
 fn text_details(ui: &mut egui::Ui, model: &mut TextViewModel, height: f32) {
+    let chrome_top = ui.cursor().min.y;
     ui.separator();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.strong("Text Details");
         ui.add(
             egui::DragValue::new(&mut model.text_details_height)
@@ -806,6 +802,7 @@ fn text_details(ui: &mut egui::Ui, model: &mut TextViewModel, height: f32) {
                 .suffix(" px"),
         );
     });
+    let content_height = (height - (ui.cursor().min.y - chrome_top)).max(1.0);
     let row = model
         .current_row
         .and_then(|i| model.comparison.as_ref()?.rows.get(i));
@@ -821,23 +818,20 @@ fn text_details(ui: &mut egui::Ui, model: &mut TextViewModel, height: f32) {
             })
             .unwrap_or_default()
     };
-    ui.allocate_ui(
-        egui::vec2(ui.available_width(), (height - 30.0).max(1.0)),
-        |ui| {
-            ui.columns(2, |columns| {
-                for (column, side) in columns.iter_mut().zip([DiffSide::Left, DiffSide::Right]) {
-                    egui::ScrollArea::both()
-                        .auto_shrink([false, false])
-                        .show(column, |ui| {
-                            ui.add(
-                                egui::Label::new(RichText::new(value(side)).monospace())
-                                    .wrap_mode(egui::TextWrapMode::Extend),
-                            );
-                        });
-                }
-            });
-        },
-    );
+    ui.allocate_ui(egui::vec2(ui.available_width(), content_height), |ui| {
+        ui.columns(2, |columns| {
+            for (column, side) in columns.iter_mut().zip([DiffSide::Left, DiffSide::Right]) {
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(column, |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(value(side)).monospace())
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    });
+            }
+        });
+    });
 }
 fn side_status(
     ui: &mut egui::Ui,
@@ -857,7 +851,7 @@ fn side_status(
     };
     ui.label(format!("{name}: {state}"));
     if let Some(e) = error {
-        ui.colored_label(Color32::RED, e);
+        semantic_status(ui, StatusTone::Error, e, None);
     }
 }
 fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
@@ -930,6 +924,121 @@ fn shortcuts(ui: &egui::Ui, m: &mut TextViewModel) {
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+
+    fn accessible_widget_bounds(
+        output: &egui::FullOutput,
+        role: egui::accesskit::Role,
+        label: Option<&str>,
+        value: Option<&str>,
+    ) -> Option<egui::Rect> {
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()?
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                (node.role() == role
+                    && label.is_none_or(|expected| node.label() == Some(expected))
+                    && value.is_none_or(|expected| node.value() == Some(expected)))
+                .then(|| node.bounds())
+                .flatten()
+                .map(|bounds| {
+                    egui::Rect::from_min_max(
+                        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    )
+                })
+            })
+    }
+
+    #[test]
+    fn diff_workspace_chrome_scaled_text_controls_remain_reachable() {
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut_of(context.theme(), |style| {
+            style.animation_time = 0.0;
+            style.override_font_id = Some(egui::FontId::proportional(24.0));
+        });
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 720.0));
+        let mut model = TextViewModel::from_test_text(
+            "left text\nneedle left".to_owned(),
+            "right text\nneedle right".to_owned(),
+        );
+        model.find_open = true;
+        model.text_details_open = true;
+        let mut settled_viewport = None;
+        let mut settled_controls = [None; 6];
+
+        for _ in 0..3 {
+            let mut viewport = None;
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        viewport = Some(ui.clip_rect());
+                        show(ui, 1, 2, &mut model);
+                    });
+                },
+            );
+            let controls = [
+                accessible_widget_bounds(
+                    &output,
+                    egui::accesskit::Role::Button,
+                    Some("◀ Previous (F7)"),
+                    None,
+                ),
+                accessible_widget_bounds(
+                    &output,
+                    egui::accesskit::Role::Button,
+                    Some("Next (F8) ▶"),
+                    None,
+                ),
+                accessible_widget_bounds(
+                    &output,
+                    egui::accesskit::Role::Button,
+                    Some("Find"),
+                    None,
+                ),
+                accessible_widget_bounds(
+                    &output,
+                    egui::accesskit::Role::Button,
+                    Some("Previous"),
+                    None,
+                ),
+                accessible_widget_bounds(
+                    &output,
+                    egui::accesskit::Role::Button,
+                    Some("Next"),
+                    None,
+                ),
+                accessible_widget_bounds(&output, egui::accesskit::Role::TextInput, None, Some("")),
+            ];
+            output.drop_without_applying_deltas();
+            settled_viewport = viewport.or(settled_viewport);
+            for (settled, observed) in settled_controls.iter_mut().zip(controls) {
+                *settled = observed.or(*settled);
+            }
+        }
+
+        let viewport = settled_viewport.expect("CentralPanel supplied a native clip rect");
+        for control in settled_controls {
+            let bounds = control.expect("scaled text toolbar control is accessible");
+            assert!(bounds.is_positive(), "{bounds:?}");
+            assert!(
+                viewport.contains_rect(bounds),
+                "{bounds:?} outside {viewport:?}"
+            );
+        }
+        assert_eq!(model.find_query, "");
+        assert!(!model.left.is_dirty());
+        assert!(!model.right.is_dirty());
+        assert!(!model.saved_filesystem_mutation);
+    }
 
     #[test]
     fn comparison_allocations_are_non_negative_and_bounded() {

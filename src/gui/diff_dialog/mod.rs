@@ -1,5 +1,6 @@
 use crate::diff::model::{DiffView, DiffWorkspace};
 use crate::diff::query::DiffOpenPayload;
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use eframe::egui;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -138,13 +139,13 @@ fn allocate_remaining_workspace<R>(
     allocate_viewport(ui, viewport, render)
 }
 
-fn bounded_message(ui: &mut egui::Ui, color: egui::Color32, text: &str, max_height: f32) {
+fn bounded_message(ui: &mut egui::Ui, text: &str, max_height: f32) {
     egui::ScrollArea::both()
         .max_height(max_height)
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.set_max_width(ui.available_width());
-            ui.colored_label(color, text);
+            semantic_status(ui, StatusTone::Error, text, None);
         });
 }
 
@@ -626,7 +627,7 @@ impl DiffDialogState {
                         );
                     });
                 if let Some(error) = &self.workspace.error {
-                    bounded_message(ui, egui::Color32::RED, error, 48.0);
+                    bounded_message(ui, error, 48.0);
                 }
                 if !self.workspace.navigation_stack.is_empty() && ui.button("← Back").clicked() {
                     self.navigate_back();
@@ -823,13 +824,11 @@ impl DiffDialogState {
                         (1, crate::diff::model::DiffSide::Right, "Right"),
                     ] {
                         if m.external_conflict[index] {
-                            ui.horizontal(|ui| {
-                                ui.colored_label(
-                                    egui::Color32::YELLOW,
-                                    format!(
-                                        "{label} changed on disk; in-memory edits were preserved."
-                                    ),
+                            ui.horizontal_wrapped(|ui| {
+                                let message = format!(
+                                    "{label} changed on disk; in-memory edits were preserved."
                                 );
+                                semantic_status(ui, StatusTone::Warning, &message, None);
                                 if ui.button("Reload / discard edits").clicked()
                                     && let Some(loaded) = self
                                         .watch_views
@@ -954,7 +953,6 @@ impl DiffDialogState {
                     let right = runtime.right_error.as_deref().unwrap_or("none");
                     bounded_message(
                         ui,
-                        egui::Color32::RED,
                         &format!("Scan failures — left: {left}; right: {right}"),
                         48.0,
                     );
@@ -2177,12 +2175,7 @@ mod tests {
                                     let _ = ui.button("Compare");
                                     let _ = ui.menu_button("More", |_| {});
                                 });
-                            bounded_message(
-                                ui,
-                                egui::Color32::RED,
-                                &"workspace-error".repeat(500),
-                                48.0,
-                            );
+                            bounded_message(ui, &"workspace-error".repeat(500), 48.0);
                             ui.separator();
                             allocate_remaining_workspace(ui, |ui| {
                                 let workspace_width = ui.max_rect().width();

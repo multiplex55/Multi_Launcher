@@ -15,9 +15,14 @@ pub fn show(
     view: u64,
     model: &mut BinaryViewModel,
 ) -> BinaryViewGeometry {
-    let command_height = ui.spacing().interact_size.y;
+    let difference_label = model.current_difference.map_or_else(
+        || format!("0/{} differences", model.differences.ranges.len()),
+        |i| format!("Difference {}/{}", i + 1, model.differences.ranges.len()),
+    );
+    let command_height = binary_toolbar_height(ui, &difference_label);
     egui::ScrollArea::horizontal()
-        .max_height(command_height)
+        .max_height(command_height + ui.spacing().scroll.allocated_width())
+        .auto_shrink([true, true])
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (label, direction) in [
@@ -30,10 +35,7 @@ pub fn show(
                         model.navigate(direction);
                     }
                 }
-                ui.label(model.current_difference.map_or_else(
-                    || format!("0/{} differences", model.differences.ranges.len()),
-                    |i| format!("Difference {}/{}", i + 1, model.differences.ranges.len()),
-                ));
+                ui.label(difference_label.as_str());
                 ui.label("Read-only · 16 bytes/row");
             })
         });
@@ -80,6 +82,74 @@ pub fn show(
         geometry.content_size = output.content_size;
     });
     geometry
+}
+
+fn binary_toolbar_height(ui: &mut egui::Ui, difference_label: &str) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| button_style.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        button_style.frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let button_height = ["First", "Previous", "Next", "Last"]
+        .into_iter()
+        .map(|label| {
+            let text_height = egui::WidgetText::from(label)
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    button_font.clone(),
+                )
+                .size()
+                .y;
+            (text_height + spacing.extra_text_line_spacing + frame_margin.y)
+                .max(spacing.interact_size.y)
+        })
+        .fold(spacing.interact_size.y, f32::max);
+    let label_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| egui::TextStyle::Body.resolve(&style));
+    let label_height = [difference_label, "Read-only · 16 bytes/row"]
+        .into_iter()
+        .map(|label| {
+            egui::WidgetText::from(label)
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    label_font.clone(),
+                )
+                .size()
+                .y
+                + spacing.extra_text_line_spacing
+        })
+        .fold(0.0, f32::max);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    ((button_height.max(label_height) * pixels_per_point).ceil() / pixels_per_point)
+        .max(spacing.interact_size.y)
 }
 
 fn binary_viewport_size(available: egui::Vec2) -> egui::Vec2 {

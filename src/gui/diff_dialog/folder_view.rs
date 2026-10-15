@@ -5,6 +5,7 @@ use crate::diff::folder_compare::{
 };
 use crate::diff::model::{FolderCompareState, FolderDisplayFilter, FolderSortState};
 use crate::diff::settings::FolderSortColumn;
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use eframe::egui;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -210,64 +211,60 @@ pub(super) fn show(
             });
     });
     let mut action = FolderViewAction::Noop;
-    let command_height = ui.spacing().interact_size.y;
-    ui.allocate_ui_with_layout(
-        egui::vec2(ui.available_width(), command_height),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            super::export::folder_menu(ui, state);
-            ui.menu_button("View", |ui| {
-                for (label, filter) in [
-                    ("All", FolderDisplayFilter::All),
-                    ("Differences", FolderDisplayFilter::Differences),
-                    ("Identical", FolderDisplayFilter::Identical),
-                    ("Left only", FolderDisplayFilter::LeftOnly),
-                    ("Right only", FolderDisplayFilter::RightOnly),
-                    ("Left newer", FolderDisplayFilter::LeftNewer),
-                    ("Right newer", FolderDisplayFilter::RightNewer),
-                    ("Errors", FolderDisplayFilter::Errors),
-                    ("Left changes", FolderDisplayFilter::LeftChanges),
-                    ("Right changes", FolderDisplayFilter::RightChanges),
-                    ("Orphans", FolderDisplayFilter::Orphans),
-                    ("All changes", FolderDisplayFilter::Changes),
-                ] {
-                    if ui
-                        .selectable_label(state.display_filter == filter, label)
-                        .clicked()
-                    {
-                        state.display_filter = filter;
-                    }
+    ui.horizontal_wrapped(|ui| {
+        super::export::folder_menu(ui, state);
+        ui.menu_button("View", |ui| {
+            for (label, filter) in [
+                ("All", FolderDisplayFilter::All),
+                ("Differences", FolderDisplayFilter::Differences),
+                ("Identical", FolderDisplayFilter::Identical),
+                ("Left only", FolderDisplayFilter::LeftOnly),
+                ("Right only", FolderDisplayFilter::RightOnly),
+                ("Left newer", FolderDisplayFilter::LeftNewer),
+                ("Right newer", FolderDisplayFilter::RightNewer),
+                ("Errors", FolderDisplayFilter::Errors),
+                ("Left changes", FolderDisplayFilter::LeftChanges),
+                ("Right changes", FolderDisplayFilter::RightChanges),
+                ("Orphans", FolderDisplayFilter::Orphans),
+                ("All changes", FolderDisplayFilter::Changes),
+            ] {
+                if ui
+                    .selectable_label(state.display_filter == filter, label)
+                    .clicked()
+                {
+                    state.display_filter = filter;
                 }
-            });
-            if ui.button("Folder Rules…").clicked() {
-                super::folder_rules_dialog::open(state);
             }
-            let required = state.rescan_required();
-            ui.label(format!(
-                "Rules: {}",
-                if state.applied_scan_rules == Default::default() {
-                    "Default"
-                } else {
-                    "Custom"
-                }
-            ));
-            if required {
-                ui.colored_label(egui::Color32::YELLOW, "Rescan required");
+        });
+        if ui.button("Folder Rules…").clicked() {
+            super::folder_rules_dialog::open(state);
+        }
+        let required = state.rescan_required();
+        ui.label(format!(
+            "Rules: {}",
+            if state.applied_scan_rules == Default::default() {
+                "Default"
+            } else {
+                "Custom"
             }
-            if ui
-                .add_enabled(required, egui::Button::new("Rescan"))
-                .clicked()
-            {
-                action = FolderViewAction::RequestRescan;
-            }
-        },
-    );
+        ));
+        if required {
+            semantic_status(ui, StatusTone::Warning, "Rescan required", None);
+        }
+        if ui
+            .add_enabled(required, egui::Button::new("Rescan"))
+            .clicked()
+        {
+            action = FolderViewAction::RequestRescan;
+        }
+    });
     if super::folder_rules_dialog::show(ui.ctx(), state) {
         action = FolderViewAction::RequestRescan;
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label("Find path:");
-        ui.text_edit_singleline(&mut state.path_filter);
+        let filter_width = ui.available_width().max(ui.spacing().interact_size.x);
+        ui.add(egui::TextEdit::singleline(&mut state.path_filter).desired_width(filter_width));
     });
     mutation_buttons(ui, state, runtime, &mut action);
     let scans_done = state.left_scan_complete && state.right_scan_complete;
@@ -319,7 +316,7 @@ pub(super) fn show(
     if keys.2 {
         apply_selection(state, &paths, None, SelectionGesture::MoveDown);
     }
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for (label, nav) in [
             ("First", DifferenceNavigation::First),
             ("Previous", DifferenceNavigation::Previous),
@@ -462,7 +459,7 @@ fn mutation_buttons(
     runtime: &crate::diff::folder_runtime::FolderRuntime,
     action: &mut FolderViewAction,
 ) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for (label, kind, left) in [
             ("Copy →", MutationKind::CopyRight, true),
             ("← Copy", MutationKind::CopyLeft, false),
