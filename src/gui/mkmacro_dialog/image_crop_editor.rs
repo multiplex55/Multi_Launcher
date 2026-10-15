@@ -14,6 +14,7 @@ pub use crate::gui::image_crop_editor::{
     display_to_source, move_rect, normalize_drag, resize_rect, selection_from_drag,
     source_to_display,
 };
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::{
     ImageAssetAuthoringService, ImageImportChoice, ImageImportResult, MkImageRef, MkMacroStore,
 };
@@ -44,6 +45,17 @@ enum CropUiAction {
     Cancel,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct OverwriteChromeObservation {
+    body: (egui::Id, egui::Rect, egui::Vec2, egui::Vec2),
+    copy: (egui::Id, egui::Rect),
+    warning: (egui::Id, egui::Rect),
+    confirm_button: (egui::Id, egui::Rect),
+    cancel_button: (egui::Id, egui::Rect),
+    footer_reserved_height: f32,
+}
+
 pub struct ImageCropEditorState {
     open: bool,
     destination: ImageCropDestination,
@@ -56,6 +68,8 @@ pub struct ImageCropEditorState {
     validation_message: Option<String>,
     persistence_message: Option<String>,
     completion: Option<ImageCropCompletion>,
+    #[cfg(test)]
+    overwrite_chrome: Option<OverwriteChromeObservation>,
 }
 
 impl Default for ImageCropEditorState {
@@ -77,6 +91,8 @@ impl Default for ImageCropEditorState {
             validation_message: None,
             persistence_message: None,
             completion: None,
+            #[cfg(test)]
+            overwrite_chrome: None,
         }
     }
 }
@@ -323,6 +339,71 @@ fn suggested_crop_filename(source: &MkImageRef) -> String {
     }
 }
 
+fn confirmation_button_row_height(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        native_button_style.frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let mut row_width = 0.0;
+    let mut row_height = 0.0_f32;
+    let mut total_height = 0.0;
+    for label in labels {
+        let text_size = egui::WidgetText::from(*label)
+            .into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                text_width,
+                button_font.clone(),
+            )
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            total_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    total_height += row_height.max(spacing.interact_size.y);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (total_height * pixels_per_point).ceil() / pixels_per_point
+}
+
+fn overwrite_confirmation_footer_height(ui: &egui::Ui) -> f32 {
+    let height = confirmation_button_row_height(ui, &["Confirm Overwrite", "Cancel"])
+        + ui.spacing().item_spacing.y;
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
+}
+
 pub fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
     let mut editor = std::mem::take(&mut dialog.image_crop_editor);
     if !editor.open {
@@ -346,23 +427,75 @@ pub fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label(format!(
+                let footer_reserved_height = overwrite_confirmation_footer_height(ui);
+                let body_max_height =
+                    (ui.available_height() - footer_reserved_height).max(0.0);
+                let copy_text = format!(
                     "Overwrite {} with the selected crop?",
                     editor.destination.source().filename()
-                ));
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "All macros and actions referencing this file will see the cropped pixels.",
                 );
-                ui.horizontal(|ui| {
-                    if ui.button("Confirm Overwrite").clicked() {
-                        editor.overwrite_confirmation = false;
-                        confirm_overwrite = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        editor.overwrite_confirmation = false;
-                    }
-                });
+                let mut copy_response = None;
+                let mut warning_response = None;
+                let body = egui::ScrollArea::vertical()
+                    .id_salt("mkmacro_crop_overwrite_confirmation_body")
+                    .max_height(body_max_height)
+                    .min_scrolled_height(0.0)
+                    .show(ui, |ui| {
+                        copy_response = Some(
+                            ui.add(
+                                egui::Label::new(&copy_text)
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                            ),
+                        );
+                        warning_response = Some(semantic_status(
+                            ui,
+                            StatusTone::Warning,
+                            "All macros and actions referencing this file will see the cropped pixels.",
+                            None,
+                        ));
+                    });
+                let (confirm_response, cancel_response) = ui
+                    .horizontal_wrapped(|ui| {
+                        let confirm = ui.add(egui::Button::new("Confirm Overwrite").wrap());
+                        let cancel = ui.add(egui::Button::new("Cancel").wrap());
+                        if confirm.clicked() {
+                            editor.overwrite_confirmation = false;
+                            confirm_overwrite = true;
+                        }
+                        if cancel.clicked() {
+                            editor.overwrite_confirmation = false;
+                        }
+                        (confirm, cancel)
+                    })
+                    .inner;
+                #[cfg(test)]
+                {
+                    editor.overwrite_chrome = Some(OverwriteChromeObservation {
+                        body: (
+                            body.id,
+                            body.inner_rect,
+                            body.content_size,
+                            body.state.offset,
+                        ),
+                        copy: copy_response
+                            .map(|response| (response.id, response.rect))
+                            .unwrap_or((egui::Id::NULL, egui::Rect::NOTHING)),
+                        warning: warning_response
+                            .map(|response| (response.id, response.rect))
+                            .unwrap_or((egui::Id::NULL, egui::Rect::NOTHING)),
+                        confirm_button: (confirm_response.id, confirm_response.rect),
+                        cancel_button: (cancel_response.id, cancel_response.rect),
+                        footer_reserved_height,
+                    });
+                }
+                #[cfg(not(test))]
+                let _ = (
+                    body,
+                    copy_response,
+                    warning_response,
+                    confirm_response,
+                    cancel_response,
+                );
             });
         if !open {
             editor.overwrite_confirmation = false;
@@ -411,6 +544,34 @@ pub fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
 mod tests {
     use super::*;
 
+    fn collect_text_shapes(
+        shape: &egui::epaint::Shape,
+        clip_rect: egui::Rect,
+        output: &mut Vec<(String, egui::Rect, egui::Rect, bool)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) => output.push((
+                text.galley.job.text.clone(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+                clip_rect,
+                text.galley.elided,
+            )),
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text_shapes(shape, clip_rect, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn same_rect(left: egui::Rect, right: egui::Rect) -> bool {
+        (left.min.x - right.min.x).abs() < 0.5
+            && (left.min.y - right.min.y).abs() < 0.5
+            && (left.max.x - right.max.x).abs() < 0.5
+            && (left.max.y - right.max.y).abs() < 0.5
+    }
+
     #[test]
     fn managed_png_suggested_names_preserve_existing_behavior() {
         assert_eq!(
@@ -425,5 +586,161 @@ mod tests {
             suggested_crop_filename(&MkImageRef::from_filename("name.with.dots.PNG")),
             "name.with.dots_cropped.png"
         );
+    }
+
+    #[test]
+    fn overwrite_confirmation_bounds_long_copy_above_actions_without_completing() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let mut dialog = MkMacroDialog::new(Arc::new(store));
+        let filename = format!(
+            "{}reference-image.png",
+            "long-crop-target-name-with-context-".repeat(8)
+        );
+        let source = MkImageRef::from_filename(&filename);
+        let destination = ImageCropDestination::ImageActionReference {
+            macro_id: 7,
+            step_id: Some(101),
+            draft_generation: 3,
+            source: source.clone(),
+        };
+        let mut editor = ImageCropEditorState::default();
+        editor.open = true;
+        editor.loading = true;
+        editor.destination = destination.clone();
+        editor.overwrite_confirmation = true;
+        dialog.image_crop_editor = editor;
+
+        let copy_text = format!("Overwrite {} with the selected crop?", source.filename());
+        let warning_text =
+            "All macros and actions referencing this file will see the cropped pixels.";
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(520.0, 340.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        ctx.style_mut_of(ctx.theme(), |style| {
+            style.override_font_id = Some(egui::FontId::new(22.0, egui::FontFamily::Proportional));
+        });
+
+        let mut previous_body = None;
+        let mut latest = None;
+        let mut stable_body = false;
+        let mut copy_unelided = false;
+        let mut warning_visible_at_bottom = false;
+        let mut bottom_offset_observed = false;
+        for _ in 0..5 {
+            let output = ctx.run_ui(input(), |ctx| show(ctx, &mut dialog));
+            let observation = dialog.image_crop_editor.overwrite_chrome;
+            let mut text_shapes = Vec::new();
+            for clipped_shape in &output.shapes {
+                collect_text_shapes(
+                    &clipped_shape.shape,
+                    clipped_shape.clip_rect,
+                    &mut text_shapes,
+                );
+            }
+            output.drop_without_applying_deltas();
+
+            if let Some(observation) = observation {
+                let (scroll_id, body_rect, content_size, offset) = observation.body;
+                stable_body = previous_body.is_some_and(|previous| same_rect(previous, body_rect));
+                previous_body = Some(body_rect);
+
+                copy_unelided |= text_shapes.iter().any(|(text, bounds, clip, elided)| {
+                    text == &copy_text
+                        && !elided
+                        && bounds.is_positive()
+                        && bounds.left() >= body_rect.left() - 0.5
+                        && bounds.right() <= body_rect.right() + 0.5
+                        && clip.left() <= body_rect.left() + 0.5
+                        && clip.right() >= body_rect.right() - 0.5
+                });
+                warning_visible_at_bottom =
+                    text_shapes.iter().any(|(text, bounds, clip, elided)| {
+                        text == warning_text
+                            && !elided
+                            && body_rect.contains_rect(*bounds)
+                            && clip.contains_rect(*bounds)
+                    });
+                let max_offset = (content_size.y - body_rect.height()).max(0.0);
+                bottom_offset_observed |= (offset.y - max_offset).abs() < 0.75;
+                if max_offset > 0.0
+                    && let Some(mut scroll) = egui::scroll_area::State::load(&ctx, scroll_id)
+                {
+                    scroll.offset.y = max_offset;
+                    scroll.store(&ctx, scroll_id);
+                }
+                latest = Some(observation);
+            }
+        }
+
+        let observation = latest.expect("the overwrite confirmation produces native geometry");
+        let (_, body_rect, content_size, offset) = observation.body;
+        let max_offset = (content_size.y - body_rect.height()).max(0.0);
+        let footer_top = observation
+            .confirm_button
+            .1
+            .union(observation.cancel_button.1)
+            .top();
+        assert!(stable_body, "the overwrite body viewport settles");
+        assert!(
+            content_size.y > body_rect.height(),
+            "the long copy has a real scroll range"
+        );
+        assert!(bottom_offset_observed && (offset.y - max_offset).abs() < 0.75);
+        assert!(
+            copy_unelided,
+            "the full destination copy is rendered without elision"
+        );
+        assert!(
+            warning_visible_at_bottom,
+            "the complete warning is reachable inside the settled body viewport"
+        );
+        assert!(
+            body_rect.bottom() <= footer_top,
+            "confirmation body {body_rect:?} ends before the native actions at {footer_top}"
+        );
+        assert!(
+            screen_rect.contains_rect(body_rect),
+            "confirmation body {body_rect:?} fits the actual screen {screen_rect:?}"
+        );
+        for (name, (id, bounds)) in [
+            ("destination copy", observation.copy),
+            ("warning", observation.warning),
+            ("Confirm Overwrite", observation.confirm_button),
+            ("Cancel", observation.cancel_button),
+        ] {
+            assert_ne!(id, egui::Id::NULL, "{name} has an actual native response");
+            assert!(bounds.is_positive(), "{name} has actual bounds {bounds:?}");
+        }
+        assert!(
+            body_rect.contains_rect(observation.warning.1),
+            "the warning response {0:?} remains inside the body {body_rect:?}",
+            observation.warning.1
+        );
+        for (name, bounds) in [
+            ("Confirm Overwrite", observation.confirm_button.1),
+            ("Cancel", observation.cancel_button.1),
+        ] {
+            assert!(
+                bounds.is_positive() && screen_rect.contains_rect(bounds),
+                "{name} bounds {bounds:?} fit the actual screen {screen_rect:?}"
+            );
+        }
+        assert!(
+            observation.footer_reserved_height
+                >= observation
+                    .confirm_button
+                    .1
+                    .union(observation.cancel_button.1)
+                    .height(),
+            "the native footer is covered by its reservation"
+        );
+        assert!(dialog.image_crop_editor.is_open());
+        assert!(dialog.image_crop_editor.overwrite_confirmation);
+        assert_eq!(dialog.image_crop_editor.destination, destination);
+        assert!(dialog.image_crop_editor.completion.is_none());
     }
 }

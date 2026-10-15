@@ -1,4 +1,5 @@
 use super::MkMacroDialog;
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::{
     CompletedStepOutcome, DebugSnapshotReason, MacroStepKey, MkMacroDocument, MkValue,
     RuntimePauseReason, RuntimeRunMode, RuntimeSnapshot, RuntimeState, is_builtin,
@@ -516,7 +517,7 @@ fn render_variables(
     show_internal: bool,
     builtins_open: &mut bool,
 ) {
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::both()
         .id_salt("runtime_inspector_variables")
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -555,10 +556,15 @@ fn render_variables(
 fn render_outcome(ui: &mut egui::Ui, outcome: &LastOutcomePresentation) {
     match outcome {
         LastOutcomePresentation::Success { detail } => {
-            ui.colored_label(egui::Color32::GREEN, detail.as_deref().unwrap_or("Success"));
+            semantic_status(
+                ui,
+                StatusTone::Success,
+                detail.as_deref().unwrap_or("Success"),
+                None,
+            );
         }
         LastOutcomePresentation::Failure { message, context } => {
-            ui.colored_label(egui::Color32::RED, "Failed");
+            semantic_status(ui, StatusTone::Error, "Failed", None);
             ui.label(message);
             for (key, value) in context {
                 ui.label(format!("{key}: {value}"));
@@ -580,14 +586,16 @@ fn render_body(
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Macro:");
                 ui.label(&view.macro_name);
-                ui.separator();
+                ui.label("·");
                 ui.strong(format!("Status: {}", view.status));
             });
             if view.call_stack.len() > 1 {
                 ui.strong("Call Stack");
                 for frame in &view.call_stack {
-                    ui.horizontal(|ui| {
-                        ui.add_space(frame.depth.saturating_sub(1) as f32 * 12.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let depth_indent = (frame.depth.saturating_sub(1) as f32 * 12.0)
+                            .min(ui.available_width().max(0.0) * 0.25);
+                        ui.add_space(depth_indent);
                         let label = if frame.active {
                             format!("▶ {}", frame.macro_name)
                         } else {
@@ -610,17 +618,19 @@ fn render_body(
                 }
             }
             if let Some(step) = &view.current_step {
-                let color = if view.breakpoint_pause {
-                    egui::Color32::from_rgb(255, 152, 0)
+                let tone = if view.breakpoint_pause {
+                    StatusTone::Warning
                 } else {
-                    egui::Color32::YELLOW
+                    StatusTone::Info
                 };
-                ui.colored_label(color, format!("Current Step: {}", step.label()));
+                semantic_status(ui, tone, &format!("Current Step: {}", step.label()), None);
             }
             if view.breakpoint_pause {
-                ui.colored_label(
-                    egui::Color32::from_rgb(255, 152, 0),
+                semantic_status(
+                    ui,
+                    StatusTone::Warning,
                     "The step has not executed yet.",
+                    None,
                 );
             }
             if let Some(step) = &view.last_step {
@@ -641,7 +651,7 @@ fn render_body(
             }
             ui.small(&view.snapshot_reason);
             ui.separator();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.strong(&view.variable_label);
                 if !view.variables.internal.is_empty() {
                     ui.checkbox(show_internal, "Show internal variables");
