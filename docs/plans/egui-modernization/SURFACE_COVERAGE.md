@@ -43,7 +43,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/qr_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_editor/mod.rs` | M5-B6 | accepted surrounding chrome/shared native actions,7targetedcontracts/review pass; authoredcanvas/skins unchanged; deferrednativeDesigner visual/input gap explicit |
-| `src/gui/regex_tester_dialog.rs` | M5-B8 | pending surface polish/review; runtime inheritance available |
+| `src/gui/regex_tester_dialog.rs` | M5-B8 | accepted compact surrounding controls and copy feedback; eight existing contracts/review pass; editor/highlight semantics unchanged, native immediate-viewport/control-clipping gap explicit |
 | `src/gui/screen_draw_toolbar.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/screenshot_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/shell_cmd_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |

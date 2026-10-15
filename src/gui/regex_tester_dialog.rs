@@ -1,4 +1,8 @@
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, secondary_help, semantic_status,
+    with_button_emphasis,
+};
 use crate::regex_tester::{EvaluationResult, MatchCompleteness, RegexSession};
 use eframe::egui;
 use std::sync::Arc;
@@ -314,22 +318,21 @@ impl RegexTesterDialogState {
 
     fn pattern_area(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.weak("Engine: Rust regex · all matches");
+            secondary_help(ui, "Engine: Rust regex · all matches");
             let label = if self.information_open {
                 "Hide info"
             } else {
                 "Show info"
             };
-            if ui
+            let toggle = ui
                 .button(label)
-                .on_hover_text("Show or hide match information")
-                .clicked()
-            {
+                .on_hover_text("Show or hide match information");
+            if with_button_emphasis(ui, toggle, ButtonEmphasis::Primary).clicked() {
                 self.information_open = !self.information_open;
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Pattern");
+            compact_section_heading(ui, "Pattern", None);
             if self.session.draft.pattern.len() > self.session.policy().pattern_bytes {
                 self.oversized_pattern_area(ui);
                 return;
@@ -376,7 +379,7 @@ impl RegexTesterDialogState {
     }
 
     fn flags_area(&mut self, ui: &mut egui::Ui) -> [egui::Response; 5] {
-        ui.label("Flags");
+        compact_section_heading(ui, "Flags", None);
         let responses = [
             (
                 "i",
@@ -556,14 +559,16 @@ impl RegexTesterDialogState {
                     InformationSection::Clipboard,
                     "Clipboard",
                 );
-            });
+            })
+            .response
+            .on_hover_text("Choose what to inspect or edit");
         if let Some(feedback) = &self.copy_feedback {
             match feedback {
                 Ok(message) => {
-                    ui.weak(*message);
+                    semantic_status(ui, StatusTone::Success, message, None);
                 }
                 Err(message) => {
-                    ui.colored_label(ui.visuals().error_fg_color, message);
+                    semantic_status(ui, StatusTone::Error, message, None);
                 }
             }
         }
@@ -577,7 +582,7 @@ impl RegexTesterDialogState {
             } else {
                 // Compiler validation is authoritative; pending revisions have
                 // no accessible stale analysis.
-                ui.weak(self.summary());
+                secondary_help(ui, &self.summary());
             }
             return;
         }
@@ -603,7 +608,7 @@ impl RegexTesterDialogState {
                     self.history_action(action);
                 }
             } else {
-                ui.weak("History storage is not configured.");
+                secondary_help(ui, "History storage is not configured.");
             }
             return;
         }
@@ -613,7 +618,7 @@ impl RegexTesterDialogState {
                     self.preset_action(action);
                 }
             } else {
-                ui.weak("Preset storage is not configured.");
+                secondary_help(ui, "Preset storage is not configured.");
             }
             return;
         }
@@ -632,7 +637,7 @@ impl RegexTesterDialogState {
 
         let count = self.session.matches().len();
         if count == 0 {
-            ui.weak(self.summary());
+            secondary_help(ui, &self.summary());
             return;
         }
         let mut selected = None;
