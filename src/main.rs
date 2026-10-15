@@ -55,7 +55,7 @@ use std::sync::{
 };
 use std::thread;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -435,6 +435,24 @@ fn related_launcher_bindings(
     bindings
 }
 
+fn shared_drain_control_bindings(
+    settings: &Settings,
+    document: &RadialDocument,
+) -> Vec<RelatedBinding> {
+    related_launcher_bindings(settings, document, true)
+        .into_iter()
+        .filter(|binding| {
+            matches!(
+                binding.action,
+                RelatedAction::Quit
+                    | RelatedAction::Help
+                    | RelatedAction::ScreenDrawLaunch
+                    | RelatedAction::ScreenDrawEmergency
+            )
+        })
+        .collect()
+}
+
 fn reject_radial_opens_while_exclusive(
     notices: &mut [multi_launcher::hotkey::launcher_invocation::ServiceNotice],
 ) {
@@ -475,9 +493,268 @@ fn legacy_listener_triggers(
 
 struct PendingLauncherRoute {
     settings_generation: u64,
-    handoff: RouteHandoff,
-    start_legacy: bool,
-    stop_service: bool,
+    handoff: Option<Box<dyn HotkeyRouteHandoffReceipt>>,
+    policy_applied: Option<Result<(), String>>,
+    completion: PendingLauncherRouteCompletion,
+}
+
+trait HotkeyRouteHandoffReceipt {
+    fn try_policy_applied(&self) -> Option<Result<(), String>>;
+    fn try_complete(&self) -> Option<Result<(), String>>;
+}
+
+impl HotkeyRouteHandoffReceipt for RouteHandoff {
+    fn try_policy_applied(&self) -> Option<Result<(), String>> {
+        RouteHandoff::try_policy_applied(self)
+    }
+
+    fn try_complete(&self) -> Option<Result<(), String>> {
+        RouteHandoff::try_complete(self)
+    }
+}
+
+trait HotkeyRouteHandoffIssuer {
+    fn begin(
+        &mut self,
+        service: Option<&LauncherInvocationService>,
+        config: InvocationConfig,
+        related: Vec<RelatedBinding>,
+        cancellation: LifecycleCancellation,
+    ) -> Result<Box<dyn HotkeyRouteHandoffReceipt>, String>;
+}
+
+struct NativeHotkeyRouteHandoffIssuer;
+
+impl HotkeyRouteHandoffIssuer for NativeHotkeyRouteHandoffIssuer {
+    fn begin(
+        &mut self,
+        service: Option<&LauncherInvocationService>,
+        config: InvocationConfig,
+        related: Vec<RelatedBinding>,
+        cancellation: LifecycleCancellation,
+    ) -> Result<Box<dyn HotkeyRouteHandoffReceipt>, String> {
+        service
+            .ok_or_else(|| "launcher invocation service is unavailable".to_owned())?
+            .begin_route_handoff(config, related, cancellation)
+            .map(|handoff| Box::new(handoff) as Box<dyn HotkeyRouteHandoffReceipt>)
+    }
+}
+
+enum PendingLauncherRouteCompletion {
+    Reconcile {
+        start_legacy: bool,
+        stop_service: bool,
+    },
+    Hotkey(Box<PendingHotkeyApplication>),
+}
+
+fn settings_hotkey_route_is_pending(pending: &Option<PendingLauncherRoute>) -> bool {
+    pending.as_ref().is_some_and(|pending| {
+        matches!(
+            pending.completion,
+            PendingLauncherRouteCompletion::Hotkey(_)
+        )
+    })
+}
+
+fn try_recv_when_hotkey_route_is_idle<T>(
+    pending: &Option<PendingLauncherRoute>,
+    receiver: &Receiver<T>,
+) -> Option<T> {
+    if settings_hotkey_route_is_pending(pending) {
+        None
+    } else {
+        receiver.try_recv().ok()
+    }
+}
+
+fn transition_process_controls_are_live(pending: &Option<PendingLauncherRoute>) -> bool {
+    pending.as_ref().is_some_and(|pending| {
+        matches!(
+            &pending.completion,
+            PendingLauncherRouteCompletion::Hotkey(application)
+                if application.phase == HotkeyApplyPhase::RestoreOldRoute
+                    || (application.old_service_existed
+                        && application.phase == HotkeyApplyPhase::DrainOldRoute)
+        )
+    })
+}
+
+fn send_current_route_feedback(
+    service: Option<&LauncherInvocationService>,
+    pending_route: &Option<PendingLauncherRoute>,
+    event: InvocationEvent,
+) {
+    if !settings_hotkey_route_is_pending(pending_route)
+        && let Some(service) = service
+    {
+        let _ = service.feedback(event);
+    }
+}
+
+fn apply_service_related_action(
+    notice: &mut ServiceNotice,
+    quit: Option<&Arc<HotkeyTrigger>>,
+    help: Option<&Arc<HotkeyTrigger>>,
+    screen_draw: Option<&Arc<HotkeyTrigger>>,
+    emergency: Option<&Arc<HotkeyTrigger>>,
+) {
+    let Some(action) = notice.action.take() else {
+        return;
+    };
+    let trigger = match action {
+        RelatedAction::Quit => quit,
+        RelatedAction::Help => help,
+        RelatedAction::ScreenDrawLaunch => screen_draw,
+        RelatedAction::ScreenDrawEmergency => emergency,
+        RelatedAction::DirectMenu { .. } => None,
+    };
+    if let Some(trigger) = trigger
+        && let Ok(mut flag) = trigger.open.lock()
+    {
+        *flag = true;
+    }
+}
+
+struct PreparedHotkeyRoute {
+    settings: Settings,
+    dependencies: HotkeyRouteDependencies,
+    generation: multi_launcher::hotkey::reconfiguration::HotkeyRuntimeGeneration,
+    listener: Option<HotkeyListener>,
+    launcher: Arc<HotkeyTrigger>,
+    quit: Option<Arc<HotkeyTrigger>>,
+    help: Option<Arc<HotkeyTrigger>>,
+    screen_draw: Option<Arc<HotkeyTrigger>>,
+    emergency: Option<Arc<HotkeyTrigger>>,
+    staged_service: Option<LauncherInvocationService>,
+}
+
+struct PreparedLegacyHotkeyFallback {
+    settings: Settings,
+    listener: HotkeyListener,
+    launcher: Arc<HotkeyTrigger>,
+    quit: Option<Arc<HotkeyTrigger>>,
+    help: Option<Arc<HotkeyTrigger>>,
+    screen_draw: Option<Arc<HotkeyTrigger>>,
+    emergency: Option<Arc<HotkeyTrigger>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct HotkeyRouteDependencies {
+    launcher: multi_launcher::hotkey::Hotkey,
+    quit: Option<multi_launcher::hotkey::Hotkey>,
+    help: Option<multi_launcher::hotkey::Hotkey>,
+    screen_draw_launch: Option<multi_launcher::hotkey::Hotkey>,
+    screen_draw_emergency: Option<multi_launcher::hotkey::Hotkey>,
+    radial: multi_launcher::radial::model::RadialFeatureSettings,
+}
+
+impl HotkeyRouteDependencies {
+    fn from_routes(
+        settings: &Settings,
+        routes: &multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
+    ) -> Self {
+        Self {
+            launcher: routes.launcher,
+            quit: routes.quit,
+            help: routes.help,
+            screen_draw_launch: routes.screen_draw_launch,
+            screen_draw_emergency: routes.screen_draw_emergency,
+            radial: settings.radial.clone(),
+        }
+    }
+}
+
+fn validate_hotkey_route_candidate(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+) -> Result<
+    multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
+    multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
+> {
+    let macro_document = multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
+        .map_err(multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Validation)?;
+    multi_launcher::hotkey::validation::validate_hotkey_routes(
+        settings,
+        radial_document,
+        macro_document.as_deref(),
+    )
+    .map_err(|issues| {
+        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Validation(
+            issues
+                .into_iter()
+                .map(|issue| format!("{}: {}", issue.field, issue.message))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+    })
+}
+
+fn prepare_legacy_hotkey_fallback(
+    old_settings: &Settings,
+    radial_document: &RadialDocument,
+    event_tx: &Sender<()>,
+) -> Result<PreparedLegacyHotkeyFallback, String> {
+    let mut settings = old_settings.clone();
+    settings.radial.enabled = false;
+    let routes = validate_hotkey_route_candidate(&settings, radial_document)
+        .map_err(|error| error.to_string())?;
+    let launcher = Arc::new(HotkeyTrigger::new(routes.launcher));
+    let quit = routes
+        .quit
+        .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+    let help = routes
+        .help
+        .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+    let screen_draw = routes
+        .screen_draw_launch
+        .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+    let emergency = routes
+        .screen_draw_emergency
+        .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+    let listener = HotkeyTrigger::prepare_listener(
+        legacy_listener_triggers(
+            false,
+            &launcher,
+            quit.as_ref(),
+            help.as_ref(),
+            screen_draw.as_ref(),
+            emergency.as_ref(),
+        ),
+        "hotkey-owner-failure-fallback",
+        event_tx.clone(),
+    )?;
+    Ok(PreparedLegacyHotkeyFallback {
+        settings,
+        listener,
+        launcher,
+        quit,
+        help,
+        screen_draw,
+        emergency,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HotkeyApplyPhase {
+    DrainOldRoute,
+    ActivateCandidate,
+    RestoreOldRoute,
+}
+
+struct PendingHotkeyApplication {
+    request: Option<multi_launcher::hotkey::reconfiguration::HotkeyApplicationRequest>,
+    prepared: PreparedHotkeyRoute,
+    old_settings: Settings,
+    old_generation: u64,
+    candidate_generation: u64,
+    old_service_existed: bool,
+    old_listener_stopped: bool,
+    fallback_listener: Option<HotkeyListener>,
+    phase: HotkeyApplyPhase,
+    cancellation_requested: bool,
+    failure: Option<multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError>,
+    restore_generation: Option<u64>,
 }
 
 struct RadialRoutePlan {
@@ -672,6 +949,31 @@ fn radial_route_plan(
     }
 }
 
+fn inert_invocation_config(
+    settings: &Settings,
+    document: &RadialDocument,
+    generation: u64,
+) -> InvocationConfig {
+    let mut config = radial_invocation_config(settings, document, false, generation);
+    config.launcher_enabled = false;
+    config.item_inputs.clear();
+    config
+}
+
+fn invocation_priority_owner(
+    recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
+) -> Arc<dyn Fn() -> PriorityOwner + Send + Sync> {
+    Arc::new(move || {
+        if let Some(lifetime) = recovery_bridge.active_lifetime() {
+            PriorityOwner::ScreenDrawRecovery(lifetime)
+        } else if exclusive_owners() != 0 {
+            PriorityOwner::ExclusiveTool
+        } else {
+            PriorityOwner::Launcher
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fail_closed_radial_route(
     settings: &mut Settings,
@@ -796,76 +1098,797 @@ fn reconcile_screen_draw_cycle_notices(
     }
 }
 
-fn process_hotkey_runtime_message(
-    message: multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage,
+fn prepare_hotkey_runtime_message(
+    request: multi_launcher::hotkey::reconfiguration::HotkeyPreparationRequest,
     radial_document: &RadialDocument,
     settings_generation: u64,
     event_tx: &Sender<()>,
-    prepared_listeners: &mut HashMap<
+    has_invocation_service: bool,
+    owner: Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
+    prepared_routes: &mut HashMap<
         multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationId,
-        HotkeyListener,
+        PreparedHotkeyRoute,
     >,
 ) {
     use multi_launcher::hotkey::reconfiguration::{
-        HotkeyReconfigurationError, HotkeyRuntimeGeneration, HotkeyRuntimeMessage,
-        PreparedHotkeyReconfiguration,
+        HotkeyReconfigurationError, HotkeyRuntimeGeneration, PreparedHotkeyReconfiguration,
     };
 
-    match message {
-        HotkeyRuntimeMessage::Cancel(request_id) => {
-            prepared_listeners.remove(&request_id);
-        }
-        HotkeyRuntimeMessage::Prepare(request) => {
-            let request_id = request.request_id();
-            let preparation = (|| {
-                let macro_document =
-                    multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
-                        .map_err(HotkeyReconfigurationError::Validation)?;
-                let routes = multi_launcher::hotkey::validation::validate_hotkey_routes(
-                    request.settings(),
-                    radial_document,
-                    macro_document.as_deref(),
+    let request_id = request.request_id();
+    let preparation = (|| {
+        let settings = request.settings().clone();
+        let routes = validate_hotkey_route_candidate(&settings, radial_document)?;
+        let dependencies = HotkeyRouteDependencies::from_routes(&settings, &routes);
+        let generation =
+            HotkeyRuntimeGeneration(settings_generation.checked_add(1).ok_or_else(|| {
+                HotkeyReconfigurationError::RuntimeTransition(
+                    "hotkey settings generation space exhausted".into(),
                 )
-                .map_err(|issues| {
-                    HotkeyReconfigurationError::Validation(
-                        issues
-                            .into_iter()
-                            .map(|issue| format!("{}: {}", issue.field, issue.message))
-                            .collect::<Vec<_>>()
-                            .join("; "),
-                    )
-                })?;
-                let shared_invocation = routes.shared_invocation;
-                let triggers = routes
-                    .legacy_triggers
-                    .into_iter()
-                    .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)))
-                    .collect();
-                let listener =
-                    HotkeyTrigger::prepare_listener(triggers, "prepared", event_tx.clone())
-                        .map_err(HotkeyReconfigurationError::ListenerPreparation)?;
-                let prepared = PreparedHotkeyReconfiguration {
-                    request_id,
-                    generation: HotkeyRuntimeGeneration(
-                        settings_generation.checked_add(1).unwrap_or(1),
-                    ),
-                    shared_invocation,
-                };
-                Ok((prepared, listener))
-            })();
+            })?);
+        let launcher = Arc::new(HotkeyTrigger::new(routes.launcher));
+        let quit = routes
+            .quit
+            .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+        let help = routes
+            .help
+            .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+        let screen_draw = routes
+            .screen_draw_launch
+            .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+        let emergency = routes
+            .screen_draw_emergency
+            .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+        let triggers = legacy_listener_triggers(
+            routes.shared_invocation,
+            &launcher,
+            quit.as_ref(),
+            help.as_ref(),
+            screen_draw.as_ref(),
+            emergency.as_ref(),
+        );
+        let listener = HotkeyTrigger::prepare_listener(triggers, "prepared", event_tx.clone())
+            .map_err(HotkeyReconfigurationError::ListenerPreparation)?;
+        let staged_service = if settings.radial.enabled && !has_invocation_service {
+            LauncherInvocationService::start(
+                inert_invocation_config(&settings, radial_document, generation.0),
+                Vec::new(),
+                owner,
+                event_tx.clone(),
+            )
+            .map(Some)
+            .map_err(HotkeyReconfigurationError::RuntimeTransition)?
+        } else {
+            None
+        };
+        let prepared = PreparedHotkeyReconfiguration {
+            request_id,
+            generation,
+            shared_invocation: routes.shared_invocation,
+        };
+        Ok((
+            prepared,
+            PreparedHotkeyRoute {
+                settings,
+                dependencies,
+                generation,
+                listener: Some(listener),
+                launcher,
+                quit,
+                help,
+                screen_draw,
+                emergency,
+                staged_service,
+            },
+        ))
+    })();
 
-            match preparation {
-                Ok((prepared, listener)) => {
-                    if request.complete(Ok(prepared)).is_ok() {
-                        prepared_listeners.insert(request_id, listener);
-                    }
+    match preparation {
+        Ok((prepared, route)) => {
+            prepared_routes.insert(request_id, route);
+            if let Err(error) = request.complete(Ok(prepared)) {
+                prepared_routes.remove(&request_id);
+                tracing::debug!(%error, "hotkey preparation requester disconnected before acknowledgement");
+            }
+        }
+        Err(error) => {
+            let _ = request.complete(Err(error));
+        }
+    }
+}
+
+fn application_error(
+    request: multi_launcher::hotkey::reconfiguration::HotkeyApplicationRequest,
+    error: multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
+) {
+    let _ = request.complete(Err(error));
+}
+
+fn install_candidate_hotkey_listener(
+    application: &mut PendingHotkeyApplication,
+    listener: &mut HotkeyListener,
+) {
+    if let Some(candidate) = application.prepared.listener.take() {
+        listener.stop();
+        application.old_listener_stopped = true;
+        candidate.activate();
+        *listener = candidate;
+    }
+}
+
+fn restore_fallback_hotkey_listener(
+    application: &mut PendingHotkeyApplication,
+    listener: &mut HotkeyListener,
+) {
+    if application.old_listener_stopped {
+        listener.stop();
+        if let Some(previous) = application.fallback_listener.take() {
+            previous.activate();
+            *listener = previous;
+        }
+        application.old_listener_stopped = false;
+    }
+}
+
+struct HotkeyApplicationStart<'a> {
+    request: multi_launcher::hotkey::reconfiguration::HotkeyApplicationRequest,
+    prepared_routes: &'a mut HashMap<
+        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationId,
+        PreparedHotkeyRoute,
+    >,
+    settings: &'a Settings,
+    settings_generation: u64,
+    radial_document: &'a RadialDocument,
+    event_tx: &'a Sender<()>,
+    listener: &'a mut HotkeyListener,
+    invocation_service: &'a mut Option<LauncherInvocationService>,
+    pending_launcher_route: &'a mut Option<PendingLauncherRoute>,
+}
+
+fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
+    let HotkeyApplicationStart {
+        request,
+        prepared_routes,
+        settings,
+        settings_generation,
+        radial_document,
+        event_tx,
+        listener,
+        invocation_service,
+        pending_launcher_route,
+    } = start;
+    use multi_launcher::hotkey::reconfiguration::{
+        HotkeyReconfigurationError, HotkeyRuntimeGeneration,
+    };
+
+    let request_id = request.request_id();
+    let Some(mut prepared) = prepared_routes.remove(&request_id) else {
+        application_error(request, HotkeyReconfigurationError::InvalidPhase);
+        return;
+    };
+    let Some(expected_generation) = settings_generation.checked_add(1) else {
+        application_error(
+            request,
+            HotkeyReconfigurationError::RuntimeTransition(
+                "hotkey settings generation space exhausted".into(),
+            ),
+        );
+        return;
+    };
+    let candidate = request.settings().clone();
+    let candidate_routes = match validate_hotkey_route_candidate(&candidate, radial_document) {
+        Ok(routes) => routes,
+        Err(error) => {
+            application_error(request, error);
+            return;
+        }
+    };
+    let candidate_dependencies =
+        HotkeyRouteDependencies::from_routes(&candidate, &candidate_routes);
+    if prepared.generation != HotkeyRuntimeGeneration(expected_generation)
+        || request.generation() != prepared.generation
+        || prepared.dependencies != candidate_dependencies
+    {
+        application_error(request, HotkeyReconfigurationError::StaleGeneration);
+        return;
+    }
+    // Apply may contain unrelated settings merged after preparation. Preserve
+    // those latest values while reusing only resources whose route dependencies
+    // still match and whose candidate remains valid against current inputs.
+    prepared.settings = candidate;
+    if pending_launcher_route.is_some() {
+        application_error(
+            request,
+            HotkeyReconfigurationError::RuntimeTransition(
+                "another launcher route transition is still pending".into(),
+            ),
+        );
+        return;
+    }
+    if prepared.settings.radial.enabled
+        && invocation_service.is_none()
+        && prepared.staged_service.is_none()
+    {
+        application_error(
+            request,
+            HotkeyReconfigurationError::RuntimeTransition(
+                "prepared shared invocation service is unavailable".into(),
+            ),
+        );
+        return;
+    }
+
+    let fallback_listener = match HotkeyTrigger::prepare_listener(
+        listener.triggers().to_vec(),
+        "hotkey-rollback",
+        event_tx.clone(),
+    ) {
+        Ok(listener) => listener,
+        Err(error) => {
+            application_error(
+                request,
+                HotkeyReconfigurationError::ListenerPreparation(error),
+            );
+            return;
+        }
+    };
+    let old_service_existed = invocation_service.is_some();
+    let mut application = PendingHotkeyApplication {
+        request: Some(request),
+        prepared,
+        old_settings: settings.clone(),
+        old_generation: settings_generation,
+        candidate_generation: expected_generation,
+        old_service_existed,
+        old_listener_stopped: false,
+        fallback_listener: Some(fallback_listener),
+        phase: if old_service_existed {
+            HotkeyApplyPhase::DrainOldRoute
+        } else {
+            HotkeyApplyPhase::ActivateCandidate
+        },
+        cancellation_requested: false,
+        failure: None,
+        restore_generation: None,
+    };
+
+    let handoff = if old_service_existed {
+        invocation_service
+            .as_ref()
+            .expect("service presence checked above")
+            .begin_route_handoff(
+                inert_invocation_config(
+                    &application.old_settings,
+                    radial_document,
+                    application.candidate_generation,
+                ),
+                shared_drain_control_bindings(&application.old_settings, radial_document),
+                LifecycleCancellation::SettingsReload,
+            )
+    } else if application.prepared.settings.radial.enabled {
+        install_candidate_hotkey_listener(&mut application, listener);
+        let plan = radial_route_plan(
+            &application.prepared.settings,
+            radial_document,
+            application.candidate_generation,
+        );
+        application
+            .prepared
+            .staged_service
+            .as_ref()
+            .expect("candidate service checked above")
+            .begin_route_handoff(
+                plan.config,
+                plan.related,
+                LifecycleCancellation::SettingsReload,
+            )
+    } else {
+        // No native hook participates in this route. Resolve the listener swap
+        // through the same owner state machine so cancellation can still win
+        // before terminal Applied is published.
+        *pending_launcher_route = Some(PendingLauncherRoute {
+            settings_generation,
+            handoff: None,
+            policy_applied: None,
+            completion: PendingLauncherRouteCompletion::Hotkey(Box::new(application)),
+        });
+        return;
+    };
+
+    match handoff {
+        Ok(handoff) => {
+            *pending_launcher_route = Some(PendingLauncherRoute {
+                settings_generation,
+                handoff: Some(Box::new(handoff)),
+                policy_applied: None,
+                completion: PendingLauncherRouteCompletion::Hotkey(Box::new(application)),
+            });
+        }
+        Err(error) => {
+            application.failure = Some(HotkeyReconfigurationError::RuntimeTransition(error));
+            if application.old_service_existed {
+                // The route is still expected to be old; no candidate listener
+                // has been admitted while the inert handoff was rejected.
+                finish_hotkey_application_error(application, listener, invocation_service, false);
+            } else {
+                restore_fallback_hotkey_listener(&mut application, listener);
+                if let Some(mut staged) = application.prepared.staged_service.take() {
+                    staged.stop();
                 }
-                Err(error) => {
-                    let _ = request.complete(Err(error));
-                }
+                finish_hotkey_application_error(application, listener, invocation_service, false);
             }
         }
     }
+}
+
+fn finish_hotkey_application_error(
+    mut application: PendingHotkeyApplication,
+    listener: &mut HotkeyListener,
+    invocation_service: &mut Option<LauncherInvocationService>,
+    stop_authoritative_service: bool,
+) {
+    if !application.old_service_existed
+        && let Some(mut staged) = application.prepared.staged_service.take()
+    {
+        staged.stop();
+    }
+    if stop_authoritative_service && let Some(mut service) = invocation_service.take() {
+        service.stop();
+    }
+    if application.old_listener_stopped {
+        restore_fallback_hotkey_listener(&mut application, listener);
+    }
+    if let Some(request) = application.request.take() {
+        let error = application.failure.take().unwrap_or_else(|| {
+            multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::RuntimeTransition(
+                "hotkey route transition ended without a terminal state".into(),
+            )
+        });
+        let _ = request.complete(Err(error));
+    }
+}
+
+fn begin_hotkey_route_rollback(
+    mut application: PendingHotkeyApplication,
+    listener: &mut HotkeyListener,
+    invocation_service: &mut Option<LauncherInvocationService>,
+    radial_document: &RadialDocument,
+    pending_launcher_route: &mut Option<PendingLauncherRoute>,
+    handoff_issuer: &mut dyn HotkeyRouteHandoffIssuer,
+) {
+    use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError;
+
+    if !application.old_service_existed && application.prepared.staged_service.is_none() {
+        restore_fallback_hotkey_listener(&mut application, listener);
+        finish_hotkey_application_error(application, listener, invocation_service, false);
+        return;
+    }
+
+    let service = if application.old_service_existed {
+        invocation_service.as_ref()
+    } else {
+        application.prepared.staged_service.as_ref()
+    };
+    let Some(restore_generation) = application.candidate_generation.checked_add(1) else {
+        application.failure = Some(HotkeyReconfigurationError::Rollback(
+            "hotkey settings generation space exhausted during route restoration".into(),
+        ));
+        finish_hotkey_application_error(application, listener, invocation_service, true);
+        return;
+    };
+    let (restore_config, restore_related) = if application.old_service_existed {
+        let old_plan = radial_route_plan(
+            &application.old_settings,
+            radial_document,
+            restore_generation,
+        );
+        (old_plan.config, old_plan.related)
+    } else {
+        (
+            inert_invocation_config(
+                &application.old_settings,
+                radial_document,
+                restore_generation,
+            ),
+            shared_drain_control_bindings(&application.old_settings, radial_document),
+        )
+    };
+    match handoff_issuer.begin(
+        service,
+        restore_config,
+        restore_related,
+        LifecycleCancellation::SettingsReload,
+    ) {
+        Ok(handoff) => {
+            if application.old_listener_stopped {
+                listener.stop();
+            }
+            application.phase = HotkeyApplyPhase::RestoreOldRoute;
+            application.restore_generation = Some(restore_generation);
+            *pending_launcher_route = Some(PendingLauncherRoute {
+                settings_generation: application.old_generation,
+                handoff: Some(handoff),
+                policy_applied: None,
+                completion: PendingLauncherRouteCompletion::Hotkey(Box::new(application)),
+            });
+        }
+        Err(restore_error) => {
+            application.failure = Some(HotkeyReconfigurationError::Rollback(format!(
+                "previous route could not be restored after transition failure: {restore_error}"
+            )));
+            finish_hotkey_application_error(application, listener, invocation_service, true);
+        }
+    }
+}
+
+fn finish_hotkey_candidate_activation(
+    mut application: PendingHotkeyApplication,
+    commit_context: &mut HotkeyRuntimeCommitContext<'_>,
+    pending_launcher_route: &mut Option<PendingLauncherRoute>,
+    handoff_issuer: &mut dyn HotkeyRouteHandoffIssuer,
+) {
+    if application.cancellation_requested {
+        application.failure = Some(
+            multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                TransactionCancelled,
+        );
+        begin_hotkey_route_rollback(
+            application,
+            commit_context.listener,
+            commit_context.invocation_service,
+            commit_context.radial_document,
+            pending_launcher_route,
+            handoff_issuer,
+        );
+    } else {
+        commit_context.commit(application);
+    }
+}
+
+struct HotkeyRuntimeCommitContext<'a> {
+    settings: &'a mut Settings,
+    settings_generation: &'a mut u64,
+    trigger: &'a mut Arc<HotkeyTrigger>,
+    quit_trigger: &'a mut Option<Arc<HotkeyTrigger>>,
+    help_trigger: &'a mut Option<Arc<HotkeyTrigger>>,
+    screen_draw_trigger: &'a mut Option<Arc<HotkeyTrigger>>,
+    emergency_trigger: &'a mut Option<Arc<HotkeyTrigger>>,
+    listener: &'a mut HotkeyListener,
+    invocation_service: &'a mut Option<LauncherInvocationService>,
+    radial_control_endpoint: &'a RadialControlMainEndpoint,
+    radial_resources: &'a mut RadialRuntimeResources,
+    radial_controller: &'a mut RadialController,
+    native_preview:
+        &'a mut multi_launcher::radial::authoring::native_preview::NativePreviewCoordinator,
+    radial_document: &'a RadialDocument,
+    authoring_reply_tx: &'a multi_launcher::radial::authoring::AuthoringReplySender,
+    event_tx: &'a Sender<()>,
+}
+
+impl HotkeyRuntimeCommitContext<'_> {
+    fn finish_after_authoritative_hook_failure(
+        &mut self,
+        mut application: PendingHotkeyApplication,
+    ) {
+        use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError;
+
+        let fallback = prepare_legacy_hotkey_fallback(
+            &application.old_settings,
+            self.radial_document,
+            self.event_tx,
+        );
+        *self.settings = application.old_settings.clone();
+        self.settings.radial.enabled = false;
+        *self.settings_generation = self.settings_generation.checked_add(1).unwrap_or(1);
+        self.radial_control_endpoint.set_enabled(false);
+        self.radial_controller.disable();
+        self.radial_resources.set_runtime_enabled(false);
+        self.radial_resources.reconcile(self.radial_controller);
+
+        match fallback {
+            Ok(fallback) => {
+                *self.settings = fallback.settings;
+                *self.trigger = fallback.launcher;
+                *self.quit_trigger = fallback.quit;
+                *self.help_trigger = fallback.help;
+                *self.screen_draw_trigger = fallback.screen_draw;
+                *self.emergency_trigger = fallback.emergency;
+                self.listener.stop();
+                fallback.listener.activate();
+                *self.listener = fallback.listener;
+                application.old_listener_stopped = false;
+                application.fallback_listener.take();
+                application.failure = Some(HotkeyReconfigurationError::Rollback(
+                    "the shared input hook failed; radial runtime was disabled and the prior legacy launcher and process-control routes were restored".into(),
+                ));
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(
+                        "The shared launcher input hook stopped unexpectedly. Radial menus were disabled and the prior legacy launcher and process-control routes were restored.".into(),
+                    ),
+                );
+            }
+            Err(error) => {
+                self.listener.stop();
+                application.failure = Some(HotkeyReconfigurationError::Rollback(format!(
+                    "the shared input hook failed and the prior legacy route could not be restored: {error}"
+                )));
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
+                        "The shared launcher input hook stopped unexpectedly. Radial menus were disabled, but the prior legacy launcher route could not be restored: {error}"
+                    )),
+                );
+            }
+        }
+
+        if let Some(mut service) = self.invocation_service.take() {
+            service.stop();
+        }
+        finish_hotkey_application_error(application, self.listener, self.invocation_service, false);
+    }
+
+    fn commit(&mut self, mut application: PendingHotkeyApplication) {
+        use multi_launcher::hotkey::reconfiguration::AppliedHotkeyReconfiguration;
+
+        install_candidate_hotkey_listener(&mut application, self.listener);
+        let candidate = application.prepared.settings.clone();
+        *self.trigger = Arc::clone(&application.prepared.launcher);
+        *self.quit_trigger = application.prepared.quit.clone();
+        *self.help_trigger = application.prepared.help.clone();
+        *self.screen_draw_trigger = application.prepared.screen_draw.clone();
+        *self.emergency_trigger = application.prepared.emergency.clone();
+        *self.settings = candidate;
+        *self.settings_generation = application.candidate_generation;
+        if self.settings.radial.enabled {
+            if self.invocation_service.is_none() {
+                *self.invocation_service = application.prepared.staged_service.take();
+            }
+        } else if let Some(mut service) = self.invocation_service.take() {
+            service.stop();
+        }
+        self.radial_control_endpoint
+            .set_enabled(self.settings.radial.enabled);
+        self.radial_resources
+            .set_runtime_enabled(self.settings.radial.enabled);
+        self.radial_resources.reconcile(self.radial_controller);
+        let tooltip_preferences =
+            multi_launcher::radial::tooltip::TooltipPreferences::from(&self.settings.radial);
+        match self
+            .native_preview
+            .set_tooltip_preferences(tooltip_preferences)
+        {
+            Ok(Some(diagnostics)) => {
+                if let Some(lease) = self.native_preview.active_lease() {
+                    let reply = AuthoringReply::NativePreviewDiagnostics {
+                        editor_session: lease.editor_session,
+                        lease,
+                        diagnostics,
+                    };
+                    if self.authoring_reply_tx.send(reply).is_err() {
+                        tracing::debug!("native preview diagnostics receiver disconnected");
+                    }
+                } else {
+                    tracing::error!(
+                        "native preview returned tooltip diagnostics without an active lease"
+                    );
+                    for diagnostic in diagnostics {
+                        multi_launcher::gui::send_event(
+                            multi_launcher::gui::WatchEvent::RadialDiagnostic(diagnostic),
+                        );
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
+                        "The radial authoring preview could not refresh tooltip preferences: {error}"
+                    )),
+                );
+            }
+        }
+        for event in self
+            .radial_controller
+            .set_tooltip_preferences(tooltip_preferences)
+        {
+            match event {
+                ControllerEvent::Diagnostic(diagnostic) => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialDiagnostic(diagnostic),
+                    );
+                }
+                ControllerEvent::Error(error) => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(error),
+                    );
+                }
+                ControllerEvent::LayoutFailed { menu_id, error } => {
+                    multi_launcher::gui::send_event(
+                        multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(format!(
+                            "Radial menu {menu_id} could not be placed after a tooltip preference change: {error:?}"
+                        )),
+                    );
+                }
+                other => tracing::warn!(
+                    ?other,
+                    "unexpected radial event while applying tooltip preferences"
+                ),
+            }
+        }
+        self.radial_controller.close(
+            multi_launcher::radial::native::CloseReason::SettingsReload,
+            None,
+        );
+        refresh_macro_hotkey_reservations(self.settings, self.radial_document);
+        multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
+
+        if let Some(request) = application.request.take() {
+            let request_id = request.request_id();
+            let _ = request.complete(Ok(AppliedHotkeyReconfiguration {
+                request_id,
+                generation: multi_launcher::hotkey::reconfiguration::HotkeyRuntimeGeneration(
+                    application.candidate_generation,
+                ),
+            }));
+        }
+    }
+}
+
+struct HotkeyRouteCompletionContext<'a> {
+    runtime: HotkeyRuntimeCommitContext<'a>,
+    pending_route: &'a mut Option<PendingLauncherRoute>,
+    deferred_notices_follow_failure: &'a mut bool,
+}
+
+/// Advances the same owner state machine used by the main loop. The return
+/// value preserves the old loop behavior of yielding immediately after a
+/// confirmed route restoration.
+fn complete_hotkey_route_step(
+    mut application: PendingHotkeyApplication,
+    result: Result<(), String>,
+    context: &mut HotkeyRouteCompletionContext<'_>,
+    handoff_issuer: &mut dyn HotkeyRouteHandoffIssuer,
+) -> bool {
+    use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError;
+
+    if application.phase == HotkeyApplyPhase::RestoreOldRoute {
+        match result {
+            Ok(()) => {
+                *context.deferred_notices_follow_failure = true;
+                *context.runtime.settings_generation = application
+                    .restore_generation
+                    .unwrap_or(application.candidate_generation);
+                restore_fallback_hotkey_listener(&mut application, context.runtime.listener);
+                if application.cancellation_requested {
+                    application.failure = Some(HotkeyReconfigurationError::TransactionCancelled);
+                }
+                finish_hotkey_application_error(
+                    application,
+                    context.runtime.listener,
+                    context.runtime.invocation_service,
+                    false,
+                );
+            }
+            Err(restore_error) => {
+                *context.deferred_notices_follow_failure = true;
+                *context.runtime.settings_generation = application
+                    .restore_generation
+                    .unwrap_or(application.candidate_generation);
+                let prior = application.failure.take().map_or_else(
+                    || "the candidate route was cancelled".to_owned(),
+                    |error| error.to_string(),
+                );
+                application.failure = Some(HotkeyReconfigurationError::Rollback(format!(
+                    "failed to restore the prior route after {prior}: {restore_error}"
+                )));
+                finish_hotkey_application_error(
+                    application,
+                    context.runtime.listener,
+                    context.runtime.invocation_service,
+                    true,
+                );
+            }
+        }
+        return true;
+    }
+
+    match application.phase {
+        HotkeyApplyPhase::DrainOldRoute => match result {
+            Err(error) => {
+                application.failure = Some(HotkeyReconfigurationError::RuntimeTransition(error));
+                begin_hotkey_route_rollback(
+                    application,
+                    context.runtime.listener,
+                    context.runtime.invocation_service,
+                    context.runtime.radial_document,
+                    context.pending_route,
+                    handoff_issuer,
+                );
+            }
+            Ok(()) if application.cancellation_requested => {
+                application.failure = Some(HotkeyReconfigurationError::TransactionCancelled);
+                begin_hotkey_route_rollback(
+                    application,
+                    context.runtime.listener,
+                    context.runtime.invocation_service,
+                    context.runtime.radial_document,
+                    context.pending_route,
+                    handoff_issuer,
+                );
+            }
+            Ok(()) if application.prepared.settings.radial.enabled => {
+                install_candidate_hotkey_listener(&mut application, context.runtime.listener);
+                let plan = radial_route_plan(
+                    &application.prepared.settings,
+                    context.runtime.radial_document,
+                    application.candidate_generation,
+                );
+                let route_service = if application.old_service_existed {
+                    context.runtime.invocation_service.as_ref()
+                } else {
+                    application.prepared.staged_service.as_ref()
+                };
+                match handoff_issuer.begin(
+                    route_service,
+                    plan.config,
+                    plan.related,
+                    LifecycleCancellation::SettingsReload,
+                ) {
+                    Ok(handoff) => {
+                        application.phase = HotkeyApplyPhase::ActivateCandidate;
+                        *context.pending_route = Some(PendingLauncherRoute {
+                            settings_generation: application.old_generation,
+                            handoff: Some(handoff),
+                            policy_applied: None,
+                            completion: PendingLauncherRouteCompletion::Hotkey(Box::new(
+                                application,
+                            )),
+                        });
+                    }
+                    Err(error) => {
+                        application.failure =
+                            Some(HotkeyReconfigurationError::RuntimeTransition(error));
+                        begin_hotkey_route_rollback(
+                            application,
+                            context.runtime.listener,
+                            context.runtime.invocation_service,
+                            context.runtime.radial_document,
+                            context.pending_route,
+                            handoff_issuer,
+                        );
+                    }
+                }
+            }
+            Ok(()) => {
+                install_candidate_hotkey_listener(&mut application, context.runtime.listener);
+                if let Some(mut service) = context.runtime.invocation_service.take() {
+                    service.stop();
+                }
+                context.runtime.commit(application);
+            }
+        },
+        HotkeyApplyPhase::ActivateCandidate => match result {
+            Ok(()) => finish_hotkey_candidate_activation(
+                application,
+                &mut context.runtime,
+                context.pending_route,
+                handoff_issuer,
+            ),
+            Err(error) => {
+                application.failure = Some(HotkeyReconfigurationError::RuntimeTransition(error));
+                begin_hotkey_route_rollback(
+                    application,
+                    context.runtime.listener,
+                    context.runtime.invocation_service,
+                    context.runtime.radial_document,
+                    context.pending_route,
+                    handoff_issuer,
+                );
+            }
+        },
+        HotkeyApplyPhase::RestoreOldRoute => {
+            unreachable!("restoration phase is handled before candidate phases")
+        }
+    }
+    false
 }
 
 struct GuiWorker {
@@ -1174,15 +2197,15 @@ fn main() -> anyhow::Result<()> {
 
     let hotkey = settings.hotkey();
     tracing::debug!(?hotkey, "configuring hotkeys");
-    let trigger = Arc::new(HotkeyTrigger::new(hotkey));
-    let quit_trigger = settings
+    let mut trigger = Arc::new(HotkeyTrigger::new(hotkey));
+    let mut quit_trigger = settings
         .quit_hotkey()
         .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-    let help_trigger = settings
+    let mut help_trigger = settings
         .help_hotkey()
         .map(|hk| Arc::new(HotkeyTrigger::new(hk)));
-    let screen_draw_trigger = screen_draw_launch_trigger(&settings);
-    let emergency_trigger = screen_draw_emergency_trigger(&settings);
+    let mut screen_draw_trigger = screen_draw_launch_trigger(&settings);
+    let mut emergency_trigger = screen_draw_emergency_trigger(&settings);
 
     let mut shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     let mut settings_generation = 1u64;
@@ -1372,7 +2395,11 @@ fn main() -> anyhow::Result<()> {
     let mut queued_visibility: Option<bool> = None;
     let mut previous_exclusive = false;
     let mut pending_launcher_route: Option<PendingLauncherRoute> = None;
-    let mut prepared_hotkey_listeners = HashMap::new();
+    let mut prepared_hotkey_routes: HashMap<_, PreparedHotkeyRoute> = HashMap::new();
+    let mut deferred_service_notices = VecDeque::new();
+    let mut deferred_notices_follow_hotkey_failure = false;
+    let mut hotkey_handoff_issuer = NativeHotkeyRouteHandoffIssuer;
+    let hotkey_service_owner = invocation_priority_owner(Arc::clone(&screen_draw_recovery_bridge));
     let mut external_radial_invocations: HashMap<InvocationId, ExternalRadialMetadata> =
         HashMap::new();
 
@@ -1400,7 +2427,11 @@ fn main() -> anyhow::Result<()> {
             break Ok(());
         }
 
-        let radial_changes = radial_resources.take_changes();
+        let radial_changes = if settings_hotkey_route_is_pending(&pending_launcher_route) {
+            multi_launcher::radial::watch::RadialWatchChanges::default()
+        } else {
+            radial_resources.take_changes()
+        };
         let mut radial_generation_replaced = false;
         if radial_changes.document {
             let reload = radial_store.reload_external_with(|_| {
@@ -1468,9 +2499,12 @@ fn main() -> anyhow::Result<()> {
                             Ok(handoff) => {
                                 pending_launcher_route = Some(PendingLauncherRoute {
                                     settings_generation,
-                                    handoff,
-                                    start_legacy: route_plan.start_legacy,
-                                    stop_service: route_plan.stop_service,
+                                    handoff: Some(Box::new(handoff)),
+                                    policy_applied: None,
+                                    completion: PendingLauncherRouteCompletion::Reconcile {
+                                        start_legacy: route_plan.start_legacy,
+                                        stop_service: route_plan.stop_service,
+                                    },
                                 });
                             }
                             Err(error) => {
@@ -1578,16 +2612,63 @@ fn main() -> anyhow::Result<()> {
                     break;
                 }
             };
-            process_hotkey_runtime_message(
-                message,
-                &radial_document,
-                settings_generation,
-                &event_tx,
-                &mut prepared_hotkey_listeners,
-            );
+            use multi_launcher::hotkey::reconfiguration::{
+                HotkeyReconfigurationError, HotkeyRuntimeMessage,
+            };
+            match message {
+                HotkeyRuntimeMessage::Prepare(request) => prepare_hotkey_runtime_message(
+                    request,
+                    &radial_document,
+                    settings_generation,
+                    &event_tx,
+                    invocation_service.is_some(),
+                    Arc::clone(&hotkey_service_owner),
+                    &mut prepared_hotkey_routes,
+                ),
+                HotkeyRuntimeMessage::Apply(request) => {
+                    begin_hotkey_application(HotkeyApplicationStart {
+                        request,
+                        prepared_routes: &mut prepared_hotkey_routes,
+                        settings: &settings,
+                        settings_generation,
+                        radial_document: &radial_document,
+                        event_tx: &event_tx,
+                        listener: &mut listener,
+                        invocation_service: &mut invocation_service,
+                        pending_launcher_route: &mut pending_launcher_route,
+                    });
+                }
+                HotkeyRuntimeMessage::Cancel(mut request) => {
+                    let request_id = request.request_id();
+                    if let Some(PendingLauncherRoute {
+                        completion: PendingLauncherRouteCompletion::Hotkey(application),
+                        ..
+                    }) = pending_launcher_route.as_mut()
+                        && application
+                            .request
+                            .as_ref()
+                            .is_some_and(|pending| pending.request_id() == request_id)
+                    {
+                        application.cancellation_requested = true;
+                        request.defer_terminal();
+                    } else if let Some(mut prepared) = prepared_hotkey_routes.remove(&request_id) {
+                        if let Some(mut staged) = prepared.staged_service.take() {
+                            staged.stop();
+                        }
+                        let _ =
+                            request.complete(Err(HotkeyReconfigurationError::TransactionCancelled));
+                    } else {
+                        let _ =
+                            request.complete(Err(HotkeyReconfigurationError::TransactionCancelled));
+                    }
+                }
+            }
         }
 
-        while let Ok(demand) = authoring_endpoint.resource_rx.try_recv() {
+        while let Some(demand) = try_recv_when_hotkey_route_is_idle(
+            &pending_launcher_route,
+            &authoring_endpoint.resource_rx,
+        ) {
             let released = match demand {
                 AuthoringResourceDemand::Acquire(editor_session) => {
                     authoring_editor_session = Some(editor_session);
@@ -1619,7 +2700,10 @@ fn main() -> anyhow::Result<()> {
             radial_resources.reconcile(&mut radial_controller);
         }
 
-        while let Ok(request) = authoring_endpoint.request_rx.try_recv() {
+        while let Some(request) = try_recv_when_hotkey_route_is_idle(
+            &pending_launcher_route,
+            &authoring_endpoint.request_rx,
+        ) {
             hold_acceptance_prepare_request(&request, acceptance_prepare_hold_file.as_deref());
             let request_id = request.id();
             let request_generation = request.generation();
@@ -1831,9 +2915,12 @@ fn main() -> anyhow::Result<()> {
                                     Ok(handoff) => {
                                         pending_launcher_route = Some(PendingLauncherRoute {
                                             settings_generation,
-                                            handoff,
-                                            start_legacy: route_plan.start_legacy,
-                                            stop_service: route_plan.stop_service,
+                                            handoff: Some(Box::new(handoff)),
+                                            policy_applied: None,
+                                            completion: PendingLauncherRouteCompletion::Reconcile {
+                                                start_legacy: route_plan.start_legacy,
+                                                stop_service: route_plan.stop_service,
+                                            },
                                         });
                                     }
                                     Err(error) => {
@@ -1970,9 +3057,12 @@ fn main() -> anyhow::Result<()> {
                                     Ok(handoff) => {
                                         pending_launcher_route = Some(PendingLauncherRoute {
                                             settings_generation,
-                                            handoff,
-                                            start_legacy: route_plan.start_legacy,
-                                            stop_service: route_plan.stop_service,
+                                            handoff: Some(Box::new(handoff)),
+                                            policy_applied: None,
+                                            completion: PendingLauncherRouteCompletion::Reconcile {
+                                                start_legacy: route_plan.start_legacy,
+                                                stop_service: route_plan.stop_service,
+                                            },
                                         });
                                     }
                                     Err(error) => {
@@ -2148,7 +3238,9 @@ fn main() -> anyhow::Result<()> {
 
         // Controls, resource release and native lifecycle replies take priority
         // over the separate capacity-one thumbnail queue. No native tile window.
-        if let Ok(request) = authoring_endpoint.gallery_rx.try_recv() {
+        if !settings_hotkey_route_is_pending(&pending_launcher_route)
+            && let Ok(request) = authoring_endpoint.gallery_rx.try_recv()
+        {
             let correlation = request.correlation;
             let result = if gallery_editor_session != Some(correlation.editor_session)
                 || !request.interest.load(std::sync::atomic::Ordering::Acquire)
@@ -2169,22 +3261,97 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        let handoff_result = pending_launcher_route
-            .as_ref()
-            .and_then(|pending| pending.handoff.try_complete());
+        if let Some(pending) = pending_launcher_route.as_mut()
+            && pending.policy_applied.is_none()
+        {
+            pending.policy_applied = pending
+                .handoff
+                .as_ref()
+                .and_then(|handoff| handoff.try_policy_applied());
+        }
+
+        let cancel_after_policy_install = pending_launcher_route.as_ref().is_some_and(|pending| {
+            pending.policy_applied == Some(Ok(()))
+                && matches!(
+                    &pending.completion,
+                    PendingLauncherRouteCompletion::Hotkey(application)
+                        if application.cancellation_requested
+                            && application.phase != HotkeyApplyPhase::RestoreOldRoute
+                )
+        });
+        if cancel_after_policy_install
+            && let Some(PendingLauncherRoute {
+                completion: PendingLauncherRouteCompletion::Hotkey(application),
+                ..
+            }) = pending_launcher_route.take()
+        {
+            use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError;
+            let mut application = *application;
+            application.failure = Some(HotkeyReconfigurationError::TransactionCancelled);
+            begin_hotkey_route_rollback(
+                application,
+                &mut listener,
+                &mut invocation_service,
+                &radial_document,
+                &mut pending_launcher_route,
+                &mut hotkey_handoff_issuer,
+            );
+        }
+
+        let restored_shared_policy = pending_launcher_route.as_ref().is_some_and(|pending| {
+            pending.policy_applied == Some(Ok(()))
+                && matches!(
+                    &pending.completion,
+                    PendingLauncherRouteCompletion::Hotkey(application)
+                        if application.old_service_existed
+                            && application.phase == HotkeyApplyPhase::RestoreOldRoute
+                )
+        });
+        if restored_shared_policy
+            && let Some(PendingLauncherRoute {
+                completion: PendingLauncherRouteCompletion::Hotkey(application),
+                ..
+            }) = pending_launcher_route.take()
+        {
+            let mut application = *application;
+            deferred_notices_follow_hotkey_failure = true;
+            settings_generation = application
+                .restore_generation
+                .unwrap_or(application.candidate_generation);
+            if application.failure.is_none() {
+                application.failure = Some(
+                    multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                        TransactionCancelled,
+                );
+            }
+            finish_hotkey_application_error(
+                application,
+                &mut listener,
+                &mut invocation_service,
+                false,
+            );
+        }
+
+        let handoff_result = pending_launcher_route.as_ref().and_then(|pending| {
+            pending
+                .handoff
+                .as_ref()
+                .map_or(Some(Ok(())), |handoff| handoff.try_complete())
+        });
         if let Some(result) = handoff_result {
             let pending = pending_launcher_route
                 .take()
                 .expect("completed launcher handoff remains pending");
-            if pending.settings_generation == settings_generation {
-                match result {
+            match pending.completion {
+                PendingLauncherRouteCompletion::Reconcile {
+                    start_legacy,
+                    stop_service,
+                } if pending.settings_generation == settings_generation => match result {
                     Ok(()) => {
-                        if pending.stop_service
-                            && let Some(mut service) = invocation_service.take()
-                        {
+                        if stop_service && let Some(mut service) = invocation_service.take() {
                             service.stop();
                         }
-                        if pending.start_legacy {
+                        if start_legacy {
                             listener.stop();
                             listener = HotkeyTrigger::start_listener(
                                 legacy_listener_triggers(
@@ -2222,12 +3389,55 @@ fn main() -> anyhow::Result<()> {
                             event_tx.clone(),
                         );
                     }
+                },
+                PendingLauncherRouteCompletion::Reconcile { .. } => {
+                    tracing::warn!(
+                        pending_generation = pending.settings_generation,
+                        current_generation = settings_generation,
+                        "discarded stale launcher route handoff completion"
+                    );
+                }
+                PendingLauncherRouteCompletion::Hotkey(application) => {
+                    let mut context = HotkeyRouteCompletionContext {
+                        runtime: HotkeyRuntimeCommitContext {
+                            settings: &mut settings,
+                            settings_generation: &mut settings_generation,
+                            trigger: &mut trigger,
+                            quit_trigger: &mut quit_trigger,
+                            help_trigger: &mut help_trigger,
+                            screen_draw_trigger: &mut screen_draw_trigger,
+                            emergency_trigger: &mut emergency_trigger,
+                            listener: &mut listener,
+                            invocation_service: &mut invocation_service,
+                            radial_control_endpoint: &radial_control_endpoint,
+                            radial_resources: &mut radial_resources,
+                            radial_controller: &mut radial_controller,
+                            native_preview: &mut native_preview,
+                            radial_document: &radial_document,
+                            authoring_reply_tx: &authoring_endpoint.reply_tx,
+                            event_tx: &event_tx,
+                        },
+                        pending_route: &mut pending_launcher_route,
+                        deferred_notices_follow_failure:
+                            &mut deferred_notices_follow_hotkey_failure,
+                    };
+                    if complete_hotkey_route_step(
+                        *application,
+                        result,
+                        &mut context,
+                        &mut hotkey_handoff_issuer,
+                    ) {
+                        continue;
+                    }
                 }
             }
         }
 
         let mut radial_notices = Vec::new();
-        while let Ok(request) = radial_control_endpoint.request_rx.try_recv() {
+        while let Some(request) = try_recv_when_hotkey_route_is_idle(
+            &pending_launcher_route,
+            &radial_control_endpoint.request_rx,
+        ) {
             match request {
                 RadialControlRequest::Close => radial_notices.push(ServiceNotice {
                     recovery: None,
@@ -2451,53 +3661,76 @@ fn main() -> anyhow::Result<()> {
         }
         if let Some(service) = invocation_service.as_ref() {
             while let Some(mut notice) = service.try_recv() {
-                if let Some(action) = notice.action.take() {
-                    match action {
-                        RelatedAction::Quit => {
-                            if let Some(v) = &quit_trigger {
-                                if let Ok(mut flag) = v.open.lock() {
-                                    *flag = true
-                                }
-                            }
-                        }
-                        RelatedAction::Help => {
-                            if let Some(v) = &help_trigger {
-                                if let Ok(mut flag) = v.open.lock() {
-                                    *flag = true
-                                }
-                            }
-                        }
-                        RelatedAction::ScreenDrawLaunch => {
-                            if let Some(v) = &screen_draw_trigger {
-                                if let Ok(mut flag) = v.open.lock() {
-                                    *flag = true
-                                }
-                            }
-                        }
-                        RelatedAction::ScreenDrawEmergency => {
-                            if let Some(v) = &emergency_trigger {
-                                if let Ok(mut flag) = v.open.lock() {
-                                    *flag = true
-                                }
-                            }
-                        }
-                        RelatedAction::DirectMenu { .. } => {}
+                let hook_failed = notice.cancellation == Some(LifecycleCancellation::HookFailure);
+                if settings_hotkey_route_is_pending(&pending_launcher_route) && !hook_failed {
+                    if transition_process_controls_are_live(&pending_launcher_route) {
+                        apply_service_related_action(
+                            &mut notice,
+                            quit_trigger.as_ref(),
+                            help_trigger.as_ref(),
+                            screen_draw_trigger.as_ref(),
+                            emergency_trigger.as_ref(),
+                        );
                     }
+                    deferred_service_notices.push_back(notice);
+                    continue;
                 }
+                apply_service_related_action(
+                    &mut notice,
+                    quit_trigger.as_ref(),
+                    help_trigger.as_ref(),
+                    screen_draw_trigger.as_ref(),
+                    emergency_trigger.as_ref(),
+                );
                 radial_notices.push(notice)
             }
         }
-        let screen_draw_actions = take_screen_draw_trigger_actions(
-            &trigger,
-            screen_draw_trigger.as_deref(),
-            emergency_trigger.as_deref(),
-            &screen_draw_recovery_bridge,
-            &mut radial_notices,
-        );
+        if !settings_hotkey_route_is_pending(&pending_launcher_route) {
+            for mut notice in deferred_service_notices.drain(..) {
+                if deferred_notices_follow_hotkey_failure {
+                    notice.action = None;
+                    notice.intents.retain(|intent| {
+                        matches!(
+                            intent,
+                            InvocationIntent::CloseRadial { .. }
+                                | InvocationIntent::CancelRadialLifecycle { .. }
+                        )
+                    });
+                    if notice.intents.is_empty() && notice.cancellation.is_none() {
+                        continue;
+                    }
+                }
+                apply_service_related_action(
+                    &mut notice,
+                    quit_trigger.as_ref(),
+                    help_trigger.as_ref(),
+                    screen_draw_trigger.as_ref(),
+                    emergency_trigger.as_ref(),
+                );
+                radial_notices.push(notice);
+            }
+            deferred_notices_follow_hotkey_failure = false;
+        }
+        let screen_draw_actions = if !settings_hotkey_route_is_pending(&pending_launcher_route)
+            || transition_process_controls_are_live(&pending_launcher_route)
+        {
+            take_screen_draw_trigger_actions(
+                &trigger,
+                screen_draw_trigger.as_deref(),
+                emergency_trigger.as_deref(),
+                &screen_draw_recovery_bridge,
+                &mut radial_notices,
+            )
+        } else {
+            ScreenDrawTriggerActions::default()
+        };
         let exclusive = exclusive_owners() != 0;
         if exclusive != previous_exclusive {
-            if let Some(service) = invocation_service.as_ref() {
-                let _ = service.set_exclusive(exclusive);
+            if !settings_hotkey_route_is_pending(&pending_launcher_route) {
+                if let Some(service) = invocation_service.as_ref() {
+                    let _ = service.set_exclusive(exclusive);
+                }
+                previous_exclusive = exclusive;
             }
             if exclusive {
                 radial_controller.close(
@@ -2505,7 +3738,6 @@ fn main() -> anyhow::Result<()> {
                     None,
                 );
             }
-            previous_exclusive = exclusive;
         }
         let screen_draw_cycle_handled = dispatch_screen_draw_trigger_actions(
             screen_draw_actions,
@@ -2520,7 +3752,9 @@ fn main() -> anyhow::Result<()> {
             },
         );
 
-        if let Some(qt) = &quit_trigger
+        if (!settings_hotkey_route_is_pending(&pending_launcher_route)
+            || transition_process_controls_are_live(&pending_launcher_route))
+            && let Some(qt) = &quit_trigger
             && qt.take()
         {
             if let Some(service) = invocation_service.as_ref() {
@@ -2577,11 +3811,11 @@ fn main() -> anyhow::Result<()> {
                         for dismissed_id in radial_controller
                             .handle_legacy_grid_toggle(Some(invocation_id), was_visible)
                         {
-                            if let Some(service) = invocation_service.as_ref() {
-                                let _ = service.feedback(InvocationEvent::RadialSessionClosed {
-                                    id: dismissed_id,
-                                });
-                            }
+                            send_current_route_feedback(
+                                invocation_service.as_ref(),
+                                &pending_launcher_route,
+                                InvocationEvent::RadialSessionClosed { id: dismissed_id },
+                            );
                         }
                     }
                     ControllerEvent::ExternalSessionAdmitted { invocation_id } => {
@@ -2590,15 +3824,16 @@ fn main() -> anyhow::Result<()> {
                             invocation_id,
                         );
                         if let Some((menu_id, interaction, context_token)) = metadata {
-                            if let Some(service) = invocation_service.as_ref() {
-                                let _ =
-                                    service.feedback(InvocationEvent::ExternalSessionAdmitted {
-                                        id: invocation_id,
-                                        menu_id,
-                                        context_token,
-                                        interaction,
-                                    });
-                            }
+                            send_current_route_feedback(
+                                invocation_service.as_ref(),
+                                &pending_launcher_route,
+                                InvocationEvent::ExternalSessionAdmitted {
+                                    id: invocation_id,
+                                    menu_id,
+                                    context_token,
+                                    interaction,
+                                },
+                            );
                         } else {
                             tracing::error!(
                                 invocation = invocation_id.0,
@@ -2672,12 +3907,14 @@ fn main() -> anyhow::Result<()> {
                             &mut external_radial_invocations,
                             invocation_id,
                         );
-                        if let Some(service) = invocation_service.as_ref() {
-                            let _ = service.feedback(InvocationEvent::RadialSessionOpened {
+                        send_current_route_feedback(
+                            invocation_service.as_ref(),
+                            &pending_launcher_route,
+                            InvocationEvent::RadialSessionOpened {
                                 id: invocation_id,
                                 session_id,
-                            });
-                        }
+                            },
+                        );
                     }
                     ControllerEvent::Closed {
                         invocation_id,
@@ -2688,16 +3925,18 @@ fn main() -> anyhow::Result<()> {
                             &mut external_radial_invocations,
                             invocation_id,
                         );
-                        if let Some(service) = invocation_service.as_ref() {
-                            let event = if reason
-                                == multi_launcher::radial::native::CloseReason::ActionHandoff
-                            {
-                                multi_launcher::radial::invocation::InvocationEvent::RadialClosedForAction{id:invocation_id}
-                            } else {
-                                multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id}
-                            };
-                            let _ = service.feedback(event);
-                        }
+                        let event = if reason
+                            == multi_launcher::radial::native::CloseReason::ActionHandoff
+                        {
+                            multi_launcher::radial::invocation::InvocationEvent::RadialClosedForAction{id:invocation_id}
+                        } else {
+                            multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id}
+                        };
+                        send_current_route_feedback(
+                            invocation_service.as_ref(),
+                            &pending_launcher_route,
+                            event,
+                        );
                     }
                     ControllerEvent::DispatchRequested(request) => {
                         multi_launcher::radial::acceptance_trace::emit_radial_dispatch_requested(
@@ -2723,28 +3962,56 @@ fn main() -> anyhow::Result<()> {
             }
         }
         if invocation_route_failed {
-            pending_launcher_route = None;
+            deferred_notices_follow_hotkey_failure =
+                settings_hotkey_route_is_pending(&pending_launcher_route);
             tracing::error!(
                 "launcher invocation lifecycle failed; disabling radial runtime and restoring legacy launcher route"
             );
-            multi_launcher::gui::send_event(
-                multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(
-                    "The radial launcher input hook stopped unexpectedly. Radial menus were disabled and the legacy launcher hotkey was restored.".into(),
-                ),
-            );
-            fail_closed_radial_route(
-                &mut settings,
-                &radial_control_endpoint,
-                &mut radial_controller,
-                &mut invocation_service,
-                &mut listener,
-                &trigger,
-                quit_trigger.as_ref(),
-                help_trigger.as_ref(),
-                screen_draw_trigger.as_ref(),
-                emergency_trigger.as_ref(),
-                &event_tx,
-            );
+            if let Some(PendingLauncherRoute {
+                completion: PendingLauncherRouteCompletion::Hotkey(application),
+                ..
+            }) = pending_launcher_route.take()
+            {
+                let mut runtime = HotkeyRuntimeCommitContext {
+                    settings: &mut settings,
+                    settings_generation: &mut settings_generation,
+                    trigger: &mut trigger,
+                    quit_trigger: &mut quit_trigger,
+                    help_trigger: &mut help_trigger,
+                    screen_draw_trigger: &mut screen_draw_trigger,
+                    emergency_trigger: &mut emergency_trigger,
+                    listener: &mut listener,
+                    invocation_service: &mut invocation_service,
+                    radial_control_endpoint: &radial_control_endpoint,
+                    radial_resources: &mut radial_resources,
+                    radial_controller: &mut radial_controller,
+                    native_preview: &mut native_preview,
+                    radial_document: &radial_document,
+                    authoring_reply_tx: &authoring_endpoint.reply_tx,
+                    event_tx: &event_tx,
+                };
+                runtime.finish_after_authoritative_hook_failure(*application);
+            } else {
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::RadialRuntimeDiagnostic(
+                        "The radial launcher input hook stopped unexpectedly. Radial menus were disabled and the legacy launcher hotkey was restored.".into(),
+                    ),
+                );
+                pending_launcher_route = None;
+                fail_closed_radial_route(
+                    &mut settings,
+                    &radial_control_endpoint,
+                    &mut radial_controller,
+                    &mut invocation_service,
+                    &mut listener,
+                    &trigger,
+                    quit_trigger.as_ref(),
+                    help_trigger.as_ref(),
+                    screen_draw_trigger.as_ref(),
+                    emergency_trigger.as_ref(),
+                    &event_tx,
+                );
+            }
         }
         for event in radial_controller.poll() {
             match event {
@@ -2754,14 +4021,16 @@ fn main() -> anyhow::Result<()> {
                         invocation_id,
                     );
                     if let Some((menu_id, interaction, context_token)) = metadata {
-                        if let Some(service) = invocation_service.as_ref() {
-                            let _ = service.feedback(InvocationEvent::ExternalSessionAdmitted {
+                        send_current_route_feedback(
+                            invocation_service.as_ref(),
+                            &pending_launcher_route,
+                            InvocationEvent::ExternalSessionAdmitted {
                                 id: invocation_id,
                                 menu_id,
                                 context_token,
                                 interaction,
-                            });
-                        }
+                            },
+                        );
                     } else {
                         tracing::error!(
                             invocation = invocation_id.0,
@@ -2835,12 +4104,14 @@ fn main() -> anyhow::Result<()> {
                         &mut external_radial_invocations,
                         invocation_id,
                     );
-                    if let Some(service) = invocation_service.as_ref() {
-                        let _ = service.feedback(InvocationEvent::RadialSessionOpened {
+                    send_current_route_feedback(
+                        invocation_service.as_ref(),
+                        &pending_launcher_route,
+                        InvocationEvent::RadialSessionOpened {
                             id: invocation_id,
                             session_id,
-                        });
-                    }
+                        },
+                    );
                 }
                 ControllerEvent::Closed {
                     invocation_id,
@@ -2851,16 +4122,22 @@ fn main() -> anyhow::Result<()> {
                         &mut external_radial_invocations,
                         invocation_id,
                     );
-                    if let Some(service) = invocation_service.as_ref() {
-                        let event = if reason
-                            == multi_launcher::radial::native::CloseReason::ActionHandoff
-                        {
-                            multi_launcher::radial::invocation::InvocationEvent::RadialClosedForAction{id:invocation_id}
-                        } else {
-                            multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed{id:invocation_id}
-                        };
-                        let _ = service.feedback(event);
-                    }
+                    let event = if reason
+                        == multi_launcher::radial::native::CloseReason::ActionHandoff
+                    {
+                        multi_launcher::radial::invocation::InvocationEvent::RadialClosedForAction {
+                            id: invocation_id,
+                        }
+                    } else {
+                        multi_launcher::radial::invocation::InvocationEvent::RadialSessionClosed {
+                            id: invocation_id,
+                        }
+                    };
+                    send_current_route_feedback(
+                        invocation_service.as_ref(),
+                        &pending_launcher_route,
+                        event,
+                    );
                 }
                 ControllerEvent::ToggleLegacyLauncher { invocation_id } => {
                     let (was_visible, _) = grid_toggle_batch.record_toggle_ordered_with_intent(
@@ -2872,11 +4149,11 @@ fn main() -> anyhow::Result<()> {
                     for dismissed_id in radial_controller
                         .handle_legacy_grid_toggle(Some(invocation_id), was_visible)
                     {
-                        if let Some(service) = invocation_service.as_ref() {
-                            let _ = service.feedback(InvocationEvent::RadialSessionClosed {
-                                id: dismissed_id,
-                            });
-                        }
+                        send_current_route_feedback(
+                            invocation_service.as_ref(),
+                            &pending_launcher_route,
+                            InvocationEvent::RadialSessionClosed { id: dismissed_id },
+                        );
                     }
                 }
                 ControllerEvent::DispatchRequested(request) => {
@@ -2901,11 +4178,15 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        if let Some(service) = invocation_service.as_ref() {
+        if !settings_hotkey_route_is_pending(&pending_launcher_route)
+            && let Some(service) = invocation_service.as_ref()
+        {
             let _ = service.set_active_menu(radial_controller.active_input_scope());
         }
 
-        if let Some(ht) = &help_trigger
+        if (!settings_hotkey_route_is_pending(&pending_launcher_route)
+            || transition_process_controls_are_live(&pending_launcher_route))
+            && let Some(ht) = &help_trigger
             && ht.take()
             && visibility.load(Ordering::SeqCst)
         {
@@ -2943,37 +4224,42 @@ fn main() -> anyhow::Result<()> {
                     (w as f32, h as f32)
                 },
             );
-            let legacy_trigger_changed = handle_visibility_trigger_with_owner_ordered(
-                trigger.as_ref(),
-                &visibility,
-                &restore_flag,
-                &ctx,
-                &mut queued_visibility,
-                {
-                    let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
-                    (x as f32, y as f32)
-                },
-                settings.follow_mouse,
-                settings.static_location_enabled,
-                settings.static_pos.map(|(x, y)| (x as f32, y as f32)),
-                settings.static_size.map(|(w, h)| (w as f32, h as f32)),
-                {
-                    let (w, h) = settings.window_size.unwrap_or((400, 220));
-                    (w as f32, h as f32)
-                },
-                &visibility_revision,
-                |was_visible| {
-                    for dismissed_id in
-                        radial_controller.handle_legacy_grid_toggle(None, was_visible)
-                    {
-                        if let Some(service) = invocation_service.as_ref() {
-                            let _ = service.feedback(InvocationEvent::RadialSessionClosed {
-                                id: dismissed_id,
-                            });
-                        }
-                    }
-                },
-            );
+            let legacy_trigger_changed =
+                if settings_hotkey_route_is_pending(&pending_launcher_route) {
+                    false
+                } else {
+                    handle_visibility_trigger_with_owner_ordered(
+                        trigger.as_ref(),
+                        &visibility,
+                        &restore_flag,
+                        &ctx,
+                        &mut queued_visibility,
+                        {
+                            let (x, y) = settings.offscreen_pos.unwrap_or((2000, 2000));
+                            (x as f32, y as f32)
+                        },
+                        settings.follow_mouse,
+                        settings.static_location_enabled,
+                        settings.static_pos.map(|(x, y)| (x as f32, y as f32)),
+                        settings.static_size.map(|(w, h)| (w as f32, h as f32)),
+                        {
+                            let (w, h) = settings.window_size.unwrap_or((400, 220));
+                            (w as f32, h as f32)
+                        },
+                        &visibility_revision,
+                        |was_visible| {
+                            for dismissed_id in
+                                radial_controller.handle_legacy_grid_toggle(None, was_visible)
+                            {
+                                send_current_route_feedback(
+                                    invocation_service.as_ref(),
+                                    &pending_launcher_route,
+                                    InvocationEvent::RadialSessionClosed { id: dismissed_id },
+                                );
+                            }
+                        },
+                    )
+                };
             grid_toggles_changed || legacy_trigger_changed
         }));
 
@@ -3027,6 +4313,159 @@ mod tests {
 
     const TRACK_C_STARTUP_WARMUPS: usize = 5;
     const TRACK_C_STARTUP_SAMPLES: usize = 20;
+
+    struct TestHotkeyHandoff {
+        completion: std::cell::RefCell<Option<Result<(), String>>>,
+    }
+
+    impl HotkeyRouteHandoffReceipt for TestHotkeyHandoff {
+        fn try_policy_applied(&self) -> Option<Result<(), String>> {
+            None
+        }
+
+        fn try_complete(&self) -> Option<Result<(), String>> {
+            self.completion.borrow_mut().take()
+        }
+    }
+
+    struct RecordedHotkeyPolicy {
+        config: InvocationConfig,
+        related: Vec<RelatedBinding>,
+        cancellation: LifecycleCancellation,
+    }
+
+    struct TestHotkeyHandoffIssuer {
+        results: VecDeque<Result<Result<(), String>, String>>,
+        issued: usize,
+        policies: Vec<RecordedHotkeyPolicy>,
+    }
+
+    impl HotkeyRouteHandoffIssuer for TestHotkeyHandoffIssuer {
+        fn begin(
+            &mut self,
+            _service: Option<&LauncherInvocationService>,
+            config: InvocationConfig,
+            related: Vec<RelatedBinding>,
+            cancellation: LifecycleCancellation,
+        ) -> Result<Box<dyn HotkeyRouteHandoffReceipt>, String> {
+            self.issued += 1;
+            self.policies.push(RecordedHotkeyPolicy {
+                config,
+                related,
+                cancellation,
+            });
+            let result = self
+                .results
+                .pop_front()
+                .expect("test handoff result is queued");
+            result.map(|completion| {
+                Box::new(TestHotkeyHandoff {
+                    completion: std::cell::RefCell::new(Some(completion)),
+                }) as Box<dyn HotkeyRouteHandoffReceipt>
+            })
+        }
+    }
+
+    struct HotkeyCompletionFixture {
+        settings: Settings,
+        settings_generation: u64,
+        trigger: Arc<HotkeyTrigger>,
+        quit_trigger: Option<Arc<HotkeyTrigger>>,
+        help_trigger: Option<Arc<HotkeyTrigger>>,
+        screen_draw_trigger: Option<Arc<HotkeyTrigger>>,
+        emergency_trigger: Option<Arc<HotkeyTrigger>>,
+        listener: HotkeyListener,
+        invocation_service: Option<LauncherInvocationService>,
+        radial_control_endpoint: RadialControlMainEndpoint,
+        radial_resources: RadialRuntimeResources,
+        radial_controller: RadialController,
+        native_preview: multi_launcher::radial::authoring::native_preview::NativePreviewCoordinator,
+        radial_document: Arc<RadialDocument>,
+        authoring_endpoint: multi_launcher::radial::authoring::AuthoringMainEndpoint,
+        _authoring_client: multi_launcher::radial::authoring::AuthoringClient,
+        event_tx: Sender<()>,
+        pending_route: Option<PendingLauncherRoute>,
+        deferred_notices_follow_failure: bool,
+        _workspace: tempfile::TempDir,
+    }
+
+    impl HotkeyCompletionFixture {
+        fn new(
+            settings: Settings,
+            trigger: Arc<HotkeyTrigger>,
+            listener: HotkeyListener,
+            radial_document: Arc<RadialDocument>,
+            wake: Sender<()>,
+            settings_generation: u64,
+        ) -> Self {
+            let (control_client, radial_control_endpoint) =
+                radial_control_service_with_wake(settings.radial.enabled, None);
+            assert_eq!(control_client.is_enabled(), settings.radial.enabled);
+            let (controller_wake, _controller_wake_rx) = channel();
+            let radial_controller =
+                RadialController::new(Arc::clone(&radial_document), false, controller_wake);
+            let (authoring_client, authoring_endpoint) = authoring_control_service_with_wake(None);
+            let radial_resources = RadialRuntimeResources::new(
+                PathBuf::from("unused-test-root"),
+                wake.clone(),
+                settings.radial.enabled,
+            );
+            let workspace = tempdir().unwrap();
+            let event_tx = wake.clone();
+            let native_preview =
+                multi_launcher::radial::authoring::native_preview::NativePreviewCoordinator::new(
+                    wake,
+                    workspace.path().to_path_buf(),
+                );
+            Self {
+                settings,
+                settings_generation,
+                trigger,
+                quit_trigger: None,
+                help_trigger: None,
+                screen_draw_trigger: None,
+                emergency_trigger: None,
+                listener,
+                invocation_service: None,
+                radial_control_endpoint,
+                radial_resources,
+                radial_controller,
+                native_preview,
+                radial_document,
+                authoring_endpoint,
+                _authoring_client: authoring_client,
+                event_tx,
+                pending_route: None,
+                deferred_notices_follow_failure: false,
+                _workspace: workspace,
+            }
+        }
+
+        fn context(&mut self) -> HotkeyRouteCompletionContext<'_> {
+            HotkeyRouteCompletionContext {
+                runtime: HotkeyRuntimeCommitContext {
+                    settings: &mut self.settings,
+                    settings_generation: &mut self.settings_generation,
+                    trigger: &mut self.trigger,
+                    quit_trigger: &mut self.quit_trigger,
+                    help_trigger: &mut self.help_trigger,
+                    screen_draw_trigger: &mut self.screen_draw_trigger,
+                    emergency_trigger: &mut self.emergency_trigger,
+                    listener: &mut self.listener,
+                    invocation_service: &mut self.invocation_service,
+                    radial_control_endpoint: &self.radial_control_endpoint,
+                    radial_resources: &mut self.radial_resources,
+                    radial_controller: &mut self.radial_controller,
+                    native_preview: &mut self.native_preview,
+                    radial_document: &self.radial_document,
+                    authoring_reply_tx: &self.authoring_endpoint.reply_tx,
+                    event_tx: &self.event_tx,
+                },
+                pending_route: &mut self.pending_route,
+                deferred_notices_follow_failure: &mut self.deferred_notices_follow_failure,
+            }
+        }
+    }
 
     #[derive(Clone, Copy, Debug)]
     enum TrackCStartupMode {
@@ -4042,6 +5481,49 @@ mod tests {
     }
 
     #[test]
+    fn shared_route_drain_keeps_old_process_controls_without_direct_radial_admission() {
+        let mut settings = Settings {
+            quit_hotkey: Some("Ctrl+Q".into()),
+            help_hotkey: Some("Ctrl+H".into()),
+            ..Settings::default()
+        };
+        settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::json!({
+                "launch_hotkey": "Ctrl+Shift+D",
+                "emergency_hotkey": "Ctrl+Shift+F11"
+            }),
+        );
+
+        let bindings = shared_drain_control_bindings(&settings, &RadialDocument::starter());
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| matches!(&binding.action, RelatedAction::Quit))
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| matches!(&binding.action, RelatedAction::Help))
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| matches!(&binding.action, RelatedAction::ScreenDrawLaunch))
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| matches!(&binding.action, RelatedAction::ScreenDrawEmergency))
+        );
+        assert!(
+            bindings
+                .iter()
+                .all(|binding| !matches!(&binding.action, RelatedAction::DirectMenu { .. }))
+        );
+    }
+
+    #[test]
     fn invalid_screen_draw_launch_hotkey_is_safely_disabled() {
         let mut settings = Settings::default();
         settings.plugin_settings.insert(
@@ -4183,6 +5665,8 @@ mod tests {
         let mut settings = Settings::default();
         settings.hotkey = Some("Ctrl+F2".into());
         settings.radial.enabled = false;
+        let mut candidate = settings.clone();
+        candidate.hotkey = Some("Ctrl+F3".into());
         settings.radial.shared_tap_hold = false;
         let settings_before = serde_json::to_value(&settings).unwrap();
         let radial_document = RadialDocument::starter();
@@ -4197,18 +5681,24 @@ mod tests {
         assert!(existing_listener.is_active());
 
         let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
-            settings.clone(),
+            candidate.clone(),
         )
         .unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
-        let message = receiver.try_recv().unwrap().unwrap();
-        let mut prepared_listeners = HashMap::new();
-        process_hotkey_runtime_message(
-            message,
+        let multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage::Prepare(request) =
+            receiver.try_recv().unwrap().unwrap()
+        else {
+            panic!("expected prepare request")
+        };
+        let mut prepared_routes = HashMap::new();
+        prepare_hotkey_runtime_message(
+            request,
             &radial_document,
             4,
             &wake_tx,
-            &mut prepared_listeners,
+            false,
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            &mut prepared_routes,
         );
 
         let prepared = ticket.try_complete().unwrap().unwrap();
@@ -4216,8 +5706,11 @@ mod tests {
         assert_eq!(prepared.request_id, ticket.request_id());
         assert!(existing_listener.is_active());
         assert!(
-            !prepared_listeners
+            !prepared_routes
                 .get(&prepared.request_id)
+                .unwrap()
+                .listener
+                .as_ref()
                 .unwrap()
                 .is_active()
         );
@@ -4231,19 +5724,670 @@ mod tests {
             b"keep persisted bytes"
         );
 
-        drop(ticket);
+        ticket.apply(candidate).unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
-        let cancel = receiver.try_recv().unwrap().unwrap();
-        process_hotkey_runtime_message(
-            cancel,
-            &radial_document,
-            4,
-            &wake_tx,
-            &mut prepared_listeners,
+        let multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage::Apply(request) =
+            receiver.try_recv().unwrap().unwrap()
+        else {
+            panic!("expected apply request")
+        };
+        let mut pending_launcher_route = None;
+        let mut invocation_service = None;
+        let mut route_handoff_issuer = NativeHotkeyRouteHandoffIssuer;
+        begin_hotkey_application(HotkeyApplicationStart {
+            request,
+            prepared_routes: &mut prepared_routes,
+            settings: &settings,
+            settings_generation: 4,
+            radial_document: &radial_document,
+            event_tx: &wake_tx,
+            listener: &mut existing_listener,
+            invocation_service: &mut invocation_service,
+            pending_launcher_route: &mut pending_launcher_route,
+        });
+        assert!(existing_listener.is_active());
+        assert_eq!(settings.hotkey, Some("Ctrl+F2".into()));
+        assert!(pending_launcher_route.is_some());
+        assert_eq!(ticket.try_terminal(), None);
+
+        ticket.cancel().unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage::Cancel(mut cancel) =
+            receiver.try_recv().unwrap().unwrap()
+        else {
+            panic!("expected cancel request")
+        };
+        let Some(PendingLauncherRoute {
+            completion: PendingLauncherRouteCompletion::Hotkey(application),
+            ..
+        }) = pending_launcher_route.take()
+        else {
+            panic!("an accepted apply must still own the route before cancellation")
+        };
+        let mut application = *application;
+        application.cancellation_requested = true;
+        application.failure = Some(
+            multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                TransactionCancelled,
         );
-        assert!(prepared_listeners.is_empty());
+        cancel.defer_terminal();
+        begin_hotkey_route_rollback(
+            application,
+            &mut existing_listener,
+            &mut invocation_service,
+            &radial_document,
+            &mut pending_launcher_route,
+            &mut route_handoff_issuer,
+        );
+        assert_eq!(
+            ticket.try_terminal(),
+            Some(Err(
+                multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                    TransactionCancelled,
+            ))
+        );
+        assert!(existing_listener.is_active());
+        assert_eq!(settings.hotkey, Some("Ctrl+F2".into()));
+        assert!(pending_launcher_route.is_none());
+        assert!(prepared_routes.is_empty());
         existing_listener.stop();
         drop(old_wake_rx);
+    }
+
+    #[test]
+    fn main_hotkey_apply_publishes_runtime_before_applied_receipt() {
+        use multi_launcher::hotkey::reconfiguration::{
+            AppliedHotkeyReconfiguration, HotkeyRuntimeMessage,
+        };
+
+        let (wake_tx, wake_rx) = channel();
+        let receiver =
+            multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
+        let mut old_settings = Settings::default();
+        old_settings.hotkey = Some("Ctrl+F2".into());
+        old_settings.radial.enabled = false;
+        old_settings.radial.shared_tap_hold = false;
+        let mut candidate = old_settings.clone();
+        candidate.hotkey = Some("Ctrl+F3".into());
+        let radial_document = Arc::new(RadialDocument::starter());
+        let old_trigger = Arc::new(HotkeyTrigger::new(parse_hotkey("Ctrl+F2").unwrap()));
+        let mut listener = HotkeyTrigger::start_listener(
+            vec![Arc::clone(&old_trigger)],
+            "hotkey-apply-old",
+            wake_tx.clone(),
+        );
+        let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
+            candidate.clone(),
+        )
+        .unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let mut prepared_routes = HashMap::new();
+        prepare_hotkey_runtime_message(
+            request,
+            &radial_document,
+            12,
+            &wake_tx,
+            false,
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            &mut prepared_routes,
+        );
+        let prepared = ticket.wait_prepared(Duration::from_secs(1)).unwrap();
+        assert_eq!(prepared.generation.0, 13);
+        candidate.radial_designer.zoom = 1.25;
+        ticket.apply(candidate.clone()).unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected apply request")
+        };
+
+        let mut settings = old_settings.clone();
+        let mut settings_generation = 12;
+        let mut trigger = old_trigger;
+        let mut quit_trigger = None;
+        let mut help_trigger = None;
+        let mut screen_draw_trigger = None;
+        let mut emergency_trigger = None;
+        let mut invocation_service = None;
+        let mut pending_launcher_route = None;
+        begin_hotkey_application(HotkeyApplicationStart {
+            request,
+            prepared_routes: &mut prepared_routes,
+            settings: &settings,
+            settings_generation,
+            radial_document: &radial_document,
+            event_tx: &wake_tx,
+            listener: &mut listener,
+            invocation_service: &mut invocation_service,
+            pending_launcher_route: &mut pending_launcher_route,
+        });
+
+        assert_eq!(settings.hotkey, old_settings.hotkey);
+        assert_eq!(settings_generation, 12);
+        assert_eq!(trigger._key, parse_hotkey("Ctrl+F2").unwrap().key);
+        assert!(listener.is_active());
+        assert_eq!(ticket.try_terminal(), None);
+        let settings_document_before = serde_json::to_value(radial_document.as_ref()).unwrap();
+        let (control_client, radial_control_endpoint) =
+            radial_control_service_with_wake(false, None);
+        control_client
+            .send(RadialControlRequest::RestoreSubmenuPresentationMigration)
+            .unwrap();
+        assert_eq!(
+            try_recv_when_hotkey_route_is_idle(
+                &pending_launcher_route,
+                &radial_control_endpoint.request_rx,
+            ),
+            None
+        );
+        assert_eq!(settings_generation, 12);
+        assert_eq!(
+            serde_json::to_value(radial_document.as_ref()).unwrap(),
+            settings_document_before
+        );
+        let Some(PendingLauncherRoute {
+            completion: PendingLauncherRouteCompletion::Hotkey(application),
+            handoff: None,
+            ..
+        }) = pending_launcher_route.take()
+        else {
+            panic!("legacy-only apply should await the main owner commit")
+        };
+
+        let (controller_wake, _controller_wake_rx) = channel();
+        let mut radial_controller =
+            RadialController::new(Arc::clone(&radial_document), false, controller_wake);
+        let mut radial_resources = disabled_radial_resources();
+        let (_authoring_client, authoring_endpoint) = authoring_control_service_with_wake(None);
+        let workspace = tempdir().unwrap();
+        let preview_wake = wake_tx.clone();
+        let mut native_preview =
+            multi_launcher::radial::authoring::native_preview::NativePreviewCoordinator::new(
+                preview_wake,
+                workspace.path().to_path_buf(),
+            );
+        let commit_context = HotkeyRuntimeCommitContext {
+            settings: &mut settings,
+            settings_generation: &mut settings_generation,
+            trigger: &mut trigger,
+            quit_trigger: &mut quit_trigger,
+            help_trigger: &mut help_trigger,
+            screen_draw_trigger: &mut screen_draw_trigger,
+            emergency_trigger: &mut emergency_trigger,
+            listener: &mut listener,
+            invocation_service: &mut invocation_service,
+            radial_control_endpoint: &radial_control_endpoint,
+            radial_resources: &mut radial_resources,
+            radial_controller: &mut radial_controller,
+            native_preview: &mut native_preview,
+            radial_document: &radial_document,
+            authoring_reply_tx: &authoring_endpoint.reply_tx,
+            event_tx: &wake_tx,
+        };
+        let mut deferred_notices_follow_failure = false;
+        let mut completion_context = HotkeyRouteCompletionContext {
+            runtime: commit_context,
+            pending_route: &mut pending_launcher_route,
+            deferred_notices_follow_failure: &mut deferred_notices_follow_failure,
+        };
+        let mut route_handoff_issuer = NativeHotkeyRouteHandoffIssuer;
+        assert!(!complete_hotkey_route_step(
+            *application,
+            Ok(()),
+            &mut completion_context,
+            &mut route_handoff_issuer,
+        ));
+
+        let applied = AppliedHotkeyReconfiguration {
+            request_id: ticket.request_id(),
+            generation: prepared.generation,
+        };
+        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
+        assert_eq!(settings.hotkey, candidate.hotkey);
+        assert_eq!(settings.radial_designer.zoom, 1.25);
+        assert_eq!(settings_generation, 13);
+        assert_eq!(trigger._key, parse_hotkey("Ctrl+F3").unwrap().key);
+        assert!(listener.is_active());
+        assert!(pending_launcher_route.is_none());
+        assert!(prepared_routes.is_empty());
+        assert_eq!(control_client.is_enabled(), settings.radial.enabled);
+        assert_eq!(
+            try_recv_when_hotkey_route_is_idle(
+                &pending_launcher_route,
+                &radial_control_endpoint.request_rx,
+            ),
+            Some(RadialControlRequest::RestoreSubmenuPresentationMigration)
+        );
+        assert_eq!(
+            try_recv_when_hotkey_route_is_idle(
+                &pending_launcher_route,
+                &radial_control_endpoint.request_rx,
+            ),
+            None
+        );
+
+        let mut route_candidate = settings.clone();
+        route_candidate.hotkey = Some("Ctrl+F4".into());
+        let mut stale_ticket =
+            multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
+                route_candidate.clone(),
+            )
+            .unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected follow-up prepare request")
+        };
+        prepare_hotkey_runtime_message(
+            request,
+            &radial_document,
+            settings_generation,
+            &wake_tx,
+            invocation_service.is_some(),
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            &mut prepared_routes,
+        );
+        stale_ticket.wait_prepared(Duration::from_secs(1)).unwrap();
+        route_candidate.hotkey = Some("Ctrl+F5".into());
+        stale_ticket.apply(route_candidate).unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected stale apply request")
+        };
+        begin_hotkey_application(HotkeyApplicationStart {
+            request,
+            prepared_routes: &mut prepared_routes,
+            settings: &settings,
+            settings_generation,
+            radial_document: &radial_document,
+            event_tx: &wake_tx,
+            listener: &mut listener,
+            invocation_service: &mut invocation_service,
+            pending_launcher_route: &mut pending_launcher_route,
+        });
+        assert_eq!(
+            stale_ticket.try_terminal(),
+            Some(Err(
+                multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                    StaleGeneration,
+            ))
+        );
+        assert_eq!(settings.hotkey, candidate.hotkey);
+        assert_eq!(trigger._key, parse_hotkey("Ctrl+F3").unwrap().key);
+        assert!(listener.is_active());
+        assert!(prepared_routes.is_empty());
+
+        radial_controller.shutdown();
+        listener.stop();
+        if let Some(mut service) = invocation_service {
+            service.stop();
+        }
+    }
+
+    #[test]
+    fn shared_hotkey_owner_restores_old_route_before_reporting_candidate_failure() {
+        use multi_launcher::hotkey::reconfiguration::HotkeyRuntimeMessage;
+
+        let (wake_tx, wake_rx) = channel();
+        let receiver =
+            multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
+        let mut old_settings = Settings::default();
+        old_settings.hotkey = Some("Ctrl+F2".into());
+        old_settings.quit_hotkey = Some("Ctrl+Q".into());
+        old_settings.help_hotkey = Some("Ctrl+H".into());
+        let mut screen_draw = multi_launcher::screen_draw::settings::ScreenDrawSettings::default();
+        screen_draw.launch_hotkey = Some(
+            multi_launcher::screen_draw::settings::HotkeyChord::from_unchecked("Ctrl+Shift+S"),
+        );
+        screen_draw.emergency_hotkey =
+            multi_launcher::screen_draw::settings::HotkeyChord::from_unchecked("Ctrl+Shift+E");
+        old_settings.plugin_settings.insert(
+            "screen_draw".into(),
+            serde_json::to_value(screen_draw).unwrap(),
+        );
+        old_settings.radial.enabled = true;
+        old_settings.radial.shared_tap_hold = true;
+        let mut candidate = old_settings.clone();
+        candidate.hotkey = Some("Ctrl+F3".into());
+        let radial_document = Arc::new(RadialDocument::starter());
+        let old_trigger = Arc::new(HotkeyTrigger::new(parse_hotkey("Ctrl+F2").unwrap()));
+        let old_listener = HotkeyTrigger::start_listener(Vec::new(), "old-shared", wake_tx.clone());
+        let mut fixture = HotkeyCompletionFixture::new(
+            old_settings.clone(),
+            old_trigger,
+            old_listener,
+            Arc::clone(&radial_document),
+            wake_tx.clone(),
+            19,
+        );
+
+        let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
+            candidate.clone(),
+        )
+        .unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let mut prepared_routes = HashMap::new();
+        prepare_hotkey_runtime_message(
+            request,
+            &radial_document,
+            19,
+            &wake_tx,
+            true,
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            &mut prepared_routes,
+        );
+        let prepared = ticket.wait_prepared(Duration::from_secs(1)).unwrap();
+        assert!(prepared.shared_invocation);
+        ticket.apply(candidate).unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected apply request")
+        };
+        let prepared_route = prepared_routes.remove(&prepared.request_id).unwrap();
+        let fallback_listener = HotkeyTrigger::prepare_listener(
+            fixture.listener.triggers().to_vec(),
+            "test-shared-fallback",
+            wake_tx.clone(),
+        )
+        .unwrap();
+        fixture.pending_route = Some(PendingLauncherRoute {
+            settings_generation: 19,
+            handoff: Some(Box::new(TestHotkeyHandoff {
+                completion: std::cell::RefCell::new(Some(Ok(()))),
+            })),
+            policy_applied: Some(Ok(())),
+            completion: PendingLauncherRouteCompletion::Hotkey(Box::new(
+                PendingHotkeyApplication {
+                    request: Some(request),
+                    prepared: prepared_route,
+                    old_settings: old_settings.clone(),
+                    old_generation: 19,
+                    candidate_generation: 20,
+                    old_service_existed: true,
+                    old_listener_stopped: false,
+                    fallback_listener: Some(fallback_listener),
+                    phase: HotkeyApplyPhase::DrainOldRoute,
+                    cancellation_requested: false,
+                    failure: None,
+                    restore_generation: None,
+                },
+            )),
+        });
+        let mut issuer = TestHotkeyHandoffIssuer {
+            results: VecDeque::from([Ok(Err("candidate hook failed".into())), Ok(Ok(()))]),
+            issued: 0,
+            policies: Vec::new(),
+        };
+
+        let drain_result = fixture
+            .pending_route
+            .as_ref()
+            .and_then(|pending| pending.handoff.as_ref())
+            .and_then(|handoff| handoff.try_complete())
+            .expect("old route drain receipt is available");
+        let PendingLauncherRoute {
+            completion: PendingLauncherRouteCompletion::Hotkey(application),
+            ..
+        } = fixture.pending_route.take().unwrap()
+        else {
+            panic!("expected settings route completion")
+        };
+        let mut context = fixture.context();
+        assert!(!complete_hotkey_route_step(
+            *application,
+            drain_result,
+            &mut context,
+            &mut issuer,
+        ));
+        drop(context);
+
+        assert_eq!(issuer.issued, 1);
+        assert_eq!(
+            serde_json::to_value(&fixture.settings).unwrap(),
+            serde_json::to_value(&old_settings).unwrap()
+        );
+        assert_eq!(fixture.settings_generation, 19);
+        assert_eq!(ticket.try_terminal(), None);
+        let candidate_result = fixture
+            .pending_route
+            .as_ref()
+            .and_then(|pending| pending.handoff.as_ref())
+            .and_then(|handoff| handoff.try_complete())
+            .expect("candidate route failure receipt is available");
+        assert_eq!(candidate_result, Err("candidate hook failed".into()));
+        let PendingLauncherRoute {
+            completion: PendingLauncherRouteCompletion::Hotkey(application),
+            ..
+        } = fixture.pending_route.take().unwrap()
+        else {
+            panic!("expected candidate activation completion")
+        };
+        let mut context = fixture.context();
+        assert!(!complete_hotkey_route_step(
+            *application,
+            candidate_result,
+            &mut context,
+            &mut issuer,
+        ));
+        drop(context);
+
+        assert_eq!(issuer.issued, 2);
+        assert_eq!(issuer.policies.len(), 2);
+        let candidate_policy = &issuer.policies[0];
+        assert!(candidate_policy.config.launcher_enabled);
+        assert_eq!(
+            candidate_policy.config.hotkey,
+            parse_hotkey("Ctrl+F3").unwrap()
+        );
+        assert_eq!(candidate_policy.config.generation, 20);
+        assert_eq!(
+            candidate_policy.cancellation,
+            LifecycleCancellation::SettingsReload
+        );
+        for (action, chord) in [
+            (RelatedAction::Quit, "Ctrl+Q"),
+            (RelatedAction::Help, "Ctrl+H"),
+            (RelatedAction::ScreenDrawLaunch, "Ctrl+Shift+S"),
+            (RelatedAction::ScreenDrawEmergency, "Ctrl+Shift+E"),
+        ] {
+            assert!(candidate_policy.related.iter().any(|binding| {
+                binding.action == action && binding.hotkey == parse_hotkey(chord).unwrap()
+            }));
+        }
+        assert_eq!(
+            serde_json::to_value(&fixture.settings).unwrap(),
+            serde_json::to_value(&old_settings).unwrap()
+        );
+        assert_eq!(fixture.settings_generation, 19);
+        assert_eq!(ticket.try_terminal(), None);
+        let restore_result = fixture
+            .pending_route
+            .as_ref()
+            .and_then(|pending| pending.handoff.as_ref())
+            .and_then(|handoff| handoff.try_complete())
+            .expect("prior route restoration receipt is available");
+        let PendingLauncherRoute {
+            completion: PendingLauncherRouteCompletion::Hotkey(application),
+            ..
+        } = fixture.pending_route.take().unwrap()
+        else {
+            panic!("expected restore completion")
+        };
+        let mut context = fixture.context();
+        assert!(complete_hotkey_route_step(
+            *application,
+            restore_result,
+            &mut context,
+            &mut issuer,
+        ));
+        drop(context);
+
+        assert_eq!(
+            serde_json::to_value(&fixture.settings).unwrap(),
+            serde_json::to_value(&old_settings).unwrap()
+        );
+        assert_eq!(fixture.settings_generation, 21);
+        assert!(!fixture.listener.is_active());
+        assert!(fixture.listener.triggers().is_empty());
+        assert!(fixture.pending_route.is_none());
+        assert!(fixture.deferred_notices_follow_failure);
+        assert_eq!(
+            ticket.try_terminal(),
+            Some(Err(
+                multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                    RuntimeTransition("candidate hook failed".into()),
+            ))
+        );
+        assert_eq!(issuer.issued, 2);
+        let restored_policy = &issuer.policies[1];
+        assert!(restored_policy.config.launcher_enabled);
+        assert_eq!(
+            restored_policy.config.hotkey,
+            parse_hotkey("Ctrl+F2").unwrap()
+        );
+        assert_eq!(restored_policy.config.generation, 21);
+        assert_eq!(
+            restored_policy.cancellation,
+            LifecycleCancellation::SettingsReload
+        );
+        for (action, chord) in [
+            (RelatedAction::Quit, "Ctrl+Q"),
+            (RelatedAction::Help, "Ctrl+H"),
+            (RelatedAction::ScreenDrawLaunch, "Ctrl+Shift+S"),
+            (RelatedAction::ScreenDrawEmergency, "Ctrl+Shift+E"),
+        ] {
+            assert!(restored_policy.related.iter().any(|binding| {
+                binding.action == action && binding.hotkey == parse_hotkey(chord).unwrap()
+            }));
+        }
+
+        fixture.radial_controller.shutdown();
+        fixture.listener.stop();
+    }
+
+    #[test]
+    fn shared_hook_failure_installs_legacy_controls_before_terminal_error() {
+        use multi_launcher::hotkey::reconfiguration::{
+            HotkeyReconfigurationError, HotkeyRuntimeMessage,
+        };
+
+        let (wake_tx, wake_rx) = channel();
+        let receiver =
+            multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
+        let mut old_settings = Settings::default();
+        old_settings.hotkey = Some("Ctrl+F2".into());
+        old_settings.quit_hotkey = Some("Ctrl+Q".into());
+        old_settings.help_hotkey = Some("Ctrl+H".into());
+        old_settings.radial.enabled = true;
+        old_settings.radial.shared_tap_hold = true;
+        let mut candidate = old_settings.clone();
+        candidate.hotkey = Some("Ctrl+F3".into());
+        let radial_document = Arc::new(RadialDocument::starter());
+        let old_trigger = Arc::new(HotkeyTrigger::new(parse_hotkey("Ctrl+F2").unwrap()));
+        let listener =
+            HotkeyTrigger::start_listener(Vec::new(), "old-shared-owner-loss", wake_tx.clone());
+        let mut fixture = HotkeyCompletionFixture::new(
+            old_settings.clone(),
+            old_trigger,
+            listener,
+            Arc::clone(&radial_document),
+            wake_tx.clone(),
+            31,
+        );
+
+        let mut ticket = multi_launcher::hotkey::reconfiguration::prepare_hotkey_reconfiguration(
+            candidate.clone(),
+        )
+        .unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let mut prepared_routes = HashMap::new();
+        prepare_hotkey_runtime_message(
+            request,
+            &radial_document,
+            31,
+            &wake_tx,
+            true,
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            &mut prepared_routes,
+        );
+        let prepared = ticket.wait_prepared(Duration::from_secs(1)).unwrap();
+        ticket.apply(candidate).unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected apply request")
+        };
+        let prepared_route = prepared_routes.remove(&prepared.request_id).unwrap();
+        let fallback_listener = HotkeyTrigger::prepare_listener(
+            fixture.listener.triggers().to_vec(),
+            "test-hook-failure-old-listener",
+            wake_tx.clone(),
+        )
+        .unwrap();
+        let application = PendingHotkeyApplication {
+            request: Some(request),
+            prepared: prepared_route,
+            old_settings: old_settings.clone(),
+            old_generation: 31,
+            candidate_generation: 32,
+            old_service_existed: true,
+            old_listener_stopped: false,
+            fallback_listener: Some(fallback_listener),
+            phase: HotkeyApplyPhase::DrainOldRoute,
+            cancellation_requested: false,
+            failure: None,
+            restore_generation: None,
+        };
+
+        fixture
+            .context()
+            .runtime
+            .finish_after_authoritative_hook_failure(application);
+
+        assert_eq!(fixture.settings.hotkey, old_settings.hotkey);
+        assert!(!fixture.settings.radial.enabled);
+        assert!(fixture.listener.is_active());
+        let trigger_keys = fixture
+            .listener
+            .triggers()
+            .iter()
+            .map(|trigger| trigger._key)
+            .collect::<Vec<_>>();
+        for chord in ["Ctrl+F2", "Ctrl+Q", "Ctrl+H"] {
+            assert!(trigger_keys.contains(&parse_hotkey(chord).unwrap().key));
+        }
+        assert!(matches!(
+            ticket.try_terminal(),
+            Some(Err(HotkeyReconfigurationError::Rollback(message)))
+                if message.contains("prior legacy launcher and process-control routes were restored")
+        ));
+        assert!(fixture.listener.is_active());
+
+        fixture.radial_controller.shutdown();
+        fixture.listener.stop();
+    }
+
+    #[test]
+    fn unsupported_legacy_control_does_not_reject_a_shared_route() {
+        let mut settings = Settings::default();
+        settings.hotkey = Some("Ctrl+F2".into());
+        settings.quit_hotkey = Some("F13".into());
+        settings.radial.enabled = true;
+        settings.radial.shared_tap_hold = true;
+        let document = RadialDocument::starter();
+
+        let routes = validate_hotkey_route_candidate(&settings, &document)
+            .expect("the shared route supports the configured control key");
+        assert!(routes.shared_invocation);
+
+        let (event_tx, _event_rx) = channel();
+        assert!(prepare_legacy_hotkey_fallback(&settings, &document, &event_tx).is_err());
     }
 
     #[test]

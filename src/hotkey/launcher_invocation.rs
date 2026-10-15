@@ -1106,10 +1106,25 @@ impl From<AdapterOutcome> for ServiceNotice {
 /// the hook applied the new admission policy and any previously claimed key
 /// cycle has reached its matching release.
 pub struct RouteHandoff {
+    policy_applied: std::sync::mpsc::Receiver<Result<(), String>>,
     completion: std::sync::mpsc::Receiver<Result<(), String>>,
 }
 
 impl RouteHandoff {
+    /// Confirms the new policy is installed even when an already-owned key
+    /// cycle still needs its matching release before the route is drained.
+    pub fn try_policy_applied(&self) -> Option<Result<(), String>> {
+        match self.policy_applied.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(
+                "launcher route policy channel closed before acknowledgement".into(),
+            )),
+        }
+    }
+
+    /// Confirms policy installation and release of any previously-owned key
+    /// cycle. Legacy admission must wait for this acknowledgement.
     pub fn try_complete(&self) -> Option<Result<(), String>> {
         match self.completion.try_recv() {
             Ok(result) => Some(result),
@@ -1164,8 +1179,10 @@ impl PendingRouteHandoffs {
     fn applied(
         &mut self,
         owned_cycle: bool,
+        policy_acknowledgement: std::sync::mpsc::SyncSender<Result<(), String>>,
         acknowledgement: std::sync::mpsc::SyncSender<Result<(), String>>,
     ) {
+        let _ = policy_acknowledgement.send(Ok(()));
         if owned_cycle {
             self.acknowledgements.push(acknowledgement);
         } else {
@@ -1182,6 +1199,17 @@ impl PendingRouteHandoffs {
         }
         true
     }
+}
+
+fn publish_route_handoff_before_wake(
+    pending: &mut PendingRouteHandoffs,
+    owned_cycle: bool,
+    policy_acknowledgement: std::sync::mpsc::SyncSender<Result<(), String>>,
+    acknowledgement: std::sync::mpsc::SyncSender<Result<(), String>>,
+    wake: &std::sync::mpsc::Sender<()>,
+) {
+    pending.applied(owned_cycle, policy_acknowledgement, acknowledgement);
+    let _ = wake.send(());
 }
 
 /// Owner of the one low-level launcher route. Ordinary hotkeys remain on the
@@ -1234,6 +1262,7 @@ enum ServiceCommand {
         Vec<RelatedBinding>,
         LifecycleCancellation,
         std::sync::mpsc::SyncSender<Result<(), String>>,
+        std::sync::mpsc::SyncSender<Result<(), String>>,
     ),
     Cancel(LifecycleCancellation),
     Exclusive(bool),
@@ -1278,17 +1307,31 @@ impl LauncherInvocationService {
         related: Vec<RelatedBinding>,
         reason: LifecycleCancellation,
     ) -> Result<RouteHandoff, String> {
+        let (policy_acknowledge, policy_applied) = std::sync::mpsc::sync_channel(1);
         let (acknowledge, completion) = std::sync::mpsc::sync_channel(1);
         #[cfg(all(windows, not(test)))]
         {
-            self.send_command(ServiceCommand::Reload(config, related, reason, acknowledge))?;
-            return Ok(RouteHandoff { completion });
+            self.send_command(ServiceCommand::Reload(
+                config,
+                related,
+                reason,
+                policy_acknowledge,
+                acknowledge,
+            ))?;
+            Ok(RouteHandoff {
+                policy_applied,
+                completion,
+            })
         }
         #[cfg(any(not(windows), test))]
         {
             let _ = (config, related, reason);
+            let _ = policy_acknowledge.send(Ok(()));
             let _ = acknowledge.send(Ok(()));
-            Ok(RouteHandoff { completion })
+            Ok(RouteHandoff {
+                policy_applied,
+                completion,
+            })
         }
     }
     pub fn cancel_lifecycle(&self, reason: LifecycleCancellation) -> Result<(), String> {
@@ -2344,6 +2387,7 @@ mod native_service {
                                         config,
                                         related,
                                         reason,
+                                        policy_acknowledgement,
                                         acknowledgement,
                                     ) => {
                                         let item_inputs = config.item_inputs.clone();
@@ -2366,13 +2410,19 @@ mod native_service {
                                                     action: None,
                                                     cancellation: Some(reason),
                                                 });
-                                                let _ = state.wake.send(());
-                                                state.pending_handoffs.applied(
-                                                    has_owned_input(state),
+                                                let owned_cycle = has_owned_input(state);
+                                                let wake = state.wake.clone();
+                                                publish_route_handoff_before_wake(
+                                                    &mut state.pending_handoffs,
+                                                    owned_cycle,
+                                                    policy_acknowledgement,
                                                     acknowledgement,
+                                                    &wake,
                                                 );
                                             }
                                             Err(error) => {
+                                                let _ =
+                                                    policy_acknowledgement.send(Err(error.clone()));
                                                 let _ = acknowledgement.send(Err(error.clone()));
                                                 let _ = state.notices.send(ServiceNotice {
                                                     recovery: None,
@@ -3481,8 +3531,18 @@ mod tests {
     #[test]
     fn route_handoff_ack_is_withheld_until_claimed_cycle_drains() {
         let mut pending = PendingRouteHandoffs::default();
+        let (policy_acknowledge, policy_applied) = std::sync::mpsc::sync_channel(1);
         let (acknowledge, completion) = std::sync::mpsc::sync_channel(1);
-        pending.applied(true, acknowledge);
+        let (wake, woke) = std::sync::mpsc::channel();
+        publish_route_handoff_before_wake(
+            &mut pending,
+            true,
+            policy_acknowledge,
+            acknowledge,
+            &wake,
+        );
+        assert_eq!(woke.try_recv(), Ok(()));
+        assert!(matches!(policy_applied.try_recv(), Ok(Ok(()))));
         assert!(matches!(
             completion.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)

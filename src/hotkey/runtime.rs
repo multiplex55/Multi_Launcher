@@ -21,8 +21,17 @@ pub struct HotkeyTrigger {
 pub struct HotkeyListener {
     stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
+    suppress_first_active_scan: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
     triggers: Vec<Arc<HotkeyTrigger>>,
+}
+
+fn update_trigger_cycle(triggered: bool, combo: bool, suppress_new_press: bool) -> (bool, bool) {
+    if combo {
+        (true, !triggered && !suppress_new_press)
+    } else {
+        (false, false)
+    }
 }
 
 impl HotkeyTrigger {
@@ -85,6 +94,7 @@ impl HotkeyTrigger {
             return Ok(HotkeyListener {
                 stop: Arc::new(AtomicBool::new(true)),
                 active: Arc::new(AtomicBool::new(false)),
+                suppress_first_active_scan: Arc::new(AtomicBool::new(false)),
                 join: None,
                 triggers,
             });
@@ -105,6 +115,8 @@ impl HotkeyTrigger {
         let stop_clone = stop_flag.clone();
         let active_flag = Arc::new(AtomicBool::new(false));
         let active_clone = active_flag.clone();
+        let suppress_first_active_scan = Arc::new(AtomicBool::new(false));
+        let suppress_scan = Arc::clone(&suppress_first_active_scan);
         let vk_keys = triggers
             .iter()
             .map(|trigger| {
@@ -145,6 +157,7 @@ impl HotkeyTrigger {
                     let alt_pressed = is_down(VK_LMENU.0 as i32) || is_down(VK_RMENU.0 as i32);
                     let alt_gr_pressed = is_down(VK_RMENU.0 as i32);
                     let win_pressed = is_down(VK_LWIN.0 as i32) || is_down(VK_RWIN.0 as i32);
+                    let suppress_new_press = suppress_scan.swap(false, Ordering::AcqRel);
 
                     for i in 0..vk_keys.len() {
                         let key_down = is_down(vk_keys[i]);
@@ -168,16 +181,14 @@ impl HotkeyTrigger {
                                 && (!need_alt_gr[i] || alt_gr_pressed)
                                 && (!need_win[i] || win_pressed)
                         };
-                        if combo {
-                            if !triggered[i] {
-                                triggered[i] = true;
-                                if let Ok(mut flag) = open_listeners[i].lock() {
-                                    *flag = true;
-                                }
-                                let _ = event_tx.send(());
+                        let (next_triggered, fire) =
+                            update_trigger_cycle(triggered[i], combo, suppress_new_press);
+                        triggered[i] = next_triggered;
+                        if fire {
+                            if let Ok(mut flag) = open_listeners[i].lock() {
+                                *flag = true;
                             }
-                        } else {
-                            triggered[i] = false;
+                            let _ = event_tx.send(());
                         }
                     }
                     thread::sleep(Duration::from_millis(20));
@@ -188,6 +199,7 @@ impl HotkeyTrigger {
         Ok(HotkeyListener {
             stop: stop_flag,
             active: active_flag,
+            suppress_first_active_scan,
             join: Some(join),
             triggers,
         })
@@ -216,12 +228,15 @@ impl HotkeyListener {
         Self {
             stop: Arc::new(AtomicBool::new(true)),
             active: Arc::new(AtomicBool::new(false)),
+            suppress_first_active_scan: Arc::new(AtomicBool::new(false)),
             join: None,
             triggers: Vec::new(),
         }
     }
 
     pub fn activate(&self) {
+        self.suppress_first_active_scan
+            .store(true, Ordering::Release);
         self.active.store(true, Ordering::Release);
     }
 
@@ -411,6 +426,25 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reactivated_listener_suppresses_an_already_held_chord_until_release() {
+        let (triggered, fired) = update_trigger_cycle(false, true, true);
+        assert!(triggered);
+        assert!(!fired);
+
+        let (triggered, fired) = update_trigger_cycle(triggered, true, false);
+        assert!(triggered);
+        assert!(!fired);
+
+        let (triggered, fired) = update_trigger_cycle(triggered, false, false);
+        assert!(!triggered);
+        assert!(!fired);
+
+        let (triggered, fired) = update_trigger_cycle(triggered, true, false);
+        assert!(triggered);
+        assert!(fired);
+    }
 
     #[test]
     fn legacy_start_keeps_supported_saved_bindings_when_one_key_is_unsupported() {

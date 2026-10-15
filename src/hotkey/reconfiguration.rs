@@ -4,9 +4,10 @@
 //! be started. It does not publish the route or change persisted settings.
 
 use crate::settings::Settings;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HotkeyReconfigurationId(u64);
@@ -29,6 +30,14 @@ pub struct PreparedHotkeyReconfiguration {
     pub shared_invocation: bool,
 }
 
+/// Terminal confirmation that the prepared route became active. A prepared
+/// response by itself never represents a successful settings save.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AppliedHotkeyReconfiguration {
+    pub request_id: HotkeyReconfigurationId,
+    pub generation: HotkeyRuntimeGeneration,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotkeyReconfigurationError {
     RuntimeUnavailable,
@@ -38,6 +47,13 @@ pub enum HotkeyReconfigurationError {
     Validation(String),
     ListenerPreparation(String),
     PreparationAbandoned,
+    TransactionCancelled,
+    StaleGeneration,
+    RuntimeTransition(String),
+    Persistence(String),
+    Rollback(String),
+    TimedOut,
+    InvalidPhase,
 }
 
 impl std::fmt::Display for HotkeyReconfigurationError {
@@ -63,6 +79,25 @@ impl std::fmt::Display for HotkeyReconfigurationError {
             Self::PreparationAbandoned => {
                 formatter.write_str("hotkey preparation request was abandoned")
             }
+            Self::TransactionCancelled => formatter
+                .write_str("hotkey reconfiguration was cancelled and the prior route restored"),
+            Self::StaleGeneration => {
+                formatter.write_str("hotkey runtime changed while the save was pending")
+            }
+            Self::RuntimeTransition(message) => {
+                write!(formatter, "hotkey runtime transition failed: {message}")
+            }
+            Self::Persistence(message) => {
+                write!(formatter, "settings persistence failed: {message}")
+            }
+            Self::Rollback(message) => {
+                write!(
+                    formatter,
+                    "settings rollback could not be completed: {message}"
+                )
+            }
+            Self::TimedOut => formatter.write_str("hotkey runtime did not finish in time"),
+            Self::InvalidPhase => formatter.write_str("hotkey request is in an invalid phase"),
         }
     }
 }
@@ -75,14 +110,22 @@ enum RuntimeCommand {
         settings: Box<Settings>,
         completion: Sender<Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError>>,
     },
+    Apply {
+        request_id: HotkeyReconfigurationId,
+        generation: HotkeyRuntimeGeneration,
+        settings: Box<Settings>,
+        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+    },
     Cancel {
         request_id: HotkeyReconfigurationId,
+        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
     },
 }
 
 struct ClientInner {
     commands: Sender<RuntimeCommand>,
     wake: Sender<()>,
+    owner_alive: Arc<AtomicBool>,
     next_request_id: AtomicU64,
     installation_id: u64,
 }
@@ -95,9 +138,14 @@ pub struct HotkeyReconfigurationClient {
 pub struct HotkeyReconfigurationTicket {
     request_id: HotkeyReconfigurationId,
     completion: Receiver<Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+    terminal: Receiver<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+    terminal_sender: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
     client: HotkeyReconfigurationClient,
+    prepared_generation: Option<HotkeyRuntimeGeneration>,
+    apply_sent: bool,
     completed: bool,
     cancelled: bool,
+    terminal_completed: bool,
 }
 
 impl HotkeyReconfigurationTicket {
@@ -120,35 +168,152 @@ impl HotkeyReconfigurationTicket {
         };
         if result.is_some() {
             self.completed = true;
+            if let Some(Ok(prepared)) = &result {
+                self.prepared_generation = Some(prepared.generation);
+            } else {
+                self.terminal_completed = true;
+            }
         }
+        result
+    }
+
+    /// Waits off the UI thread for the main owner's preparation response.
+    pub fn wait_prepared(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError> {
+        if self.completed || self.cancelled {
+            return Err(HotkeyReconfigurationError::InvalidPhase);
+        }
+        let result = match self.completion.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(HotkeyReconfigurationError::TimedOut);
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(HotkeyReconfigurationError::Disconnected);
+            }
+        };
+        self.completed = true;
+        match result {
+            Ok(prepared) => {
+                self.prepared_generation = Some(prepared.generation);
+                Ok(prepared)
+            }
+            Err(error) => {
+                self.terminal_completed = true;
+                Err(error)
+            }
+        }
+    }
+
+    /// Sends the persisted candidate for activation after preparation has
+    /// succeeded. The final result is polled separately with `try_terminal`.
+    pub fn apply(&mut self, settings: Settings) -> Result<(), HotkeyReconfigurationError> {
+        let Some(generation) = self.prepared_generation else {
+            return Err(HotkeyReconfigurationError::InvalidPhase);
+        };
+        if self.apply_sent || self.cancelled || self.terminal_completed {
+            return Err(HotkeyReconfigurationError::InvalidPhase);
+        }
+        self.client.apply(
+            self.request_id,
+            generation,
+            settings,
+            self.terminal_sender.clone(),
+        )?;
+        self.apply_sent = true;
+        Ok(())
+    }
+
+    /// Polls for the authoritative terminal result. If cancellation races an
+    /// already-completed apply, the receiver yields `Applied` first.
+    pub fn try_terminal(
+        &mut self,
+    ) -> Option<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>> {
+        if self.terminal_completed {
+            return None;
+        }
+        let result = match self.terminal.try_recv() {
+            Ok(result) => Some(result),
+            Err(TryRecvError::Empty) if !self.client.inner.owner_alive.load(Ordering::Acquire) => {
+                match self.terminal.try_recv() {
+                    Ok(result) => Some(result),
+                    Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                        Some(Err(HotkeyReconfigurationError::Disconnected))
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(HotkeyReconfigurationError::Disconnected)),
+        };
+        if result.is_some() {
+            self.terminal_completed = true;
+        }
+        result
+    }
+
+    /// Waits off the UI thread for the authoritative Applied or rollback
+    /// receipt. A timeout is kept distinct from owner disconnection.
+    pub fn wait_terminal(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError> {
+        if self.terminal_completed {
+            return Err(HotkeyReconfigurationError::InvalidPhase);
+        }
+        let result = match self.terminal.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(result) = self.try_terminal() {
+                    result
+                } else {
+                    return Err(HotkeyReconfigurationError::TimedOut);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(HotkeyReconfigurationError::Disconnected)
+            }
+        };
+        self.terminal_completed = true;
         result
     }
 
     /// Cancels a staged preparation by its identity. The main runtime removes
     /// any dormant listener already prepared for this request.
-    pub fn cancel(&mut self) {
+    pub fn cancel(&mut self) -> Result<(), HotkeyReconfigurationError> {
         if !self.cancelled {
-            self.client.cancel(self.request_id);
+            self.client
+                .cancel(self.request_id, self.terminal_sender.clone())?;
             self.cancelled = true;
         }
+        Ok(())
     }
 }
 
 impl Drop for HotkeyReconfigurationTicket {
     fn drop(&mut self) {
-        if !self.cancelled {
-            self.client.cancel(self.request_id);
+        if !self.cancelled && !self.terminal_completed {
+            let _ = self
+                .client
+                .cancel(self.request_id, self.terminal_sender.clone());
             self.cancelled = true;
         }
     }
 }
 
 impl HotkeyReconfigurationClient {
-    fn new(commands: Sender<RuntimeCommand>, wake: Sender<()>, installation_id: u64) -> Self {
+    fn new(
+        commands: Sender<RuntimeCommand>,
+        wake: Sender<()>,
+        owner_alive: Arc<AtomicBool>,
+        installation_id: u64,
+    ) -> Self {
         Self {
             inner: Arc::new(ClientInner {
                 commands,
                 wake,
+                owner_alive,
                 next_request_id: AtomicU64::new(1),
                 installation_id,
             }),
@@ -161,6 +326,7 @@ impl HotkeyReconfigurationClient {
     ) -> Result<HotkeyReconfigurationTicket, HotkeyReconfigurationError> {
         let request_id = self.next_request_id()?;
         let (completion_tx, completion_rx) = mpsc::channel();
+        let (terminal_tx, terminal_rx) = mpsc::channel();
         self.inner
             .commands
             .send(RuntimeCommand::Prepare {
@@ -170,15 +336,20 @@ impl HotkeyReconfigurationClient {
             })
             .map_err(|_| HotkeyReconfigurationError::Disconnected)?;
 
-        let ticket = HotkeyReconfigurationTicket {
+        let mut ticket = HotkeyReconfigurationTicket {
             request_id,
             completion: completion_rx,
+            terminal: terminal_rx,
+            terminal_sender: terminal_tx,
             client: self.clone(),
+            prepared_generation: None,
+            apply_sent: false,
             completed: false,
             cancelled: false,
+            terminal_completed: false,
         };
         if self.inner.wake.send(()).is_err() {
-            self.cancel(request_id);
+            let _ = ticket.cancel();
             return Err(HotkeyReconfigurationError::Disconnected);
         }
         Ok(ticket)
@@ -194,27 +365,147 @@ impl HotkeyReconfigurationClient {
             .map_err(|_| HotkeyReconfigurationError::IdentityExhausted)
     }
 
-    fn cancel(&self, request_id: HotkeyReconfigurationId) {
+    fn apply(
+        &self,
+        request_id: HotkeyReconfigurationId,
+        generation: HotkeyRuntimeGeneration,
+        settings: Settings,
+        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+    ) -> Result<(), HotkeyReconfigurationError> {
         if self
             .inner
             .commands
-            .send(RuntimeCommand::Cancel { request_id })
-            .is_ok()
+            .send(RuntimeCommand::Apply {
+                request_id,
+                generation,
+                settings: Box::new(settings),
+                completion,
+            })
+            .is_err()
         {
-            let _ = self.inner.wake.send(());
+            self.inner.owner_alive.store(false, Ordering::Release);
+            return Err(HotkeyReconfigurationError::Disconnected);
         }
+        // After enqueueing, the command may still be applied. A failed wake
+        // must therefore resolve through the owner's terminal response.
+        let _ = self.inner.wake.send(());
+        Ok(())
+    }
+
+    fn cancel(
+        &self,
+        request_id: HotkeyReconfigurationId,
+        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+    ) -> Result<(), HotkeyReconfigurationError> {
+        if self
+            .inner
+            .commands
+            .send(RuntimeCommand::Cancel {
+                request_id,
+                completion,
+            })
+            .is_err()
+        {
+            self.inner.owner_alive.store(false, Ordering::Release);
+            return Err(HotkeyReconfigurationError::Disconnected);
+        }
+        // Once queued, cancellation is resolved by the owner just like Apply.
+        let _ = self.inner.wake.send(());
+        Ok(())
     }
 }
 
 pub enum HotkeyRuntimeMessage {
     Prepare(HotkeyPreparationRequest),
-    Cancel(HotkeyReconfigurationId),
+    Apply(HotkeyApplicationRequest),
+    Cancel(HotkeyCancellationRequest),
 }
 
 pub struct HotkeyPreparationRequest {
     request_id: HotkeyReconfigurationId,
     settings: Box<Settings>,
     completion: Option<Sender<Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError>>>,
+}
+
+pub struct HotkeyApplicationRequest {
+    request_id: HotkeyReconfigurationId,
+    generation: HotkeyRuntimeGeneration,
+    settings: Box<Settings>,
+    completion: Option<Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>>,
+}
+
+impl HotkeyApplicationRequest {
+    pub fn request_id(&self) -> HotkeyReconfigurationId {
+        self.request_id
+    }
+
+    pub fn generation(&self) -> HotkeyRuntimeGeneration {
+        self.generation
+    }
+
+    pub fn settings(&self) -> &Settings {
+        self.settings.as_ref()
+    }
+
+    pub fn complete(
+        mut self,
+        result: Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>,
+    ) -> Result<(), HotkeyReconfigurationError> {
+        self.completion
+            .take()
+            .ok_or(HotkeyReconfigurationError::Disconnected)?
+            .send(result)
+            .map_err(|_| HotkeyReconfigurationError::Disconnected)
+    }
+}
+
+impl Drop for HotkeyApplicationRequest {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(Err(HotkeyReconfigurationError::RuntimeTransition(
+                "apply request was abandoned before a terminal result".into(),
+            )));
+        }
+    }
+}
+
+pub struct HotkeyCancellationRequest {
+    request_id: HotkeyReconfigurationId,
+    completion: Option<Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>>,
+}
+
+impl HotkeyCancellationRequest {
+    pub fn request_id(&self) -> HotkeyReconfigurationId {
+        self.request_id
+    }
+
+    pub fn complete(
+        mut self,
+        result: Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>,
+    ) -> Result<(), HotkeyReconfigurationError> {
+        self.completion
+            .take()
+            .ok_or(HotkeyReconfigurationError::Disconnected)?
+            .send(result)
+            .map_err(|_| HotkeyReconfigurationError::Disconnected)
+    }
+
+    /// Releases this command's terminal sender when an accepted Apply is
+    /// already authoritative. The application request will publish the single
+    /// terminal result after it resolves the route transition.
+    pub fn defer_terminal(&mut self) {
+        self.completion.take();
+    }
+}
+
+impl Drop for HotkeyCancellationRequest {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(Err(HotkeyReconfigurationError::RuntimeTransition(
+                "cancel request was abandoned before the prior route was confirmed".into(),
+            )));
+        }
+    }
 }
 
 impl HotkeyPreparationRequest {
@@ -250,6 +541,7 @@ impl Drop for HotkeyPreparationRequest {
 
 pub struct HotkeyReconfigurationReceiver {
     commands: Receiver<RuntimeCommand>,
+    owner_alive: Arc<AtomicBool>,
     installation_id: u64,
 }
 
@@ -267,9 +559,28 @@ impl HotkeyReconfigurationReceiver {
                     completion: Some(completion),
                 },
             ))),
-            Ok(RuntimeCommand::Cancel { request_id }) => {
-                Ok(Some(HotkeyRuntimeMessage::Cancel(request_id)))
-            }
+            Ok(RuntimeCommand::Apply {
+                request_id,
+                generation,
+                settings,
+                completion,
+            }) => Ok(Some(HotkeyRuntimeMessage::Apply(
+                HotkeyApplicationRequest {
+                    request_id,
+                    generation,
+                    settings,
+                    completion: Some(completion),
+                },
+            ))),
+            Ok(RuntimeCommand::Cancel {
+                request_id,
+                completion,
+            }) => Ok(Some(HotkeyRuntimeMessage::Cancel(
+                HotkeyCancellationRequest {
+                    request_id,
+                    completion: Some(completion),
+                },
+            ))),
             Err(TryRecvError::Empty) => Ok(None),
             Err(TryRecvError::Disconnected) => Err(HotkeyReconfigurationError::Disconnected),
         }
@@ -278,6 +589,7 @@ impl HotkeyReconfigurationReceiver {
 
 impl Drop for HotkeyReconfigurationReceiver {
     fn drop(&mut self) {
+        self.owner_alive.store(false, Ordering::Release);
         if let Ok(mut slot) = client_slot().write()
             && slot
                 .as_ref()
@@ -306,7 +618,13 @@ pub fn install_main_runtime(
         })
         .map_err(|_| HotkeyReconfigurationError::IdentityExhausted)?;
     let (command_tx, command_rx) = mpsc::channel();
-    let client = HotkeyReconfigurationClient::new(command_tx, wake, installation_id);
+    let owner_alive = Arc::new(AtomicBool::new(true));
+    let client = HotkeyReconfigurationClient::new(
+        command_tx,
+        wake,
+        Arc::clone(&owner_alive),
+        installation_id,
+    );
     let mut slot = client_slot()
         .write()
         .map_err(|_| HotkeyReconfigurationError::RuntimeUnavailable)?;
@@ -316,6 +634,7 @@ pub fn install_main_runtime(
     *slot = Some(client);
     Ok(HotkeyReconfigurationReceiver {
         commands: command_rx,
+        owner_alive,
         installation_id,
     })
 }
@@ -344,10 +663,12 @@ mod tests {
     ) {
         let (wake_tx, wake_rx) = mpsc::channel();
         let (command_tx, command_rx) = mpsc::channel();
+        let owner_alive = Arc::new(AtomicBool::new(true));
         (
-            HotkeyReconfigurationClient::new(command_tx, wake_tx, 0),
+            HotkeyReconfigurationClient::new(command_tx, wake_tx, Arc::clone(&owner_alive), 0),
             HotkeyReconfigurationReceiver {
                 commands: command_rx,
+                owner_alive,
                 installation_id: 0,
             },
             wake_rx,
@@ -355,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_acknowledges_the_typed_request_identity_and_generation() {
+    fn save_request_requires_preparation_then_returns_a_typed_applied_ack() {
         let (client, receiver, wake_rx) = test_runtime();
         let mut ticket = client.prepare(Settings::default()).unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
@@ -371,6 +692,138 @@ mod tests {
         };
         request.complete(Ok(prepared)).unwrap();
         assert_eq!(ticket.try_complete(), Some(Ok(prepared)));
+
+        ticket.apply(Settings::default()).unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected apply request")
+        };
+        assert_eq!(request.request_id(), ticket.request_id());
+        assert_eq!(request.generation(), prepared.generation);
+        assert_eq!(request.settings().hotkey, Settings::default().hotkey);
+        let applied = AppliedHotkeyReconfiguration {
+            request_id: ticket.request_id(),
+            generation: prepared.generation,
+        };
+        request.complete(Ok(applied)).unwrap();
+        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
+    }
+
+    #[test]
+    fn cancellation_has_a_terminal_receipt_and_cannot_be_mistaken_for_applied() {
+        let (client, receiver, wake_rx) = test_runtime();
+        let mut ticket = client.prepare(Settings::default()).unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let prepared = PreparedHotkeyReconfiguration {
+            request_id: request.request_id(),
+            generation: HotkeyRuntimeGeneration(3),
+            shared_invocation: false,
+        };
+        request.complete(Ok(prepared)).unwrap();
+        assert_eq!(ticket.try_complete(), Some(Ok(prepared)));
+
+        ticket.cancel().unwrap();
+        assert_eq!(wake_rx.try_recv(), Ok(()));
+        let HotkeyRuntimeMessage::Cancel(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected cancel request")
+        };
+        assert_eq!(request.request_id(), ticket.request_id());
+        request
+            .complete(Err(HotkeyReconfigurationError::TransactionCancelled))
+            .unwrap();
+        assert_eq!(
+            ticket.try_terminal(),
+            Some(Err(HotkeyReconfigurationError::TransactionCancelled))
+        );
+    }
+
+    #[test]
+    fn queued_apply_wake_failure_is_resolved_by_the_terminal_receipt() {
+        let (client, receiver, wake_rx) = test_runtime();
+        let mut ticket = client.prepare(Settings::default()).unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let prepared = PreparedHotkeyReconfiguration {
+            request_id: request.request_id(),
+            generation: HotkeyRuntimeGeneration(11),
+            shared_invocation: false,
+        };
+        request.complete(Ok(prepared)).unwrap();
+        assert_eq!(ticket.try_complete(), Some(Ok(prepared)));
+
+        drop(wake_rx);
+        ticket.apply(Settings::default()).unwrap();
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("accepted apply must remain queued after its wake receiver closes")
+        };
+        assert_eq!(ticket.try_terminal(), None);
+        let applied = AppliedHotkeyReconfiguration {
+            request_id: ticket.request_id(),
+            generation: prepared.generation,
+        };
+        request.complete(Ok(applied)).unwrap();
+        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
+    }
+
+    #[test]
+    fn owner_disconnect_after_queued_apply_or_cancel_is_terminal() {
+        for queue_cancel in [false, true] {
+            let (client, receiver, _wake_rx) = test_runtime();
+            let mut ticket = client.prepare(Settings::default()).unwrap();
+            let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap()
+            else {
+                panic!("expected prepare request")
+            };
+            let prepared = PreparedHotkeyReconfiguration {
+                request_id: request.request_id(),
+                generation: HotkeyRuntimeGeneration(12),
+                shared_invocation: false,
+            };
+            request.complete(Ok(prepared)).unwrap();
+            assert_eq!(ticket.try_complete(), Some(Ok(prepared)));
+
+            if queue_cancel {
+                ticket.cancel().unwrap();
+            } else {
+                ticket.apply(Settings::default()).unwrap();
+            }
+            drop(receiver);
+            assert_eq!(
+                ticket.try_terminal(),
+                Some(Err(HotkeyReconfigurationError::Disconnected)),
+                "queued command must not leave a terminal channel pending forever"
+            );
+        }
+    }
+
+    #[test]
+    fn published_applied_result_wins_a_following_owner_drop() {
+        let (client, receiver, _wake_rx) = test_runtime();
+        let mut ticket = client.prepare(Settings::default()).unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let prepared = PreparedHotkeyReconfiguration {
+            request_id: request.request_id(),
+            generation: HotkeyRuntimeGeneration(13),
+            shared_invocation: false,
+        };
+        request.complete(Ok(prepared)).unwrap();
+        assert_eq!(ticket.try_complete(), Some(Ok(prepared)));
+        ticket.apply(Settings::default()).unwrap();
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected apply request")
+        };
+        let applied = AppliedHotkeyReconfiguration {
+            request_id: ticket.request_id(),
+            generation: prepared.generation,
+        };
+        request.complete(Ok(applied)).unwrap();
+        drop(receiver);
+        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
     }
 
     #[test]
