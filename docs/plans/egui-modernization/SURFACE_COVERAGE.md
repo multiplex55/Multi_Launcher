@@ -10,8 +10,8 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/actions_editor.rs` | M5-C1 | accepted bounded full-command cards; scoped publication/layout contracts pass, Dark initial capture inspected; src/gui/actions.rs domain dispatch unchanged |
 | `src/gui/add_action_dialog.rs` | M5-C1 | accepted bounded Add/Edit form and native footer; exact draft/publication/layout contract passes; native Browse/input gap explicit |
 | `src/gui/add_bookmark_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/bookmark_alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
+| `src/gui/bookmark_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/brightness_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/calendar_event_details.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/calendar_event_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -25,7 +25,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/dashboard_editor_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/data_recovery_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/diff_dialog/mod.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/fav_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/fav_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
 | `src/gui/file_search_dialog.rs` | M5-B5 | accepted wrapped chrome/font-aware highlight/table metrics;14distinctcontracts/review pass; initialDark002 framebuffer inspected, populatednative/input gaps explicit |
 | `src/gui/file_search_preview_dialog.rs` | M5-B5 | accepted wrapped header/status/measured native rows; scoped line-map/payload/row-stride contracts pass; native selected-preview capture/input gap explicit |
 | `src/gui/image_crop_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -47,9 +47,9 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/screen_draw_toolbar.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/screenshot_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/shell_cmd_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/snippet_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/snippet_prompt_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/tempfile_alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/snippet_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
+| `src/gui/snippet_prompt_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
+| `src/gui/tempfile_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/tempfile_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | M5-A complete at94b4724d;21contracts and Dark/Light852x460 rendered footer reviewed; physical native gaps remain |
 | `src/gui/timer_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
