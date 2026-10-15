@@ -2768,9 +2768,24 @@ impl LauncherApp {
             .cancel(super::track_c_query_observer::Cause::RootHidden);
     }
 
-    fn render_root_toasts(&mut self, ui: &mut egui::Ui) {
+    fn root_toast_region(
+        content_rect: egui::Rect,
+        header_bottom: f32,
+        edge_spacing: egui::Vec2,
+    ) -> Option<egui::Rect> {
+        let left_inset = edge_spacing.x.max(0.0);
+        let top_inset = edge_spacing.y.max(0.0);
+        let min = egui::pos2(content_rect.left() + left_inset, header_bottom + top_inset);
+        let max = egui::pos2(
+            content_rect.right() - left_inset,
+            content_rect.bottom() - top_inset,
+        );
+        (min.x < max.x && min.y < max.y).then(|| egui::Rect::from_min_max(min, max))
+    }
+
+    fn render_root_toasts(&mut self, ui: &mut egui::Ui, bounds: egui::Rect) {
         if self.enable_toasts {
-            self.toasts.show(ui);
+            self.toasts.show_in_rect(ui, bounds);
         }
     }
 
@@ -2882,7 +2897,6 @@ impl LauncherApp {
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
         }
         self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
-        self.render_root_toasts(ui);
         if first_ui_pass {
             self.cancel_screen_draw_startup_on_escape(&ctx);
             crate::performance::record_frame(
@@ -2903,7 +2917,7 @@ impl LauncherApp {
             }
         }
 
-        Panel::top("menu_bar").show(ui, |ui| {
+        let menu_bar = Panel::top("menu_bar").show(ui, |ui| {
             MenuBar::new().ui(ui, |ui| {
                 let mut apps_menu_state = (false, false, false);
                 let mut file_menu_body_entered = false;
@@ -3001,8 +3015,7 @@ impl LauncherApp {
                     }
                 });
                 for panel in self.pinned_panels.clone() {
-                    let label = format!("{:?}", panel);
-                    if ui.button(label).clicked() && first_ui_pass {
+                    if ui.button(panel.display_label()).clicked() && first_ui_pass {
                         if self.panel_stack.last() == Some(&panel) {
                             self.toggle_pin(panel);
                         } else {
@@ -3012,6 +3025,7 @@ impl LauncherApp {
                 }
             });
         });
+        let menu_bar_rect = menu_bar.response.rect;
 
         if first_ui_pass {
             let background_cause = self.run_background_after_menu();
@@ -3098,11 +3112,18 @@ impl LauncherApp {
         let mut deferred_radial_authoring_add = None;
         CentralPanel::default().show(ui, |ui| {
             if ocr_blocks_launcher_input {
-                ui.heading("Screen Region OCR");
+                let heading = ui.heading("Screen Region OCR");
+                if let Some(bounds) = Self::root_toast_region(
+                    ctx.content_rect(),
+                    menu_bar_rect.bottom().max(heading.rect.bottom()),
+                    ui.spacing().item_spacing,
+                ) {
+                    self.render_root_toasts(ui, bounds);
+                }
                 return;
             }
             let mut deferred_activation: Option<DeferredActivation> = None;
-            ui.horizontal(|ui| {
+            let brand = ui.horizontal(|ui| {
                 crate::gui::theme::paint_brand_badge(ui);
                 ui.label(
                     egui::RichText::new("Multi Launcher")
@@ -3112,6 +3133,7 @@ impl LauncherApp {
                         .strong(),
                 );
             });
+            let mut query_rect = brand.response.rect;
             if self.should_render_inline_error()
                 && let Some(err) = &self.error
             {
@@ -3163,6 +3185,7 @@ impl LauncherApp {
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
+                query_rect = query_response.rect;
                 if first_ui_pass
                     && Self::launcher_query_focus_should_be_requested(
                     just_became_visible,
@@ -3311,6 +3334,18 @@ impl LauncherApp {
                         deferred_activation_from_results(&self.results, i, ActivationSource::Enter);
                 }
             });
+
+            let header_bottom = menu_bar_rect
+                .bottom()
+                .max(brand.response.rect.bottom())
+                .max(query_rect.bottom());
+            if let Some(bounds) = Self::root_toast_region(
+                ctx.content_rect(),
+                header_bottom,
+                ui.spacing().item_spacing,
+            ) {
+                self.render_root_toasts(ui, bounds);
+            }
 
             if use_dashboard {
                 if first_ui_pass && !self.suggestions.is_empty() {
@@ -5614,7 +5649,24 @@ mod tests {
             )
         }
 
-        fn frame(ctx: &egui::Context, app: &mut LauncherApp, time: f64, events: Vec<egui::Event>) {
+        let default_context = egui::Context::default();
+        let toast_bounds = LauncherApp::root_toast_region(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+            40.0,
+            default_context
+                .style_of(default_context.theme())
+                .spacing
+                .item_spacing,
+        )
+        .expect("the bounded test viewport leaves room below its header");
+
+        fn frame(
+            ctx: &egui::Context,
+            app: &mut LauncherApp,
+            bounds: egui::Rect,
+            time: f64,
+            events: Vec<egui::Event>,
+        ) {
             let output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
@@ -5626,7 +5678,7 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ui| app.render_root_toasts(ui),
+                |ui| app.render_root_toasts(ui, bounds),
             );
             output.drop_without_applying_deltas();
         }
@@ -5642,7 +5694,7 @@ mod tests {
         settings.show_error_toasts = false;
         let mut app = new_app_with_settings(&ctx, settings);
         app.enable_toasts = true;
-        frame(&ctx, &mut app, 0.0, Vec::new());
+        frame(&ctx, &mut app, toast_bounds, 0.0, Vec::new());
         assert!(!visible(&ctx, 0) && !visible(&ctx, 1));
 
         let short_options = ToastOptions::default().duration_in_seconds(0.5);
@@ -5660,9 +5712,9 @@ mod tests {
             style: Default::default(),
         });
 
-        frame(&ctx, &mut app, 0.01, Vec::new());
+        frame(&ctx, &mut app, toast_bounds, 0.01, Vec::new());
         // The first Area pass establishes its content size; anchor geometry is stable next frame.
-        frame(&ctx, &mut app, 0.02, Vec::new());
+        frame(&ctx, &mut app, toast_bounds, 0.02, Vec::new());
         let first = ctx
             .memory(|memory| memory.area_rect(toast_layer(0).id))
             .expect("the first toast was rendered");
@@ -5670,9 +5722,15 @@ mod tests {
             .memory(|memory| memory.area_rect(toast_layer(1).id))
             .expect("the second toast was rendered");
         assert!(visible(&ctx, 0) && visible(&ctx, 1));
-        // RIGHT_TOP plus a positive x offset is clamped to the viewport edge by egui::Area.
-        assert!((first.right() - 800.0).abs() < 0.5, "{first:?}");
-        assert!((first.top() - 10.0).abs() < 0.1, "{first:?}");
+        // The bounded region keeps the existing RIGHT_TOP anchor inside its inset edges.
+        assert!(
+            (first.right() - (toast_bounds.right() - 10.0)).abs() < 0.5,
+            "{first:?}"
+        );
+        assert!(
+            (first.top() - (toast_bounds.top() + 10.0)).abs() < 0.1,
+            "{first:?}"
+        );
         assert!(
             second.top() >= first.bottom() + 9.9,
             "{first:?} then {second:?}"
@@ -5681,18 +5739,21 @@ mod tests {
         frame(
             &ctx,
             &mut app,
+            toast_bounds,
             0.03,
             vec![egui::Event::PointerMoved(second.center())],
         );
         frame(
             &ctx,
             &mut app,
+            toast_bounds,
             0.1,
             vec![egui::Event::PointerMoved(second.center())],
         );
         frame(
             &ctx,
             &mut app,
+            toast_bounds,
             1.0,
             vec![egui::Event::PointerMoved(second.center())],
         );
@@ -5704,16 +5765,243 @@ mod tests {
         frame(
             &ctx,
             &mut app,
+            toast_bounds,
             1.1,
             vec![egui::Event::PointerMoved(egui::pos2(400.0, 300.0))],
         );
-        frame(&ctx, &mut app, 2.0, Vec::new());
+        frame(&ctx, &mut app, toast_bounds, 2.0, Vec::new());
         assert!(visible(&ctx, 0) && visible(&ctx, 1));
-        frame(&ctx, &mut app, 2.01, Vec::new());
+        frame(&ctx, &mut app, toast_bounds, 2.01, Vec::new());
         assert!(visible(&ctx, 0), "the longer toast remains after expiry");
         assert!(
             !visible(&ctx, 1),
             "the short toast expires after hover ends"
+        );
+    }
+
+    #[test]
+    fn root_toast_long_startup_notice_fits_below_header_and_dismisses() {
+        fn toast_layer() -> egui::LayerId {
+            egui::LayerId::new(
+                egui::Order::Foreground,
+                egui::Id::new("__toasts").with("toast").with(0),
+            )
+        }
+
+        fn accessible_rect(
+            output: &egui::FullOutput,
+            predicate: impl Fn(&egui::accesskit::Node) -> bool,
+            pixels_per_point: f32,
+        ) -> Option<egui::Rect> {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .filter(|(_, node)| predicate(node))
+                .find_map(|(_, node)| {
+                    let bounds = node.bounds()?;
+                    Some(egui::Rect::from_min_max(
+                        egui::pos2(
+                            bounds.x0 as f32 / pixels_per_point,
+                            bounds.y0 as f32 / pixels_per_point,
+                        ),
+                        egui::pos2(
+                            bounds.x1 as f32 / pixels_per_point,
+                            bounds.y1 as f32 / pixels_per_point,
+                        ),
+                    ))
+                })
+        }
+
+        fn painted_text_rect(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+            output.shapes.iter().find_map(|clipped| {
+                if let egui::epaint::Shape::Text(text) = &clipped.shape
+                    && text.galley.text() == label
+                {
+                    Some(text.visual_bounding_rect())
+                } else {
+                    None
+                }
+            })
+        }
+
+        fn painted_text_layout_rect(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+            output.shapes.iter().find_map(|clipped| {
+                if let egui::epaint::Shape::Text(text) = &clipped.shape
+                    && text.galley.text() == label
+                {
+                    Some(text.galley.rect.translate(text.pos.to_vec2()))
+                } else {
+                    None
+                }
+            })
+        }
+
+        fn frame(
+            ctx: &egui::Context,
+            app: &mut LauncherApp,
+            screen_rect: egui::Rect,
+            time: f64,
+            events: Vec<egui::Event>,
+        ) -> egui::FullOutput {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    time: Some(time),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.render_root_ui(ui),
+            )
+        }
+
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 220.0));
+        let mut settings = Settings::default();
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = true;
+        settings.show_error_toasts = false;
+        let mut app = new_app_with_settings(&ctx, settings);
+        app.enable_toasts = true;
+        app.data_recovery_dialog
+            .set_startup_diagnostics(vec![SafeStartupDiagnostic {
+                label: "Actions startup".into(),
+                path: None,
+                summary: "The saved actions document needs attention.".into(),
+            }]);
+        let notice = app
+            .data_recovery_dialog
+            .take_startup_notice()
+            .expect("the startup diagnostic produces one notice");
+        assert_eq!(
+            notice,
+            "Multi Launcher started with 1 persistence diagnostic. Open Data & Recovery for details."
+        );
+        app.add_toast(Toast {
+            text: notice.clone().into(),
+            kind: ToastKind::Warning,
+            options: ToastOptions::default().duration_in_seconds(30.0),
+            style: Default::default(),
+        });
+        let mut root_frame = RootFrameLogic::default();
+        root_frame.should_be_visible = true;
+        app.root_frame_logic = Some(root_frame);
+
+        let pixels_per_point = ctx.pixels_per_point().max(f32::EPSILON);
+        let edge_spacing = ctx.style_of(ctx.theme()).spacing.item_spacing;
+        let mut settled = None;
+        for time in [0.0, 0.1, 0.2] {
+            let output = frame(&ctx, &mut app, screen_rect, time, Vec::new());
+            let brand_texture_id = crate::gui::theme::brand_texture_id(&ctx);
+            let observation = (|| {
+                let toast_rect = ctx.memory(|memory| memory.area_rect(toast_layer().id))?;
+                let menu_bottom = ["File", "Settings", "Help"]
+                    .into_iter()
+                    .filter_map(|label| {
+                        accessible_rect(
+                            &output,
+                            |node| node.label() == Some(label),
+                            pixels_per_point,
+                        )
+                    })
+                    .map(|rect| rect.bottom())
+                    .reduce(f32::max)?;
+                let brand_label_rect = painted_text_layout_rect(&output, "Multi Launcher")?;
+                let brand_image_bottom = match brand_texture_id {
+                    Some(texture_id) => Some(output.shapes.iter().find_map(|clipped| {
+                        if let egui::epaint::Shape::Mesh(mesh) = &clipped.shape
+                            && mesh.texture_id == texture_id
+                        {
+                            Some(mesh.calc_bounds().bottom())
+                        } else {
+                            None
+                        }
+                    })?),
+                    None => None,
+                };
+                let brand_bottom = brand_image_bottom.map_or(brand_label_rect.bottom(), |bottom| {
+                    bottom.max(brand_label_rect.bottom())
+                });
+                let query_rect = accessible_rect(
+                    &output,
+                    |node| node.role() == egui::accesskit::Role::TextInput,
+                    pixels_per_point,
+                )?;
+                let header_bottom = menu_bottom.max(brand_bottom).max(query_rect.bottom());
+                let toast_text = output.shapes.iter().find_map(|clipped| {
+                    if let egui::epaint::Shape::Text(text) = &clipped.shape
+                        && text.galley.text() == notice
+                    {
+                        Some((
+                            text.visual_bounding_rect(),
+                            text.galley.size(),
+                            text.galley.rows.len(),
+                            text.galley.elided,
+                        ))
+                    } else {
+                        None
+                    }
+                })?;
+                Some((toast_rect, header_bottom, toast_text))
+            })();
+            output.drop_without_applying_deltas();
+            if let Some(observation) = observation {
+                settled = Some(observation);
+            }
+        }
+
+        let (toast_rect, header_bottom, (text_rect, galley_size, row_count, elided)) =
+            settled.expect("the settled toast frame paints the full startup notice galley");
+        let bounds =
+            LauncherApp::root_toast_region(ctx.content_rect(), header_bottom, edge_spacing)
+                .expect("the measured header leaves a positive toast region");
+        assert!(bounds.contains_rect(toast_rect));
+        assert!(toast_rect.top() >= header_bottom + edge_spacing.y);
+        assert!(toast_rect.right() <= ctx.content_rect().right() - edge_spacing.x);
+        assert!(toast_rect.expand(0.5).contains_rect(text_rect));
+        assert!(galley_size.x <= toast_rect.width());
+        assert!(row_count > 1, "the long notice wraps at the bounded width");
+        assert!(!elided, "the full notice text remains in the galley");
+
+        let click_point = text_rect.center();
+        let pressed = frame(
+            &ctx,
+            &mut app,
+            screen_rect,
+            0.3,
+            vec![
+                egui::Event::PointerMoved(click_point),
+                egui::Event::PointerButton {
+                    pos: click_point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        pressed.drop_without_applying_deltas();
+        let released = frame(
+            &ctx,
+            &mut app,
+            screen_rect,
+            0.4,
+            vec![egui::Event::PointerButton {
+                pos: click_point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        released.drop_without_applying_deltas();
+        let closed = frame(&ctx, &mut app, screen_rect, 0.5, Vec::new());
+        closed.drop_without_applying_deltas();
+        assert!(
+            !ctx.memory(|memory| memory.areas().visible_last_frame(&toast_layer())),
+            "clicking the actual toast text dismisses it"
         );
     }
 

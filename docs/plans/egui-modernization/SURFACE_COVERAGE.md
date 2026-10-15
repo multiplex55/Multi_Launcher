@@ -6,7 +6,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 
 | Presentation owner | Group | Status / evidence |
 |---|---|---|
-| `src/gui/render.rs` | M4-A/B | M4-A/B accepted; Dark/Light852x460 ROOT framebuffer inspected, receipts/m4b-root-visual-review.md; physical focus/IME/DPI gaps remain |
+| `src/gui/render.rs` | M4-A/B + M5-C11 | Root hierarchy accepted; C11 full400x220 startup warning now readable below header,3 toast/label contracts and warning image accepted; native input/focus/IME/DPI gaps remain. |
 | `src/actions_editor.rs` | M5-C1 | accepted bounded full-command cards; scoped publication/layout contracts pass, Dark initial capture inspected; src/gui/actions.rs domain dispatch unchanged |
 | `src/gui/add_action_dialog.rs` | M5-C1 | accepted bounded Add/Edit form and native footer; exact draft/publication/layout contract passes; native Browse/input gap explicit |
 | `src/gui/add_bookmark_dialog.rs` | M5-C4 | accepted responsive labeled forms/native footer; Unicode scroll/draft contract/review pass, initial Dark Tempfile/Light Bookmark images inspected; native input/create/open/close gaps explicit |
@@ -47,8 +47,8 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/radial_actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_editor/mod.rs` | M5-B6 | accepted surrounding chrome/shared native actions,7targetedcontracts/review pass; authoredcanvas/skins unchanged; deferrednativeDesigner visual/input gap explicit |
 | `src/gui/regex_tester_dialog.rs` | M5-B8 | accepted compact surrounding controls and copy feedback; eight existing contracts/review pass; editor/highlight semantics unchanged, native immediate-viewport/control-clipping gap explicit |
-| `src/gui/screen_draw_toolbar.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/screenshot_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/screen_draw_toolbar.rs` | M5-C remaining overlay chrome | Source-reviewed: orientation-specific native scrolling/controls/preferences coherent; pending three ordinary error/warning statuses in render_toolbar_contents/export_controls. Session/input/hook/canvas unchanged. |
+| `src/gui/screenshot_editor.rs` | M5-C remaining overlay chrome | Source-reviewed pending: ScreenshotEditor::ui two long toolbar rows need bounded reflow/horizontal access; authored palette/pixels/annotations unchanged. |
 | `src/gui/shell_cmd_dialog.rs` | M5-C5 | accepted bounded chrome/pinnedload/inputfix; six contracts/review pass, initial Dark image inspected; native edit/input/close gaps |
 | `src/gui/snippet_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
 | `src/gui/snippet_prompt_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
@@ -133,3 +133,5 @@ M5-B3 covers main only. Remaining MKMacro presentation review in M5-C includes a
 MouseGestures plugin settings_ui local shared presentation accepted underM5-B7; ranges/changedguards/authoredtrailcolor retained, no nativecapture/effect verification.
 
 M5-C2 Snippets/Prompt/Favorites accepted: eleven privacy/input/transaction/layout contracts pass; Dark Snippets and populated Light Favorites initial app-native images inspected. Prompt session/long-edit native coverage absent. See receipts/m5c2-snippets-favorites.md. No Computer Use.
+
+M5-C11 also provides exhaustive friendly pinned-panel display labels in gui/mod.rs with unchanged enum/serde/routes, and an opt-in bounded path in existing egui-toast (legacy show retained). Source/contracts/native warning image and immutable malformed-settings proof are in receipts/m5c11-root-feedback.md; vendor provenance/maintenance is PATCH.md and performance backlog inventory.

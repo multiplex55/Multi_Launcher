@@ -188,6 +188,19 @@ impl Toasts {
 
     /// Show and update all toasts
     pub fn show(&mut self, ui: &mut Ui) {
+        self.show_with_constraint(ui, None);
+    }
+
+    /// Show and update all toasts within a bounded rectangle.
+    ///
+    /// Toast contents keep their normal presentation, while the default toast
+    /// text wraps to the available width. [`Self::show`] retains the original
+    /// unconstrained behavior.
+    pub fn show_in_rect(&mut self, ui: &mut Ui, rect: egui::Rect) {
+        self.show_with_constraint(ui, Some(rect));
+    }
+
+    fn show_with_constraint(&mut self, ui: &mut Ui, constrain_rect: Option<egui::Rect>) {
         let Self {
             id,
             align,
@@ -204,17 +217,23 @@ impl Toasts {
         toasts.retain(|toast| toast.options.ttl_sec > 0.0);
 
         for (i, toast) in toasts.iter_mut().enumerate() {
-            let response = Area::new(id.with("toast").with(i))
+            let mut area = Area::new(id.with("toast").with(i))
                 .anchor(align, offset.to_vec2())
                 .order(order)
-                .interactable(true)
-                .show(ui, |ui| {
-                    if let Some(add_contents) = self.custom_toast_contents.get_mut(&toast.kind) {
-                        add_contents(ui, toast)
-                    } else {
-                        default_toast_contents(ui, toast)
-                    }
-                });
+                .interactable(true);
+            if let Some(rect) = constrain_rect {
+                area = area.constrain_to(rect).default_size(rect.size());
+            }
+            let response = area.show(ui, |ui| {
+                if let Some(rect) = constrain_rect {
+                    ui.set_max_width(rect.width());
+                }
+                if let Some(add_contents) = self.custom_toast_contents.get_mut(&toast.kind) {
+                    add_contents(ui, toast)
+                } else {
+                    default_toast_contents(ui, toast, constrain_rect.is_some())
+                }
+            });
 
             if !response.response.hovered() && !response.inner.hovered() {
                 toast.options.ttl_sec -= dt;
@@ -249,7 +268,7 @@ impl Toasts {
     }
 }
 
-fn default_toast_contents(ui: &mut Ui, toast: &mut Toast) -> Response {
+fn default_toast_contents(ui: &mut Ui, toast: &mut Toast, wrap_text: bool) -> Response {
     let inner_margin = 10.0;
     let frame = Frame::window(ui.style()).shadow(egui::Shadow::NONE);
     let response = frame
@@ -267,7 +286,14 @@ fn default_toast_contents(ui: &mut Ui, toast: &mut Toast) -> Response {
                         });
                     }
                 };
-                let b = |ui: &mut Ui, toast: &mut Toast| ui.label(toast.text.clone());
+                let b = |ui: &mut Ui, toast: &mut Toast| {
+                    let text = egui::Label::new(toast.text.clone());
+                    if wrap_text {
+                        ui.add(text.wrap_mode(egui::TextWrapMode::Wrap))
+                    } else {
+                        ui.add(text)
+                    }
+                };
 
                 // Draw the contents in the reverse order on right-to-left layouts
                 // to keep the same look.

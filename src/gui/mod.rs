@@ -642,6 +642,62 @@ pub enum Panel {
     RadialEditor,
 }
 
+impl Panel {
+    pub const fn display_label(self) -> &'static str {
+        match self {
+            Self::AliasDialog => "Alias",
+            Self::BookmarkAliasDialog => "Bookmark Alias",
+            Self::TempfileAliasDialog => "Temporary File Alias",
+            Self::TempfileDialog => "Temporary File",
+            Self::AddBookmarkDialog => "Add Bookmark",
+            Self::HelpOverlay => "Quick Help",
+            Self::HelpWindow => "Command Help",
+            Self::TimerDialog => "Timer",
+            Self::CompletionDialog => "Completion",
+            Self::ShellCmdDialog => "Shell Commands",
+            Self::SnippetDialog => "Snippets",
+            Self::SnippetPromptDialog => "Snippet Prompt",
+            Self::MacroDialog => "Macros",
+            Self::MkMacroDialog => "MKMacro",
+            Self::MouseGesturesDialog => "Mouse Gestures",
+            Self::MouseGestureSettingsDialog => "Mouse Gesture Settings",
+            Self::MouseSettingsDialog => "Mouse Settings",
+            Self::ThemeSettingsDialog => "Theme Settings",
+            Self::FavDialog => "Favorites",
+            Self::FileSearchDialog => "File Search",
+            Self::NotesDialog => "Quick Notes",
+            Self::NoteGraphDialog => "Note Graph",
+            Self::UnusedAssetsDialog => "Unused Note Assets",
+            Self::NotePanel => "Note",
+            Self::ImagePanel => "Image Viewer",
+            Self::ScreenshotEditor => "Screenshot Editor",
+            Self::CropDialog => "Image Crop",
+            Self::TodoDialog => "To-do",
+            Self::TodoViewDialog => "To-do View",
+            Self::ClipboardDialog => "Clipboard History",
+            Self::ClipboardModifyDialog => "Clipboard Modify",
+            Self::JsonUtilityDialog => "JSON Utility",
+            Self::RegexTesterDialog => "Regex Tester",
+            Self::QrDialog => "QR Generator",
+            Self::ConvertPanel => "Converter",
+            Self::VolumeDialog => "Volume",
+            Self::BrightnessDialog => "Brightness",
+            Self::CpuListDialog => "CPU Usage",
+            Self::DataRecoveryDialog => "Data & Recovery",
+            Self::ToastLogDialog => "Toast Log",
+            Self::CalendarPopover => "Calendar",
+            Self::CalendarEventEditor => "Calendar Event",
+            Self::CalendarEventDetails => "Calendar Event Details",
+            Self::Editor => "App Editor",
+            Self::Settings => "Settings",
+            Self::Plugins => "Plugins",
+            Self::MultiManagerDialog => "Multi Manager",
+            Self::MultiManagerSettingsDialog => "Multi Manager Settings",
+            Self::RadialEditor => "Radial Editor",
+        }
+    }
+}
+
 #[derive(Default)]
 struct PanelStates {
     alias_dialog: bool,
@@ -1890,7 +1946,7 @@ impl LauncherApp {
         let (tx, rx) = event_channel::channel();
         let event_sink = register_observed_event_sender(tx.clone(), ViewportWake::root(ctx));
         let mut watchers = Vec::new();
-        let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [10.0, 10.0]);
+        let mut toasts = Toasts::new().anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0]);
         let enable_toasts = settings.enable_toasts;
         let show_inline_errors = settings.show_inline_errors;
         let show_error_toasts = settings.show_error_toasts;
@@ -4337,6 +4393,29 @@ mod tests {
     };
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    #[test]
+    fn panel_display_labels_are_friendly_and_serde_names_stay_stable() {
+        for (panel, expected) in [
+            (Panel::NotesDialog, "Quick Notes"),
+            (Panel::NoteGraphDialog, "Note Graph"),
+            (Panel::ClipboardDialog, "Clipboard History"),
+            (Panel::ClipboardModifyDialog, "Clipboard Modify"),
+            (Panel::MkMacroDialog, "MKMacro"),
+            (Panel::DataRecoveryDialog, "Data & Recovery"),
+            (Panel::CpuListDialog, "CPU Usage"),
+        ] {
+            assert_eq!(panel.display_label(), expected);
+        }
+        assert_eq!(
+            serde_json::to_string(&Panel::NotesDialog).unwrap(),
+            "\"NotesDialog\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Panel>("\"NotesDialog\"").unwrap(),
+            Panel::NotesDialog
+        );
+    }
 
     fn reset_event_registry_for_test() {
         let mut registry = super::APP_EVENT_REGISTRY.lock().unwrap();

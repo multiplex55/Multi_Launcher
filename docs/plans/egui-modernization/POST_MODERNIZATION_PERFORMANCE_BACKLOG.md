@@ -45,7 +45,7 @@ Source796 frozen comparison manifests/lock differ in identity from the actual li
 | epaint0.36.2 | Performance: bounded shaping reuse, exact size-only measurement with shared geometry/atlas correctness | Existing key/bounds/Unicode/variable-font/full-output/size/atlas/cursor contracts; maintenance cost acknowledged, no broader fork for parity; see vendor/epaint/PATCH.md |
 | egui0.36.2 | Integration/performance: shared WidgetText preparation and exact measurement | Focused formatting/wrapping/line-height/fallback/Galley pass-through contracts; remove with upstream equivalent preserving behavior |
 | image0.25.6 | Correctness/compatibility: DDS capability reporting matches decoder | Capability/format integration tests; remove when upstream releases equivalent fix; image0.24 app decoder unchanged |
-| egui-toast0.22.0 | Correctness: hover pause under full-rect close interaction | Hover/lifetime/toast integration tests; remove when upstream covers egui0.36 behavior |
+| egui-toast0.22.0 | Correctness/compatibility: hover pause under full-rect close interaction and opt-in bounded ROOT display below actual header | Stack/hover/TTL and complete400x220 warning/header/dismissal contracts; legacy show path retained. Remove when upstream covers egui0.36 interaction and equivalent bounded API; vendor/egui-toast/PATCH.md. No benchmark-parity optimization |
 
 ## Unmeasured native metrics and future sequence
 

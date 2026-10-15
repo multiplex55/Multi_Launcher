@@ -16,6 +16,14 @@ contents response is hovered. In egui 0.36 the full-rect close interaction is
 the top interactive widget, so the Area response alone does not report hover
 over the visible toast body.
 
-The patch changes no layout, stacking, lifetime source, close behavior, or
-rendering. Remove it after an upstream egui-toast release uses both hover
-responses when applying toast lifetime updates.
+`Toasts::show_in_rect` adds an opt-in bounded display path for ROOT's startup
+warning. It reuses the existing stack, Area IDs, content callback, progress,
+hover, lifetime, and close handling while constraining the Areas and wrapping
+default text to the available width. The existing `Toasts::show` path remains
+unconstrained and source-compatible. Remove this addition once upstream offers
+an equivalent bounded API that preserves these interaction owners.
+
+Classification: UI correctness/egui compatibility, not benchmark-parity work.
+Application coverage is `root_toasts_preserve_anchor_stack_hover_pause_and_configured_duration`
+and `root_toast_long_startup_notice_fits_below_header_and_dismisses`; they retain
+stack/hover/TTL behavior and check complete default text below the actual header.
