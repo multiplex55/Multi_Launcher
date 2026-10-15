@@ -1,7 +1,8 @@
+use crate::gui::theme::presets::{PaletteFamily, curated_presets, find_curated_preset};
 use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::gui::theme::{
-    chrome_icon_button, chrome_small_icon_button, effective_color_scheme, resolve_theme,
-    text_style_for_role, ChromeIcon, ResolvedTheme, SystemAppearance, TextRole,
+    ChromeIcon, ResolvedTheme, SystemAppearance, TextRole, chrome_icon_button,
+    chrome_small_icon_button, effective_color_scheme, resolve_theme, text_style_for_role,
 };
 use crate::settings::{ColorScheme, Settings, ThemeColor, ThemeMode, ThemeSettings};
 use eframe::egui;
@@ -14,6 +15,9 @@ pub struct ThemeSettingsDialogState {
     pub last_error: Option<String>,
     persisted_baseline: Option<ThemeSettings>,
     conflicted: bool,
+    curated_family: PaletteFamily,
+    #[cfg(test)]
+    palette_card_rects: Vec<egui::Rect>,
 }
 
 impl Default for ThemeSettingsDialogState {
@@ -24,6 +28,9 @@ impl Default for ThemeSettingsDialogState {
             last_error: None,
             persisted_baseline: None,
             conflicted: false,
+            curated_family: PaletteFamily::Oled,
+            #[cfg(test)]
+            palette_card_rects: Vec::new(),
         }
     }
 }
@@ -106,9 +113,10 @@ impl ThemeSettingsDialogState {
     }
 
     fn select_curated_preset(&mut self, preset_id: &str) -> bool {
-        let Some(scheme) = curated_scheme(preset_id) else {
+        let Some(preset) = find_curated_preset(preset_id) else {
             return false;
         };
+        let scheme = preset.scheme();
         let base_key = format!("curated.{preset_id}");
         let name = self
             .draft
@@ -146,6 +154,14 @@ impl ThemeSettingsDialogState {
         self.draft.mode = ThemeMode::Custom;
         self.draft.preferences.active_preset = Some(name);
         self.dirty = true;
+        true
+    }
+
+    fn select_curated_family(&mut self, family: PaletteFamily) -> bool {
+        if self.curated_family == family {
+            return false;
+        }
+        self.curated_family = family;
         true
     }
 
@@ -223,6 +239,7 @@ pub fn ui(
         .max_height(ctx.content_rect().height())
         .vscroll(false)
         .default_width(980.0)
+        .default_height(theme_window_initial_height(ctx.content_rect().height()))
         .show(ctx, |ui| {
             if !state.can_edit() {
                 if let Some(err) = &state.last_error {
@@ -489,6 +506,16 @@ fn theme_content_height(available_height: f32, footer_reserved_height: f32) -> f
     (available_height - footer_reserved_height).max(0.0)
 }
 
+const THEME_WINDOW_INITIAL_HEIGHT_FRACTION: f32 = 0.85;
+const THEME_WINDOW_MAX_INITIAL_HEIGHT: f32 = 720.0;
+
+fn theme_window_initial_height(content_height: f32) -> f32 {
+    let content_height = content_height.max(0.0);
+    (content_height * THEME_WINDOW_INITIAL_HEIGHT_FRACTION)
+        .min(THEME_WINDOW_MAX_INITIAL_HEIGHT)
+        .min(content_height)
+}
+
 #[derive(Clone, Copy)]
 struct ThemeFooterLayout {
     break_before: [bool; 4],
@@ -679,15 +706,6 @@ fn section_base_mode(ui: &mut egui::Ui, mode: &mut ThemeMode) -> bool {
     changed
 }
 
-const CURATED_PRESETS: [(&str, &str); 6] = [
-    ("graphite-dark", "Graphite · Dark"),
-    ("graphite-light", "Graphite · Light"),
-    ("slate-dark", "Slate · Dark"),
-    ("slate-light", "Slate · Light"),
-    ("ocean-dark", "Ocean · Dark"),
-    ("ocean-light", "Ocean · Light"),
-];
-
 fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> bool {
     section_heading(
         ui,
@@ -740,80 +758,82 @@ fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> b
             }
         });
 
-    egui::ComboBox::from_label("Curated palette")
-        .selected_text("Choose a curated palette")
+    let mut selected_family = state.curated_family;
+    egui::ComboBox::from_label("Curated group")
+        .selected_text(selected_family.label())
         .show_ui(ui, |ui| {
-            for (id, label) in CURATED_PRESETS {
-                if ui.selectable_label(false, label).clicked() {
-                    changed |= state.select_curated_preset(id);
-                }
+            for family in PaletteFamily::ALL {
+                ui.selectable_value(&mut selected_family, family, family.label());
             }
         });
+    state.select_curated_family(selected_family);
+
+    let family_presets: Vec<_> = curated_presets()
+        .iter()
+        .filter(|preset| preset.family == state.curated_family)
+        .collect();
+    #[cfg(test)]
+    state.palette_card_rects.clear();
+    ui.label(
+        egui::RichText::new(format!("{} palettes", family_presets.len()))
+            .text_style(text_style_for_role(TextRole::Metadata))
+            .color(ui.visuals().weak_text_color()),
+    );
+
+    let active_scheme = (state.draft.mode == ThemeMode::Custom)
+        .then_some(state.draft.preferences.active_preset.as_deref())
+        .flatten()
+        .and_then(|name| state.draft.named_presets.get(name));
+    let mut chosen_preset = None;
+    ui.columns(2, |columns| {
+        for (index, preset) in family_presets.iter().enumerate() {
+            let column = &mut columns[index % 2];
+            column.push_id(preset.id, |ui| {
+                let scheme = preset.scheme();
+                let selected = active_scheme.is_some_and(|active| active == &scheme);
+                let response = ui.add_sized(
+                    egui::vec2(ui.available_width(), 30.0),
+                    egui::Button::selectable(
+                        selected,
+                        egui::RichText::new(preset.label)
+                            .text_style(text_style_for_role(TextRole::Metadata)),
+                    ),
+                );
+                #[cfg(test)]
+                state.palette_card_rects.push(response.rect);
+                if response.clicked() {
+                    chosen_preset = Some(preset.id);
+                }
+                response.on_hover_text(format!("{} · {}", preset.family.label(), preset.label));
+                ui.horizontal(|ui| {
+                    let swatch_width = 26.0;
+                    let swatch_gap = ui.spacing().item_spacing.x;
+                    let swatch_row_width = 3.0 * swatch_width + 2.0 * swatch_gap;
+                    ui.add_space(((ui.available_width() - swatch_row_width).max(0.0)) * 0.5);
+                    palette_swatch(ui, "Window", scheme.window_fill, scheme.text);
+                    palette_swatch(ui, "Panel", scheme.panel_fill, scheme.text);
+                    palette_swatch(ui, "Link", scheme.hyperlink, scheme.text);
+                });
+                ui.add_space(3.0);
+            });
+        }
+    });
+    if let Some(id) = chosen_preset {
+        changed |= state.select_curated_preset(id);
+    }
     changed
 }
 
-fn curated_scheme(id: &str) -> Option<ColorScheme> {
-    let mut scheme = match id {
-        "graphite-dark" | "slate-dark" | "ocean-dark" => ColorScheme::dark(),
-        "graphite-light" | "slate-light" | "ocean-light" => ColorScheme::light(),
-        _ => return None,
-    };
-    match id {
-        "graphite-dark" => {
-            scheme.window_fill = rgba(27, 29, 33, 255);
-            scheme.panel_fill = rgba(35, 37, 42, 255);
-            scheme.text = rgba(231, 233, 238, 255);
-            scheme.widget_active_fill = rgba(71, 82, 101, 255);
-            scheme.widget_active_stroke = rgba(159, 177, 210, 255);
-            scheme.selection_bg = rgba(70, 101, 153, 210);
-        }
-        "graphite-light" => {
-            scheme.window_fill = rgba(243, 244, 246, 255);
-            scheme.panel_fill = rgba(252, 252, 253, 255);
-            scheme.text = rgba(38, 41, 47, 255);
-            scheme.widget_active_fill = rgba(211, 217, 228, 255);
-            scheme.widget_active_stroke = rgba(91, 105, 130, 255);
-            scheme.selection_bg = rgba(169, 187, 219, 220);
-        }
-        "slate-dark" => {
-            scheme.window_fill = rgba(25, 31, 42, 255);
-            scheme.panel_fill = rgba(32, 40, 53, 255);
-            scheme.text = rgba(225, 233, 244, 255);
-            scheme.hyperlink = rgba(130, 180, 237, 255);
-            scheme.widget_active_fill = rgba(62, 83, 113, 255);
-            scheme.widget_active_stroke = rgba(143, 180, 224, 255);
-            scheme.selection_bg = rgba(59, 105, 158, 210);
-        }
-        "slate-light" => {
-            scheme.window_fill = rgba(237, 242, 248, 255);
-            scheme.panel_fill = rgba(250, 252, 255, 255);
-            scheme.text = rgba(34, 47, 64, 255);
-            scheme.hyperlink = rgba(42, 105, 173, 255);
-            scheme.widget_active_fill = rgba(197, 214, 235, 255);
-            scheme.widget_active_stroke = rgba(75, 111, 153, 255);
-            scheme.selection_bg = rgba(146, 185, 224, 220);
-        }
-        "ocean-dark" => {
-            scheme.window_fill = rgba(18, 32, 38, 255);
-            scheme.panel_fill = rgba(24, 42, 49, 255);
-            scheme.text = rgba(222, 240, 239, 255);
-            scheme.hyperlink = rgba(89, 202, 196, 255);
-            scheme.widget_active_fill = rgba(38, 104, 105, 255);
-            scheme.widget_active_stroke = rgba(111, 211, 199, 255);
-            scheme.selection_bg = rgba(37, 123, 122, 215);
-        }
-        "ocean-light" => {
-            scheme.window_fill = rgba(235, 247, 246, 255);
-            scheme.panel_fill = rgba(251, 255, 254, 255);
-            scheme.text = rgba(27, 55, 55, 255);
-            scheme.hyperlink = rgba(20, 123, 120, 255);
-            scheme.widget_active_fill = rgba(182, 225, 219, 255);
-            scheme.widget_active_stroke = rgba(45, 132, 126, 255);
-            scheme.selection_bg = rgba(130, 207, 195, 215);
-        }
-        _ => return None,
-    }
-    Some(scheme)
+fn palette_swatch(ui: &mut egui::Ui, name: &str, fill: ThemeColor, border: ThemeColor) {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 11.0), egui::Sense::hover());
+    ui.painter().rect(
+        rect,
+        2.0,
+        to_egui(fill),
+        egui::Stroke::new(1.0, to_egui(border)),
+        egui::StrokeKind::Inside,
+    );
+    response.on_hover_text(name);
 }
 
 const fn rgba(r: u8, g: u8, b: u8, a: u8) -> ThemeColor {
@@ -1112,6 +1132,75 @@ mod tests {
         }
 
         let ctx = egui::Context::default();
+        let tall_screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 800.0));
+        let mut state = ThemeSettingsDialogState::default();
+        let mut open = true;
+        let mut body_clip = egui::Rect::NOTHING;
+        let mut window_rect = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(tall_screen),
+                    ..Default::default()
+                },
+                |_| {
+                    let rendered_window = egui::Window::new("Theme settings")
+                        .open(&mut open)
+                        .resizable(true)
+                        .max_width(ctx.content_rect().width())
+                        .max_height(ctx.content_rect().height())
+                        .vscroll(false)
+                        .default_width(980.0)
+                        .default_height(theme_window_initial_height(ctx.content_rect().height()))
+                        .show(&ctx, |ui| {
+                            let footer_layout = theme_footer_layout(ui);
+                            let body_height = theme_content_height(
+                                ui.available_height(),
+                                footer_layout.reserved_height,
+                            );
+                            egui::ScrollArea::vertical()
+                                .min_scrolled_height(0.0)
+                                .max_height(body_height)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    body_clip = ui.clip_rect();
+                                    render_theme_body(ui, &mut state, SystemAppearance::Dark);
+                                });
+                            render_theme_footer(ui, &state, &footer_layout);
+                        });
+                    window_rect = rendered_window
+                        .map(|window| window.response.rect)
+                        .unwrap_or(egui::Rect::NOTHING);
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+        let mut visible_palette_rows: Vec<_> = state
+            .palette_card_rects
+            .iter()
+            .filter(|rect| body_clip.contains_rect(**rect))
+            .map(|rect| rect.center().y)
+            .collect();
+        visible_palette_rows.sort_by(f32::total_cmp);
+        visible_palette_rows.dedup_by(|left, right| (*left - *right).abs() < 1.0);
+        assert!(
+            window_rect.height() >= theme_window_initial_height(tall_screen.height()) - 8.0,
+            "the initial dialog should use the tall viewport instead of its content-sized height; \
+             window={window_rect:?}"
+        );
+        assert!(
+            visible_palette_rows.len() >= 3,
+            "an ordinary tall viewport should expose several usable palette rows; \
+             rows={visible_palette_rows:?}, body_clip={body_clip:?}, \
+             cards={:?}, window={window_rect:?}",
+            state.palette_card_rects
+        );
+        assert!(open, "the dialog remains open during layout-only frames");
+        assert_eq!(theme_window_initial_height(800.0), 680.0);
+        assert_eq!(theme_window_initial_height(1200.0), 720.0);
+        assert_eq!(theme_window_initial_height(600.0), 510.0);
+
+        let ctx = egui::Context::default();
         ctx.set_theme(egui::Theme::Dark);
         let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
         style.override_font_id = Some(egui::FontId::proportional(31.0));
@@ -1140,6 +1229,7 @@ mod tests {
                         .max_height(ctx.content_rect().height())
                         .vscroll(false)
                         .default_width(420.0)
+                        .default_height(theme_window_initial_height(ctx.content_rect().height()))
                         .show(&ctx, |ui| {
                             let footer_layout = theme_footer_layout(ui);
                             let body_height = theme_content_height(
@@ -1253,9 +1343,11 @@ mod tests {
         let bad_path = directory.path().join("not-a-settings-file");
         std::fs::create_dir(&bad_path).unwrap();
 
-        assert!(state
-            .save_to_path(&ctx, bad_path.to_str().unwrap())
-            .is_err());
+        assert!(
+            state
+                .save_to_path(&ctx, bad_path.to_str().unwrap())
+                .is_err()
+        );
         assert!(state.dirty);
         assert_eq!(state.draft, draft);
         assert_eq!(state.persisted_baseline, baseline);
@@ -1315,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_updates_under_preview_are_restored_on_cancel_and_system_keeps_following_os() {
+    fn committed_updates_under_preview_restore_system_or_custom_appearance_on_cancel() {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = Settings::default();
         stored.theme.mode = ThemeMode::System;
@@ -1360,14 +1452,18 @@ mod tests {
         );
 
         state.end_session(&ctx);
-        assert_eq!(ctx.theme(), egui::Theme::Dark);
+        assert_eq!(ctx.theme(), egui::Theme::Light);
         assert_eq!(
-            ctx.style_of(egui::Theme::Dark).visuals.window_fill,
+            ctx.style_of(egui::Theme::Light).visuals.window_fill,
             to_egui(external.custom_scheme.window_fill),
             "the latest committed palette is revealed after cancelling the preview"
         );
         state.end_session(&ctx);
-        assert_eq!(ctx.theme(), egui::Theme::Dark, "cancellation is idempotent");
+        assert_eq!(
+            ctx.theme(),
+            egui::Theme::Light,
+            "cancellation is idempotent"
+        );
     }
 
     #[test]
@@ -1409,6 +1505,14 @@ mod tests {
             .theme
             .named_presets
             .insert("curated.graphite-dark".into(), user_scheme.clone());
+        let second_collision = ColorScheme {
+            panel_fill: rgba(19, 29, 39, 255),
+            ..ColorScheme::dark()
+        };
+        stored
+            .theme
+            .named_presets
+            .insert("curated.graphite-dark.2".into(), second_collision.clone());
         let path = settings_path(&directory, &stored);
         let ctx = egui::Context::default();
         crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
@@ -1417,13 +1521,20 @@ mod tests {
 
         assert!(state.select_curated_preset("graphite-dark"));
         let active = state.draft.preferences.active_preset.as_deref().unwrap();
-        assert_eq!(active, "curated.graphite-dark.2");
+        assert_eq!(active, "curated.graphite-dark.3");
         assert_eq!(
             state.draft.named_presets["curated.graphite-dark"], user_scheme,
             "a user collision remains unchanged"
         );
-        let selected = curated_scheme("graphite-dark").unwrap();
+        assert_eq!(
+            state.draft.named_presets["curated.graphite-dark.2"], second_collision,
+            "an occupied suffix also remains unchanged"
+        );
+        let selected = find_curated_preset("graphite-dark").unwrap().scheme();
         assert_eq!(state.effective_scheme(SystemAppearance::Dark), selected);
+        let palette_count = state.draft.named_presets.len();
+        assert!(!state.select_curated_preset("graphite-dark"));
+        assert_eq!(state.draft.named_presets.len(), palette_count);
 
         let mut manual = state.effective_scheme(SystemAppearance::Dark);
         manual.window_fill = rgba(151, 92, 33, 83);
@@ -1460,7 +1571,7 @@ mod tests {
         );
         assert_eq!(
             missing_active_state.draft.named_presets["curated.ocean-dark"],
-            curated_scheme("ocean-dark").unwrap()
+            find_curated_preset("ocean-dark").unwrap().scheme()
         );
         assert_eq!(
             missing_active_state.draft.named_presets["curated.graphite-dark"], user_scheme,
@@ -1468,7 +1579,7 @@ mod tests {
         );
         assert_eq!(
             missing_active_state.effective_scheme(SystemAppearance::Dark),
-            curated_scheme("ocean-dark").unwrap()
+            find_curated_preset("ocean-dark").unwrap().scheme()
         );
 
         let before = resolve_theme(&state.draft, SystemAppearance::Dark);
@@ -1493,6 +1604,57 @@ mod tests {
         });
         output.drop_without_applying_deltas();
         assert_eq!(color, original);
+    }
+
+    #[test]
+    fn browsing_curated_families_does_not_mutate_the_theme_draft() {
+        let mut state = ThemeSettingsDialogState::default();
+        state.draft.named_presets.insert(
+            "User palette".into(),
+            ColorScheme {
+                window_fill: rgba(72, 31, 101, 255),
+                ..ColorScheme::dark()
+            },
+        );
+        let draft = state.draft.clone();
+
+        assert!(state.select_curated_family(PaletteFamily::Light));
+        assert_eq!(state.curated_family, PaletteFamily::Light);
+        assert_eq!(state.draft, draft);
+        assert!(!state.dirty);
+        assert!(!state.select_curated_family(PaletteFamily::Light));
+        assert_eq!(state.draft, draft);
+        assert!(!state.dirty);
+    }
+
+    #[test]
+    fn curated_selection_reuses_equal_saved_scheme_without_adding_a_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let scheme = find_curated_preset("obsidian-amber").unwrap().scheme();
+        let mut stored = Settings::default();
+        stored
+            .theme
+            .named_presets
+            .insert("Amber user copy".into(), scheme.clone());
+        stored
+            .theme
+            .named_presets
+            .insert("Amber alternate".into(), scheme.clone());
+        let path = settings_path(&directory, &stored);
+        let ctx = egui::Context::default();
+        crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
+        let mut state = ThemeSettingsDialogState::default();
+        state.begin_session(&ctx, &path);
+        let count = state.draft.named_presets.len();
+
+        assert!(state.select_curated_preset("obsidian-amber"));
+        assert_eq!(state.draft.named_presets.len(), count);
+        assert_eq!(
+            state.draft.preferences.active_preset.as_deref(),
+            Some("Amber alternate"),
+            "equal saved schemes reuse the lexicographically first matching entry"
+        );
+        assert_eq!(state.effective_scheme(SystemAppearance::Dark), scheme);
     }
 
     #[test]

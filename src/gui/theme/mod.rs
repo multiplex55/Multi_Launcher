@@ -7,6 +7,7 @@ use eframe::egui::style::WidgetVisuals;
 use eframe::egui::{self, Plugin, RawInput, Style, Theme, ThemePreference};
 use std::sync::Arc;
 
+pub(crate) mod presets;
 pub(crate) mod widgets;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +118,7 @@ pub fn resolve_theme(
     settings: &ThemeSettings,
     system_appearance: SystemAppearance,
 ) -> ResolvedTheme {
-    let appearance = resolved_appearance(settings.mode, system_appearance);
+    let appearance = resolved_appearance(settings, system_appearance);
     let scheme = effective_color_scheme(settings, system_appearance);
 
     let mut palette = palette_from_scheme(&scheme);
@@ -158,15 +159,39 @@ pub(crate) fn effective_color_scheme(
     }
 }
 
-fn resolved_appearance(mode: ThemeMode, system_appearance: SystemAppearance) -> ResolvedAppearance {
-    match mode {
+fn resolved_appearance(
+    settings: &ThemeSettings,
+    system_appearance: SystemAppearance,
+) -> ResolvedAppearance {
+    match settings.mode {
         ThemeMode::System => match system_appearance {
             SystemAppearance::Light => ResolvedAppearance::Light,
             SystemAppearance::Dark | SystemAppearance::Unknown => ResolvedAppearance::Dark,
         },
-        ThemeMode::Dark | ThemeMode::Custom => ResolvedAppearance::Dark,
+        ThemeMode::Dark => ResolvedAppearance::Dark,
         ThemeMode::Light => ResolvedAppearance::Light,
+        ThemeMode::Custom => {
+            let scheme = effective_color_scheme(settings, system_appearance);
+            if relative_luminance(scheme.window_fill) >= 0.5 {
+                ResolvedAppearance::Light
+            } else {
+                ResolvedAppearance::Dark
+            }
+        }
     }
+}
+
+fn relative_luminance(color: ThemeColor) -> f64 {
+    fn linear(channel: u8) -> f64 {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
 }
 
 fn palette_from_scheme(scheme: &ColorScheme) -> SemanticPalette {
@@ -311,7 +336,11 @@ impl ThemeRuntimePlugin {
 
     fn apply_effective(&mut self, ctx: &egui::Context) -> bool {
         let effective = self.preview.as_ref().unwrap_or(&self.committed);
-        let preference = theme_preference(effective.mode);
+        let system_appearance = match ctx.theme() {
+            Theme::Dark => SystemAppearance::Dark,
+            Theme::Light => SystemAppearance::Light,
+        };
+        let preference = theme_preference(effective, system_appearance);
         let mut changed = self.theme_preference != Some(preference);
         if changed {
             ctx.set_theme(preference);
@@ -382,11 +411,18 @@ impl Plugin for ThemeRuntimePlugin {
     }
 }
 
-fn theme_preference(mode: ThemeMode) -> ThemePreference {
-    match mode {
+fn theme_preference(
+    settings: &ThemeSettings,
+    system_appearance: SystemAppearance,
+) -> ThemePreference {
+    match settings.mode {
         ThemeMode::System => ThemePreference::System,
-        ThemeMode::Dark | ThemeMode::Custom => ThemePreference::Dark,
+        ThemeMode::Dark => ThemePreference::Dark,
         ThemeMode::Light => ThemePreference::Light,
+        ThemeMode::Custom => match resolved_appearance(settings, system_appearance) {
+            ResolvedAppearance::Dark => ThemePreference::Dark,
+            ResolvedAppearance::Light => ThemePreference::Light,
+        },
     }
 }
 
@@ -847,6 +883,32 @@ mod tests {
             custom_ctx.style_of(Theme::Light).visuals.window_fill,
             custom_fill
         );
+
+        let custom_light_ctx = egui::Context::default();
+        let custom_light = ThemeSettings {
+            mode: ThemeMode::Custom,
+            custom_scheme: ColorScheme::light(),
+            ..ThemeSettings::default()
+        };
+        initialize_runtime(&custom_light_ctx, &custom_light);
+        assert_eq!(custom_light_ctx.theme(), Theme::Light);
+        assert_eq!(
+            resolved_for_current_context(&custom_light_ctx)
+                .unwrap()
+                .appearance,
+            ResolvedAppearance::Light
+        );
+        assert_eq!(
+            first_ui_window_fill(
+                &custom_light_ctx,
+                RawInput {
+                    system_theme: Some(Theme::Dark),
+                    ..Default::default()
+                },
+            ),
+            light,
+            "Custom follows its effective light colors instead of the OS theme"
+        );
     }
 
     #[test]
@@ -1251,6 +1313,7 @@ mod tests {
         settings.mode = ThemeMode::Custom;
         let custom_preset = resolve_theme(&settings, SystemAppearance::Light);
         assert_eq!(custom_preset.palette, light.palette);
+        assert_eq!(custom_preset.appearance, ResolvedAppearance::Light);
 
         let custom_fallback = ColorScheme {
             text: ThemeColor {
@@ -1265,6 +1328,7 @@ mod tests {
         settings.preferences.active_preset = Some("missing-preset".into());
         let fallback = resolve_theme(&settings, SystemAppearance::Light);
         assert_eq!(fallback.palette.primary_text, custom_fallback.text);
+        assert_eq!(fallback.appearance, ResolvedAppearance::Dark);
         assert_eq!(
             settings.preferences.active_preset.as_deref(),
             Some("missing-preset")
