@@ -1,4 +1,5 @@
 use super::MkMacroDialog;
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::mkmacro::{
     MovementMode, REPEATED_CLICK_MINIMUM_MAX, REPEATED_CLICK_MINIMUM_MIN, RecorderRuntimeState,
     RuntimeState,
@@ -124,7 +125,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         return;
     }
     let state = state(dialog);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui
             .button("Refresh checks")
             .on_hover_text("Check external image files and connected monitors")
@@ -132,7 +133,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         {
             dialog.refresh_environment();
         }
-        if ui.button("Save").clicked() {
+        let save_button = ui.button("Save");
+        let save = widgets::with_button_emphasis(ui, save_button, ButtonEmphasis::Primary);
+        if save.clicked() {
             let result = dialog.save();
             report(dialog, result);
         }
@@ -205,9 +208,13 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                         .clone()
                         .unwrap_or_else(|| "Playback is active".into()),
                 );
-        } else if ui.button("Run").clicked() {
-            let result = dialog.run_selected_macro();
-            report(dialog, result);
+        } else {
+            let run_button = ui.button("Run");
+            let run = widgets::with_button_emphasis(ui, run_button, ButtonEmphasis::Primary);
+            if run.clicked() {
+                let result = dialog.run_selected_macro();
+                report(dialog, result);
+            }
         }
         ui.menu_button("Debug", |ui| {
             let [
@@ -279,13 +286,12 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         {
             report(dialog, crate::mkmacro::runtime::resume());
         }
-        if ui
-            .add_enabled(
-                state.command_enabled(ToolbarCommand::Stop),
-                eframe::egui::Button::new("Stop"),
-            )
-            .clicked()
-        {
+        let stop_button = ui.add_enabled(
+            state.command_enabled(ToolbarCommand::Stop),
+            eframe::egui::Button::new("Stop"),
+        );
+        let stop = widgets::with_button_emphasis(ui, stop_button, ButtonEmphasis::Destructive);
+        if stop.clicked() {
             report(dialog, crate::mkmacro::runtime::stop());
         }
         let response = ui.add_enabled(
@@ -316,9 +322,6 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             let result = dialog.run_selected_steps();
             report(dialog, result);
         }
-        if dialog.dirty {
-            ui.label("Unsaved changes");
-        }
         if ui
             .add_enabled(
                 dialog.can_undo_recording_insert(),
@@ -338,12 +341,6 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             && let Err(error) = dialog.redo_last_recording_insert()
         {
             dialog.command_error = Some(error);
-        }
-        if dialog.conflict {
-            ui.colored_label(
-                eframe::egui::Color32::YELLOW,
-                "File changed externally; reload or save to overwrite",
-            );
         }
         let recorder = crate::mkmacro::runtime::recorder_snapshot();
         let recorder_active = recorder
@@ -388,6 +385,21 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             show_record_options(ui, dialog, recorder_active)
         });
     });
+    if dialog.dirty || dialog.conflict {
+        ui.horizontal_wrapped(|ui| {
+            if dialog.dirty {
+                widgets::semantic_status(ui, StatusTone::Warning, "Unsaved changes", None);
+            }
+            if dialog.conflict {
+                widgets::semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    "File changed externally",
+                    Some("reload or save to overwrite"),
+                );
+            }
+        });
+    }
     if let Some(rec) = crate::mkmacro::runtime::recorder_snapshot().filter(|s| {
         s.state != RecorderRuntimeState::Idle || crate::mkmacro::runtime::record_stop_pending()
     }) {
@@ -405,7 +417,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             dialog.recording_review.is_some(),
             dialog.action_editor.draft.is_some() || super::step_table::table_modal_open(dialog),
         );
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let secs = rec.elapsed.as_secs();
             let state_label = match recorder_state {
                 RecorderRuntimeState::Recording => "Recording",
@@ -413,17 +425,24 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 RecorderRuntimeState::Stopping => "Stopping",
                 RecorderRuntimeState::Idle => "Idle",
             };
-            ui.label(format!(
-                "● {state_label} {:02}:{:02} — {} raw events — ~{} actions",
-                secs / 60,
-                secs % 60,
-                rec.raw_event_count,
-                rec.estimated_action_count
-            ));
+            widgets::semantic_status(
+                ui,
+                StatusTone::Info,
+                state_label,
+                Some(&format!(
+                    "{:02}:{:02} — {} raw events — ~{} actions",
+                    secs / 60,
+                    secs % 60,
+                    rec.raw_event_count,
+                    rec.estimated_action_count
+                )),
+            );
             if rec.dropped_event_count > 0 {
-                ui.colored_label(
-                    eframe::egui::Color32::YELLOW,
-                    format!("{} events dropped", rec.dropped_event_count),
+                widgets::semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    &format!("{} events dropped", rec.dropped_event_count),
+                    None,
                 );
             }
             match recorder_state {
@@ -471,10 +490,10 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         });
     }
     if let Some(error) = &dialog.command_error {
-        ui.colored_label(eframe::egui::Color32::RED, error);
+        widgets::semantic_status(ui, StatusTone::Error, "Command failed", Some(error));
     }
     if let Some(status) = crate::mkmacro::runtime::recording_status() {
-        ui.colored_label(eframe::egui::Color32::YELLOW, status);
+        widgets::semantic_status(ui, StatusTone::Warning, "Recording status", Some(&status));
     }
     if let Some(run) = crate::mkmacro::runtime::snapshot().filter(|s| {
         matches!(
@@ -487,13 +506,17 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             .and_then(|id| dialog.draft.macros.iter().find(|m| m.id == id))
             .map(|m| m.name.as_str())
             .unwrap_or("Unknown macro");
-        ui.label(format!(
-            "{:?}: {} — step {}/{}",
-            run.state,
-            name,
-            run.completed_steps.saturating_add(1).min(run.total_steps),
-            run.total_steps
-        ));
+        widgets::semantic_status(
+            ui,
+            StatusTone::Info,
+            &format!("{:?}", run.state),
+            Some(&format!(
+                "{} — step {}/{}",
+                name,
+                run.completed_steps.saturating_add(1).min(run.total_steps),
+                run.total_steps
+            )),
+        );
     }
     show_recording_annotation(ui.ctx(), dialog);
 }
@@ -793,7 +816,12 @@ fn show_record_options(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog, ac
         dialog.mark_dirty();
     }
     if let Some(conflict) = recorder_control_conflict(dialog) {
-        ui.colored_label(eframe::egui::Color32::RED, conflict);
+        widgets::semantic_status(
+            ui,
+            StatusTone::Error,
+            "Recorder hotkey conflict",
+            Some(&conflict),
+        );
     }
 }
 

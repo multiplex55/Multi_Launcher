@@ -355,7 +355,7 @@ fn base_menu_model(
         MenuEntry::action("Delete", Command::DeleteRow(id), true),
     ]
 }
-const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
+pub(super) const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
 
 fn menu_model(
     step: &MkStep,
@@ -399,8 +399,18 @@ fn table_viewport_height(available_height: f32) -> f32 {
     available_height.max(MIN_TABLE_VIEWPORT_HEIGHT)
 }
 
+fn diagnostic_visual(
+    ui: &eframe::egui::Ui,
+    severity: crate::mkmacro::DiagnosticSeverity,
+) -> (&'static str, eframe::egui::Color32) {
+    match severity {
+        crate::mkmacro::DiagnosticSeverity::Fatal => ("Error", ui.visuals().error_fg_color),
+        crate::mkmacro::DiagnosticSeverity::Warning => ("Warning", ui.visuals().warn_fg_color),
+    }
+}
+
 fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
-    use eframe::egui::{Color32, RichText};
+    use eframe::egui::RichText;
     let diagnostics = d.cached_diagnostics();
     let mut target = None;
     if diagnostics.is_empty() {
@@ -419,14 +429,7 @@ fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
                     |ui, range| {
                         for index in range {
                             let diagnostic = &diagnostics[index];
-                            let (severity, color) = match diagnostic.severity {
-                                crate::mkmacro::DiagnosticSeverity::Fatal => {
-                                    ("Error", Color32::RED)
-                                }
-                                crate::mkmacro::DiagnosticSeverity::Warning => {
-                                    ("Warning", Color32::YELLOW)
-                                }
-                            };
+                            let (severity, color) = diagnostic_visual(ui, diagnostic.severity);
                             let owner = d
                                 .draft
                                 .macros
@@ -459,13 +462,13 @@ fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
     false
 }
 
-pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
+pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<eframe::egui::Rect> {
     if show_diagnostics(ui, d) {
-        return;
+        return None;
     }
     let Some(mid) = d.selected_macro_id else {
         ui.label("Select a macro");
-        return;
+        return None;
     };
     let diagnostics = d.cached_diagnostics();
     if d.analysis_cache.borrow().environment_pending {
@@ -483,21 +486,18 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         .iter()
         .filter(|x| x.macro_id == mid && x.step_id.is_none())
     {
-        let color = match diagnostic.severity {
-            crate::mkmacro::DiagnosticSeverity::Fatal => eframe::egui::Color32::RED,
-            crate::mkmacro::DiagnosticSeverity::Warning => eframe::egui::Color32::YELLOW,
-        };
-        ui.colored_label(color, format!("⚠ {}", diagnostic.message))
+        let (severity, color) = diagnostic_visual(ui, diagnostic.severity);
+        ui.colored_label(color, format!("{severity} · {}", diagnostic.message))
             .on_hover_text(format!("{}\nCode: {}", diagnostic.message, diagnostic.code));
     }
     let runtime = crate::mkmacro::runtime::snapshot();
     let breakpoint_locked = !breakpoint_editable(runtime.as_deref());
     let Some(m) = d.draft.macros.iter().find(|m| m.id == mid) else {
-        return;
+        return None;
     };
     let rows: Vec<u64> = m.steps.iter().map(|s| s.id).collect();
     let Some(structure) = d.cached_structure(mid) else {
-        return;
+        return None;
     };
     if let Some(primary) = d.selection.primary {
         d.selection.primary = Some(
@@ -626,12 +626,9 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                         });
                         if let Some(items) = row_diagnostics.get(&s.id) {
                             let first = items.iter().copied().find(|diagnostic| diagnostic.severity == crate::mkmacro::DiagnosticSeverity::Fatal).unwrap_or(items[0]);
-                            let color = match first.severity {
-                                crate::mkmacro::DiagnosticSeverity::Fatal => eframe::egui::Color32::RED,
-                                crate::mkmacro::DiagnosticSeverity::Warning => eframe::egui::Color32::YELLOW,
-                            };
+                            let (severity, color) = diagnostic_visual(ui, first.severity);
                             let hover = items.iter().map(|x| format!("{}\nCode: {}", x.message, x.code)).collect::<Vec<_>>().join("\n\n");
-                            if ui.add(eframe::egui::Label::new(eframe::egui::RichText::new(format!("⚠ {}", first.message)).color(color)).sense(eframe::egui::Sense::click())).on_hover_text(hover).clicked() {
+                            if ui.add(eframe::egui::Label::new(eframe::egui::RichText::new(format!("{severity} · {}", first.message)).color(color)).sense(eframe::egui::Sense::click())).on_hover_text(hover).clicked() {
                                 if !interaction_blocked { diagnostic_target = Some(s.id); }
                             }
                         }
@@ -877,6 +874,7 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     if d.editor_state.scroll_to.is_some() || matches!(command, Some(Command::Fold(_))) {
         ui.ctx().request_repaint();
     }
+    Some(table_response.response.rect.intersect(ui.clip_rect()))
 }
 
 fn render_context_menu(

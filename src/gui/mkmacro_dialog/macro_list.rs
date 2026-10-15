@@ -1,4 +1,5 @@
 use super::MkMacroDialog;
+use crate::gui::theme::widgets::{self, ButtonEmphasis};
 use crate::mkmacro::{MkMacro, MkMacroDocument, MkMacroFolder};
 use std::collections::HashSet;
 
@@ -85,8 +86,11 @@ pub(super) fn show_empty(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         eframe::egui::Layout::centered_and_justified(eframe::egui::Direction::TopDown),
         |ui| {
             ui.vertical_centered(|ui| {
-                ui.heading("Mouse/Keyboard Macros");
-                ui.label("Create reusable keyboard, mouse, window, and automation workflows.");
+                widgets::compact_section_heading(
+                    ui,
+                    "Mouse/Keyboard Macros",
+                    Some("Create reusable keyboard, mouse, window, and automation workflows."),
+                );
                 if ui
                     .add_sized([180.0, 36.0], eframe::egui::Button::new("New Macro"))
                     .clicked()
@@ -199,16 +203,18 @@ fn show_folder_rename(
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let mut command = None;
-    ui.heading("Macros");
-    ui.horizontal(|ui| {
+    widgets::compact_section_heading(
+        ui,
+        "Macros",
+        Some("Browse folders and choose a workflow to edit."),
+    );
+    ui.horizontal_wrapped(|ui| {
         if ui.button("New Macro").clicked() {
             command = Some(Command::NewMacro);
         }
         if ui.button("New Folder").clicked() {
             command = Some(Command::NewFolder);
         }
-    });
-    ui.horizontal(|ui| {
         let selected = d.selected_macro().map(|m| m.id);
         if ui
             .add_enabled(selected.is_some(), eframe::egui::Button::new("Duplicate"))
@@ -216,17 +222,18 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
         {
             command = selected.map(Command::DuplicateMacro);
         }
-        if ui
-            .add_enabled(selected.is_some(), eframe::egui::Button::new("Delete"))
-            .clicked()
-        {
+        let delete = ui.add_enabled(selected.is_some(), eframe::egui::Button::new("Delete"));
+        if widgets::with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
             command = selected.map(Command::DeleteMacro);
         }
     });
-    ui.add(
-        eframe::egui::TextEdit::singleline(&mut d.search)
-            .hint_text("Search names and descriptions"),
-    );
+    widgets::labeled_form_row(ui, "Search", |ui| {
+        ui.add(
+            eframe::egui::TextEdit::singleline(&mut d.search)
+                .desired_width(ui.available_width())
+                .hint_text("Names and descriptions"),
+        )
+    });
     let mut rename_text = d.folder_rename_text.clone();
     let rename_needs_focus = std::mem::take(&mut d.folder_rename_needs_focus);
     let searching = !d.search.trim().is_empty();

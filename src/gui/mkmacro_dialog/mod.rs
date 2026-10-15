@@ -359,6 +359,155 @@ mod tests {
     }
 
     #[test]
+    fn minimum_size_main_layout_keeps_toolbar_and_steps_reachable_without_mutation() {
+        use eframe::egui::{self, accesskit::Role, pos2, vec2};
+
+        let (_directory, mut dialog) = dialog();
+        dialog.open = true;
+        dialog.create_macro();
+        dialog.selected_macro_mut().unwrap().steps.push(MkStep {
+            id: 90_001,
+            action: MkAction::Delay(MkDelayPayload::default()),
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            metadata: Default::default(),
+        });
+        dialog.mark_dirty();
+        dialog.dirty = false;
+
+        let before_draft = dialog.draft.clone();
+        let before_selected_macro = dialog.selected_macro_id;
+        let before_selection = (
+            dialog.selection.ids.clone(),
+            dialog.selection.anchor,
+            dialog.selection.primary,
+        );
+        let before_revision = dialog.draft_revision();
+        let before_run =
+            crate::mkmacro::runtime::snapshot().map(|snapshot| (snapshot.run_id, snapshot.state));
+        let before_recorder = crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| {
+            (
+                snapshot.state,
+                snapshot.raw_event_count,
+                snapshot.estimated_action_count,
+                snapshot.dropped_event_count,
+            )
+        });
+        let before_stop_pending = crate::mkmacro::runtime::record_stop_pending();
+
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(680.0, 420.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+
+        let mut previous_viewport: Option<egui::Rect> = None;
+        let mut previous_actions_visible = None;
+        let mut settled_viewport = None;
+        let mut settled_actions_visible = [false; 4];
+        let mut stable_frame_observed = false;
+        for frame in 0..4 {
+            let mut viewport = None;
+            let mut window_open = dialog.open;
+            let output = ctx.run_ui(input(), |ctx| {
+                dialog.sync_external();
+                viewport = dialog.show_main_window(ctx, &mut window_open);
+            });
+            dialog.open = window_open;
+
+            let actions_visible = output
+                .platform_output
+                .accesskit_update
+                .as_ref()
+                .map(|update| {
+                    ["Save", "Run", "Record", "Stop"].map(|label| {
+                        update.nodes.iter().any(|(_, node)| {
+                            let Some(bounds) = node.bounds() else {
+                                return false;
+                            };
+                            let bounds = egui::Rect::from_min_max(
+                                pos2(bounds.x0 as f32, bounds.y0 as f32),
+                                pos2(bounds.x1 as f32, bounds.y1 as f32),
+                            );
+                            node.role() == Role::Button
+                                && node.label() == Some(label)
+                                && bounds.is_positive()
+                                && screen_rect.contains_rect(bounds)
+                        })
+                    })
+                });
+            if frame > 0
+                && let (Some(previous), Some(current)) = (previous_viewport, viewport)
+            {
+                let stable = (previous.min.x - current.min.x).abs() < 0.5
+                    && (previous.min.y - current.min.y).abs() < 0.5
+                    && (previous.max.x - current.max.x).abs() < 0.5
+                    && (previous.max.y - current.max.y).abs() < 0.5;
+                if stable {
+                    stable_frame_observed = true;
+                    settled_viewport = Some(current);
+                    if let Some(actions_visible) = actions_visible.or(previous_actions_visible) {
+                        settled_actions_visible = actions_visible;
+                    }
+                }
+            }
+            previous_viewport = viewport;
+            previous_actions_visible = actions_visible;
+            output.drop_without_applying_deltas();
+        }
+
+        assert!(stable_frame_observed, "the visible main window settles");
+        let step_viewport = settled_viewport.expect("the selected macro has a visible step area");
+        assert!(
+            step_viewport.is_positive(),
+            "the step table keeps a positive minimum viewport: {step_viewport:?}"
+        );
+        assert!(
+            settled_actions_visible.into_iter().all(|visible| visible),
+            "Save, Run, Record, and Stop remain inside the minimum-size window"
+        );
+        assert!(dialog.open);
+        assert!(!dialog.dirty);
+        assert_eq!(dialog.draft, before_draft);
+        assert_eq!(dialog.selected_macro_id, before_selected_macro);
+        assert_eq!(
+            (
+                dialog.selection.ids.clone(),
+                dialog.selection.anchor,
+                dialog.selection.primary,
+            ),
+            before_selection
+        );
+        assert_eq!(dialog.draft_revision(), before_revision);
+        assert_eq!(
+            crate::mkmacro::runtime::snapshot().map(|snapshot| (snapshot.run_id, snapshot.state)),
+            before_run,
+            "layout rendering does not start or advance playback"
+        );
+        assert_eq!(
+            crate::mkmacro::runtime::recorder_snapshot().map(|snapshot| {
+                (
+                    snapshot.state,
+                    snapshot.raw_event_count,
+                    snapshot.estimated_action_count,
+                    snapshot.dropped_event_count,
+                )
+            }),
+            before_recorder,
+            "layout rendering does not start or advance recording"
+        );
+        assert_eq!(
+            crate::mkmacro::runtime::record_stop_pending(),
+            before_stop_pending
+        );
+    }
+
+    #[test]
     fn analysis_revision_tracks_mutations_save_repair_reload_and_presentation() {
         let (_dir, mut d) = dialog();
         d.create_macro();
@@ -5965,22 +6114,31 @@ impl MkMacroDialog {
             return;
         }
         let mut open = self.open;
-        // Manual regression: resize this window, add 100 steps, expand/edit rows,
-        // and delete them again. Its chosen outer height must remain unchanged.
-        eframe::egui::Window::new("Mouse/Keyboard Macros")
-            .id(eframe::egui::Id::new("mkmacro_main_window"))
-            .open(&mut open)
-            .default_size([920.0, 620.0])
-            .min_size([680.0, 420.0])
-            .resizable(true)
-            .show(ctx, |ui| {
-                self.show_contents(ui);
-            });
+        let _ = self.show_main_window(ctx, &mut open);
         self.open = open;
         if !self.open {
             self.close_children();
             self.set_selected_macro(None);
         }
+    }
+    fn show_main_window(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        open: &mut bool,
+    ) -> Option<eframe::egui::Rect> {
+        let mut table_viewport = None;
+        // Manual regression: resize this window, add 100 steps, expand/edit rows,
+        // and delete them again. Its chosen outer height must remain unchanged.
+        eframe::egui::Window::new("Mouse/Keyboard Macros")
+            .id(eframe::egui::Id::new("mkmacro_main_window"))
+            .open(open)
+            .default_size([920.0, 620.0])
+            .min_size([680.0, 420.0])
+            .resizable(true)
+            .show(ctx, |ui| {
+                table_viewport = self.show_contents_with_table_viewport(ui);
+            });
+        table_viewport
     }
     fn close_children(&mut self) {
         if self.recording_annotation_open {
@@ -6004,11 +6162,18 @@ impl MkMacroDialog {
         );
     }
     pub fn show_contents(&mut self, ui: &mut eframe::egui::Ui) {
+        let _ = self.show_contents_with_table_viewport(ui);
+    }
+    fn show_contents_with_table_viewport(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+    ) -> Option<eframe::egui::Rect> {
         search::shortcuts(ui.ctx(), self);
         self.publish_recording_target();
         self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
         self.drain_pending_recording_reviews();
         toolbar::show(ui, self);
+        let mut table_viewport = None;
         if self.draft.macros.is_empty() && self.draft.folders.is_empty() {
             let body_size = ui.available_size();
             ui.allocate_ui_with_layout(
@@ -6028,11 +6193,26 @@ impl MkMacroDialog {
                 .horizontal(|mut strip| {
                     strip.cell(|ui| macro_list::show(ui, self));
                     strip.cell(|ui| {
-                        macro_properties::show(ui, self);
+                        let inspector_height = if self.runtime_inspector_open {
+                            runtime_inspector::INSPECTOR_BODY_HEIGHT + ui.spacing().interact_size.y
+                        } else {
+                            ui.spacing().interact_size.y
+                        };
+                        let properties_height = (ui.available_height()
+                            - step_table::MIN_TABLE_VIEWPORT_HEIGHT
+                            - inspector_height
+                            - 2.0 * ui.spacing().item_spacing.y)
+                            .max(0.0);
+                        eframe::egui::ScrollArea::vertical()
+                            .id_salt("mkmacro_macro_properties_scroll")
+                            .auto_shrink([false, true])
+                            .min_scrolled_height(0.0)
+                            .max_height(properties_height)
+                            .show(ui, |ui| macro_properties::show(ui, self));
                         ui.separator();
                         runtime_inspector::show(ui, self);
                         ui.separator();
-                        step_table::show(ui, self);
+                        table_viewport = step_table::show(ui, self);
                     });
                     strip.cell(|ui| outline::show(ui, self));
                 });
@@ -6075,5 +6255,6 @@ impl MkMacroDialog {
             }
             ConfirmationResult::None => {}
         }
+        table_viewport
     }
 }

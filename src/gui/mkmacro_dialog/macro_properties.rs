@@ -2,6 +2,7 @@ use super::MkMacroDialog;
 use super::key_capture::{apply_captured_hotkey, captured_chord, chord_hotkey, hotkey_name};
 pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::window_picker::{MatcherDestination, MatcherEditRequest};
+use crate::gui::theme::widgets::{self, StatusTone};
 use crate::mkmacro::hotkeys::{HotkeyDiagnostic, HotkeyDiagnosticSeverity};
 use crate::mkmacro::{MkHotkeyScope, MkMacroFolder, MkWindowMatcher};
 use eframe::egui;
@@ -28,11 +29,11 @@ fn current_folder_choice(
         .unwrap_or((None, "Unfiled"))
 }
 
-// Pure presentation mapping: no UI context is needed to test severity colors.
-fn hotkey_diagnostic_color(severity: HotkeyDiagnosticSeverity) -> egui::Color32 {
+// Keep severity classification independent from the active palette.
+fn hotkey_diagnostic_tone(severity: HotkeyDiagnosticSeverity) -> StatusTone {
     match severity {
-        HotkeyDiagnosticSeverity::Error => egui::Color32::RED,
-        HotkeyDiagnosticSeverity::Warning => egui::Color32::YELLOW,
+        HotkeyDiagnosticSeverity::Error => StatusTone::Error,
+        HotkeyDiagnosticSeverity::Warning => StatusTone::Warning,
     }
 }
 
@@ -74,19 +75,17 @@ fn edit_active_matcher(scope: &mut MkHotkeyScope, edit: impl FnOnce(&mut MkWindo
 }
 
 pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
-    ui.horizontal(|ui| {
-        ui.label("Record Toggle:");
+    widgets::labeled_form_row(ui, "Record Toggle", |ui| {
         let label = hotkey_name(&d.draft.settings.record_toggle_hotkey);
-        if ui
-            .button(if d.record_hotkey_capture {
-                "Press a key…"
-            } else {
-                &label
-            })
-            .clicked()
-        {
+        let response = ui.button(if d.record_hotkey_capture {
+            "Press a key…"
+        } else {
+            &label
+        });
+        if response.clicked() {
             d.record_hotkey_capture = true;
         }
+        response
     });
     if d.record_hotkey_capture {
         if let Some(chord) = ui.input(captured_chord) {
@@ -103,9 +102,11 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     }
     let conflicts = crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[]);
     if has_recording_toggle_conflict(&conflicts) {
-        ui.colored_label(
-            hotkey_diagnostic_color(HotkeyDiagnosticSeverity::Error),
+        widgets::semantic_status(
+            ui,
+            StatusTone::Error,
             "hotkey conflicts with an enabled macro",
+            None,
         );
     }
     ui.separator();
@@ -117,23 +118,28 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     let folders = folder_choices(&d.draft.folders);
     let mut folder_change = None;
     let Some(m) = d.selected_macro_mut() else {
-        ui.label("Select a macro");
+        widgets::secondary_help(ui, "Select a macro to edit its properties.");
         return;
     };
     let macro_id = m.id;
-    ui.heading("Macro Properties");
-    changed |= ui.text_edit_singleline(&mut m.name).changed();
-    changed |= ui
-        .add(
+    widgets::compact_section_heading(
+        ui,
+        "Macro Properties",
+        Some("Edit identity, hotkey, scope, and playback behavior."),
+    );
+    changed |=
+        widgets::labeled_form_row(ui, "Name", |ui| ui.text_edit_singleline(&mut m.name)).changed();
+    changed |= widgets::labeled_form_row(ui, "Description", |ui| {
+        ui.add(
             egui::TextEdit::multiline(&mut m.description)
                 .desired_rows(2)
                 .hint_text("Description"),
         )
-        .changed();
+    })
+    .changed();
     changed |= ui.checkbox(&mut m.enabled, "Enabled").changed();
     let (selected_folder, folder_label) = current_folder_choice(&folders, m.folder_id);
-    ui.horizontal(|ui| {
-        ui.label("Folder:");
+    widgets::labeled_form_row(ui, "Folder", |ui| {
         egui::ComboBox::from_id_salt(("macro_properties_folder", macro_id))
             .selected_text(folder_label)
             .show_ui(ui, |ui| {
@@ -145,32 +151,35 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
                         folder_change = Some(*folder_id);
                     }
                 }
-            });
+            })
+            .response
     });
-    ui.horizontal(|ui| {
-        ui.label("Hotkey:");
+    widgets::labeled_form_row(ui, "Hotkey", |ui| {
         let label = m
             .hotkey
             .as_ref()
             .map(hotkey_name)
             .unwrap_or_else(|| "None".into());
-        if ui
-            .button(if capturing { "Press a key…" } else { &label })
-            .clicked()
-        {
-            capture = Some(true);
-        }
-        if m.hotkey.is_some() && ui.small_button("Clear").clicked() {
-            clear = true;
-        }
+        ui.horizontal(|ui| {
+            let response = ui.button(if capturing { "Press a key…" } else { &label });
+            if response.clicked() {
+                capture = Some(true);
+            }
+            if m.hotkey.is_some() && ui.small_button("Clear").clicked() {
+                clear = true;
+            }
+            response
+        })
+        .inner
     });
     let mut scope_enabled = matches!(m.hotkey_scope, MkHotkeyScope::ActiveWindow(_));
-    if ui
-        .checkbox(
+    if widgets::labeled_form_row(ui, "Hotkey scope", |ui| {
+        ui.checkbox(
             &mut scope_enabled,
             "Only activate this hotkey when this window is active",
         )
-        .changed()
+    })
+    .changed()
     {
         changed |= set_hotkey_scope_enabled(&mut m.hotkey_scope, scope_enabled);
     }
@@ -240,9 +249,11 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         .into_iter()
         .filter(|x| Some(x.macro_id) == d.selected_macro_id)
     {
-        ui.colored_label(
-            hotkey_diagnostic_color(diagnostic.severity),
-            diagnostic.message,
+        widgets::semantic_status(
+            ui,
+            hotkey_diagnostic_tone(diagnostic.severity),
+            &diagnostic.message,
+            None,
         );
     }
     if changed {
@@ -301,14 +312,14 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_severity_maps_to_error_red_and_warning_yellow() {
+    fn hotkey_severity_maps_to_semantic_error_and_warning_tones() {
         assert_eq!(
-            hotkey_diagnostic_color(HotkeyDiagnosticSeverity::Error),
-            egui::Color32::RED
+            hotkey_diagnostic_tone(HotkeyDiagnosticSeverity::Error),
+            StatusTone::Error
         );
         assert_eq!(
-            hotkey_diagnostic_color(HotkeyDiagnosticSeverity::Warning),
-            egui::Color32::YELLOW
+            hotkey_diagnostic_tone(HotkeyDiagnosticSeverity::Warning),
+            StatusTone::Warning
         );
     }
 
