@@ -4,6 +4,7 @@ use crate::graph::note_graph::{
     project_world_to_screen,
 };
 use crate::gui::LauncherApp;
+use crate::gui::theme::widgets;
 use crate::plugins::note::Note;
 use crate::settings::{NoteGraphSettings, Settings};
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
@@ -109,6 +110,12 @@ struct SearchResult {
     title: String,
     alias: Option<String>,
     score: i64,
+}
+
+struct NoteGraphDetailsLayout {
+    content: egui::containers::scroll_area::ScrollAreaOutput<()>,
+    center_button: egui::Response,
+    open_button: egui::Response,
 }
 
 #[derive(Default)]
@@ -363,13 +370,15 @@ impl NoteGraphDialog {
 
     fn top_bar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) -> bool {
         let mut changed = false;
-        ui.horizontal(|ui| {
-            ui.label("Search");
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.search.query)
-                    .desired_width(240.0)
-                    .hint_text("title, alias, slug"),
-            );
+        ui.horizontal_wrapped(|ui| {
+            let search_label = ui.label("Search");
+            let response = ui
+                .add(
+                    egui::TextEdit::singleline(&mut self.search.query)
+                        .desired_width(240.0)
+                        .hint_text("title, alias, slug"),
+                )
+                .labelled_by(search_label.id);
             if response.changed() {
                 self.search.selected_idx = 0;
             }
@@ -439,7 +448,7 @@ impl NoteGraphDialog {
 
     fn filters_top_panel(&mut self, ui: &mut egui::Ui, notes: &[Note]) -> bool {
         let mut changed = false;
-        ui.label("Filters");
+        widgets::compact_section_heading(ui, "Filters", None);
         ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.filter.include_input)
@@ -689,54 +698,31 @@ impl NoteGraphDialog {
     ) -> bool {
         ui.set_min_width(width);
         ui.set_max_width(width);
-        ui.label("Details");
+        widgets::compact_section_heading(ui, "Details", None);
         let Some(slug) = self.selected_node_id.as_deref() else {
-            ui.label("Select a node");
+            widgets::secondary_help(ui, "Select a node");
             return false;
         };
         let Some(note) = notes.iter().find(|n| n.slug == slug) else {
-            ui.label("Selected node not in filtered set.");
+            widgets::secondary_help(ui, "Selected node not in filtered set.");
             return false;
         };
 
-        ui.label(format!("Title: {}", note.title));
-        ui.label(format!("Slug: {}", note.slug));
-        if let Some(alias) = &note.alias {
-            ui.label(format!("Alias: {alias}"));
-        }
-        ui.separator();
-        ui.label("Tags");
-        if note.tags.is_empty() {
-            ui.label("(none)");
-        } else {
-            ui.label(note.tags.join(", "));
-        }
-
-        ui.separator();
-        ui.label("Outgoing links");
-        for link in &note.links {
-            if ui.link(link).clicked() {
-                self.selected_node_id = Some(link.clone());
-                self.center_request = Some(link.clone());
-            }
-        }
-
-        ui.separator();
-        ui.label("Backlinks");
-        for back in notes.iter().filter(|n| n.links.contains(&note.slug)) {
-            if ui.link(format!("{} [{}]", back.title, back.slug)).clicked() {
-                self.selected_node_id = Some(back.slug.clone());
-                self.center_request = Some(back.slug.clone());
-            }
-        }
-
-        ui.separator();
-        if ui.button("Center on node").clicked() {
+        let layout = render_note_graph_details(
+            ui,
+            width,
+            note,
+            notes,
+            &mut self.selected_node_id,
+            &mut self.center_request,
+        );
+        if layout.center_button.clicked() {
             self.center_request = Some(note.slug.clone());
         }
-        if ui.button("Open note").clicked() {
+        if layout.open_button.clicked() {
             app.open_note_panel(&note.slug, None);
         }
+        let _ = layout.content;
         false
     }
 
@@ -767,6 +753,129 @@ impl NoteGraphDialog {
             self.search.selected_idx = 0;
         }
     }
+}
+
+fn render_note_graph_details(
+    ui: &mut egui::Ui,
+    width: f32,
+    note: &Note,
+    notes: &[Note],
+    selected_node_id: &mut Option<String>,
+    center_request: &mut Option<String>,
+) -> NoteGraphDetailsLayout {
+    let button_heights = note_graph_details_button_heights(ui, width);
+    let footer_height = note_graph_details_footer_reserved_height(ui, &button_heights);
+    let scroll_height = (ui.available_height() - footer_height).max(0.0);
+
+    let content = egui::ScrollArea::vertical()
+        .id_salt("note_graph_details_content")
+        .max_height(scroll_height)
+        .min_scrolled_height(0.0)
+        .show(ui, |ui| {
+            widgets::compact_section_heading(ui, &format!("Title: {}", note.title), None);
+            widgets::secondary_help(ui, &format!("Slug: {}", note.slug));
+            if let Some(alias) = &note.alias {
+                widgets::secondary_help(ui, &format!("Alias: {alias}"));
+            }
+
+            ui.separator();
+            widgets::compact_section_heading(ui, "Tags", None);
+            if note.tags.is_empty() {
+                widgets::secondary_help(ui, "(none)");
+            } else {
+                widgets::secondary_help(ui, &note.tags.join(", "));
+            }
+
+            ui.separator();
+            widgets::compact_section_heading(ui, "Outgoing links", None);
+            for link in &note.links {
+                if ui.link(link).clicked() {
+                    *selected_node_id = Some(link.clone());
+                    *center_request = Some(link.clone());
+                }
+            }
+
+            ui.separator();
+            widgets::compact_section_heading(ui, "Backlinks", None);
+            for back in notes.iter().filter(|n| n.links.contains(&note.slug)) {
+                if ui.link(format!("{} [{}]", back.title, back.slug)).clicked() {
+                    *selected_node_id = Some(back.slug.clone());
+                    *center_request = Some(back.slug.clone());
+                }
+            }
+        });
+
+    ui.separator();
+    let center_button = ui.add_sized(
+        egui::vec2(width, button_heights[0]),
+        egui::Button::new("Center on node").wrap(),
+    );
+    let open_button = ui.add_sized(
+        egui::vec2(width, button_heights[1]),
+        egui::Button::new("Open note").wrap(),
+    );
+
+    NoteGraphDetailsLayout {
+        content,
+        center_button,
+        open_button,
+    }
+}
+
+fn note_graph_details_button_heights(ui: &mut egui::Ui, width: f32) -> [f32; 2] {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let button_frame = native_button_style.frame;
+    let frame_margin = if ui.visuals().button_frame {
+        button_frame.total_margin().sum()
+    } else {
+        Vec2::ZERO
+    };
+    let text_width = (ui.available_width().min(width) - frame_margin.x).max(1.0);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+
+    ["Center on node", "Open note"].map(|label| {
+        let text_height = egui::WidgetText::from(label)
+            .into_galley(
+                ui,
+                Some(egui::TextWrapMode::Wrap),
+                text_width,
+                button_font.clone(),
+            )
+            .size()
+            .y;
+        let height = (text_height + frame_margin.y).max(spacing.interact_size.y);
+        (height * pixels_per_point).ceil() / pixels_per_point
+    })
+}
+
+fn note_graph_details_footer_reserved_height(ui: &egui::Ui, button_heights: &[f32; 2]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let separator_spacing = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let height =
+        button_heights.iter().sum::<f32>() + 3.0 * spacing.item_spacing.y + separator_spacing;
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
 }
 
 fn compute_graph_layout(total_width: f32, details_visible: bool) -> (f32, Option<f32>) {
@@ -1053,5 +1162,171 @@ mod tests {
         assert!((hidden_canvas - total_width).abs() < f32::EPSILON);
         assert!((visible_canvas - (hidden_canvas - details_width)).abs() < f32::EPSILON);
         assert!((visible_canvas + details_width - total_width).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn long_details_scroll_keeps_actions_reachable_and_state_stable() {
+        struct Frame {
+            panel_clip: Rect,
+            scroll_id: egui::Id,
+            content_size: Vec2,
+            inner_rect: Rect,
+            scroll_offset: Vec2,
+            center_id: egui::Id,
+            center_rect: Rect,
+            open_id: egui::Id,
+            open_rect: Rect,
+        }
+
+        fn render_frame(
+            ctx: &egui::Context,
+            dialog: &mut NoteGraphDialog,
+            notes: &[Note],
+            screen_rect: Rect,
+            panel_rect: Rect,
+        ) -> (egui::FullOutput, Frame) {
+            let mut rendered = None;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen_rect),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(panel_rect), |ui| {
+                        let panel_rect = ui.max_rect();
+                        let panel_clip = ui.clip_rect().intersect(panel_rect);
+                        let note = notes
+                            .iter()
+                            .find(|note| note.slug == "root")
+                            .expect("synthetic root note is present");
+                        let layout = render_note_graph_details(
+                            ui,
+                            panel_rect.width(),
+                            note,
+                            notes,
+                            &mut dialog.selected_node_id,
+                            &mut dialog.center_request,
+                        );
+                        rendered = Some(Frame {
+                            panel_clip,
+                            scroll_id: layout.content.id,
+                            content_size: layout.content.content_size,
+                            inner_rect: layout.content.inner_rect,
+                            scroll_offset: layout.content.state.offset,
+                            center_id: layout.center_button.id,
+                            center_rect: layout.center_button.rect,
+                            open_id: layout.open_button.id,
+                            open_rect: layout.open_button.rect,
+                        });
+                    });
+                },
+            );
+            (
+                output,
+                rendered.expect("details panel rendered in the constrained UI"),
+            )
+        }
+
+        let ctx = egui::Context::default();
+        let mut style = ctx.style_of(ctx.theme()).as_ref().clone();
+        style.override_font_id = Some(egui::FontId::proportional(30.0));
+        ctx.set_style_of(ctx.theme(), style);
+
+        let screen_rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 320.0));
+        let panel_rect = Rect::from_min_size(egui::pos2(12.0, 12.0), egui::vec2(180.0, 280.0));
+        let title = "A deliberately long note title ".repeat(12);
+        let alias = "a deliberately long alternate title ".repeat(8);
+        let mut root = note(
+            "root",
+            &title,
+            Some(&alias),
+            &["#work", "#a-tag-that-wraps-inside-the-narrow-panel"],
+        );
+        root.links = (0..24)
+            .map(|index| format!("outgoing-destination-{index:02}-with-a-long-slug"))
+            .collect();
+        let mut notes = vec![root];
+        for index in 0..18 {
+            let mut backlink = note(
+                &format!("backlink-{index:02}"),
+                &format!("Backlink {index}: a long title that wraps in details"),
+                None,
+                &[],
+            );
+            backlink.links.push("root".to_owned());
+            notes.push(backlink);
+        }
+
+        let mut dialog = NoteGraphDialog::default();
+        dialog.selected_node_id = Some("root".to_owned());
+        dialog.center_request = Some("previous-center-request".to_owned());
+        dialog.filter.include_tags = BTreeSet::from(["work".to_owned()]);
+        dialog.filter.exclude_tags = BTreeSet::from(["archived".to_owned()]);
+        dialog.filter.include_all = true;
+        dialog.filter.only_tagged = true;
+        let selection_before = dialog.selected_node_id.clone();
+        let center_before = dialog.center_request.clone();
+        let filter_before = (
+            dialog.filter.include_tags.clone(),
+            dialog.filter.exclude_tags.clone(),
+            dialog.filter.include_all,
+            dialog.filter.only_tagged,
+        );
+
+        let (first_output, first_frame) =
+            render_frame(&ctx, &mut dialog, &notes, screen_rect, panel_rect);
+        first_output.drop_without_applying_deltas();
+        let (second_output, second_frame) =
+            render_frame(&ctx, &mut dialog, &notes, screen_rect, panel_rect);
+        second_output.drop_without_applying_deltas();
+
+        assert!(
+            second_frame.content_size.y > second_frame.inner_rect.height(),
+            "long note metadata, outgoing links, and backlinks retain a scroll range"
+        );
+        assert!(
+            second_frame
+                .panel_clip
+                .contains_rect(second_frame.inner_rect)
+        );
+        assert!(
+            second_frame
+                .panel_clip
+                .contains_rect(second_frame.center_rect)
+        );
+        assert!(
+            second_frame
+                .panel_clip
+                .contains_rect(second_frame.open_rect)
+        );
+        assert!(second_frame.center_rect.is_positive());
+        assert!(second_frame.open_rect.is_positive());
+        assert_ne!(second_frame.center_id, second_frame.open_id);
+        assert_eq!(first_frame.scroll_id, second_frame.scroll_id);
+        assert_eq!(first_frame.center_id, second_frame.center_id);
+        assert_eq!(first_frame.open_id, second_frame.open_id);
+        assert_eq!(first_frame.center_rect, second_frame.center_rect);
+        assert_eq!(first_frame.open_rect, second_frame.open_rect);
+
+        let max_scroll_y =
+            (second_frame.content_size.y - second_frame.inner_rect.height()).max(0.0);
+        assert!(second_frame.scroll_offset.x.abs() <= f32::EPSILON);
+        assert!(second_frame.scroll_offset.y >= -f32::EPSILON);
+        assert!(second_frame.scroll_offset.y <= max_scroll_y + f32::EPSILON);
+        let stored_state = egui::scroll_area::State::load(&ctx, second_frame.scroll_id)
+            .expect("the details scroll area persists its actual state");
+        assert_eq!(stored_state.offset, second_frame.scroll_offset);
+
+        assert_eq!(dialog.selected_node_id, selection_before);
+        assert_eq!(dialog.center_request, center_before);
+        assert_eq!(
+            (
+                dialog.filter.include_tags.clone(),
+                dialog.filter.exclude_tags.clone(),
+                dialog.filter.include_all,
+                dialog.filter.only_tagged,
+            ),
+            filter_before
+        );
     }
 }

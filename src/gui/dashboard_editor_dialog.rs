@@ -1,6 +1,7 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode, SlotConfig};
 use crate::dashboard::widgets::{WidgetRegistry, WidgetSettingsContext};
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use eframe::egui;
 use eframe::egui::collapsing_header::CollapsingState;
 use serde_json::Value;
@@ -120,8 +121,9 @@ impl DashboardEditorDialog {
             .resizable(true)
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_max_width(ui.available_width().min(900.0));
                     if let Some(err) = &self.error {
-                        ui.colored_label(egui::Color32::RED, err);
+                        widgets::semantic_status(ui, StatusTone::Error, err, None);
                     }
 
                     ui.horizontal(|ui| {
@@ -142,8 +144,8 @@ impl DashboardEditorDialog {
                     });
 
                     ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Preview");
+                    widgets::compact_section_heading(ui, "Preview", None);
+                    ui.horizontal_wrapped(|ui| {
                         ui.checkbox(&mut self.show_preview, "Show preview");
                         ui.checkbox(&mut self.snap_on_edit, "Snap to free space on edit");
                         ui.checkbox(&mut self.show_swap_buttons, "Show swap");
@@ -169,7 +171,7 @@ impl DashboardEditorDialog {
                         warnings.sort();
                         warnings.dedup();
                         for warn in warnings {
-                            ui.colored_label(egui::Color32::YELLOW, warn);
+                            widgets::semantic_status(ui, StatusTone::Warning, &warn, None);
                         }
                         if let Some(idx) = self.selected_slot
                             && ui.button("Auto-place nearest free slot").clicked()
@@ -190,12 +192,12 @@ impl DashboardEditorDialog {
                     if !conflict_messages.is_empty() {
                         ui.separator();
                         for msg in &conflict_messages {
-                            ui.colored_label(egui::Color32::RED, msg);
+                            widgets::semantic_status(ui, StatusTone::Error, msg, None);
                         }
                     }
 
                     ui.separator();
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("Add slot").clicked() {
                             self.config
                                 .slots
@@ -205,14 +207,22 @@ impl DashboardEditorDialog {
                             self.reload(registry);
                         }
                         ui.add_enabled_ui(!has_conflicts, |ui| {
-                            if ui.button("Save").clicked() {
+                            let response = ui.button("Save");
+                            let response = widgets::with_button_emphasis(
+                                ui,
+                                response,
+                                ButtonEmphasis::Primary,
+                            );
+                            if response.clicked() {
                                 self.save(registry);
                             }
                         });
                         if has_conflicts {
-                            ui.colored_label(
-                                egui::Color32::RED,
+                            widgets::semantic_status(
+                                ui,
+                                StatusTone::Error,
                                 "Resolve slot conflicts before saving.",
+                                None,
                             );
                         }
                         if ui.button("Expand all").clicked() {
@@ -328,13 +338,10 @@ impl DashboardEditorDialog {
                                                 } else {
                                                     "Swap"
                                                 };
-                                                let swap_button = if is_swap_source {
-                                                    egui::Button::new(swap_label)
-                                                        .fill(egui::Color32::from_rgb(60, 120, 200))
-                                                } else {
-                                                    egui::Button::new(swap_label)
-                                                };
-                                                if ui.add(swap_button).clicked() {
+                                                if ui
+                                                    .selectable_label(is_swap_source, swap_label)
+                                                    .clicked()
+                                                {
                                                     if is_swap_source {
                                                         self.swap_anchor = None;
                                                     } else if let Some(anchor) = self.swap_anchor {
@@ -570,7 +577,7 @@ impl DashboardEditorDialog {
         settings_ctx: &WidgetSettingsContext<'_>,
         require_confirm_destructive: bool,
     ) {
-        ui.heading("Settings");
+        widgets::compact_section_heading(ui, "Settings", None);
         if self.config.slots.is_empty() {
             ui.label("Add a slot to edit its settings.");
             return;
@@ -580,9 +587,11 @@ impl DashboardEditorDialog {
             return;
         };
         if selected_idx >= self.config.slots.len() {
-            ui.colored_label(
-                egui::Color32::YELLOW,
+            widgets::semantic_status(
+                ui,
+                StatusTone::Warning,
                 "Selected slot no longer exists; please reselect.",
+                None,
             );
             return;
         }
@@ -594,13 +603,13 @@ impl DashboardEditorDialog {
             .unwrap_or_else(|| Value::Object(Default::default()));
         let mut settings_changed = Self::ensure_slot_settings_defaults(slot, &default_settings, ui);
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(format!("Widget: {widget_name}"));
             if let Some(meta) = registry.metadata_for(&widget_name) {
                 if meta.has_settings_ui {
-                    ui.colored_label(egui::Color32::GREEN, "Settings available");
+                    widgets::semantic_status(ui, StatusTone::Success, "Settings available", None);
                 } else {
-                    ui.colored_label(egui::Color32::GRAY, "No custom settings UI");
+                    widgets::secondary_help(ui, "No custom settings UI");
                 }
             }
             if ui.button("Reset to defaults").clicked() {
@@ -622,13 +631,15 @@ impl DashboardEditorDialog {
                 settings_changed = true;
             }
             if let Some(err) = result.error {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    format!("{err}. Settings saved after edits."),
+                widgets::semantic_status(
+                    ui,
+                    StatusTone::Warning,
+                    &format!("{err}. Settings saved after edits."),
+                    None,
                 );
             }
         } else {
-            ui.label("No settings available for this widget.");
+            widgets::secondary_help(ui, "No settings available for this widget.");
         }
 
         match self.confirm_modal.ui(ui.ctx()) {
@@ -723,9 +734,11 @@ impl DashboardEditorDialog {
         ui: &mut egui::Ui,
     ) -> bool {
         if slot.settings.is_null() {
-            ui.colored_label(
-                egui::Color32::YELLOW,
+            widgets::semantic_status(
+                ui,
+                StatusTone::Warning,
                 "Settings were empty; defaults were applied.",
+                None,
             );
             slot.settings = default_settings.clone();
             return true;

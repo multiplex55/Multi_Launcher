@@ -22,7 +22,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/convert_panel.rs` | M5-C5 | inspected coherent existing native presentation accepted unchanged; session/clipboard/parser owners preserved, native interaction unobserved |
 | `src/gui/cpu_list_dialog.rs` | M5-C6 | accepted bounded labels/native footer, refresh/sort/count unchanged; scoped compilation/review pass, native visual gap and preexisting pinned count0 documented |
 | `src/gui/crop_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/dashboard_editor_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/dashboard_editor_dialog.rs` | M5-C9 | accepted wrapped/bounded chrome;12 contracts/review pass, initial NoteGraph controls inspected; populated graph/details/Dashboard preview/nativeinput/close gaps explicit |
 | `src/gui/data_recovery_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/diff_dialog/mod.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/fav_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
@@ -37,7 +37,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/mouse_gestures_dialog.rs` | M5-B7 | accepted shared editor/picker/status chrome; persistence/read-only/recordinglabel contracts pass; authoredstroke/canvas unchanged, nativecapture/input gap explicit |
 | `src/gui/mouse_settings_dialog.rs` | M5-B7 | accepted semantic forms/session-vs-draft help; existing compact/failedapply/immediate/committedsummary contracts pass; initialDarkcapture inspected, lowernative/input/effect gaps explicit |
 | `src/gui/multi_manager_actions.rs` | M5-B4 | inspected behavior owner unchanged; presentation remains src/multi_manager/ui.rs |
-| `src/gui/note_graph_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/note_graph_dialog.rs` | M5-C9 | accepted wrapped/bounded chrome;12 contracts/review pass, initial NoteGraph controls inspected; populated graph/details/Dashboard preview/nativeinput/close gaps explicit |
 | `src/gui/note_panel.rs` | M5-B1 | implemented/source reviewed; strict window/save/discard/narrow tests pass; native after-image gap |
 | `src/gui/notes_dialog.rs` | M5-B1 | implemented/source reviewed;13 targeted contracts plus Notes002 app-native after-image atda0ca08c; receipts/m5b1-notes-presentation.md |
 | `src/gui/qr_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -63,6 +63,28 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/settings_editor/render.rs` | M5-A | complete at94b4724d; section identity/collapse/footer and mapping tests, Dark852x460 rendered review |
 
 Plugin settings_ui owners also require local presentation review alongside their surface group: browser_tabs, network, history, mkmacro, mouse_gestures, file_search, omni_search, virtual_desktop, note, diff, clipboard_modify, color_picker, screenshot, shell, clipboard and stopwatch. Preserve mappings/ranges and native control behavior.
+
+### Source-backed plugin settings review after C8
+
+Read-only local presentation review; unchanged dispositions are source review, not native interaction verification. No runtime/algorithm audit or tests executed for unchanged owners.
+
+| Plugin settings owner | Disposition |
+|---|---|
+| browser_tabs | Coherent unchanged: native checkbox and wrapped explanation. |
+| network | Coherent unchanged: short refresh DragValue/unit ComboBox; ranges/mappings retained. |
+| history | Coherent unchanged: single bounded-range native slider. |
+| mkmacro | Coherent unchanged: native enable checkbox; child authoring coverage remains pending separately. |
+| omni_search | Coherent unchanged: six native scope checkboxes. |
+| note | Coherent unchanged: native external-open enum/feature checks and dedicated Notes settings section. |
+| diff | Coherent unchanged: native options and pane split; comparison/child forms remain separate. |
+| color_picker | Coherent unchanged: native color editor with changed-only publication. |
+| shell | Coherent unchanged: single native checkbox/live atomic owner. |
+| stopwatch | Coherent unchanged: short precision/refresh controls. |
+| file_search | Pending: ripgrep path/editor/action and nested path rows need reflow/full control access; ordinary hardcoded validation colors need semantic statuses. src/plugins/file_search.rs render_ripgrep_settings_ui and list helpers. |
+| virtual_desktop | Pending: long rule labels/default-width fields overflow unwrapped rows in settings_ui; preserve native snapshot/rule/runtime owners. |
+| screenshot | Pending: screenshot directory label/editor/Browse row needs bounded reflow in settings_ui; preserve file dialog/serialization. |
+
+Mouse/Clipboard settings were inspected with their completed surface checkpoints. Vertical scrolling of the Settings shell alone does not solve the three remaining horizontal-overflow cases. These three settings owners form one bounded later checkpoint; no extra dependency, persistence or native-effects work.
 
 Intentional domain ownership: native radial compositor/skins; Screen Draw canvas; coordinate effects; sampling/capture overlays; image pixels/selection/annotations; regex source/capture highlights; diff semantics; Markdown syntax/callouts/code/images. Theme surrounding chrome only, never globally recolor these meaningful outputs or alter transparency/focus/hook transport. QR/Regex immediate viewports, Radial deferred viewport, macro prompts, Screen Draw toolbar and radial-placement recovery must inherit Context changes without parent geometry reset. Native capture/input/DPI qualification remains separate.
 
