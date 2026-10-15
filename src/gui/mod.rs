@@ -3716,7 +3716,7 @@ impl LauncherApp {
             Panel::HelpWindow => self.help_window.open = true,
             Panel::TimerDialog => self.timer_dialog.open = true,
             Panel::CompletionDialog => self.completion_dialog.open = true,
-            Panel::ShellCmdDialog => self.shell_cmd_dialog.open = true,
+            Panel::ShellCmdDialog => self.shell_cmd_dialog.ensure_open(),
             Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),

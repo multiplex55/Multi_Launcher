@@ -19,7 +19,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/clipboard_dialog.rs` | M5-B2 | accepted semantic chrome/bounded previews/actions;15scoped contracts across B2 chain; populated History002 framebuffer inspected; native input/close gaps explicit |
 | `src/gui/clipboard_modify_dialog.rs` | M5-B2 | accepted semantic sections/status/footer/native constrained scrolling; scoped layout/state/persistence contracts and review pass; native visual/input coverage unobserved |
 | `src/gui/confirmation_modal.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/convert_panel.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/convert_panel.rs` | M5-C5 | inspected coherent existing native presentation accepted unchanged; session/clipboard/parser owners preserved, native interaction unobserved |
 | `src/gui/cpu_list_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/crop_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/dashboard_editor_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -30,7 +30,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/file_search_preview_dialog.rs` | M5-B5 | accepted wrapped header/status/measured native rows; scoped line-map/payload/row-stride contracts pass; native selected-preview capture/input gap explicit |
 | `src/gui/image_crop_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/image_panel.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/json_utility_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/json_utility_dialog.rs` | M5-C5 | inspected coherent existing native presentation accepted unchanged; session/clipboard/parser owners preserved, native interaction unobserved |
 | `src/gui/macro_dialog.rs` | M5-C1 | accepted legacy Macro browse/edit/picker chrome, pinned initial load/draft fix; seven contracts/review pass, populated Light browser capture inspected; native edit/play/input gap explicit |
 | `src/gui/mkmacro_dialog/mod.rs` | M5-B3 | main toolbar/properties/sidebar/diagnostics accepted;9contracts and initial main framebuffer pass; child chrome M5-C pending and native interaction gaps explicit |
 | `src/gui/mouse_gesture_settings_dialog.rs` | M5-B7 | accepted boundedbody/nativefooter and transitionopen/pinnedClose/unpinnedClose corrections; focusedactualcontract pass, initialLightcapture inspected; nativeinteraction gap explicit |
@@ -46,7 +46,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/regex_tester_dialog.rs` | M5-B8 | accepted compact surrounding controls and copy feedback; eight existing contracts/review pass; editor/highlight semantics unchanged, native immediate-viewport/control-clipping gap explicit |
 | `src/gui/screen_draw_toolbar.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/screenshot_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/shell_cmd_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/shell_cmd_dialog.rs` | M5-C5 | accepted bounded chrome/pinnedload/inputfix; six contracts/review pass, initial Dark image inspected; native edit/input/close gaps |
 | `src/gui/snippet_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
 | `src/gui/snippet_prompt_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
 | `src/gui/tempfile_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
