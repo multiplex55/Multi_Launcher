@@ -13,9 +13,9 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/bookmark_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/brightness_dialog.rs` | M5-C6 | source inspected coherent short native form accepted unchanged; lazy-load/native action owners retained; native visual/action gap |
-| `src/gui/calendar_event_details.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/calendar_event_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/calendar_popover.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/calendar_event_details.rs` | M5-C8 | accepted bounded Calendar chrome;3 transaction/layout contracts/review pass, Editor001/corrected Popover002 images inspected; expanded/native details/input/event/close gaps explicit |
+| `src/gui/calendar_event_editor.rs` | M5-C8 | accepted bounded Calendar chrome;3 transaction/layout contracts/review pass, Editor001/corrected Popover002 images inspected; expanded/native details/input/event/close gaps explicit |
+| `src/gui/calendar_popover.rs` | M5-C8 | accepted bounded Calendar chrome;3 transaction/layout contracts/review pass, Editor001/corrected Popover002 images inspected; expanded/native details/input/event/close gaps explicit |
 | `src/gui/clipboard_dialog.rs` | M5-B2 | accepted semantic chrome/bounded previews/actions;15scoped contracts across B2 chain; populated History002 framebuffer inspected; native input/close gaps explicit |
 | `src/gui/clipboard_modify_dialog.rs` | M5-B2 | accepted semantic sections/status/footer/native constrained scrolling; scoped layout/state/persistence contracts and review pass; native visual/input coverage unobserved |
 | `src/gui/confirmation_modal.rs` | M5-C | pending surface polish/review; runtime inheritance available |
