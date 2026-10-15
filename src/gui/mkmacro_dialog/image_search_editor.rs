@@ -173,16 +173,8 @@ pub(super) fn show(
         // Click requires a point; do not expose an unsupported continuation contract.
         payload.not_found_policy = MkImageNotFoundPolicy::Fail;
     }
-    ui.horizontal(|ui| {
-        ui.label("Tolerance");
-        ui.add(egui::Slider::new(&mut payload.tolerance, 0..=255));
-    });
-    egui::ComboBox::from_label("Alpha handling")
-        .selected_text(format!("{:?}", payload.alpha))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut payload.alpha, AlphaPolicy::Compare, "Compare alpha");
-            ui.selectable_value(&mut payload.alpha, AlphaPolicy::Ignore, "Ignore alpha");
-        });
+    tolerance_slider_ui(ui, &mut payload.tolerance);
+    super::image_search_controls::alpha_policy_ui(ui, &mut payload.alpha);
     ui.horizontal_wrapped(|ui| {
         ui.label("Return point");
         ui.selectable_value(&mut payload.return_point, ReturnPoint::Center, "Center");
@@ -259,6 +251,10 @@ pub(super) fn show(
         }
     }
     out
+}
+
+pub(super) fn tolerance_slider_ui(ui: &mut egui::Ui, tolerance: &mut u8) {
+    ui.add(egui::Slider::new(tolerance, 0..=255).text("Tolerance"));
 }
 
 #[cfg(test)]

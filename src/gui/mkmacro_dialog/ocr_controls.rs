@@ -49,10 +49,12 @@ pub fn search_match_ui(ui: &mut egui::Ui, search: &mut MkOcrSearchSpec) {
 }
 
 pub fn read_output_ui(ui: &mut egui::Ui, read: &mut MkOcrReadPayload) {
-    ui.horizontal(|ui| {
-        ui.label("Output variable");
-        ui.text_edit_singleline(&mut read.output_variable);
-    });
+    let label = ui.label("Output variable");
+    ui.add(
+        egui::TextEdit::singleline(&mut read.output_variable)
+            .desired_width(ui.available_width().max(1.0)),
+    )
+    .labelled_by(label.id);
 }
 
 pub fn installed_language_ui(

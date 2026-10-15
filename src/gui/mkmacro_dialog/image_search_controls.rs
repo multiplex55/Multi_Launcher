@@ -1,5 +1,6 @@
 //! Search fields shared by image actions and live image conditions.
 use super::window_matcher_editor::matcher_ui;
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::{
     AlphaPolicy, MkImageOutputs, MkImagePayload, MkImageRef, MkImageSearchCondition,
     MkWindowMatcher, MonitorDescriptor, ReturnPoint, ScreenRect, SearchRegion,
@@ -57,7 +58,7 @@ pub(crate) fn image_outputs_valid(outputs: &MkImageOutputs) -> bool {
 
 /// Shared editor for the named result variables produced by image and pixel searches.
 pub(crate) fn show_image_outputs_editor(ui: &mut egui::Ui, outputs: &mut MkImageOutputs) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.heading("Outputs");
         let available = outputs
             .found
@@ -79,10 +80,12 @@ pub(crate) fn show_image_outputs_editor(ui: &mut egui::Ui, outputs: &mut MkImage
         ("X", &mut outputs.x),
         ("Y", &mut outputs.y),
     ] {
-        ui.horizontal(|ui| {
-            ui.label(label);
-            ui.text_edit_singleline(value.get_or_insert_with(String::new));
-        });
+        let label_response = ui.label(label);
+        ui.add(
+            egui::TextEdit::singleline(value.get_or_insert_with(String::new))
+                .desired_width(ui.available_width().max(1.0)),
+        )
+        .labelled_by(label_response.id);
         if let Some(name) = value.as_deref().filter(|name| !name.trim().is_empty())
             && let Err(error) = crate::mkmacro::variables::validate_variable_name(name)
         {
@@ -207,7 +210,11 @@ pub fn show_search_region_fields(
     state: &mut SearchRegionEditorState,
 ) -> Option<SearchRegionRequest> {
     let mut out = None;
-    egui::ComboBox::from_label("Area")
+    let area_label = ui.label("Area");
+    let area_width = ui.available_width().max(1.0);
+    egui::ComboBox::from_id_salt("Area")
+        .width(area_width)
+        .wrap()
         .selected_text(match state.kind {
             SearchRegionKind::Desktop => "Desktop",
             SearchRegionKind::Monitor => "Monitor",
@@ -225,12 +232,16 @@ pub fn show_search_region_fields(
             ] {
                 ui.selectable_value(&mut state.kind, k, l);
             }
-        });
+        })
+        .response
+        .labelled_by(area_label.id);
     match state.kind {
         SearchRegionKind::Monitor => {
-            if ui.button("Refresh Monitors").clicked() {
-                out = Some(SearchRegionRequest::RefreshMonitors);
-            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Refresh Monitors").clicked() {
+                    out = Some(SearchRegionRequest::RefreshMonitors);
+                }
+            });
             match &state.monitors {
                 Ok(ms) => {
                     let selected = ms
@@ -240,32 +251,46 @@ pub fn show_search_region_fields(
                         .unwrap_or_else(|| {
                             format!("Monitor {} — unavailable", state.monitor_index)
                         });
-                    egui::ComboBox::from_label("Monitor")
+                    let monitor_label = ui.label("Monitor");
+                    let monitor_width = ui.available_width().max(1.0);
+                    egui::ComboBox::from_id_salt("Monitor")
+                        .width(monitor_width)
+                        .wrap()
                         .selected_text(selected)
                         .show_ui(ui, |ui| {
                             for m in ms {
                                 ui.selectable_value(&mut state.monitor_index, m.index, m.label());
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(monitor_label.id);
                 }
                 Err(e) => {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        format!("Monitor information unavailable: {e}"),
+                    semantic_status(
+                        ui,
+                        StatusTone::Warning,
+                        &format!("Monitor information unavailable: {e}"),
+                        None,
                     );
                 }
             }
         }
         SearchRegionKind::Rectangle => {
-            ui.horizontal(|ui| {
-                ui.label("X");
-                ui.add(egui::DragValue::new(&mut state.rectangle.x));
-                ui.label("Y");
-                ui.add(egui::DragValue::new(&mut state.rectangle.y));
-                ui.label("W");
-                ui.add(egui::DragValue::new(&mut state.rectangle.width));
-                ui.label("H");
-                ui.add(egui::DragValue::new(&mut state.rectangle.height));
+            ui.horizontal_wrapped(|ui| {
+                let label = ui.label("X");
+                ui.add(egui::DragValue::new(&mut state.rectangle.x))
+                    .labelled_by(label.id);
+                let label = ui.label("Y");
+                ui.add(egui::DragValue::new(&mut state.rectangle.y))
+                    .labelled_by(label.id);
+                let label = ui.label("W");
+                ui.add(egui::DragValue::new(&mut state.rectangle.width))
+                    .labelled_by(label.id);
+                let label = ui.label("H");
+                ui.add(egui::DragValue::new(&mut state.rectangle.height))
+                    .labelled_by(label.id);
+            });
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Select Region").clicked() {
                     out = Some(SearchRegionRequest::SelectRectangle);
                 }
@@ -290,12 +315,15 @@ pub fn show_search_region_fields(
         out,
         Some(SearchRegionRequest::PickWindow | SearchRegionRequest::SelectRectangle)
     ) && state.kind != SearchRegionKind::Rectangle
-        && ui.button("Preview Region").clicked()
     {
-        out = Some(SearchRegionRequest::PreviewRegion);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Preview Region").clicked() {
+                out = Some(SearchRegionRequest::PreviewRegion);
+            }
+        });
     }
     if let Some(e) = state.validation_error() {
-        ui.colored_label(egui::Color32::YELLOW, e);
+        semantic_status(ui, StatusTone::Warning, &e, None);
     }
     out
 }
@@ -392,17 +420,8 @@ pub fn show_shared_fields(
         }
     });
     ui.add(egui::Slider::new(tolerance, 0..=255).text("Tolerance"));
-    egui::ComboBox::from_label("Alpha handling")
-        .selected_text(format!("{alpha:?}"))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(alpha, AlphaPolicy::Compare, "Compare alpha");
-            ui.selectable_value(alpha, AlphaPolicy::Ignore, "Ignore alpha");
-        });
-    ui.horizontal(|ui| {
-        ui.label("Return point");
-        ui.selectable_value(return_point, ReturnPoint::Center, "Center");
-        ui.selectable_value(return_point, ReturnPoint::TopLeft, "Top-left");
-    });
+    alpha_policy_ui(ui, alpha);
+    show_return_point_control(ui, return_point);
     let mut state = SearchRegionEditorState::from_region(region);
     if let Some(r) = show_search_region_fields(ui, &mut state) {
         request = Some(match r {
@@ -422,6 +441,29 @@ pub fn show_shared_fields(
     }
     *region = state.selected_region();
     request
+}
+
+pub(super) fn alpha_policy_ui(ui: &mut egui::Ui, alpha: &mut AlphaPolicy) {
+    let label = ui.label("Alpha handling");
+    let available_width = ui.available_width().max(1.0);
+    egui::ComboBox::from_id_salt("Alpha handling")
+        .width(available_width)
+        .wrap()
+        .selected_text(format!("{alpha:?}"))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(alpha, AlphaPolicy::Compare, "Compare alpha");
+            ui.selectable_value(alpha, AlphaPolicy::Ignore, "Ignore alpha");
+        })
+        .response
+        .labelled_by(label.id);
+}
+
+fn show_return_point_control(ui: &mut egui::Ui, return_point: &mut ReturnPoint) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Return point");
+        ui.selectable_value(return_point, ReturnPoint::Center, "Center");
+        ui.selectable_value(return_point, ReturnPoint::TopLeft, "Top-left");
+    });
 }
 
 pub fn payload_to_condition(p: &MkImagePayload) -> MkImageSearchCondition {
@@ -444,7 +486,250 @@ pub fn apply_condition_to_payload(c: &MkImageSearchCondition, p: &mut MkImagePay
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mkmacro::{MkImageNotFoundPolicy, MkImageOutputs, MkImageRef, MkWaitOptions};
+    use crate::mkmacro::{
+        MkImageNotFoundPolicy, MkImageOutputs, MkImageRef, MkOcrReadPayload, MkWaitOptions,
+    };
+
+    #[test]
+    fn mkmacro_image_controls_chrome_keeps_shared_fields_inside_narrow_view_without_mutation() {
+        use egui::accesskit::{Node, NodeId, Role};
+
+        fn control_has_label(nodes: &[(NodeId, Node)], node: &Node, expected: &str) -> bool {
+            node.label() == Some(expected)
+                || node.labelled_by().iter().any(|label_id| {
+                    nodes.iter().any(|(id, label)| {
+                        id == label_id
+                            && label.role() == Role::Label
+                            && label.value() == Some(expected)
+                    })
+                })
+        }
+
+        let mut outputs = MkImageOutputs {
+            found: Some("found_result".into()),
+            point: Some("point_result".into()),
+            x: Some("x_result".into()),
+            y: Some("y_result".into()),
+        };
+        let mut region = SearchRegionEditorState {
+            kind: SearchRegionKind::Rectangle,
+            monitor_index: 0,
+            rectangle: ScreenRect::new(-140, 260, 640, 480),
+            window_matcher: Default::default(),
+            client_matcher: Default::default(),
+            monitors: Ok(Vec::new()),
+        };
+        let mut return_point = ReturnPoint::TopLeft;
+        let mut tolerance = 37;
+        let mut alpha = AlphaPolicy::Ignore;
+        let mut read = MkOcrReadPayload {
+            output_variable: "recognized_result".into(),
+            ..Default::default()
+        };
+        let original = (
+            outputs.clone(),
+            region.clone(),
+            return_point,
+            tolerance,
+            alpha,
+            read.clone(),
+        );
+        let mut request = None;
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut_of(context.theme(), |style| {
+            style.override_font_id = Some(egui::FontId::new(22.0, egui::FontFamily::Proportional));
+        });
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 760.0));
+        let output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    show_image_outputs_editor(ui, &mut outputs);
+                    request = show_search_region_fields(ui, &mut region);
+                    alpha_policy_ui(ui, &mut alpha);
+                    show_return_point_control(ui, &mut return_point);
+                    super::super::image_search_editor::tolerance_slider_ui(ui, &mut tolerance);
+                    super::super::ocr_controls::read_output_ui(ui, &mut read);
+                });
+            },
+        );
+
+        let labels = [
+            "Found",
+            "Point",
+            "X",
+            "Y",
+            "W",
+            "H",
+            "Area",
+            "Select Region",
+            "Preview Region",
+            "Alpha handling",
+            "Return point",
+            "Center",
+            "Top-left",
+            "Tolerance",
+            "Output variable",
+        ];
+        let values = [
+            "found_result",
+            "point_result",
+            "x_result",
+            "y_result",
+            "recognized_result",
+        ];
+        let mut all_labels_reachable = false;
+        let mut all_values_reachable = false;
+        let mut all_controls_reachable = false;
+        let mut all_bounds_inside_view = false;
+        if let Some(update) = output.platform_output.accesskit_update.as_ref() {
+            let actual_bounds = labels
+                .iter()
+                .map(|expected| {
+                    update.nodes.iter().find_map(|(_, node)| {
+                        (node.label() == Some(expected) || node.value() == Some(expected))
+                            .then(|| node.bounds())
+                            .flatten()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let value_bounds = values
+                .iter()
+                .map(|expected| {
+                    update.nodes.iter().find_map(|(_, node)| {
+                        (node.value() == Some(expected))
+                            .then(|| node.bounds())
+                            .flatten()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let controls = [
+                "Found",
+                "Point",
+                "X",
+                "Y",
+                "W",
+                "H",
+                "Area",
+                "Select Region",
+                "Preview Region",
+                "Alpha handling",
+                "Center",
+                "Top-left",
+                "Tolerance",
+                "Output variable",
+            ];
+            let control_bounds = controls
+                .iter()
+                .map(|expected| {
+                    update.nodes.iter().find_map(|(_, node)| {
+                        (node.role() != Role::Label
+                            && control_has_label(&update.nodes, node, expected))
+                        .then(|| node.bounds())
+                        .flatten()
+                    })
+                })
+                .collect::<Vec<_>>();
+            all_labels_reachable = actual_bounds.iter().all(Option::is_some);
+            all_values_reachable = value_bounds.iter().all(Option::is_some);
+            all_controls_reachable = control_bounds.iter().all(Option::is_some);
+            all_bounds_inside_view =
+                control_bounds
+                    .iter()
+                    .chain(&value_bounds)
+                    .flatten()
+                    .all(|bounds| {
+                        bounds.x0 as f32 >= screen_rect.left() - 0.5
+                            && bounds.x1 as f32 <= screen_rect.right() + 0.5
+                            && bounds.y0 as f32 >= screen_rect.top() - 0.5
+                            && bounds.y1 as f32 <= screen_rect.bottom() + 0.5
+                    });
+        }
+        output.drop_without_applying_deltas();
+
+        let monitor = MonitorDescriptor {
+            index: 17,
+            bounds: ScreenRect::new(-1920, 0, 3840, 2160),
+            primary: true,
+        };
+        let expected_monitor_label = monitor.label();
+        let mut monitor_region = SearchRegionEditorState {
+            kind: SearchRegionKind::Monitor,
+            monitor_index: monitor.index,
+            rectangle: ScreenRect::new(0, 0, 1, 1),
+            window_matcher: Default::default(),
+            client_matcher: Default::default(),
+            monitors: Ok(vec![monitor]),
+        };
+        let monitor_region_before = monitor_region.clone();
+        let monitor_output = context.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    request = show_search_region_fields(ui, &mut monitor_region);
+                });
+            },
+        );
+        let mut monitor_control_bounds = None;
+        let mut monitor_text_preserved = false;
+        if let Some(update) = monitor_output.platform_output.accesskit_update.as_ref() {
+            for (_, node) in &update.nodes {
+                if node.role() != Role::Label && control_has_label(&update.nodes, node, "Monitor") {
+                    monitor_control_bounds = node.bounds();
+                }
+                if node.value() == Some(expected_monitor_label.as_str()) {
+                    monitor_text_preserved = true;
+                }
+            }
+        }
+        let monitor_control_inside_view = monitor_control_bounds.is_some_and(|bounds| {
+            bounds.x0 as f32 >= screen_rect.left() - 0.5
+                && bounds.x1 as f32 <= screen_rect.right() + 0.5
+                && bounds.y0 as f32 >= screen_rect.top() - 0.5
+                && bounds.y1 as f32 <= screen_rect.bottom() + 0.5
+        });
+        monitor_output.drop_without_applying_deltas();
+
+        assert!(
+            all_labels_reachable,
+            "actual native labels and actions are exposed"
+        );
+        assert!(
+            all_values_reachable,
+            "the image and OCR editor values are exposed"
+        );
+        assert!(
+            all_controls_reachable,
+            "native controls retain their accessible labels"
+        );
+        assert!(
+            all_bounds_inside_view,
+            "native shared-control bounds fit the constrained view"
+        );
+        assert!(
+            monitor_text_preserved,
+            "the selected native monitor label is preserved"
+        );
+        assert!(
+            monitor_control_inside_view,
+            "selected monitor control bounds {monitor_control_bounds:?} fit {screen_rect:?}"
+        );
+        assert_eq!(monitor_region, monitor_region_before);
+        assert_eq!(request, None, "rendering does not emit a region operation");
+        assert_eq!(
+            (outputs, region, return_point, tolerance, alpha, read),
+            original,
+            "rendering does not modify authored image/OCR values"
+        );
+    }
 
     #[test]
     fn reference_authoring_availability_is_safe_for_actions_and_conditions() {
