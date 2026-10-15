@@ -45,6 +45,7 @@ impl SettingsEditor {
             settings.static_size.unwrap_or((400, 220)),
         );
         let mut s = Self {
+            baseline_settings: settings.clone(),
             hotkey,
             hotkey_valid,
             last_valid_hotkey,

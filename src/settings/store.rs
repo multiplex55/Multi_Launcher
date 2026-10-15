@@ -44,6 +44,12 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Read the latest settings while serialized with settings updates.
+    pub fn read_current(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let _transaction = transaction_guard();
+        load_effective(path)
+    }
+
     /// Update settings only when the raw bytes still match the caller's
     /// inspected SHA-256. The exact serialized bytes are atomically committed
     /// and read back before their digest is returned.

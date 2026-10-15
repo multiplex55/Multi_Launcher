@@ -2343,6 +2343,7 @@ impl LauncherApp {
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
     ) -> super::track_c_query_observer::GeometryCause {
+        self.drain_settings_save(ctx);
         let mut geometry_cause = super::track_c_query_observer::GeometryCause::Other;
         if let Some(hwnd) = crate::window_manager::get_hwnd(frame) {
             self.launcher_hwnd = Some(hwnd.0 as usize);
@@ -4494,7 +4495,7 @@ impl LauncherApp {
 
 // Keep the normal close writer independently exercisable against an isolated
 // settings path without running the unrelated native/global shutdown owners.
-fn persist_launcher_close_preferences(
+pub(crate) fn persist_launcher_close_preferences(
     settings_path: &str,
     window_size: (i32, i32),
     pinned_panels: Vec<Panel>,
@@ -4588,17 +4589,7 @@ impl eframe::App for LauncherApp {
         self.unregister_all_hotkeys();
         self.request_launcher_visibility(false);
         self.last_visible = false;
-        self.save_file_search_ui_preferences_if_dirty();
-        let window_size = self.window_size;
-        let pinned_panels = self.pinned_panels.clone();
-        let dialog_width = self.clipboard_modify_dialog.persisted_window_size.x;
-        let dialog_height = self.clipboard_modify_dialog.persisted_window_size.y;
-        let _ = persist_launcher_close_preferences(
-            &self.settings_path,
-            window_size,
-            pinned_panels,
-            (dialog_width, dialog_height),
-        );
+        self.prepare_settings_save_shutdown();
         let _ = usage::save_usage(USAGE_FILE, &self.usage);
     }
 }

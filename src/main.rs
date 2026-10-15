@@ -1200,7 +1200,7 @@ fn application_error(
     request: multi_launcher::hotkey::reconfiguration::HotkeyApplicationRequest,
     error: multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
 ) {
-    let _ = request.complete(Err(error));
+    let _ = request.complete_restored(error);
 }
 
 fn install_candidate_hotkey_listener(
@@ -1443,7 +1443,14 @@ fn finish_hotkey_application_error(
                 "hotkey route transition ended without a terminal state".into(),
             )
         });
-        let _ = request.complete(Err(error));
+        if matches!(
+            &error,
+            multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Rollback(_)
+        ) {
+            let _ = request.complete_restoration_unavailable(error);
+        } else {
+            let _ = request.complete_restored(error);
+        }
     }
 }
 
@@ -1597,7 +1604,7 @@ impl HotkeyRuntimeCommitContext<'_> {
                 *self.listener = fallback.listener;
                 application.old_listener_stopped = false;
                 application.fallback_listener.take();
-                application.failure = Some(HotkeyReconfigurationError::Rollback(
+                application.failure = Some(HotkeyReconfigurationError::RuntimeTransition(
                     "the shared input hook failed; radial runtime was disabled and the prior legacy launcher and process-control routes were restored".into(),
                 ));
                 multi_launcher::gui::send_event(
@@ -1722,12 +1729,12 @@ impl HotkeyRuntimeCommitContext<'_> {
 
         if let Some(request) = application.request.take() {
             let request_id = request.request_id();
-            let _ = request.complete(Ok(AppliedHotkeyReconfiguration {
+            let _ = request.complete_applied(AppliedHotkeyReconfiguration {
                 request_id,
                 generation: multi_launcher::hotkey::reconfiguration::HotkeyRuntimeGeneration(
                     application.candidate_generation,
                 ),
-            }));
+            });
         }
     }
 }
@@ -1947,6 +1954,17 @@ impl GuiWorker {
     }
 }
 
+struct GuiStartupServices {
+    settings_diagnostic: Option<SettingsStartupDiagnostic>,
+    actions_diagnostic: Option<PersistenceError>,
+    recovery: multi_launcher::persistence::RecoveryStartupResult,
+    enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
+    screen_draw_recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
+    visibility_revision: VisibilityRevision,
+    event_tx: Sender<()>,
+    settings_save_workers: multi_launcher::gui::SettingsSaveWorkerRegistry,
+}
+
 /// Spawn the GUI on a separate thread.
 ///
 /// `actions` is wrapped in an [`Arc`] so the main thread and GUI worker can
@@ -1960,14 +1978,8 @@ fn spawn_gui(
     startup_indexing: Option<StartupIndexingTransfer>,
     settings: Settings,
     settings_path: String,
-    startup_settings_diagnostic: Option<SettingsStartupDiagnostic>,
-    startup_actions_diagnostic: Option<PersistenceError>,
-    startup_recovery: multi_launcher::persistence::RecoveryStartupResult,
-    enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
-    screen_draw_recovery_bridge: Arc<ScreenDrawRecoveryBridge>,
-    visibility_revision: VisibilityRevision,
-    event_tx: Sender<()>,
     radial_hotkey_reservations: Vec<(String, String)>,
+    startup_services: GuiStartupServices,
 ) -> (
     GuiWorker,
     Arc<AtomicBool>,
@@ -1976,6 +1988,16 @@ fn spawn_gui(
     Arc<Mutex<Option<RootViewportCtx>>>,
     RootWindowBridge,
 ) {
+    let GuiStartupServices {
+        settings_diagnostic: startup_settings_diagnostic,
+        actions_diagnostic: startup_actions_diagnostic,
+        recovery: startup_recovery,
+        enabled_capabilities,
+        screen_draw_recovery_bridge,
+        visibility_revision,
+        event_tx,
+        settings_save_workers,
+    } = startup_services;
     #[cfg(feature = "qa-framebuffer-capture")]
     let qa_framebuffer_request = match QaFramebufferRequest::from_environment() {
         Ok(request) => request,
@@ -2039,6 +2061,7 @@ fn spawn_gui(
     let root_window_bridge_for_gui = root_window_bridge.clone();
     let actions_for_window = Arc::clone(&actions);
     let startup_indexing_for_window = startup_indexing;
+    let settings_save_workers_for_window = settings_save_workers;
     #[cfg(feature = "qa-framebuffer-capture")]
     let qa_framebuffer_request_for_window = qa_framebuffer_request;
 
@@ -2087,6 +2110,7 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                app.install_settings_save_worker_registry(settings_save_workers_for_window);
                 #[cfg(feature = "qa-framebuffer-capture")]
                 if let Some(request) = qa_framebuffer_request_for_window {
                     if let Err(error) = app.install_qa_framebuffer_request(request) {
@@ -2181,8 +2205,8 @@ fn main() -> anyhow::Result<()> {
     actions_timer.finish("startup.action_load");
 
     let (event_tx, event_rx) = channel::<()>();
-    let hotkey_runtime_receiver =
-        multi_launcher::hotkey::reconfiguration::install_main_runtime(event_tx.clone())?;
+    let mut hotkey_runtime_receiver =
+        Some(multi_launcher::hotkey::reconfiguration::install_main_runtime(event_tx.clone())?);
     install_exclusive_wake(event_tx.clone());
 
     let index_timer = multi_launcher::performance::Timer::start();
@@ -2377,20 +2401,25 @@ fn main() -> anyhow::Result<()> {
     // `visibility` holds whether the window is currently restored (true) or
     // minimized (false).
     let visibility_revision = VisibilityRevision::default();
+    let settings_save_workers = multi_launcher::gui::SettingsSaveWorkerRegistry::default();
+    let startup_services = GuiStartupServices {
+        settings_diagnostic: startup_settings_diagnostic,
+        actions_diagnostic: startup_actions_diagnostic,
+        recovery: startup_recovery,
+        enabled_capabilities: settings.enabled_capabilities.clone(),
+        screen_draw_recovery_bridge: Arc::clone(&screen_draw_recovery_bridge),
+        visibility_revision: visibility_revision.clone(),
+        event_tx: event_tx.clone(),
+        settings_save_workers: settings_save_workers.clone(),
+    };
     let (gui_worker, visibility, restore_flag, help_flag, ctx, root_window_bridge) = spawn_gui(
         Arc::clone(&actions),
         custom_len,
         startup_indexing,
         settings.clone(),
         "settings.json".to_string(),
-        startup_settings_diagnostic,
-        startup_actions_diagnostic,
-        startup_recovery,
-        settings.enabled_capabilities.clone(),
-        Arc::clone(&screen_draw_recovery_bridge),
-        visibility_revision.clone(),
-        event_tx.clone(),
         radial_global_hotkey_reservations(&settings, &radial_document),
+        startup_services,
     );
     let mut queued_visibility: Option<bool> = None;
     let mut previous_exclusive = false;
@@ -2413,6 +2442,8 @@ fn main() -> anyhow::Result<()> {
             }
         };
         if shutdown {
+            settings_save_workers.begin_shutdown();
+            drop(hotkey_runtime_receiver.take());
             if let Some(service) = invocation_service.as_ref() {
                 let _ = service.cancel_lifecycle(LifecycleCancellation::Shutdown);
             }
@@ -2424,6 +2455,7 @@ fn main() -> anyhow::Result<()> {
             }
             listener.stop();
             let _ = gui_worker.join();
+            settings_save_workers.join_all();
             break Ok(());
         }
 
@@ -2604,7 +2636,11 @@ fn main() -> anyhow::Result<()> {
         }
 
         loop {
-            let message = match hotkey_runtime_receiver.try_recv() {
+            let message = match hotkey_runtime_receiver
+                .as_ref()
+                .expect("hotkey runtime receiver stays installed until shutdown")
+                .try_recv()
+            {
                 Ok(Some(message)) => message,
                 Ok(None) => break,
                 Err(error) => {
@@ -2655,11 +2691,11 @@ fn main() -> anyhow::Result<()> {
                         if let Some(mut staged) = prepared.staged_service.take() {
                             staged.stop();
                         }
-                        let _ =
-                            request.complete(Err(HotkeyReconfigurationError::TransactionCancelled));
+                        let _ = request
+                            .complete_restored(HotkeyReconfigurationError::TransactionCancelled);
                     } else {
-                        let _ =
-                            request.complete(Err(HotkeyReconfigurationError::TransactionCancelled));
+                        let _ = request
+                            .complete_restored(HotkeyReconfigurationError::TransactionCancelled);
                     }
                 }
             }
@@ -3767,6 +3803,8 @@ fn main() -> anyhow::Result<()> {
                 service.stop();
             }
             listener.stop();
+            settings_save_workers.begin_shutdown();
+            drop(hotkey_runtime_receiver.take());
             if let Ok(guard) = ctx.lock()
                 && let Some(c) = &*guard
             {
@@ -3774,6 +3812,7 @@ fn main() -> anyhow::Result<()> {
                 c.request_repaint();
             }
             let _ = gui_worker.join();
+            settings_save_workers.join_all();
             break Ok(());
         }
 
@@ -5748,7 +5787,7 @@ mod tests {
         assert!(existing_listener.is_active());
         assert_eq!(settings.hotkey, Some("Ctrl+F2".into()));
         assert!(pending_launcher_route.is_some());
-        assert_eq!(ticket.try_terminal(), None);
+        assert_eq!(ticket.try_terminal_disposition(), None);
 
         ticket.cancel().unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
@@ -5780,10 +5819,13 @@ mod tests {
             &mut route_handoff_issuer,
         );
         assert_eq!(
-            ticket.try_terminal(),
-            Some(Err(
-                multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
-                    TransactionCancelled,
+            ticket.try_terminal_disposition(),
+            Some(Ok(
+                multi_launcher::hotkey::reconfiguration::HotkeyTerminalDisposition::
+                    ConfirmedNotAppliedOrRestored(
+                        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                            TransactionCancelled,
+                    ),
             ))
         );
         assert!(existing_listener.is_active());
@@ -5868,7 +5910,7 @@ mod tests {
         assert_eq!(settings_generation, 12);
         assert_eq!(trigger._key, parse_hotkey("Ctrl+F2").unwrap().key);
         assert!(listener.is_active());
-        assert_eq!(ticket.try_terminal(), None);
+        assert_eq!(ticket.try_terminal_disposition(), None);
         let settings_document_before = serde_json::to_value(radial_document.as_ref()).unwrap();
         let (control_client, radial_control_endpoint) =
             radial_control_service_with_wake(false, None);
@@ -5944,7 +5986,14 @@ mod tests {
             request_id: ticket.request_id(),
             generation: prepared.generation,
         };
-        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
+        assert_eq!(
+            ticket.try_terminal_disposition(),
+            Some(Ok(
+                multi_launcher::hotkey::reconfiguration::HotkeyTerminalDisposition::Applied(
+                    applied,
+                ),
+            ))
+        );
         assert_eq!(settings.hotkey, candidate.hotkey);
         assert_eq!(settings.radial_designer.zoom, 1.25);
         assert_eq!(settings_generation, 13);
@@ -6007,10 +6056,13 @@ mod tests {
             pending_launcher_route: &mut pending_launcher_route,
         });
         assert_eq!(
-            stale_ticket.try_terminal(),
-            Some(Err(
-                multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
-                    StaleGeneration,
+            stale_ticket.try_terminal_disposition(),
+            Some(Ok(
+                multi_launcher::hotkey::reconfiguration::HotkeyTerminalDisposition::
+                    ConfirmedNotAppliedOrRestored(
+                        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                            StaleGeneration,
+                    ),
             ))
         );
         assert_eq!(settings.hotkey, candidate.hotkey);
@@ -6151,7 +6203,7 @@ mod tests {
             serde_json::to_value(&old_settings).unwrap()
         );
         assert_eq!(fixture.settings_generation, 19);
-        assert_eq!(ticket.try_terminal(), None);
+        assert_eq!(ticket.try_terminal_disposition(), None);
         let candidate_result = fixture
             .pending_route
             .as_ref()
@@ -6203,7 +6255,7 @@ mod tests {
             serde_json::to_value(&old_settings).unwrap()
         );
         assert_eq!(fixture.settings_generation, 19);
-        assert_eq!(ticket.try_terminal(), None);
+        assert_eq!(ticket.try_terminal_disposition(), None);
         let restore_result = fixture
             .pending_route
             .as_ref()
@@ -6236,10 +6288,13 @@ mod tests {
         assert!(fixture.pending_route.is_none());
         assert!(fixture.deferred_notices_follow_failure);
         assert_eq!(
-            ticket.try_terminal(),
-            Some(Err(
-                multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
-                    RuntimeTransition("candidate hook failed".into()),
+            ticket.try_terminal_disposition(),
+            Some(Ok(
+                multi_launcher::hotkey::reconfiguration::HotkeyTerminalDisposition::
+                    ConfirmedNotAppliedOrRestored(
+                        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::
+                            RuntimeTransition("candidate hook failed".into()),
+                    ),
             ))
         );
         assert_eq!(issuer.issued, 2);
@@ -6363,8 +6418,13 @@ mod tests {
             assert!(trigger_keys.contains(&parse_hotkey(chord).unwrap().key));
         }
         assert!(matches!(
-            ticket.try_terminal(),
-            Some(Err(HotkeyReconfigurationError::Rollback(message)))
+            ticket.try_terminal_disposition(),
+            Some(Ok(
+                multi_launcher::hotkey::reconfiguration::HotkeyTerminalDisposition::
+                    ConfirmedNotAppliedOrRestored(
+                        HotkeyReconfigurationError::RuntimeTransition(message)
+                    )
+            ))
                 if message.contains("prior legacy launcher and process-control routes were restored")
         ));
         assert!(fixture.listener.is_active());

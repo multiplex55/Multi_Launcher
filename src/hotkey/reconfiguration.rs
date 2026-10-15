@@ -7,7 +7,7 @@ use crate::settings::Settings;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HotkeyReconfigurationId(u64);
@@ -38,6 +38,16 @@ pub struct AppliedHotkeyReconfiguration {
     pub generation: HotkeyRuntimeGeneration,
 }
 
+/// Main-owner disposition of an accepted Apply or Cancel command.
+/// Transport timeout/disconnection remains outside this enum and can never be
+/// mistaken for proof that the old route was restored.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HotkeyTerminalDisposition {
+    Applied(AppliedHotkeyReconfiguration),
+    ConfirmedNotAppliedOrRestored(HotkeyReconfigurationError),
+    RestorationUnavailable(HotkeyReconfigurationError),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HotkeyReconfigurationError {
     RuntimeUnavailable,
@@ -54,6 +64,27 @@ pub enum HotkeyReconfigurationError {
     Rollback(String),
     TimedOut,
     InvalidPhase,
+}
+
+/// Why an Apply command could not be submitted. `NotEnqueued` proves this
+/// ticket's candidate never entered the runtime queue; `AlreadyEnqueued`
+/// means an earlier call may still be applied and therefore needs a terminal
+/// owner receipt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HotkeyApplySubmissionError {
+    NotEnqueued(HotkeyReconfigurationError),
+    AlreadyEnqueued(HotkeyReconfigurationError),
+}
+
+impl std::fmt::Display for HotkeyApplySubmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotEnqueued(error) => write!(formatter, "Apply was not enqueued: {error}"),
+            Self::AlreadyEnqueued(error) => {
+                write!(formatter, "Apply may already be enqueued: {error}")
+            }
+        }
+    }
 }
 
 impl std::fmt::Display for HotkeyReconfigurationError {
@@ -114,11 +145,11 @@ enum RuntimeCommand {
         request_id: HotkeyReconfigurationId,
         generation: HotkeyRuntimeGeneration,
         settings: Box<Settings>,
-        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+        completion: Sender<HotkeyTerminalDisposition>,
     },
     Cancel {
         request_id: HotkeyReconfigurationId,
-        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+        completion: Sender<HotkeyTerminalDisposition>,
     },
 }
 
@@ -138,8 +169,8 @@ pub struct HotkeyReconfigurationClient {
 pub struct HotkeyReconfigurationTicket {
     request_id: HotkeyReconfigurationId,
     completion: Receiver<Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError>>,
-    terminal: Receiver<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
-    terminal_sender: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+    terminal: Receiver<HotkeyTerminalDisposition>,
+    terminal_sender: Sender<HotkeyTerminalDisposition>,
     client: HotkeyReconfigurationClient,
     prepared_generation: Option<HotkeyRuntimeGeneration>,
     apply_sent: bool,
@@ -208,37 +239,49 @@ impl HotkeyReconfigurationTicket {
     }
 
     /// Sends the persisted candidate for activation after preparation has
-    /// succeeded. The final result is polled separately with `try_terminal`.
-    pub fn apply(&mut self, settings: Settings) -> Result<(), HotkeyReconfigurationError> {
-        let Some(generation) = self.prepared_generation else {
-            return Err(HotkeyReconfigurationError::InvalidPhase);
-        };
-        if self.apply_sent || self.cancelled || self.terminal_completed {
-            return Err(HotkeyReconfigurationError::InvalidPhase);
+    /// succeeded. The final owner disposition is polled separately.
+    pub fn apply(&mut self, settings: Settings) -> Result<(), HotkeyApplySubmissionError> {
+        if self.apply_sent {
+            return Err(HotkeyApplySubmissionError::AlreadyEnqueued(
+                HotkeyReconfigurationError::InvalidPhase,
+            ));
         }
-        self.client.apply(
-            self.request_id,
-            generation,
-            settings,
-            self.terminal_sender.clone(),
-        )?;
+        let Some(generation) = self.prepared_generation else {
+            return Err(HotkeyApplySubmissionError::NotEnqueued(
+                HotkeyReconfigurationError::InvalidPhase,
+            ));
+        };
+        if self.cancelled || self.terminal_completed {
+            return Err(HotkeyApplySubmissionError::NotEnqueued(
+                HotkeyReconfigurationError::InvalidPhase,
+            ));
+        }
+        self.client
+            .apply(
+                self.request_id,
+                generation,
+                settings,
+                self.terminal_sender.clone(),
+            )
+            .map_err(HotkeyApplySubmissionError::NotEnqueued)?;
         self.apply_sent = true;
         Ok(())
     }
 
-    /// Polls for the authoritative terminal result. If cancellation races an
-    /// already-completed apply, the receiver yields `Applied` first.
-    pub fn try_terminal(
+    /// Polls for an explicit main-owner disposition. The outer error denotes
+    /// transport loss; only `ConfirmedNotAppliedOrRestored` authorizes a
+    /// caller to roll back its persisted candidate.
+    pub fn try_terminal_disposition(
         &mut self,
-    ) -> Option<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>> {
+    ) -> Option<Result<HotkeyTerminalDisposition, HotkeyReconfigurationError>> {
         if self.terminal_completed {
             return None;
         }
         let result = match self.terminal.try_recv() {
-            Ok(result) => Some(result),
+            Ok(result) => Some(Ok(result)),
             Err(TryRecvError::Empty) if !self.client.inner.owner_alive.load(Ordering::Acquire) => {
                 match self.terminal.try_recv() {
-                    Ok(result) => Some(result),
+                    Ok(result) => Some(Ok(result)),
                     Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
                         Some(Err(HotkeyReconfigurationError::Disconnected))
                     }
@@ -253,30 +296,47 @@ impl HotkeyReconfigurationTicket {
         result
     }
 
-    /// Waits off the UI thread for the authoritative Applied or rollback
-    /// receipt. A timeout is kept distinct from owner disconnection.
-    pub fn wait_terminal(
+    /// Waits for the main owner's terminal disposition. A timeout or owner
+    /// disconnection is returned as the outer error and is never a restore
+    /// acknowledgement.
+    pub fn wait_terminal_disposition(
         &mut self,
         timeout: Duration,
-    ) -> Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError> {
+    ) -> Result<HotkeyTerminalDisposition, HotkeyReconfigurationError> {
         if self.terminal_completed {
             return Err(HotkeyReconfigurationError::InvalidPhase);
         }
-        let result = match self.terminal.recv_timeout(timeout) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(result) = self.try_terminal() {
-                    result
-                } else {
-                    return Err(HotkeyReconfigurationError::TimedOut);
+        let started = Instant::now();
+        loop {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                if let Some(result) = self.try_terminal_disposition() {
+                    return result;
+                }
+                return Err(HotkeyReconfigurationError::TimedOut);
+            }
+            // std::sync::mpsc cannot wait on both the receipt and owner-liveness
+            // flag. Check liveness at a bounded interval so shutdown does not
+            // make a worker wait out the full transaction timeout.
+            match self
+                .terminal
+                .recv_timeout(remaining.min(Duration::from_millis(100)))
+            {
+                Ok(result) => {
+                    self.terminal_completed = true;
+                    return Ok(result);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if let Some(result) = self.try_terminal_disposition() {
+                        return result;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.terminal_completed = true;
+                    return Err(HotkeyReconfigurationError::Disconnected);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(HotkeyReconfigurationError::Disconnected)
-            }
-        };
-        self.terminal_completed = true;
-        result
+        }
     }
 
     /// Cancels a staged preparation by its identity. The main runtime removes
@@ -370,7 +430,7 @@ impl HotkeyReconfigurationClient {
         request_id: HotkeyReconfigurationId,
         generation: HotkeyRuntimeGeneration,
         settings: Settings,
-        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+        completion: Sender<HotkeyTerminalDisposition>,
     ) -> Result<(), HotkeyReconfigurationError> {
         if self
             .inner
@@ -395,7 +455,7 @@ impl HotkeyReconfigurationClient {
     fn cancel(
         &self,
         request_id: HotkeyReconfigurationId,
-        completion: Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>,
+        completion: Sender<HotkeyTerminalDisposition>,
     ) -> Result<(), HotkeyReconfigurationError> {
         if self
             .inner
@@ -431,7 +491,7 @@ pub struct HotkeyApplicationRequest {
     request_id: HotkeyReconfigurationId,
     generation: HotkeyRuntimeGeneration,
     settings: Box<Settings>,
-    completion: Option<Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>>,
+    completion: Option<Sender<HotkeyTerminalDisposition>>,
 }
 
 impl HotkeyApplicationRequest {
@@ -447,14 +507,38 @@ impl HotkeyApplicationRequest {
         self.settings.as_ref()
     }
 
-    pub fn complete(
+    pub fn complete_applied(
         mut self,
-        result: Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>,
+        applied: AppliedHotkeyReconfiguration,
     ) -> Result<(), HotkeyReconfigurationError> {
         self.completion
             .take()
             .ok_or(HotkeyReconfigurationError::Disconnected)?
-            .send(result)
+            .send(HotkeyTerminalDisposition::Applied(applied))
+            .map_err(|_| HotkeyReconfigurationError::Disconnected)
+    }
+
+    pub fn complete_restored(
+        mut self,
+        error: HotkeyReconfigurationError,
+    ) -> Result<(), HotkeyReconfigurationError> {
+        self.completion
+            .take()
+            .ok_or(HotkeyReconfigurationError::Disconnected)?
+            .send(HotkeyTerminalDisposition::ConfirmedNotAppliedOrRestored(
+                error,
+            ))
+            .map_err(|_| HotkeyReconfigurationError::Disconnected)
+    }
+
+    pub fn complete_restoration_unavailable(
+        mut self,
+        error: HotkeyReconfigurationError,
+    ) -> Result<(), HotkeyReconfigurationError> {
+        self.completion
+            .take()
+            .ok_or(HotkeyReconfigurationError::Disconnected)?
+            .send(HotkeyTerminalDisposition::RestorationUnavailable(error))
             .map_err(|_| HotkeyReconfigurationError::Disconnected)
     }
 }
@@ -462,16 +546,18 @@ impl HotkeyApplicationRequest {
 impl Drop for HotkeyApplicationRequest {
     fn drop(&mut self) {
         if let Some(completion) = self.completion.take() {
-            let _ = completion.send(Err(HotkeyReconfigurationError::RuntimeTransition(
-                "apply request was abandoned before a terminal result".into(),
-            )));
+            let _ = completion.send(HotkeyTerminalDisposition::RestorationUnavailable(
+                HotkeyReconfigurationError::RuntimeTransition(
+                    "apply request was abandoned before a terminal result".into(),
+                ),
+            ));
         }
     }
 }
 
 pub struct HotkeyCancellationRequest {
     request_id: HotkeyReconfigurationId,
-    completion: Option<Sender<Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>>>,
+    completion: Option<Sender<HotkeyTerminalDisposition>>,
 }
 
 impl HotkeyCancellationRequest {
@@ -479,14 +565,27 @@ impl HotkeyCancellationRequest {
         self.request_id
     }
 
-    pub fn complete(
+    pub fn complete_restored(
         mut self,
-        result: Result<AppliedHotkeyReconfiguration, HotkeyReconfigurationError>,
+        error: HotkeyReconfigurationError,
     ) -> Result<(), HotkeyReconfigurationError> {
         self.completion
             .take()
             .ok_or(HotkeyReconfigurationError::Disconnected)?
-            .send(result)
+            .send(HotkeyTerminalDisposition::ConfirmedNotAppliedOrRestored(
+                error,
+            ))
+            .map_err(|_| HotkeyReconfigurationError::Disconnected)
+    }
+
+    pub fn complete_restoration_unavailable(
+        mut self,
+        error: HotkeyReconfigurationError,
+    ) -> Result<(), HotkeyReconfigurationError> {
+        self.completion
+            .take()
+            .ok_or(HotkeyReconfigurationError::Disconnected)?
+            .send(HotkeyTerminalDisposition::RestorationUnavailable(error))
             .map_err(|_| HotkeyReconfigurationError::Disconnected)
     }
 
@@ -501,9 +600,11 @@ impl HotkeyCancellationRequest {
 impl Drop for HotkeyCancellationRequest {
     fn drop(&mut self) {
         if let Some(completion) = self.completion.take() {
-            let _ = completion.send(Err(HotkeyReconfigurationError::RuntimeTransition(
-                "cancel request was abandoned before the prior route was confirmed".into(),
-            )));
+            let _ = completion.send(HotkeyTerminalDisposition::RestorationUnavailable(
+                HotkeyReconfigurationError::RuntimeTransition(
+                    "cancel request was abandoned before the prior route was confirmed".into(),
+                ),
+            ));
         }
     }
 }
@@ -656,7 +757,7 @@ pub fn prepare_hotkey_reconfiguration(
 mod tests {
     use super::*;
 
-    fn test_runtime() -> (
+    pub(crate) fn test_runtime() -> (
         HotkeyReconfigurationClient,
         HotkeyReconfigurationReceiver,
         Receiver<()>,
@@ -705,8 +806,11 @@ mod tests {
             request_id: ticket.request_id(),
             generation: prepared.generation,
         };
-        request.complete(Ok(applied)).unwrap();
-        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
+        request.complete_applied(applied).unwrap();
+        assert_eq!(
+            ticket.try_terminal_disposition(),
+            Some(Ok(HotkeyTerminalDisposition::Applied(applied)))
+        );
     }
 
     #[test]
@@ -731,11 +835,15 @@ mod tests {
         };
         assert_eq!(request.request_id(), ticket.request_id());
         request
-            .complete(Err(HotkeyReconfigurationError::TransactionCancelled))
+            .complete_restored(HotkeyReconfigurationError::TransactionCancelled)
             .unwrap();
         assert_eq!(
-            ticket.try_terminal(),
-            Some(Err(HotkeyReconfigurationError::TransactionCancelled))
+            ticket.try_terminal_disposition(),
+            Some(Ok(
+                HotkeyTerminalDisposition::ConfirmedNotAppliedOrRestored(
+                    HotkeyReconfigurationError::TransactionCancelled
+                )
+            ))
         );
     }
 
@@ -759,13 +867,16 @@ mod tests {
         let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
             panic!("accepted apply must remain queued after its wake receiver closes")
         };
-        assert_eq!(ticket.try_terminal(), None);
+        assert_eq!(ticket.try_terminal_disposition(), None);
         let applied = AppliedHotkeyReconfiguration {
             request_id: ticket.request_id(),
             generation: prepared.generation,
         };
-        request.complete(Ok(applied)).unwrap();
-        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
+        request.complete_applied(applied).unwrap();
+        assert_eq!(
+            ticket.try_terminal_disposition(),
+            Some(Ok(HotkeyTerminalDisposition::Applied(applied)))
+        );
     }
 
     #[test]
@@ -792,11 +903,36 @@ mod tests {
             }
             drop(receiver);
             assert_eq!(
-                ticket.try_terminal(),
+                ticket.try_terminal_disposition(),
                 Some(Err(HotkeyReconfigurationError::Disconnected)),
                 "queued command must not leave a terminal channel pending forever"
             );
         }
+    }
+
+    #[test]
+    fn waiting_terminal_observes_owner_shutdown_without_waiting_full_timeout() {
+        let (client, receiver, _wake_rx) = test_runtime();
+        let mut ticket = client.prepare(Settings::default()).unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        let prepared = PreparedHotkeyReconfiguration {
+            request_id: request.request_id(),
+            generation: HotkeyRuntimeGeneration(18),
+            shared_invocation: false,
+        };
+        request.complete(Ok(prepared)).unwrap();
+        assert_eq!(ticket.try_complete(), Some(Ok(prepared)));
+        ticket.apply(Settings::default()).unwrap();
+        drop(receiver);
+
+        let started = Instant::now();
+        assert_eq!(
+            ticket.wait_terminal_disposition(Duration::from_secs(30)),
+            Err(HotkeyReconfigurationError::Disconnected)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -821,9 +957,12 @@ mod tests {
             request_id: ticket.request_id(),
             generation: prepared.generation,
         };
-        request.complete(Ok(applied)).unwrap();
+        request.complete_applied(applied).unwrap();
         drop(receiver);
-        assert_eq!(ticket.try_terminal(), Some(Ok(applied)));
+        assert_eq!(
+            ticket.try_terminal_disposition(),
+            Some(Ok(HotkeyTerminalDisposition::Applied(applied)))
+        );
     }
 
     #[test]
@@ -857,4 +996,13 @@ mod tests {
             Some(HotkeyReconfigurationError::Disconnected)
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_reconfiguration_runtime() -> (
+    HotkeyReconfigurationClient,
+    HotkeyReconfigurationReceiver,
+    Receiver<()>,
+) {
+    tests::test_runtime()
 }

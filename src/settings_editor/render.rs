@@ -225,7 +225,8 @@ impl SettingsEditor {
 
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    let save = ui.button("Save");
+                    let pending = app.settings_save_pending();
+                    let save = ui.add_enabled(!pending, egui::Button::new("Save"));
                     if crate::gui::theme::widgets::with_button_emphasis(
                         ui,
                         save,
@@ -234,6 +235,11 @@ impl SettingsEditor {
                     .clicked()
                     {
                         self.save_settings(ctx, app);
+                    }
+                    if app.settings_save_reconciliation_required() {
+                        ui.label("Hotkey state needs reconciliation; saving is disabled.");
+                    } else if pending {
+                        ui.label("Saving settings…");
                     }
                 });
             });

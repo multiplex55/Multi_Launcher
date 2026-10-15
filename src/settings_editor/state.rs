@@ -4,6 +4,7 @@ use eframe::egui;
 
 #[derive(Default)]
 pub struct SettingsEditor {
+    pub(crate) baseline_settings: Settings,
     pub(crate) hotkey: String,
     pub(crate) hotkey_valid: bool,
     pub(crate) last_valid_hotkey: String,

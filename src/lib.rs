@@ -63,6 +63,7 @@ pub mod regex_tester;
 pub mod screen_draw;
 pub mod settings;
 pub mod settings_editor;
+mod settings_save;
 pub mod sound;
 pub mod startup;
 pub mod text_transform;

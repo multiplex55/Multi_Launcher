@@ -1,6 +1,6 @@
 use super::state::SettingsEditor;
 use crate::dashboard::config::DashboardConfig;
-use crate::gui::{LauncherApp, UiErrorEvent};
+use crate::gui::LauncherApp;
 use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
 use crate::plugins::note::NotePluginSettings;
 use crate::settings::Settings;
@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 impl SettingsEditor {
     pub(crate) fn save_settings(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
+        if app.settings_save_pending() {
+            return;
+        }
         if let Err(message) = self.validate_before_save() {
             app.add_error_toast(message);
             return;
@@ -21,30 +24,18 @@ impl SettingsEditor {
         }
 
         self.sync_from_plugin_settings();
-        let settings_path = app.settings_path.clone();
-        match Settings::update(&settings_path, |current| {
-            let mut new_settings = self.to_settings(current);
-            app.merge_file_search_ui_preferences_into_settings(&mut new_settings);
-            *current = new_settings;
-            Ok(())
-        }) {
-            Ok(new_settings) => {
-                self.apply_saved_settings(ctx, app, new_settings);
-            }
-            Err(e) => {
-                app.report_ui_error(UiErrorEvent::new(
-                    "settings_editor.save",
-                    format!("Failed to save settings: {e}"),
-                ));
-            }
-        }
+        let mut desired = self.to_settings(&self.baseline_settings);
+        app.merge_file_search_ui_preferences_into_settings(&mut desired);
+        let intent =
+            crate::settings_save::SettingsSaveIntent::general(desired, &self.baseline_settings);
+        app.begin_settings_save(ctx, intent);
     }
 
-    fn apply_saved_settings(
-        &self,
+    pub(crate) fn apply_saved_settings(
         ctx: &egui::Context,
         app: &mut LauncherApp,
         new_settings: Settings,
+        show_success_toast: bool,
     ) {
         crate::gui::theme::publish_committed(ctx, &new_settings.theme);
         crate::plugins::macros::configure_search_runtime(&new_settings, &app.actions_path);
@@ -183,7 +174,20 @@ impl SettingsEditor {
         {
             app.clipboard_modify_hide_launcher_after_apply = cfg.hide_launcher_after_apply;
         }
-        if app.enable_toasts {
+        let screen_draw_settings = new_settings
+            .plugin_settings
+            .get("screen_draw")
+            .cloned()
+            .and_then(|value| {
+                serde_json::from_value::<crate::screen_draw::ScreenDrawSettings>(value).ok()
+            })
+            .unwrap_or_default();
+        app.screen_draw_controller
+            .update_settings(screen_draw_settings);
+        app.plugin_editor
+            .sync_committed_settings(&new_settings, app.plugins.plugin_infos());
+        app.settings_editor.baseline_settings = new_settings.clone();
+        if show_success_toast && app.enable_toasts {
             app.add_toast(Toast {
                 text: "Settings saved".into(),
                 kind: ToastKind::Success,

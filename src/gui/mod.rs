@@ -78,9 +78,12 @@ pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
 
+pub use crate::settings_save::SettingsSaveWorkerRegistry;
+
 pub(crate) use radial_editor::{
     AuthoringBindingEditorIdentity, BindingEditorScope, BindingEditorSlot, BindingEditorSurface,
 };
+pub(crate) use render::persist_launcher_close_preferences;
 pub(crate) use state::AuthoringProviderSearchPurpose;
 pub use state::AuthoringProviderSearchRequest;
 
@@ -827,6 +830,8 @@ pub struct LauncherApp {
     #[cfg(test)]
     pub(crate) test_activation_trace: Vec<(Action, ActivationSource)>,
     pub usage: HashMap<String, u32>,
+    /// IDs registered through the legacy public `global_hotkey::Hotkey` API.
+    /// The launcher itself routes configured hotkeys through the main runtime.
     pub registered_hotkeys: Mutex<HashMap<String, usize>>,
     pub show_editor: bool,
     pub show_settings: bool,
@@ -836,6 +841,9 @@ pub struct LauncherApp {
     pub settings_editor: SettingsEditor,
     pub plugin_editor: PluginEditor,
     pub settings_path: String,
+    pub(crate) settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry,
+    pub(crate) pending_settings_save: Option<crate::settings_save::PendingSettingsSave>,
+    pub(crate) settings_save_reconciliation_required: bool,
     /// Persistence failure captured before GUI startup. A later recovery UI can
     /// consume this without re-reading or replacing the damaged settings file.
     pub startup_settings_diagnostic: Option<crate::startup::SettingsStartupDiagnostic>,
@@ -1117,6 +1125,24 @@ impl CachedSearchEntry {
 }
 
 impl LauncherApp {
+    pub(crate) fn settings_save_close_preferences(
+        &self,
+    ) -> crate::settings_save::LauncherClosePreferences {
+        let file_search_ui_preferences = self
+            .file_search_dialog
+            .ui_preferences_dirty
+            .then(|| self.file_search_dialog.ui_preferences.clone());
+        crate::settings_save::LauncherClosePreferences {
+            window_size: self.window_size,
+            pinned_panels: self.pinned_panels.clone(),
+            clipboard_modify_dialog_size: (
+                self.clipboard_modify_dialog.persisted_window_size.x,
+                self.clipboard_modify_dialog.persisted_window_size.y,
+            ),
+            file_search_ui_preferences,
+        }
+    }
+
     pub fn set_startup_persistence_context(
         &mut self,
         recovery: crate::persistence::RecoveryStartupResult,
@@ -1496,7 +1522,7 @@ impl LauncherApp {
     }
 
     fn open_settings_dialog(&mut self) {
-        if !self.show_settings {
+        if !self.show_settings && !self.settings_save_pending() {
             match Settings::load(&self.settings_path) {
                 Ok(settings) => {
                     if let Err(error) = self
@@ -2370,6 +2396,9 @@ impl LauncherApp {
             settings_editor,
             plugin_editor,
             settings_path,
+            settings_save_workers: crate::settings_save::SettingsSaveWorkerRegistry::default(),
+            pending_settings_save: None,
+            settings_save_reconciliation_required: false,
             startup_settings_diagnostic: None,
             actions_persistence_diagnostic: None,
             startup_recovery: Default::default(),
@@ -2661,20 +2690,6 @@ impl LauncherApp {
 
         app.enforce_pinned();
         app.update_panel_stack();
-
-        {
-            use crate::global_hotkey::Hotkey as WinHotkey;
-            if let Some(ref seq) = settings.hotkey
-                && let Ok(mut hk) = WinHotkey::new(seq)
-            {
-                hk.register(&app, 1);
-            }
-            if let Some(ref seq) = settings.quit_hotkey
-                && let Ok(mut hk) = WinHotkey::new(seq)
-            {
-                hk.register(&app, 2);
-            }
-        }
 
         let action_cache_timer = crate::performance::Timer::start();
         app.update_action_cache();
