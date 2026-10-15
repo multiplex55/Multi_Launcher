@@ -1,5 +1,9 @@
 use crate::gui::LauncherApp;
 use crate::gui::confirmation_modal::{ConfirmationModal, ConfirmationResult, DestructiveAction};
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, secondary_help,
+    semantic_status, with_button_emphasis,
+};
 use crate::mouse_gestures::db::{
     BindingEntry, BindingKind, GESTURES_FILE, GestureDb, GestureEntry, format_gesture_label,
     load_gestures,
@@ -673,9 +677,10 @@ impl MgGesturesDialog {
         gesture_idx: usize,
         save_now: &mut bool,
     ) {
-        ui.label("Bindings");
-        ui.horizontal(|ui| {
-            if ui.button("Add Binding").clicked() {
+        compact_section_heading(ui, "Bindings", None);
+        ui.horizontal_wrapped(|ui| {
+            let add_binding = ui.button("Add Binding");
+            if with_button_emphasis(ui, add_binding, ButtonEmphasis::Primary).clicked() {
                 let next_idx = entry.bindings.len();
                 binding_dialog.open_new(gesture_idx, next_idx);
             }
@@ -696,7 +701,7 @@ impl MgGesturesDialog {
                 }
                 for idx in 0..binding_len {
                     let binding = &mut entry.bindings[idx];
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.checkbox(&mut binding.enabled, "").changed() {
                             binding_enabled_changed = true;
                         }
@@ -717,7 +722,8 @@ impl MgGesturesDialog {
                         if ui.button("Edit").clicked() {
                             edit_request = Some((idx, binding.clone()));
                         }
-                        if ui.button("Remove").clicked() {
+                        let remove = ui.button("Remove");
+                        if with_button_emphasis(ui, remove, ButtonEmphasis::Destructive).clicked() {
                             remove_idx = Some(idx);
                         }
                     });
@@ -775,15 +781,14 @@ impl MgGesturesDialog {
             .show(ctx, |ui| {
                 let editor = &mut self.binding_dialog.editor;
                 let mut save_entry: Option<BindingEntry> = None;
-                ui.horizontal(|ui| {
-                    ui.label("Label");
-                    let response = ui.text_edit_singleline(&mut editor.label);
-                    if editor.focus_label {
-                        response.request_focus();
-                        editor.focus_label = false;
-                    }
-                });
-                ui.horizontal(|ui| {
+                compact_section_heading(ui, "Binding details", None);
+                let response =
+                    labeled_form_row(ui, "Label", |ui| ui.text_edit_singleline(&mut editor.label));
+                if editor.focus_label {
+                    response.request_focus();
+                    editor.focus_label = false;
+                }
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Type");
                     ui.radio_value(&mut editor.kind, BindingKind::Execute, "Execute");
                     ui.radio_value(&mut editor.kind, BindingKind::SetQuery, "Set query");
@@ -805,21 +810,18 @@ impl MgGesturesDialog {
                 });
                 match editor.kind {
                     BindingKind::Execute => {
-                        ui.horizontal(|ui| {
-                            ui.label("Action");
-                            ui.text_edit_singleline(&mut editor.action);
+                        labeled_form_row(ui, "Action", |ui| {
+                            ui.text_edit_singleline(&mut editor.action)
                         });
-                        ui.horizontal(|ui| {
-                            ui.label("Args");
-                            ui.text_edit_singleline(&mut editor.args);
+                        labeled_form_row(ui, "Args", |ui| {
+                            ui.text_edit_singleline(&mut editor.args)
                         });
                     }
                     BindingKind::SetQuery
                     | BindingKind::SetQueryAndShow
                     | BindingKind::SetQueryAndExecute => {
-                        ui.horizontal(|ui| {
-                            ui.label("Query");
-                            ui.text_edit_singleline(&mut editor.action);
+                        labeled_form_row(ui, "Query", |ui| {
+                            ui.text_edit_singleline(&mut editor.action)
                         });
                     }
                     BindingKind::ToggleLauncher => {
@@ -838,9 +840,8 @@ impl MgGesturesDialog {
                         | BindingKind::SetQueryAndExecute => "Pick a query",
                         BindingKind::ToggleLauncher => "Pick an action",
                     };
-                    ui.label(picker_label);
-                    ui.horizontal(|ui| {
-                        ui.label("Category");
+                    compact_section_heading(ui, picker_label, None);
+                    labeled_form_row(ui, "Category", |ui| {
                         let mut plugin_names: Vec<_> =
                             app.plugins.iter().map(|p| p.name().to_string()).collect();
                         plugin_names.push("app".to_string());
@@ -859,15 +860,14 @@ impl MgGesturesDialog {
                                         name,
                                     );
                                 }
-                            });
+                            })
+                            .response
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Filter");
-                        ui.text_edit_singleline(&mut editor.add_filter);
+                    labeled_form_row(ui, "Filter", |ui| {
+                        ui.text_edit_singleline(&mut editor.add_filter)
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Args");
-                        ui.text_edit_singleline(&mut editor.add_args);
+                    labeled_form_row(ui, "Args", |ui| {
+                        ui.text_edit_singleline(&mut editor.add_args)
                     });
                     if editor.add_plugin == "app" {
                         let filter = editor.add_filter.trim().to_lowercase();
@@ -883,8 +883,12 @@ impl MgGesturesDialog {
                                     {
                                         continue;
                                     }
-                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
-                                    {
+                                    let action_button = ui.add_sized(
+                                        [ui.available_width(), 0.0],
+                                        egui::Button::new(format!("{} - {}", act.label, act.desc))
+                                            .wrap(),
+                                    );
+                                    if action_button.clicked() {
                                         apply_action_pick(editor, act, "");
                                     }
                                 }
@@ -907,8 +911,12 @@ impl MgGesturesDialog {
                                     {
                                         continue;
                                     }
-                                    if ui.button(format!("{} - {}", act.label, act.desc)).clicked()
-                                    {
+                                    let action_button = ui.add_sized(
+                                        [ui.available_width(), 0.0],
+                                        egui::Button::new(format!("{} - {}", act.label, act.desc))
+                                            .wrap(),
+                                    );
+                                    if action_button.clicked() {
                                         let add_args = editor.add_args.clone();
                                         apply_action_pick(editor, &act, &add_args);
                                     }
@@ -916,8 +924,9 @@ impl MgGesturesDialog {
                             });
                     }
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                ui.horizontal_wrapped(|ui| {
+                    let save_button = ui.button("Save");
+                    if with_button_emphasis(ui, save_button, ButtonEmphasis::Primary).clicked() {
                         let action_required = matches!(
                             editor.kind,
                             BindingKind::Execute
@@ -994,10 +1003,14 @@ impl MgGesturesDialog {
             .open(&mut open)
             .show(ctx, |ui| {
                 if let Some(error) = self.load_error.clone() {
-                    ui.colored_label(egui::Color32::RED, error);
-                    ui.label("The existing gesture file is read-only until it loads successfully.");
-                    ui.horizontal(|ui| {
-                        if ui.button("Retry").clicked() {
+                    semantic_status(ui, StatusTone::Error, "Gesture file", Some(&error));
+                    secondary_help(
+                        ui,
+                        "The existing gesture file is read-only until it loads successfully.",
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        let retry = ui.button("Retry");
+                        if with_button_emphasis(ui, retry, ButtonEmphasis::Primary).clicked() {
                             self.open();
                         }
                         if ui.button("Close").clicked() {
@@ -1006,8 +1019,9 @@ impl MgGesturesDialog {
                     });
                     return;
                 }
-                ui.horizontal(|ui| {
-                    if ui.button("Add Gesture").clicked() {
+                ui.horizontal_wrapped(|ui| {
+                    let add = ui.button("Add Gesture");
+                    if with_button_emphasis(ui, add, ButtonEmphasis::Primary).clicked() {
                         self.add_gesture();
                         save_now = true;
                     }
@@ -1041,7 +1055,7 @@ impl MgGesturesDialog {
                     left_ui.set_min_width(left_width);
                     left_ui.set_min_height(content_height);
 
-                    left_ui.label("Gestures");
+                    compact_section_heading(&mut left_ui, "Gestures", None);
                     egui::ScrollArea::vertical()
                         .id_salt("mg_gestures_list")
                         .auto_shrink([false, false])
@@ -1055,7 +1069,7 @@ impl MgGesturesDialog {
                             for idx in gesture_order {
                                 let selected = self.selected_idx == Some(idx);
                                 let entry = &mut self.db.gestures[idx];
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
                                     if ui.checkbox(&mut entry.enabled, "").changed() {
                                         save_now = true;
                                     }
@@ -1069,11 +1083,15 @@ impl MgGesturesDialog {
                                         self.binding_dialog.editor.reset();
                                         self.binding_dialog.open = false;
                                     }
-                                    if ui.button("Rename").clicked() {
+                                    let rename = ui.button("Rename");
+                                    if rename.clicked() {
                                         self.rename_idx = Some(idx);
                                         self.rename_label = entry.label.clone();
                                     }
-                                    if ui.button("Delete").clicked() {
+                                    let delete = ui.button("Delete");
+                                    if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive)
+                                        .clicked()
+                                    {
                                         request_delete_idx = Some(idx);
                                     }
                                 });
@@ -1081,13 +1099,21 @@ impl MgGesturesDialog {
                                     // Use a vertical group for renaming so the text edit never
                                     // pushes the Save/Cancel buttons past the left panel width.
                                     ui.group(|ui| {
-                                        ui.label("Label");
-                                        ui.add_sized(
-                                            [ui.available_width(), 0.0],
-                                            egui::TextEdit::singleline(&mut self.rename_label),
-                                        );
-                                        ui.horizontal(|ui| {
-                                            if ui.button("Save").clicked()
+                                        compact_section_heading(ui, "Rename gesture", None);
+                                        labeled_form_row(ui, "Label", |ui| {
+                                            ui.add_sized(
+                                                [ui.available_width(), 0.0],
+                                                egui::TextEdit::singleline(&mut self.rename_label),
+                                            )
+                                        });
+                                        ui.horizontal_wrapped(|ui| {
+                                            let save = ui.button("Save");
+                                            if with_button_emphasis(
+                                                ui,
+                                                save,
+                                                ButtonEmphasis::Primary,
+                                            )
+                                            .clicked()
                                                 && !self.rename_label.trim().is_empty()
                                             {
                                                 entry.label = self.rename_label.trim().to_string();
@@ -1128,11 +1154,10 @@ impl MgGesturesDialog {
                         .show(&mut right_ui, |ui| {
                             if let Some(idx) = self.selected_idx {
                                 if let Some(entry) = self.db.gestures.get_mut(idx) {
-                                    ui.label("Recorder");
-                                    ui.horizontal(|ui| {
-                                        ui.label("Direction mode");
+                                    compact_section_heading(ui, "Recorder", None);
+                                    labeled_form_row(ui, "Direction mode", |ui| {
                                         let mut dir_mode = entry.dir_mode;
-                                        egui::ComboBox::from_id_salt("mg_dir_mode")
+                                        let response = egui::ComboBox::from_id_salt("mg_dir_mode")
                                             .selected_text(match dir_mode {
                                                 DirMode::Four => "4-way",
                                                 DirMode::Eight => "8-way",
@@ -1148,12 +1173,14 @@ impl MgGesturesDialog {
                                                     DirMode::Eight,
                                                     "8-way",
                                                 );
-                                            });
+                                            })
+                                            .response;
                                         if dir_mode != entry.dir_mode {
                                             entry.dir_mode = dir_mode;
                                             self.recorder.set_dir_mode(dir_mode);
                                             save_now = true;
                                         }
+                                        response
                                     });
                                     ui.label(format!(
                                         "Gesture tokens: {}",
@@ -1172,8 +1199,15 @@ impl MgGesturesDialog {
                                             recorded_tokens.as_str()
                                         }
                                     ));
-                                    ui.horizontal(|ui| {
-                                        if ui.button("Use Recording").clicked() {
+                                    ui.horizontal_wrapped(|ui| {
+                                        let use_recording = ui.button("Use Recording");
+                                        if with_button_emphasis(
+                                            ui,
+                                            use_recording,
+                                            ButtonEmphasis::Primary,
+                                        )
+                                        .clicked()
+                                        {
                                             let normalized_stroke =
                                                 self.recorder.normalized_stroke();
                                             apply_recording_to_entry(
@@ -1188,11 +1222,18 @@ impl MgGesturesDialog {
                                         if ui.button("Clear Recording").clicked() {
                                             self.recorder.reset();
                                         }
-                                        if !entry.stroke.is_empty()
-                                            && ui.button("Clear Saved").clicked()
-                                        {
-                                            entry.stroke.clear();
-                                            save_now = true;
+                                        if !entry.stroke.is_empty() {
+                                            let clear_saved = ui.button("Clear Saved");
+                                            if with_button_emphasis(
+                                                ui,
+                                                clear_saved,
+                                                ButtonEmphasis::Destructive,
+                                            )
+                                            .clicked()
+                                            {
+                                                entry.stroke.clear();
+                                                save_now = true;
+                                            }
                                         }
                                     });
                                     let available = ui.available_width();
@@ -1260,11 +1301,10 @@ impl MgGesturesDialog {
                                         ));
                                     }
                                     ui.separator();
-                                    ui.horizontal(|ui| {
-                                        ui.label("Tokens");
-                                        ui.text_edit_singleline(&mut self.token_buffer);
+                                    labeled_form_row(ui, "Tokens", |ui| {
+                                        ui.text_edit_singleline(&mut self.token_buffer)
                                     });
-                                    ui.horizontal(|ui| {
+                                    ui.horizontal_wrapped(|ui| {
                                         if ui.button("Import").clicked() {
                                             entry.tokens = self.token_buffer.trim().to_string();
                                             save_now = true;
@@ -1288,10 +1328,10 @@ impl MgGesturesDialog {
                                         &mut save_now,
                                     );
                                 } else {
-                                    ui.label("Select a gesture to edit.");
+                                    secondary_help(ui, "Select a gesture to edit.");
                                 }
                             } else {
-                                ui.label("Select a gesture to edit.");
+                                secondary_help(ui, "Select a gesture to edit.");
                             }
                         });
                 });

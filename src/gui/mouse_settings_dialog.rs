@@ -4,6 +4,9 @@ use crate::coordinate_tool::{
     CursorEffectStatus, HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
 };
 use crate::gui::coordinate_tool::CoordinateToolGui;
+use crate::gui::theme::widgets::{
+    ButtonEmphasis, StatusTone, compact_section_heading, semantic_status, with_button_emphasis,
+};
 use eframe::egui;
 
 #[derive(Default)]
@@ -93,16 +96,23 @@ impl MouseSettingsDialog {
                     .id_salt("mouse_settings_form")
                     .max_height(ui.available_height().max(1.0))
                     .show(ui, |ui| {
-                        ui.label("Configure coordinate overlays. Session switches take effect immediately; appearance changes stay in draft until Apply.");
-                        ui.small("Commands: mouse coords …, mouse crosshair gap N, mouse halo/zoom toggle|on|off, mouse effects off, and mouse help.");
+                        compact_section_heading(
+                            ui,
+                            "Coordinate overlays",
+                            Some("Session switches take effect immediately. Appearance changes stay in draft until Apply."),
+                        );
+                        crate::gui::theme::widgets::secondary_help(
+                            ui,
+                            "Commands: mouse coords …, mouse crosshair gap N, mouse halo/zoom toggle|on|off, mouse effects off, and mouse help.",
+                        );
                         ui.separator();
 
                         if let Some(error) = &self.last_error {
-                            ui.colored_label(egui::Color32::RED, error);
+                            semantic_status(ui, StatusTone::Error, "Settings error", Some(error));
                             ui.separator();
                         }
 
-                        ui.heading("Crosshair");
+                        compact_section_heading(ui, "Crosshair", None);
                         let mut crosshair_enabled = runtime.crosshair_enabled();
                         if ui
                             .push_id("mouse_settings_crosshair_enabled", |ui| {
@@ -117,18 +127,24 @@ impl MouseSettingsDialog {
                             self.last_error = Some(error);
                         }
 
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("RGB color");
-                            let mut rgb = [
-                                self.draft.crosshair.color.red,
-                                self.draft.crosshair.color.green,
-                                self.draft.crosshair.color.blue,
-                            ];
-                            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                                self.draft.crosshair.color =
-                                    CrosshairColor::new(rgb[0], rgb[1], rgb[2]);
-                            }
-                        });
+                        let mut crosshair_rgb = [
+                            self.draft.crosshair.color.red,
+                            self.draft.crosshair.color.green,
+                            self.draft.crosshair.color.blue,
+                        ];
+                        if crate::gui::theme::widgets::labeled_form_row(
+                            ui,
+                            "RGB color",
+                            |ui| ui.color_edit_button_srgb(&mut crosshair_rgb),
+                        )
+                        .changed()
+                        {
+                            self.draft.crosshair.color = CrosshairColor::new(
+                                crosshair_rgb[0],
+                                crosshair_rgb[1],
+                                crosshair_rgb[2],
+                            );
+                        }
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Thickness");
                             ui.add(
@@ -166,8 +182,8 @@ impl MouseSettingsDialog {
                         );
 
                         ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.heading("Cursor Halo");
+                        ui.horizontal_wrapped(|ui| {
+                            compact_section_heading(ui, "Cursor Halo", None);
                             if ui.small_button("Reset halo draft").clicked() {
                                 self.reset_halo_draft();
                             }
@@ -186,7 +202,13 @@ impl MouseSettingsDialog {
                         {
                             self.last_error = Some(error);
                         }
-                        ui.label(effect_status_text(effect_status.halo()));
+                        let halo_status = effect_status.halo();
+                        semantic_status(
+                            ui,
+                            effect_status_tone(halo_status),
+                            &effect_status_text(halo_status),
+                            None,
+                        );
                         ui.small(applied_halo_summary(adapter.preferences()));
                         ui.add(
                             egui::Slider::new(&mut self.draft.halo.radius, 8..=256)
@@ -209,17 +231,25 @@ impl MouseSettingsDialog {
                             &mut self.draft.halo.outline_enabled,
                             "Show halo outline",
                         );
+                        let mut halo_outline_rgb = [
+                            self.draft.halo.outline_color.red,
+                            self.draft.halo.outline_color.green,
+                            self.draft.halo.outline_color.blue,
+                        ];
+                        if crate::gui::theme::widgets::labeled_form_row(
+                            ui,
+                            "Outline RGB",
+                            |ui| ui.color_edit_button_srgb(&mut halo_outline_rgb),
+                        )
+                        .changed()
+                        {
+                            self.draft.halo.outline_color = CrosshairColor::new(
+                                halo_outline_rgb[0],
+                                halo_outline_rgb[1],
+                                halo_outline_rgb[2],
+                            );
+                        }
                         ui.horizontal_wrapped(|ui| {
-                            ui.label("Outline RGB");
-                            let mut rgb = [
-                                self.draft.halo.outline_color.red,
-                                self.draft.halo.outline_color.green,
-                                self.draft.halo.outline_color.blue,
-                            ];
-                            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                                self.draft.halo.outline_color =
-                                    CrosshairColor::new(rgb[0], rgb[1], rgb[2]);
-                            }
                             ui.label("Thickness (px)");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.halo.outline_thickness)
@@ -228,8 +258,8 @@ impl MouseSettingsDialog {
                         });
 
                         ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.heading("Cursor Magnifier");
+                        ui.horizontal_wrapped(|ui| {
+                            compact_section_heading(ui, "Cursor Magnifier", None);
                             if ui.small_button("Reset magnifier draft").clicked() {
                                 self.reset_zoom_draft();
                             }
@@ -248,7 +278,13 @@ impl MouseSettingsDialog {
                         {
                             self.last_error = Some(error);
                         }
-                        ui.label(effect_status_text(effect_status.zoom()));
+                        let zoom_status = effect_status.zoom();
+                        semantic_status(
+                            ui,
+                            effect_status_tone(zoom_status),
+                            &effect_status_text(zoom_status),
+                            None,
+                        );
                         ui.small(applied_zoom_summary(adapter.preferences()));
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Destination mode");
@@ -302,17 +338,25 @@ impl MouseSettingsDialog {
                             &mut self.draft.zoom.outline_enabled,
                             "Show magnifier outline",
                         );
+                        let mut zoom_outline_rgb = [
+                            self.draft.zoom.outline_color.red,
+                            self.draft.zoom.outline_color.green,
+                            self.draft.zoom.outline_color.blue,
+                        ];
+                        if crate::gui::theme::widgets::labeled_form_row(
+                            ui,
+                            "Outline RGB",
+                            |ui| ui.color_edit_button_srgb(&mut zoom_outline_rgb),
+                        )
+                        .changed()
+                        {
+                            self.draft.zoom.outline_color = CrosshairColor::new(
+                                zoom_outline_rgb[0],
+                                zoom_outline_rgb[1],
+                                zoom_outline_rgb[2],
+                            );
+                        }
                         ui.horizontal_wrapped(|ui| {
-                            ui.label("Outline RGB");
-                            let mut rgb = [
-                                self.draft.zoom.outline_color.red,
-                                self.draft.zoom.outline_color.green,
-                                self.draft.zoom.outline_color.blue,
-                            ];
-                            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                                self.draft.zoom.outline_color =
-                                    CrosshairColor::new(rgb[0], rgb[1], rgb[2]);
-                            }
                             ui.label("Thickness (px)");
                             ui.add(
                                 egui::DragValue::new(&mut self.draft.zoom.outline_thickness)
@@ -321,7 +365,7 @@ impl MouseSettingsDialog {
                         });
 
                         ui.separator();
-                        ui.heading("Coordinate Display");
+                        compact_section_heading(ui, "Coordinate Display", None);
                         let mut hud_enabled = runtime.hud_enabled();
                         if ui
                             .push_id("mouse_settings_hud_enabled", |ui| {
@@ -375,9 +419,9 @@ impl MouseSettingsDialog {
                         });
 
                         ui.separator();
-                        if ui
-                            .add_enabled(self.is_dirty(), egui::Button::new("Apply"))
-                            .clicked()
+                        let apply_button =
+                            ui.add_enabled(self.is_dirty(), egui::Button::new("Apply"));
+                        if with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary).clicked()
                             && let Err(error) = self.apply_to(adapter)
                         {
                             self.last_error = Some(error);
@@ -405,6 +449,17 @@ fn effect_status_text(status: &CursorEffectStatus) -> String {
         CursorEffectStatus::Unavailable(reason) => {
             format!("Unavailable: {}", concise_status_reason(reason))
         }
+    }
+}
+
+fn effect_status_tone(status: &CursorEffectStatus) -> StatusTone {
+    match status {
+        CursorEffectStatus::Disabled | CursorEffectStatus::Prepared => StatusTone::Info,
+        CursorEffectStatus::Active => StatusTone::Success,
+        CursorEffectStatus::Fallback(_)
+        | CursorEffectStatus::Paused
+        | CursorEffectStatus::GeometryPaused(_) => StatusTone::Warning,
+        CursorEffectStatus::Unavailable(_) => StatusTone::Error,
     }
 }
 

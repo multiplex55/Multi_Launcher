@@ -575,11 +575,17 @@ impl Plugin for MouseGesturesPlugin {
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
+        use crate::gui::theme::widgets::{
+            ButtonEmphasis, StatusTone, compact_section_heading, labeled_form_row, semantic_status,
+            with_button_emphasis,
+        };
+
         let mut cfg =
             serde_json::from_value::<MouseGestureSettings>(value.clone()).unwrap_or_default();
 
         let mut changed = false;
 
+        compact_section_heading(ui, "Gesture behavior", None);
         changed |= ui
             .checkbox(&mut cfg.enabled, "Enable mouse gestures")
             .changed();
@@ -591,8 +597,7 @@ impl Plugin for MouseGesturesPlugin {
             .checkbox(&mut cfg.show_trail, "Show trail overlay")
             .changed();
 
-        ui.horizontal(|ui| {
-            ui.label("Trail color");
+        labeled_form_row(ui, "Trail color", |ui| {
             let mut color = egui::Color32::from_rgba_unmultiplied(
                 cfg.trail_color[0],
                 cfg.trail_color[1],
@@ -605,44 +610,41 @@ impl Plugin for MouseGesturesPlugin {
                 cfg.trail_color = [color.r(), color.g(), color.b(), color.a()];
                 changed = true;
             }
+            resp
         });
 
-        ui.horizontal(|ui| {
-            ui.label("Trail width");
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut cfg.trail_width)
-                        .range(1.0..=20.0)
-                        .speed(0.5),
-                )
-                .changed();
+        labeled_form_row(ui, "Trail width", |ui| {
+            let response = ui.add(
+                egui::DragValue::new(&mut cfg.trail_width)
+                    .range(1.0..=20.0)
+                    .speed(0.5),
+            );
+            changed |= response.changed();
+            response
         });
 
         changed |= ui
             .checkbox(&mut cfg.show_hint, "Show hint overlay")
             .changed();
 
-        ui.horizontal(|ui| {
-            ui.label("Hint offset (x, y)");
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut cfg.hint_offset.0)
-                        .range(-200.0..=200.0)
-                        .speed(1.0),
-                )
-                .changed();
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut cfg.hint_offset.1)
-                        .range(-200.0..=200.0)
-                        .speed(1.0),
-                )
-                .changed();
+        labeled_form_row(ui, "Hint offset (x, y)", |ui| {
+            let first = ui.add(
+                egui::DragValue::new(&mut cfg.hint_offset.0)
+                    .range(-200.0..=200.0)
+                    .speed(1.0),
+            );
+            changed |= first.changed();
+            let second = ui.add(
+                egui::DragValue::new(&mut cfg.hint_offset.1)
+                    .range(-200.0..=200.0)
+                    .speed(1.0),
+            );
+            changed |= second.changed();
+            second
         });
 
-        ui.horizontal(|ui| {
-            ui.label("Cancel behavior");
-            egui::ComboBox::from_id_salt("mg_cancel_behavior")
+        labeled_form_row(ui, "Cancel behavior", |ui| {
+            let response = egui::ComboBox::from_id_salt("mg_cancel_behavior")
                 .selected_text(cancel_behavior_label(cfg.cancel_behavior))
                 .show_ui(ui, |ui| {
                     changed |= ui
@@ -659,12 +661,13 @@ impl Plugin for MouseGesturesPlugin {
                             "Pass through right-click",
                         )
                         .changed();
-                });
+                })
+                .response;
+            response
         });
 
-        ui.horizontal(|ui| {
-            ui.label("No-match behavior");
-            egui::ComboBox::from_id_salt("mg_no_match_behavior")
+        labeled_form_row(ui, "No-match behavior", |ui| {
+            let response = egui::ComboBox::from_id_salt("mg_no_match_behavior")
                 .selected_text(no_match_behavior_label(cfg.no_match_behavior))
                 .show_ui(ui, |ui| {
                     changed |= ui
@@ -688,16 +691,21 @@ impl Plugin for MouseGesturesPlugin {
                             "Show no-match hint",
                         )
                         .changed();
-                });
+                })
+                .response;
+            response
         });
         ui.small(
             "Fallback runs when a gesture does not match; default is pass-through right-click.",
         );
 
         ui.separator();
-        ui.heading("Ignore windows (disable gestures)");
-        ui.small(
-            "Gestures will be ignored when the active window title contains one of these entries.",
+        compact_section_heading(
+            ui,
+            "Ignore windows (disable gestures)",
+            Some(
+                "Gestures will be ignored when the active window title contains one of these entries.",
+            ),
         );
 
         let mut remove_index: Option<usize> = None;
@@ -705,9 +713,10 @@ impl Plugin for MouseGesturesPlugin {
             ui.label("No ignored windows.");
         } else {
             for (index, title) in cfg.ignore_window_titles.iter().enumerate() {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(title);
-                    if ui.button("Remove").clicked() {
+                    let remove = ui.button("Remove");
+                    if with_button_emphasis(ui, remove, ButtonEmphasis::Destructive).clicked() {
                         remove_index = Some(index);
                     }
                 });
@@ -718,9 +727,11 @@ impl Plugin for MouseGesturesPlugin {
             changed = true;
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let response = ui.text_edit_singleline(&mut self.ignore_input);
-            let mut add_now = ui.button("Add").clicked();
+            let add_button = ui.button("Add");
+            let mut add_now =
+                with_button_emphasis(ui, add_button, ButtonEmphasis::Primary).clicked();
             if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 add_now = true;
             }
@@ -757,7 +768,7 @@ impl Plugin for MouseGesturesPlugin {
                 .resizable(true)
                 .show(ui.ctx(), |ui| {
                     if let Some(err) = &self.window_picker_error {
-                        ui.colored_label(egui::Color32::RED, err);
+                        semantic_status(ui, StatusTone::Error, "Window picker error", Some(err));
                         ui.separator();
                     }
 

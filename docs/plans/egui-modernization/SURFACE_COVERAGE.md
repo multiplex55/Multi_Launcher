@@ -33,9 +33,9 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/json_utility_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/macro_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/mkmacro_dialog/mod.rs` | M5-B3 | main toolbar/properties/sidebar/diagnostics accepted;9contracts and initial main framebuffer pass; child chrome M5-C pending and native interaction gaps explicit |
-| `src/gui/mouse_gesture_settings_dialog.rs` | M5-B7 | pending surface polish/review; runtime inheritance available |
-| `src/gui/mouse_gestures_dialog.rs` | M5-B7 | pending surface polish/review; runtime inheritance available |
-| `src/gui/mouse_settings_dialog.rs` | M5-B7 | pending surface polish/review; runtime inheritance available |
+| `src/gui/mouse_gesture_settings_dialog.rs` | M5-B7 | accepted boundedbody/nativefooter and transitionopen/pinnedClose/unpinnedClose corrections; focusedactualcontract pass, initialLightcapture inspected; nativeinteraction gap explicit |
+| `src/gui/mouse_gestures_dialog.rs` | M5-B7 | accepted shared editor/picker/status chrome; persistence/read-only/recordinglabel contracts pass; authoredstroke/canvas unchanged, nativecapture/input gap explicit |
+| `src/gui/mouse_settings_dialog.rs` | M5-B7 | accepted semantic forms/session-vs-draft help; existing compact/failedapply/immediate/committedsummary contracts pass; initialDarkcapture inspected, lowernative/input/effect gaps explicit |
 | `src/gui/multi_manager_actions.rs` | M5-B4 | inspected behavior owner unchanged; presentation remains src/multi_manager/ui.rs |
 | `src/gui/note_graph_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/note_panel.rs` | M5-B1 | implemented/source reviewed; strict window/save/discard/narrow tests pass; native after-image gap |
@@ -102,3 +102,5 @@ At da0ca08c, immutable65EE QA binary produced Notes002 and Theme001852x460 image
 M5-B2 also updates Clipboard/Modify settings_ui labeled rows with unchanged ranges/serialization. App-native History001 exposed the pinned load bypass; transition-only State::ensure_open and LauncherApp delegation fixed it, repeated drafts/pinned close retained. History002 confirms populated saved entries; raw001 and all earlier failures preserved. See receipts/m5b2-clipboard-presentation.md. No Computer Use.
 
 M5-B3 covers main only. Remaining MKMacro presentation review in M5-C includes action/condition/call editors, action/launcher/window pickers, parameter prompts/package/recording review, image/OCR surrounding controls and runtime-inspector/outline chrome; authored images/canvas/native overlays remain domain exceptions. Review scaled table row fit (current body row22) and pinned-panel menu display labels (currently enum Debug names) during that existing chrome pass; these are not completed coverage or performance-backlog work.
+
+MouseGestures plugin settings_ui local shared presentation accepted underM5-B7; ranges/changedguards/authoredtrailcolor retained, no nativecapture/effect verification.
