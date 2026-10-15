@@ -43,8 +43,14 @@ fn parameter_ui(
 ) -> Option<StructuralEdit> {
     let mut edit = None;
     ui.group(|ui| {
-        ui.horizontal(|ui| {
-            ui.strong(format!("Parameter {} · #{}", index + 1, parameter.id.0));
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("Parameter {} · #{}", index + 1, parameter.id.0))
+                        .strong(),
+                )
+                .wrap(),
+            );
             if ui.small_button("↑").on_hover_text("Move up").clicked() {
                 edit = Some(StructuralEdit::Move(
                     DefinitionKind::Parameter,
@@ -59,11 +65,14 @@ fn parameter_ui(
                 edit = Some(StructuralEdit::Delete(DefinitionKind::Parameter, index));
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Name");
-            ui.text_edit_singleline(&mut parameter.name);
+            ui.add(
+                egui::TextEdit::singleline(&mut parameter.name)
+                    .desired_width(ui.available_width().max(1.0)),
+            );
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Type");
             type_selector(
                 ui,
@@ -105,8 +114,14 @@ fn output_ui(
 ) -> Option<StructuralEdit> {
     let mut edit = None;
     ui.group(|ui| {
-        ui.horizontal(|ui| {
-            ui.strong(format!("Output {} · #{}", index + 1, output.id.0));
+        ui.horizontal_wrapped(|ui| {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("Output {} · #{}", index + 1, output.id.0))
+                        .strong(),
+                )
+                .wrap(),
+            );
             if ui.small_button("↑").on_hover_text("Move up").clicked() {
                 edit = Some(StructuralEdit::Move(DefinitionKind::Output, index, false));
             }
@@ -117,11 +132,14 @@ fn output_ui(
                 edit = Some(StructuralEdit::Delete(DefinitionKind::Output, index));
             }
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Name");
-            ui.text_edit_singleline(&mut output.name);
+            ui.add(
+                egui::TextEdit::singleline(&mut output.name)
+                    .desired_width(ui.available_width().max(1.0)),
+            );
         });
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("Type");
             type_selector(ui, ("output_type", output.id), &mut output.value_type);
         });
@@ -215,7 +233,12 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog, macro_id: u64)
                 structural = edit;
             }
         }
-        if ui.button("+ Add Parameter").clicked() { structural = Some(StructuralEdit::Add(DefinitionKind::Parameter)); }
+        if ui
+            .add(egui::Button::new("+ Add Parameter").wrap())
+            .clicked()
+        {
+            structural = Some(StructuralEdit::Add(DefinitionKind::Parameter));
+        }
         ui.separator();
         ui.heading("Outputs");
         for (index, output) in signature.outputs.iter_mut().enumerate() {
@@ -224,7 +247,9 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog, macro_id: u64)
                 structural = edit;
             }
         }
-        if ui.button("+ Add Output").clicked() { structural = Some(StructuralEdit::Add(DefinitionKind::Output)); }
+        if ui.add(egui::Button::new("+ Add Output").wrap()).clicked() {
+            structural = Some(StructuralEdit::Add(DefinitionKind::Output));
+        }
         for diagnostic in diagnostics.iter().filter(|d| d.macro_id == macro_id && d.step_id.is_none() && matches!(d.code, "invalid_signature_id" | "invalid_signature_name" | "duplicate_signature_name" | "invalid_parameter_default")) {
             ui.colored_label(ui.visuals().error_fg_color, &diagnostic.message);
         }

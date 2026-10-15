@@ -12,6 +12,12 @@ use std::{collections::BTreeSet, fs};
 #[derive(Default)]
 pub(super) struct PackageUiState {
     modal: Option<PackageModal>,
+    #[cfg(test)]
+    test_body_scroll: Option<(egui::Id, egui::Rect, egui::Vec2, egui::Vec2)>,
+    #[cfg(test)]
+    test_footer_clip: Option<egui::Rect>,
+    #[cfg(test)]
+    test_close_response: Option<(egui::Id, egui::Rect)>,
 }
 
 enum PackageModal {
@@ -163,12 +169,89 @@ fn open_templates(dialog: &mut MkMacroDialog) {
     }
 }
 
+fn footer_labels(modal: &PackageModal) -> &'static [&'static str] {
+    match modal {
+        PackageModal::ExportLibrary { .. } => &["Export…", "Cancel"],
+        PackageModal::ImportPreview { .. } => &["Apply Import", "Cancel"],
+        PackageModal::SaveTemplate { .. } => &["Save Template", "Cancel"],
+        PackageModal::Templates { preview, .. } if preview.is_some() => {
+            &["Create Independent Copy", "Cancel"]
+        }
+        PackageModal::Templates { .. } => &["Preview Copy", "Cancel"],
+        PackageModal::Help => &["Close"],
+    }
+}
+
+fn package_footer_reserved_height(ui: &mut egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let button_frame = native_button_style.frame;
+    let frame_margin = if ui.visuals().button_frame {
+        button_frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    let mut row_width = 0.0;
+    let mut row_height = 0.0_f32;
+    let mut actions_height = 0.0;
+
+    for label in labels {
+        let text_size = egui::WidgetText::from(*label)
+            .into_galley(ui, Some(wrap_mode), text_width, button_font.clone())
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            actions_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    actions_height += row_height.max(spacing.interact_size.y);
+    let separator_spacing = style
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let footer_height = actions_height + 2.0 * spacing.item_spacing.y + separator_spacing;
+    (footer_height * pixels_per_point).ceil() / pixels_per_point
+}
+
 pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
     let Some(mut modal) = dialog.package_ui.modal.take() else {
         return;
     };
     let mut open = true;
     let mut keep = true;
+    let labels = footer_labels(&modal);
     egui::Window::new(modal.title())
         .id(egui::Id::new("mkmacro_package_modal"))
         .open(&mut open)
@@ -176,8 +259,12 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
         .resizable(true)
         .default_width(520.0)
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical()
-                .max_height(430.0)
+            let footer_height = package_footer_reserved_height(ui, labels);
+            let body_max_height = (ui.available_height() - footer_height).max(0.0);
+            let body_output = egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .min_scrolled_height(0.0)
+                .max_height(body_max_height)
                 .show(ui, |ui| match &mut modal {
                     PackageModal::ExportLibrary { roots } => {
                         ui.label("Choose explicit library roots. Every authored Call dependency, including disabled steps, is packaged automatically.");
@@ -228,8 +315,24 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
                     }
                     PackageModal::Help => help(ui),
                 });
+            #[cfg(test)]
+            {
+                dialog.package_ui.test_body_scroll = Some((
+                    body_output.id,
+                    body_output.inner_rect,
+                    body_output.content_size,
+                    body_output.state.offset,
+                ));
+            }
+            #[cfg(not(test))]
+            let _ = body_output;
             ui.separator();
-            ui.horizontal(|ui| match &mut modal {
+            #[cfg(test)]
+            {
+                dialog.package_ui.test_footer_clip = Some(ui.clip_rect());
+            }
+            let mut close_response = None;
+            ui.horizontal_wrapped(|ui| match &mut modal {
                 PackageModal::ExportLibrary { roots } => {
                     if ui.add_enabled(!roots.is_empty(), egui::Button::new("Export…")).clicked() {
                         let root_ids = roots.iter().copied().collect::<Vec<_>>();
@@ -290,9 +393,17 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
                     if ui.button("Cancel").clicked() { keep = false; }
                 }
                 PackageModal::Help => {
-                    if ui.button("Close").clicked() { keep = false; }
+                    let response = ui.button("Close");
+                    close_response = Some((response.id, response.rect));
+                    if response.clicked() { keep = false; }
                 }
             });
+            #[cfg(test)]
+            {
+                dialog.package_ui.test_close_response = close_response;
+            }
+            #[cfg(not(test))]
+            let _ = close_response;
         });
     if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
         keep = false;
@@ -442,6 +553,320 @@ mod tests {
             "My-useful-macro.mkmacro"
         );
         assert_eq!(package_filename("***"), "macro.mkmacro");
+    }
+
+    #[test]
+    fn mkmacro_package_chrome_keeps_long_help_body_scrolling_above_close_without_mutation() {
+        use egui::accesskit::{NodeId, Role};
+
+        fn response_node_bounds(
+            output: &egui::FullOutput,
+            response: Option<(egui::Id, egui::Rect)>,
+            label: &str,
+        ) -> Option<egui::Rect> {
+            let (response_id, _) = response?;
+            let node_id = NodeId(response_id.value());
+            let (_, node) = output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == node_id)?;
+            if node.role() != Role::Button || node.label() != Some(label) {
+                return None;
+            }
+            let bounds = node.bounds()?;
+            Some(egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            ))
+        }
+
+        fn named_node_bounds(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .find(|(_, node)| node.value() == Some(label))
+                .and_then(|(_, node)| {
+                    let bounds = node.bounds()?;
+                    Some(egui::Rect::from_min_max(
+                        egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    ))
+                })
+        }
+
+        fn same_rect(left: egui::Rect, right: egui::Rect) -> bool {
+            (left.min.x - right.min.x).abs() < 0.5
+                && (left.min.y - right.min.y).abs() < 0.5
+                && (left.max.x - right.max.x).abs() < 0.5
+                && (left.max.y - right.max.y).abs() < 0.5
+        }
+
+        fn collect_text_shapes(
+            shape: &egui::epaint::Shape,
+            clip_rect: egui::Rect,
+            output: &mut Vec<(String, egui::Rect, egui::Rect, bool)>,
+        ) {
+            match shape {
+                egui::epaint::Shape::Text(text) => output.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                    clip_rect,
+                    text.galley.elided,
+                )),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text_shapes(shape, clip_rect, output);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn trailing_help_text_shape(
+            output: &egui::FullOutput,
+            expected: &str,
+        ) -> Option<(egui::Rect, egui::Rect, bool)> {
+            let mut texts = Vec::new();
+            for clipped_shape in &output.shapes {
+                collect_text_shapes(&clipped_shape.shape, clipped_shape.clip_rect, &mut texts);
+            }
+            texts
+                .into_iter()
+                .find(|(text, _, _, _)| text == expected)
+                .map(|(_, text_rect, clip_rect, elided)| (text_rect, clip_rect, elided))
+        }
+
+        fn same_text_shape(
+            left: (egui::Rect, egui::Rect, bool),
+            right: (egui::Rect, egui::Rect, bool),
+        ) -> bool {
+            same_rect(left.0, right.0) && same_rect(left.1, right.1) && left.2 == right.2
+        }
+
+        const TRAILING_HELP_TEXT: &str = "Imports are independent copies with fresh macro, folder, step, parameter, output, and asset identities. Imported authored hotkeys are retained; template instances clear every copied hotkey. Templates and all instances are snapshots—there are no live links.";
+
+        #[derive(Clone, Copy)]
+        struct Layout {
+            body_scroll: (egui::Id, egui::Rect, egui::Vec2, egui::Vec2),
+            footer_clip: egui::Rect,
+            close_response: (egui::Id, egui::Rect),
+            close_node: egui::Rect,
+            heading_node: egui::Rect,
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = MkMacroStore::open(directory.path()).unwrap();
+        let mut dialog = MkMacroDialog::new(std::sync::Arc::new(store));
+        dialog.package_ui.modal = Some(PackageModal::Help);
+        let draft_before = dialog.draft.clone();
+        let baseline_before = dialog.baseline.clone();
+        let persisted_before = dialog.store.snapshot();
+        let revision_before = dialog.draft_revision;
+        let dirty_before = dialog.dirty;
+        let conflict_before = dialog.conflict;
+        let selected_before = dialog.selected_macro_id;
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut_of(context.theme(), |style| {
+            style.override_font_id = Some(egui::FontId::new(22.0, egui::FontFamily::Proportional));
+        });
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(520.0, 380.0));
+        let input = || egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+
+        let mut previous_layout: Option<Layout> = None;
+        let mut settled_layout: Option<Layout> = None;
+        let mut last_close_node: Option<(egui::Id, egui::Rect)> = None;
+        let mut last_heading_node: Option<egui::Rect> = None;
+        for _ in 0..6 {
+            let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
+            let close_response = dialog.package_ui.test_close_response;
+            if let Some(response) = close_response
+                && let Some(bounds) = response_node_bounds(&output, Some(response), "Close")
+            {
+                last_close_node = Some((response.0, bounds));
+            }
+            if let Some(bounds) = named_node_bounds(&output, "Recording") {
+                last_heading_node = Some(bounds);
+            }
+            let layout = match (
+                dialog.package_ui.test_body_scroll,
+                dialog.package_ui.test_footer_clip,
+                close_response,
+                last_close_node,
+                last_heading_node,
+            ) {
+                (
+                    Some(body_scroll),
+                    Some(footer_clip),
+                    Some(close_response),
+                    Some((close_id, close_node)),
+                    Some(heading_node),
+                ) if close_id == close_response.0 => Some(Layout {
+                    body_scroll,
+                    footer_clip,
+                    close_response,
+                    close_node,
+                    heading_node,
+                }),
+                _ => None,
+            };
+            if let (Some(previous), Some(current)) = (previous_layout, layout)
+                && previous.body_scroll.0 == current.body_scroll.0
+                && same_rect(previous.body_scroll.1, current.body_scroll.1)
+                && (previous.body_scroll.2 - current.body_scroll.2).length() < 0.5
+                && (previous.body_scroll.3 - current.body_scroll.3).length() < 0.5
+                && same_rect(previous.footer_clip, current.footer_clip)
+                && same_rect(previous.close_response.1, current.close_response.1)
+                && same_rect(previous.close_node, current.close_node)
+                && same_rect(previous.heading_node, current.heading_node)
+            {
+                settled_layout = Some(current);
+            }
+            previous_layout = layout;
+            output.drop_without_applying_deltas();
+        }
+
+        let initial_layout = settled_layout;
+        let mut previous_scrolled_layout: Option<Layout> = None;
+        let mut settled_scrolled_layout: Option<Layout> = None;
+        let mut previous_trailing_text: Option<(egui::Rect, egui::Rect, bool)> = None;
+        let mut settled_trailing_text: Option<(egui::Rect, egui::Rect, bool)> = None;
+        let mut scroll_state_matches = false;
+        if let Some(initial) = initial_layout {
+            let (scroll_id, viewport, content_size, _) = initial.body_scroll;
+            if let Some(mut scroll_state) = egui::scroll_area::State::load(&context, scroll_id) {
+                let max_scroll = (content_size.y - viewport.height()).max(0.0);
+                scroll_state.offset.y = max_scroll;
+                scroll_state.store(&context, scroll_id);
+                for _ in 0..5 {
+                    let output = context.run_ui(input(), |ctx| show(ctx, &mut dialog));
+                    let close_response = dialog.package_ui.test_close_response;
+                    if let Some(response) = close_response
+                        && let Some(bounds) = response_node_bounds(&output, Some(response), "Close")
+                    {
+                        last_close_node = Some((response.0, bounds));
+                    }
+                    if let Some(bounds) = named_node_bounds(&output, "Recording") {
+                        last_heading_node = Some(bounds);
+                    }
+                    let layout = match (
+                        dialog.package_ui.test_body_scroll,
+                        dialog.package_ui.test_footer_clip,
+                        close_response,
+                        last_close_node,
+                        last_heading_node,
+                    ) {
+                        (
+                            Some(body_scroll),
+                            Some(footer_clip),
+                            Some(close_response),
+                            Some((close_id, close_node)),
+                            Some(heading_node),
+                        ) if close_id == close_response.0 => Some(Layout {
+                            body_scroll,
+                            footer_clip,
+                            close_response,
+                            close_node,
+                            heading_node,
+                        }),
+                        _ => None,
+                    };
+                    let trailing_text = trailing_help_text_shape(&output, TRAILING_HELP_TEXT);
+                    if let (Some(previous), Some(current), Some(previous_text), Some(current_text)) = (
+                        previous_scrolled_layout,
+                        layout,
+                        previous_trailing_text,
+                        trailing_text,
+                    ) && same_rect(previous.body_scroll.1, current.body_scroll.1)
+                        && (previous.body_scroll.2 - current.body_scroll.2).length() < 0.5
+                        && (previous.body_scroll.3 - current.body_scroll.3).length() < 0.5
+                        && same_rect(previous.footer_clip, current.footer_clip)
+                        && same_rect(previous.close_response.1, current.close_response.1)
+                        && same_rect(previous.close_node, current.close_node)
+                        && same_text_shape(previous_text, current_text)
+                    {
+                        settled_scrolled_layout = Some(current);
+                        settled_trailing_text = Some(current_text);
+                    }
+                    previous_scrolled_layout = layout;
+                    previous_trailing_text = trailing_text;
+                    output.drop_without_applying_deltas();
+                }
+                scroll_state_matches = egui::scroll_area::State::load(&context, scroll_id)
+                    .is_some_and(|state| {
+                        settled_scrolled_layout.is_some_and(|layout| {
+                            state.offset == layout.body_scroll.3
+                                && state.offset.y
+                                    <= (layout.body_scroll.2.y - layout.body_scroll.1.height())
+                                        .max(0.0)
+                                        + 0.5
+                        })
+                    });
+            }
+        }
+
+        let unchanged = dialog.draft == draft_before
+            && dialog.baseline == baseline_before
+            && dialog.store.snapshot() == persisted_before
+            && dialog.draft_revision == revision_before
+            && dialog.dirty == dirty_before
+            && dialog.conflict == conflict_before
+            && dialog.selected_macro_id == selected_before
+            && dialog
+                .package_ui
+                .modal
+                .as_ref()
+                .is_some_and(|modal| matches!(modal, PackageModal::Help));
+        let layout = initial_layout;
+        assert!(
+            unchanged,
+            "opening package help must not mutate the transaction"
+        );
+        let layout = layout.expect("the settled help modal exposes its native Close action");
+        assert!(layout.body_scroll.1.is_positive());
+        assert!(layout.body_scroll.2.y > layout.body_scroll.1.height());
+        assert!(layout.body_scroll.3.y >= 0.0);
+        assert!(
+            layout.body_scroll.3.y
+                <= (layout.body_scroll.2.y - layout.body_scroll.1.height()).max(0.0) + 0.5
+        );
+        assert!(layout.body_scroll.3.y.abs() <= 0.5);
+        assert!(screen_rect.contains_rect(layout.body_scroll.1));
+        assert!(screen_rect.contains_rect(layout.footer_clip));
+        assert!(screen_rect.contains_rect(layout.close_response.1));
+        assert!(screen_rect.contains_rect(layout.close_node));
+        assert!(screen_rect.contains_rect(layout.heading_node));
+        assert!(layout.body_scroll.1.contains_rect(layout.heading_node));
+        assert!(layout.body_scroll.1.bottom() <= layout.close_response.1.top());
+        assert!(layout.footer_clip.contains_rect(layout.close_response.1));
+        assert!(same_rect(layout.close_response.1, layout.close_node));
+        assert!(
+            scroll_state_matches,
+            "the settled native ScrollArea state uses the legal trailing offset"
+        );
+        let scrolled = settled_scrolled_layout
+            .expect("the long Help body reaches a settled trailing scroll position");
+        let trailing_text = settled_trailing_text
+            .expect("the final Help label is emitted as a settled text galley");
+        let max_scroll = (scrolled.body_scroll.2.y - scrolled.body_scroll.1.height()).max(0.0);
+        assert!(scrolled.body_scroll.3.y > 0.0);
+        assert!(scrolled.body_scroll.3.y <= max_scroll + 0.5);
+        assert!(scrolled.body_scroll.1.contains_rect(trailing_text.0));
+        assert!(scrolled.body_scroll.1.intersects(trailing_text.1));
+        assert!(trailing_text.1.contains_rect(trailing_text.0));
+        assert!(!trailing_text.2);
+        assert!(scrolled.body_scroll.1.bottom() <= scrolled.close_response.1.top());
+        assert!(same_rect(layout.body_scroll.1, scrolled.body_scroll.1));
     }
 
     #[test]

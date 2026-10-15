@@ -1,3 +1,4 @@
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::mkmacro::{
     MkInvocationValues,
     invocation_prompt::{
@@ -133,7 +134,7 @@ impl ParameterPromptUi {
                         .max_height(ui.available_height())
                         .show(ui, |ui| {
                             if let Some(notice) = &self.notice {
-                                ui.colored_label(egui::Color32::RED, notice);
+                                semantic_status(ui, StatusTone::Error, notice, None);
                                 ui.separator();
                             }
                             if let Some(pending) = &self.pending {
@@ -183,7 +184,7 @@ impl ParameterPromptUi {
                                             .is_ok_and(|prepared| prepared.missing.is_empty());
                                 }
                                 if let Some(error) = &self.error {
-                                    ui.colored_label(egui::Color32::RED, error);
+                                    semantic_status(ui, StatusTone::Error, error, None);
                                 }
                             }
                         });
