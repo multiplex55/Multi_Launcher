@@ -4,6 +4,7 @@
 //! Filesystem paths, persistence, and domain-specific destinations belong to
 //! the adapters that embed it.
 
+use crate::gui::theme::widgets::{ButtonEmphasis, with_button_emphasis};
 use crate::image_crop::{ImageCropRect, crop_rgba, validate_crop_rect};
 use eframe::egui;
 use image::RgbaImage;
@@ -12,6 +13,25 @@ pub const MIN_CROP_ZOOM: f32 = 0.05;
 pub const MAX_CROP_ZOOM: f32 = 16.0;
 const HANDLE_SIZE: f32 = 12.0;
 const MIN_VIEWPORT_SIZE: egui::Vec2 = egui::Vec2::new(320.0, 260.0);
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct CropChromeObservation {
+    window_rect: Option<egui::Rect>,
+    metadata: Option<(egui::Id, egui::Rect, egui::Vec2, egui::Vec2)>,
+    source_label: Option<(egui::Id, egui::Rect)>,
+    collision_label: Option<(egui::Id, egui::Rect)>,
+    persistence_label: Option<(egui::Id, egui::Rect)>,
+    filename_label: Option<(egui::Id, egui::Rect)>,
+    filename_edit: Option<(egui::Id, egui::Rect)>,
+    viewport: egui::Rect,
+    reset_button: (egui::Id, egui::Rect),
+    full_image_button: (egui::Id, egui::Rect),
+    save_as_button: (egui::Id, egui::Rect, bool),
+    overwrite_button: Option<(egui::Id, egui::Rect, bool)>,
+    cancel_button: (egui::Id, egui::Rect),
+    footer_reserved_height: f32,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CropPoint {
@@ -248,6 +268,8 @@ pub struct ImageCropEditorState {
     fit_initialized: bool,
     interaction: Option<ActiveInteraction>,
     validation_message: Option<String>,
+    #[cfg(test)]
+    test_chrome: Option<CropChromeObservation>,
 }
 
 impl Default for ImageCropEditorState {
@@ -262,6 +284,8 @@ impl Default for ImageCropEditorState {
             fit_initialized: false,
             interaction: None,
             validation_message: None,
+            #[cfg(test)]
+            test_chrome: None,
         }
     }
 }
@@ -581,20 +605,135 @@ impl ImageCropEditorState {
         self.ensure_texture(ctx, &options.window_id);
         let mut open = true;
         let mut action = None;
-        egui::Window::new(&options.title)
+        #[cfg(test)]
+        let mut test_chrome = None;
+        let available_rect = ctx.content_rect();
+        let max_window_width = available_rect.width().max(1.0);
+        let max_window_height = available_rect.height().max(1.0);
+        let window_output = egui::Window::new(&options.title)
             .id(egui::Id::new(&options.window_id))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size([860.0, 680.0])
-            .min_size([560.0, 480.0])
+            .max_width(max_window_width)
+            .max_height(max_window_height)
+            .default_size([860.0_f32.min(max_window_width), 680.0_f32.min(max_window_height)])
+            .min_size([560.0_f32.min(max_window_width), 480.0_f32.min(max_window_height)])
             .show(ctx, |ui| {
-                if let Some(source_label) = &options.source_label {
-                    ui.label(source_label);
+                #[cfg(test)]
+                let mut filename_label_response = None;
+                #[cfg(test)]
+                let mut filename_edit_response = None;
+                if let Some(filename) = save_as_filename.as_deref_mut() {
+                    let label = ui.label("Save As filename");
+                    #[cfg(test)]
+                    {
+                        filename_label_response = Some(label);
+                    }
+                    #[cfg(not(test))]
+                    let _ = label;
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(filename).desired_width(ui.available_width()),
+                    );
+                    #[cfg(test)]
+                    {
+                        filename_edit_response = Some(edit);
+                    }
+                    #[cfg(not(test))]
+                    let _ = edit;
                 }
-                if let Some(message) = &self.validation_message {
-                    ui.colored_label(ui.visuals().error_fg_color, message);
-                }
+                let footer_reserved_height = crop_editor_footer_reserved_height(
+                    ui,
+                    options.allow_overwrite,
+                );
+                let metadata_height = crop_metadata_height_budget(
+                    ui,
+                    ui.available_height(),
+                    footer_reserved_height,
+                );
+                #[cfg(test)]
+                let mut source_label_response = None;
+                #[cfg(test)]
+                let mut collision_label_response = None;
+                #[cfg(test)]
+                let mut persistence_label_response = None;
+                let metadata = egui::ScrollArea::vertical()
+                    .id_salt("crop_editor_metadata")
+                    .auto_shrink([false, true])
+                    .min_scrolled_height(0.0)
+                    .max_height(metadata_height)
+                    .show(ui, |ui| {
+                        if let Some(source_label) = &options.source_label {
+                            let response = ui.add(
+                                egui::Label::new(source_label)
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                            #[cfg(test)]
+                            {
+                                source_label_response = Some(response);
+                            }
+                            #[cfg(not(test))]
+                            let _ = response;
+                        }
+                        if let Some(message) = &self.validation_message {
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(message.as_str())
+                                        .color(ui.visuals().error_fg_color),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                        }
+                        if self.source.is_some() {
+                            let selection = self.selection.unwrap();
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!(
+                                    "{} × {} px",
+                                    selection.width, selection.height
+                                ));
+                                ui.label(format!("Zoom {:.0}%", self.zoom * 100.0));
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(
+                                            "Left drag creates/moves/resizes · middle drag pans · wheel zooms",
+                                        )
+                                        .small(),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                                );
+                            });
+                        }
+                        if let Some(message) = &options.collision_message {
+                            let response = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(message.as_str())
+                                        .color(ui.visuals().warn_fg_color),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                            #[cfg(test)]
+                            {
+                                collision_label_response = Some(response);
+                            }
+                            #[cfg(not(test))]
+                            let _ = response;
+                        }
+                        if let Some(message) = &options.persistence_message {
+                            let response = ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(message.as_str())
+                                        .color(ui.visuals().error_fg_color),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                            #[cfg(test)]
+                            {
+                                persistence_label_response = Some(response);
+                            }
+                            #[cfg(not(test))]
+                            let _ = response;
+                        }
+                    });
                 let Some((image_width, image_height)) = self
                     .source
                     .as_ref()
@@ -605,8 +744,8 @@ impl ImageCropEditorState {
                 };
                 let available = ui.available_size();
                 let viewport_size = egui::vec2(
-                    available.x.max(MIN_VIEWPORT_SIZE.x),
-                    (available.y - 100.0).max(MIN_VIEWPORT_SIZE.y),
+                    available.x.max(1.0),
+                    (available.y - footer_reserved_height).max(1.0),
                 );
                 let (viewport, response) =
                     ui.allocate_exact_size(viewport_size, egui::Sense::click_and_drag());
@@ -713,49 +852,97 @@ impl ImageCropEditorState {
                     self.interaction = None;
                 }
                 self.render_viewport(ui, viewport, transform);
-                let selection = self.selection.unwrap();
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} × {} px", selection.width, selection.height));
-                    ui.separator();
-                    ui.label(format!("Zoom {:.0}%", self.zoom * 100.0));
-                    ui.small("Left drag creates/moves/resizes · middle drag pans · wheel zooms");
-                });
-                ui.horizontal(|ui| {
-                    let reset_clicked = ui.button("Reset").clicked();
-                    let full_image_clicked = ui.button("Select Full Image").clicked();
-                    if reset_clicked || full_image_clicked {
-                        self.reset_selection();
-                    }
-                    if let Some(filename) = save_as_filename.as_deref_mut() {
-                        ui.label("Save As filename");
-                        ui.text_edit_singleline(filename);
-                    }
-                });
-                if let Some(message) = &options.collision_message {
-                    ui.colored_label(ui.visuals().warn_fg_color, message);
+                ui.separator();
+                let (reset_button, full_image_button) = ui
+                    .horizontal_wrapped(|ui| {
+                        let reset = ui.button("Reset");
+                        let full_image = ui.button("Select Full Image");
+                        let reset_clicked = reset.clicked();
+                        let full_image_clicked = full_image.clicked();
+                        if reset_clicked || full_image_clicked {
+                            self.reset_selection();
+                        }
+                        (reset, full_image)
+                    })
+                    .inner;
+                let (save_as_button, overwrite_button, cancel_button) = ui
+                    .horizontal_wrapped(|ui| {
+                        let save_as = ui.add_enabled(self.can_save(), egui::Button::new("Save As"));
+                        let save_as = with_button_emphasis(ui, save_as, ButtonEmphasis::Primary);
+                        if save_as.clicked() {
+                            action = Some(CropEditorAction::SaveAs);
+                        }
+                        let overwrite = options.allow_overwrite.then(|| {
+                            let button = ui.add_enabled(
+                                self.can_save(),
+                                egui::Button::new("Overwrite Current"),
+                            );
+                            with_button_emphasis(ui, button, ButtonEmphasis::Destructive)
+                        });
+                        if overwrite.as_ref().is_some_and(egui::Response::clicked) {
+                            action = Some(CropEditorAction::RequestOverwrite);
+                        }
+                        let cancel = ui.button("Cancel");
+                        if cancel.clicked() {
+                            action = Some(CropEditorAction::Cancel);
+                        }
+                        (save_as, overwrite, cancel)
+                    })
+                    .inner;
+                #[cfg(test)]
+                {
+                    test_chrome = Some(CropChromeObservation {
+                        window_rect: None,
+                        metadata: Some((
+                            metadata.id,
+                            metadata.inner_rect,
+                            metadata.content_size,
+                            metadata.state.offset,
+                        )),
+                        source_label: source_label_response
+                            .map(|response| (response.id, response.rect)),
+                        collision_label: collision_label_response
+                            .map(|response| (response.id, response.rect)),
+                        persistence_label: persistence_label_response
+                            .map(|response| (response.id, response.rect)),
+                        filename_label: filename_label_response
+                            .map(|response| (response.id, response.rect)),
+                        filename_edit: filename_edit_response
+                            .map(|response| (response.id, response.rect)),
+                        viewport,
+                        reset_button: (reset_button.id, reset_button.rect),
+                        full_image_button: (full_image_button.id, full_image_button.rect),
+                        save_as_button: (
+                            save_as_button.id,
+                            save_as_button.rect,
+                            save_as_button.enabled(),
+                        ),
+                        overwrite_button: overwrite_button.map(|response| {
+                            (response.id, response.rect, response.enabled())
+                        }),
+                        cancel_button: (cancel_button.id, cancel_button.rect),
+                        footer_reserved_height,
+                    });
                 }
-                if let Some(message) = &options.persistence_message {
-                    ui.colored_label(ui.visuals().error_fg_color, message);
-                }
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(self.can_save(), egui::Button::new("Save As"))
-                        .clicked()
-                    {
-                        action = Some(CropEditorAction::SaveAs);
-                    }
-                    if options.allow_overwrite
-                        && ui
-                            .add_enabled(self.can_save(), egui::Button::new("Overwrite Current"))
-                            .clicked()
-                    {
-                        action = Some(CropEditorAction::RequestOverwrite);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        action = Some(CropEditorAction::Cancel);
-                    }
-                });
+                #[cfg(not(test))]
+                let _ = (
+                    metadata,
+                    reset_button,
+                    full_image_button,
+                    save_as_button,
+                    overwrite_button,
+                    cancel_button,
+                );
             });
+        #[cfg(test)]
+        {
+            self.test_chrome = test_chrome.map(|mut observation| {
+                observation.window_rect = window_output.map(|output| output.response.rect);
+                observation
+            });
+        }
+        #[cfg(not(test))]
+        let _ = window_output;
         if !open {
             self.open = false;
             action = Some(CropEditorAction::Cancel);
@@ -764,9 +951,209 @@ impl ImageCropEditorState {
     }
 }
 
+fn crop_metadata_height_budget(
+    ui: &egui::Ui,
+    available_height: f32,
+    footer_reserved_height: f32,
+) -> f32 {
+    let available_for_metadata = (available_height - footer_reserved_height).max(0.0);
+    let body_font = egui::FontSelection::Default.resolve(ui.style());
+    let readable_row = ui.fonts_mut(|fonts| fonts.row_height(&body_font))
+        + ui.spacing().extra_text_line_spacing
+        + ui.spacing().item_spacing.y;
+    let preserve_canvas = (available_for_metadata - MIN_VIEWPORT_SIZE.y).max(0.0);
+    preserve_canvas
+        .max(readable_row.min(available_for_metadata))
+        .min(available_for_metadata)
+}
+
+fn crop_editor_footer_reserved_height(ui: &egui::Ui, allow_overwrite: bool) -> f32 {
+    let primary_actions = button_row_reserved_height(ui, &["Reset", "Select Full Image"]);
+    let save_actions = if allow_overwrite {
+        button_row_reserved_height(ui, &["Save As", "Overwrite Current", "Cancel"])
+    } else {
+        button_row_reserved_height(ui, &["Save As", "Cancel"])
+    };
+    let spacing = ui.spacing().clone();
+    let separator_spacing = ui
+        .style()
+        .separator_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Noninteractive,
+        )
+        .spacing;
+    let height = primary_actions
+        + spacing.item_spacing.y
+        + save_actions
+        + 2.0 * spacing.item_spacing.y
+        + separator_spacing;
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
+}
+
+fn button_row_reserved_height(ui: &egui::Ui, labels: &[&str]) -> f32 {
+    let spacing = ui.spacing().clone();
+    let style = ui.style().clone();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let button_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(&style))
+        })
+        .unwrap_or_else(|| native_button_style.text_style.font_id.clone());
+    let frame_margin = if ui.visuals().button_frame {
+        native_button_style.frame.total_margin().sum()
+    } else {
+        egui::Vec2::ZERO
+    };
+    let available_width = ui.available_width().max(1.0);
+    let text_width = (available_width - frame_margin.x).max(1.0);
+    let wrap_mode = ui.wrap_mode();
+    let mut row_width = 0.0;
+    let mut row_height = 0.0f32;
+    let mut actions_height = 0.0;
+
+    for label in labels {
+        let text_size = egui::WidgetText::from(*label)
+            .into_galley(ui, Some(wrap_mode), text_width, button_font.clone())
+            .size();
+        let button_width = (text_size.x + frame_margin.x)
+            .max(spacing.interact_size.x)
+            .min(available_width);
+        let button_height = (text_size.y + spacing.extra_text_line_spacing + frame_margin.y)
+            .max(spacing.interact_size.y);
+        if row_width > 0.0 && row_width + spacing.item_spacing.x + button_width > available_width {
+            actions_height += row_height + spacing.item_spacing.y;
+            row_width = button_width;
+            row_height = button_height;
+        } else {
+            if row_width > 0.0 {
+                row_width += spacing.item_spacing.x;
+            }
+            row_width += button_width;
+            row_height = row_height.max(button_height);
+        }
+    }
+    actions_height + row_height.max(spacing.interact_size.y)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn crop_input(size: egui::Vec2) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            focused: true,
+            ..Default::default()
+        }
+    }
+
+    fn render_crop_frame(
+        ctx: &egui::Context,
+        state: &mut ImageCropEditorState,
+        options: &CropEditorUiOptions,
+        filename: &mut String,
+        size: egui::Vec2,
+    ) -> (egui::FullOutput, Option<CropEditorAction>) {
+        let mut action = None;
+        let output = ctx.run_ui(crop_input(size), |ctx| {
+            action = state.show_with_save_as_filename(ctx, options, Some(filename));
+        });
+        (output, action)
+    }
+
+    fn collect_text_shapes(
+        shape: &egui::epaint::Shape,
+        clip_rect: egui::Rect,
+        output: &mut Vec<(String, egui::Rect, egui::Rect, bool)>,
+    ) {
+        match shape {
+            egui::epaint::Shape::Text(text) => output.push((
+                text.galley.job.text.clone(),
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+                clip_rect,
+                text.galley.elided,
+            )),
+            egui::epaint::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text_shapes(shape, clip_rect, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn visible_text_shapes(
+        output: &egui::FullOutput,
+        bounds: egui::Rect,
+    ) -> Vec<(String, egui::Rect, egui::Rect)> {
+        let mut texts = Vec::new();
+        for clipped_shape in &output.shapes {
+            collect_text_shapes(&clipped_shape.shape, clipped_shape.clip_rect, &mut texts);
+        }
+        texts
+            .into_iter()
+            .filter_map(|(text, galley_rect, clip_rect, elided)| {
+                (!elided
+                    && bounds.intersects(galley_rect)
+                    && clip_rect.intersects(galley_rect)
+                    && galley_rect.left() >= bounds.left() - 1.0
+                    && galley_rect.right() <= bounds.right() + 1.0
+                    && galley_rect.left() >= clip_rect.left() - 1.0
+                    && galley_rect.right() <= clip_rect.right() + 1.0)
+                    .then_some((text, galley_rect, clip_rect))
+            })
+            .collect()
+    }
+
+    fn settle_metadata_target(
+        ctx: &egui::Context,
+        state: &mut ImageCropEditorState,
+        options: &CropEditorUiOptions,
+        filename: &mut String,
+        size: egui::Vec2,
+        observation: CropChromeObservation,
+        target_rect: egui::Rect,
+        align_bottom: bool,
+    ) -> Option<(
+        CropChromeObservation,
+        Vec<(String, egui::Rect, egui::Rect)>,
+        Option<CropEditorAction>,
+    )> {
+        let (scroll_id, scroll_rect, content_size, offset) = observation.metadata?;
+        let mut scroll = egui::scroll_area::State::load(ctx, scroll_id)?;
+        let max_offset = (content_size.y - scroll_rect.height()).max(0.0);
+        let target_content_y = if align_bottom {
+            target_rect.bottom() + offset.y - scroll_rect.bottom()
+        } else {
+            target_rect.top() + offset.y - scroll_rect.top()
+        };
+        scroll.offset = egui::vec2(0.0, target_content_y.clamp(0.0, max_offset));
+        scroll.store(ctx, scroll_id);
+
+        let mut latest = None;
+        let mut visible_text = Vec::new();
+        let mut action = None;
+        for _ in 0..2 {
+            let (output, frame_action) = render_crop_frame(ctx, state, options, filename, size);
+            latest = state.test_chrome;
+            visible_text = latest
+                .and_then(|layout| layout.metadata.map(|(_, rect, _, _)| rect))
+                .map(|rect| visible_text_shapes(&output, rect))
+                .unwrap_or_default();
+            action = frame_action;
+            output.drop_without_applying_deltas();
+        }
+        latest.map(|layout| (layout, visible_text, action))
+    }
 
     fn rect(x: u32, y: u32, width: u32, height: u32) -> ImageCropRect {
         ImageCropRect {
@@ -958,5 +1345,208 @@ mod tests {
         assert!(state.can_save());
         state.reset_selection();
         assert_eq!(state.selection(), Some(rect(0, 0, 8, 6)));
+    }
+
+    #[test]
+    fn crop_chrome_bounds_long_metadata_and_keeps_canvas_and_actions_reachable() {
+        let ctx = egui::Context::default();
+        let source = RgbaImage::from_fn(64, 48, |x, y| {
+            image::Rgba([x as u8, y as u8, (x + y) as u8, 255])
+        });
+        let mut state = ImageCropEditorState::from_image(source).unwrap();
+        let selection = rect(4, 6, 29, 21);
+        state.set_selection(selection).unwrap();
+        let source_bytes = state.source_image().unwrap().as_raw().clone();
+        let source_label = "Source: C:\\Users\\Jay\\Pictures\\Launch captures\\2026\\October\\The very long original image filename with a detailed subject and full-resolution dimensions.png".to_owned();
+        let collision_message = "Destination already exists: C:\\Users\\Jay\\Pictures\\Launch captures\\2026\\October\\Exports\\The detailed crop of the original high-resolution image already exists and must be replaced or saved under another name.png".to_owned();
+        let persistence_message = "Could not save C:\\Users\\Jay\\Pictures\\Launch captures\\2026\\October\\Exports\\The detailed crop of the original high-resolution image because the destination is read-only. The current source image and crop selection remain unchanged.".to_owned();
+        let mut options = CropEditorUiOptions::new("Crop image", "crop_chrome_contract");
+        options.source_label = Some(source_label.clone());
+        options.collision_message = Some(collision_message.clone());
+        options.persistence_message = Some(persistence_message.clone());
+        options.allow_overwrite = true;
+        let mut filename = "detailed-crop".to_owned();
+        let initial_size = egui::vec2(852.0, 460.0);
+        let mut initial_layout = None;
+        let mut initial_text = Vec::new();
+        let mut initial_action = None;
+        for _ in 0..3 {
+            let (output, action) =
+                render_crop_frame(&ctx, &mut state, &options, &mut filename, initial_size);
+            initial_layout = state.test_chrome;
+            initial_text = initial_layout
+                .and_then(|layout| layout.metadata.map(|(_, rect, _, _)| rect))
+                .map(|rect| visible_text_shapes(&output, rect))
+                .unwrap_or_default();
+            initial_action = action;
+            output.drop_without_applying_deltas();
+        }
+
+        let initial_layout = initial_layout.expect("settled crop frame captures its responses");
+        let source_rect = initial_layout
+            .source_label
+            .map(|(_, rect)| rect)
+            .expect("source response is captured");
+        let collision_rect = initial_layout
+            .collision_label
+            .map(|(_, rect)| rect)
+            .expect("collision response is captured");
+        let (collision_top, collision_top_text, collision_action) = settle_metadata_target(
+            &ctx,
+            &mut state,
+            &options,
+            &mut filename,
+            initial_size,
+            initial_layout,
+            collision_rect,
+            false,
+        )
+        .expect("native scroll state and collision response are available");
+        let collision_bottom_rect = collision_top
+            .collision_label
+            .map(|(_, rect)| rect)
+            .expect("collision response remains captured after scrolling");
+        let (collision_bottom, collision_bottom_text, collision_bottom_action) =
+            settle_metadata_target(
+                &ctx,
+                &mut state,
+                &options,
+                &mut filename,
+                initial_size,
+                collision_top,
+                collision_bottom_rect,
+                true,
+            )
+            .expect("collision can be scrolled to its lower lines");
+        let persistence_rect = collision_bottom
+            .persistence_label
+            .map(|(_, rect)| rect)
+            .expect("persistence response remains captured after scrolling");
+        let (persistence_top, persistence_top_text, persistence_action) = settle_metadata_target(
+            &ctx,
+            &mut state,
+            &options,
+            &mut filename,
+            initial_size,
+            collision_bottom,
+            persistence_rect,
+            false,
+        )
+        .expect("persistence response can be scrolled into view");
+        let persistence_bottom_rect = persistence_top
+            .persistence_label
+            .map(|(_, rect)| rect)
+            .expect("persistence response remains captured after scrolling");
+        let (persistence_bottom, persistence_bottom_text, persistence_bottom_action) =
+            settle_metadata_target(
+                &ctx,
+                &mut state,
+                &options,
+                &mut filename,
+                initial_size,
+                persistence_top,
+                persistence_bottom_rect,
+                true,
+            )
+            .expect("persistence text can be scrolled through to its final lines");
+
+        let window_rect = persistence_bottom
+            .window_rect
+            .expect("crop window response is captured");
+        let (metadata_id, metadata_rect, content_size, scroll_offset) = persistence_bottom
+            .metadata
+            .expect("metadata ScrollArea exposes its native state and viewport");
+        let (_, initial_metadata_rect, _, _) = initial_layout
+            .metadata
+            .expect("initial crop frame exposes its metadata viewport");
+        let max_scroll_offset = (content_size.y - metadata_rect.height()).max(0.0);
+        let save_as_rect = persistence_bottom.save_as_button.1;
+        let overwrite_rect = persistence_bottom
+            .overwrite_button
+            .map(|(_, rect, _)| rect)
+            .expect("overwrite response is present for existing sources");
+        let label_bounds = |texts: &[(String, egui::Rect, egui::Rect)], expected: &str| {
+            texts
+                .iter()
+                .find(|(text, text_rect, clip_rect)| {
+                    text == expected
+                        && metadata_rect.intersects(*text_rect)
+                        && clip_rect.intersects(*text_rect)
+                })
+                .map(|(_, text_rect, _)| *text_rect)
+        };
+        let initial_source_bounds = label_bounds(&initial_text, &source_label);
+        let collision_top_bounds = label_bounds(&collision_top_text, &collision_message);
+        let collision_bottom_bounds = label_bounds(&collision_bottom_text, &collision_message);
+        let persistence_top_bounds = label_bounds(&persistence_top_text, &persistence_message);
+        let persistence_bottom_bounds =
+            label_bounds(&persistence_bottom_text, &persistence_message);
+
+        assert!(
+            initial_source_bounds.is_some_and(|rect| initial_metadata_rect.intersects(rect)),
+            "full source text is emitted inside the bounded body"
+        );
+        assert!(
+            collision_top_bounds.is_some_and(|rect| rect.top() >= metadata_rect.top() - 1.0),
+            "collision text can be reached from its first lines"
+        );
+        assert!(
+            collision_bottom_bounds
+                .is_some_and(|rect| rect.bottom() <= metadata_rect.bottom() + 1.0),
+            "collision text can be reached through its final lines"
+        );
+        assert!(
+            persistence_top_bounds.is_some_and(|rect| rect.top() >= metadata_rect.top() - 1.0),
+            "persistence text can be reached from its first lines"
+        );
+        assert!(
+            persistence_bottom_bounds
+                .is_some_and(|rect| rect.bottom() <= metadata_rect.bottom() + 1.0),
+            "persistence text can be reached through its final lines"
+        );
+        let workspace_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, initial_size);
+        assert!(workspace_rect.contains_rect(window_rect));
+        assert!(window_rect.contains_rect(metadata_rect));
+        assert!(window_rect.contains_rect(persistence_bottom.viewport));
+        assert!(window_rect.contains_rect(save_as_rect));
+        assert!(window_rect.contains_rect(overwrite_rect));
+        assert!(window_rect.contains_rect(persistence_bottom.cancel_button.1));
+        assert!(window_rect.contains_rect(persistence_bottom.filename_label.unwrap().1));
+        let filename_edit_rect = persistence_bottom.filename_edit.unwrap().1;
+        assert!(window_rect.contains_rect(filename_edit_rect));
+        assert!(filename_edit_rect.bottom() <= metadata_rect.top());
+        assert!(metadata_rect.bottom() <= persistence_bottom.viewport.top());
+        assert!(persistence_bottom.viewport.bottom() <= persistence_bottom.reset_button.1.top());
+        assert!(persistence_bottom.viewport.width() >= MIN_VIEWPORT_SIZE.x);
+        assert!(persistence_bottom.viewport.height() >= MIN_VIEWPORT_SIZE.y * 0.75);
+        assert!(persistence_bottom.footer_reserved_height > 0.0);
+        assert!(
+            window_rect.bottom() - persistence_bottom.viewport.bottom()
+                >= persistence_bottom.footer_reserved_height - 2.0
+        );
+        assert!(persistence_bottom.save_as_button.2);
+        assert!(persistence_bottom.overwrite_button.unwrap().2);
+        assert!(initial_layout.reset_button.0 != initial_layout.full_image_button.0);
+        assert!(initial_layout.save_as_button.0 != persistence_bottom.cancel_button.0);
+        assert!(
+            persistence_bottom.save_as_button.0 != persistence_bottom.overwrite_button.unwrap().0
+        );
+        assert!(
+            persistence_bottom.overwrite_button.unwrap().0 != persistence_bottom.cancel_button.0
+        );
+        assert!(scroll_offset.y >= -0.5 && scroll_offset.y <= max_scroll_offset + 0.5);
+        assert_eq!(
+            egui::scroll_area::State::load(&ctx, metadata_id).map(|scroll| scroll.offset.y),
+            Some(scroll_offset.y)
+        );
+        assert!(content_size.y > metadata_rect.height());
+        assert_eq!(initial_action, None);
+        assert_eq!(collision_action, None);
+        assert_eq!(collision_bottom_action, None);
+        assert_eq!(persistence_action, None);
+        assert_eq!(persistence_bottom_action, None);
+        assert_eq!(state.source_image().unwrap().as_raw(), &source_bytes);
+        assert_eq!(state.selection(), Some(selection));
+        assert_eq!(filename, "detailed-crop");
     }
 }
