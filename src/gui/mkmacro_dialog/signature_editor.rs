@@ -224,36 +224,44 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog, macro_id: u64)
     let before = dialog.draft.macros[index].signature.clone();
     let mut signature = before.clone();
     let mut structural = None;
-    egui::CollapsingHeader::new("Reusable Signature").default_open(false).show(ui, |ui| {
-        ui.small("Parameters are local inputs. Outputs are named values returned to callers. IDs remain stable when names or order change.");
-        ui.heading("Parameters");
-        for (index, parameter) in signature.parameters.iter_mut().enumerate() {
-            let edit = parameter_ui(ui, parameter, index);
-            if structural.is_none() {
-                structural = edit;
-            }
+    ui.small("Parameters are local inputs. Outputs are named values returned to callers. IDs remain stable when names or order change.");
+    ui.heading("Parameters");
+    for (index, parameter) in signature.parameters.iter_mut().enumerate() {
+        let edit = parameter_ui(ui, parameter, index);
+        if structural.is_none() {
+            structural = edit;
         }
-        if ui
-            .add(egui::Button::new("+ Add Parameter").wrap())
-            .clicked()
-        {
-            structural = Some(StructuralEdit::Add(DefinitionKind::Parameter));
+    }
+    if ui
+        .add(egui::Button::new("+ Add Parameter").wrap())
+        .clicked()
+    {
+        structural = Some(StructuralEdit::Add(DefinitionKind::Parameter));
+    }
+    ui.separator();
+    ui.heading("Outputs");
+    for (index, output) in signature.outputs.iter_mut().enumerate() {
+        let edit = output_ui(ui, output, index);
+        if structural.is_none() {
+            structural = edit;
         }
-        ui.separator();
-        ui.heading("Outputs");
-        for (index, output) in signature.outputs.iter_mut().enumerate() {
-            let edit = output_ui(ui, output, index);
-            if structural.is_none() {
-                structural = edit;
-            }
-        }
-        if ui.add(egui::Button::new("+ Add Output").wrap()).clicked() {
-            structural = Some(StructuralEdit::Add(DefinitionKind::Output));
-        }
-        for diagnostic in diagnostics.iter().filter(|d| d.macro_id == macro_id && d.step_id.is_none() && matches!(d.code, "invalid_signature_id" | "invalid_signature_name" | "duplicate_signature_name" | "invalid_parameter_default")) {
-            ui.colored_label(ui.visuals().error_fg_color, &diagnostic.message);
-        }
-    });
+    }
+    if ui.add(egui::Button::new("+ Add Output").wrap()).clicked() {
+        structural = Some(StructuralEdit::Add(DefinitionKind::Output));
+    }
+    for diagnostic in diagnostics.iter().filter(|d| {
+        d.macro_id == macro_id
+            && d.step_id.is_none()
+            && matches!(
+                d.code,
+                "invalid_signature_id"
+                    | "invalid_signature_name"
+                    | "duplicate_signature_name"
+                    | "invalid_parameter_default"
+            )
+    }) {
+        ui.colored_label(ui.visuals().error_fg_color, &diagnostic.message);
+    }
     let mut changed = false;
     if signature != before {
         dialog.draft.macros[index].signature = signature;

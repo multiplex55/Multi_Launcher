@@ -353,6 +353,9 @@ impl SettingsEditor {
             // latest settings snapshot supplied by the caller so an older
             // SettingsEditor cannot overwrite a concurrent Designer update.
             radial_designer: current.radial_designer.clone(),
+            // MkMacro view preferences are independent of this editor's
+            // draft and may have changed while the dialog was open.
+            mkmacro_properties: current.mkmacro_properties.clone(),
             radial_submenu_migration: current.radial_submenu_migration.clone(),
         }
     }
@@ -454,6 +457,23 @@ mod tests {
         let restored = editor.to_settings(&current);
 
         assert_eq!(restored.radial_designer, current.radial_designer);
+    }
+
+    #[test]
+    fn settings_editor_preserves_current_mkmacro_presentation_preferences() {
+        let opening = Settings::default();
+        let editor = SettingsEditor::from_settings(&opening);
+        let mut current = Settings::default();
+        current.mkmacro_properties.master_open = true;
+        current.mkmacro_properties.focus_steps = true;
+        current.mkmacro_properties.activation_open = false;
+
+        let restored = editor.to_settings(&current);
+
+        assert_eq!(
+            restored.mkmacro_properties, current.mkmacro_properties,
+            "a stale General Settings draft must preserve independent MkMacro view choices"
+        );
     }
 
     #[test]

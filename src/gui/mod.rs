@@ -2330,6 +2330,7 @@ impl LauncherApp {
                 launcher_actions: Arc::clone(&actions),
             },
         );
+        mkmacro_dialog.set_macro_properties_preferences(settings.mkmacro_properties.clone());
         let visual_capture_dependencies = production_visual_capture_dependencies(
             &mkmacro_dialog,
             Arc::clone(&plugins.internal_services().mkmacro_store),

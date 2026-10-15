@@ -1416,6 +1416,8 @@ mod tests {
         latest
             .plugin_settings
             .insert("unrelated".into(), serde_json::json!({"x": 2}));
+        latest.mkmacro_properties.master_open = true;
+        latest.mkmacro_properties.focus_steps = true;
         intent.apply(&mut latest);
 
         assert_eq!(latest.hotkey.as_deref(), Some("F7"));
@@ -1426,6 +1428,8 @@ mod tests {
             latest.plugin_settings["unrelated"],
             serde_json::json!({"x": 2})
         );
+        assert!(latest.mkmacro_properties.master_open);
+        assert!(latest.mkmacro_properties.focus_steps);
     }
 
     #[test]
@@ -1625,6 +1629,8 @@ mod tests {
         assert_eq!(application.settings().hotkey.as_deref(), Some("F8"));
         Settings::update(&path, |latest| {
             latest.theme.mode = crate::settings::ThemeMode::Dark;
+            latest.mkmacro_properties.master_open = true;
+            latest.mkmacro_properties.focus_steps = true;
             let mut screen_draw: crate::screen_draw::ScreenDrawSettings =
                 serde_json::from_value(latest.plugin_settings["screen_draw"].clone())?;
             screen_draw.emergency_hotkey =
@@ -1650,6 +1656,8 @@ mod tests {
             completion.settings.theme.mode,
             crate::settings::ThemeMode::Dark
         );
+        assert!(completion.settings.mkmacro_properties.master_open);
+        assert!(completion.settings.mkmacro_properties.focus_steps);
         assert!(
             completion
                 .warning
@@ -1667,6 +1675,8 @@ mod tests {
         let saved = Settings::load(&path).unwrap();
         assert_eq!(saved.hotkey.as_deref(), Some("F8"));
         assert_eq!(saved.theme.mode, crate::settings::ThemeMode::Dark);
+        assert!(saved.mkmacro_properties.master_open);
+        assert!(saved.mkmacro_properties.focus_steps);
         let saved_screen_draw: crate::screen_draw::ScreenDrawSettings =
             serde_json::from_value(saved.plugin_settings["screen_draw"].clone()).unwrap();
         assert_eq!(
@@ -1758,6 +1768,8 @@ mod tests {
         };
         Settings::update(&path, |latest| {
             latest.theme.mode = crate::settings::ThemeMode::Dark;
+            latest.mkmacro_properties.master_open = true;
+            latest.mkmacro_properties.focus_steps = true;
             Ok(())
         })
         .unwrap();
@@ -1773,6 +1785,8 @@ mod tests {
         let saved = Settings::load(&path).unwrap();
         assert_eq!(saved.hotkey, baseline.hotkey);
         assert_eq!(saved.theme.mode, crate::settings::ThemeMode::Dark);
+        assert!(saved.mkmacro_properties.master_open);
+        assert!(saved.mkmacro_properties.focus_steps);
     }
 
     #[test]

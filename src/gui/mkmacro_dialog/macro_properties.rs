@@ -1,5 +1,5 @@
 use super::MkMacroDialog;
-use super::key_capture::{apply_captured_hotkey, captured_chord, chord_hotkey, hotkey_name};
+use super::key_capture::{apply_captured_hotkey, captured_chord, hotkey_name};
 pub(crate) use super::window_matcher_editor::{MatcherEditorOutcome, matcher_ui};
 use super::window_picker::{MatcherDestination, MatcherEditRequest};
 use crate::gui::theme::widgets::{self, StatusTone};
@@ -75,70 +75,155 @@ fn edit_active_matcher(scope: &mut MkHotkeyScope, edit: impl FnOnce(&mut MkWindo
 }
 
 pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
-    widgets::labeled_form_row(ui, "Record Toggle", |ui| {
-        let label = hotkey_name(&d.draft.settings.record_toggle_hotkey);
-        let response = ui.button(if d.record_hotkey_capture {
-            "Press a key…"
-        } else {
-            &label
-        });
-        if response.clicked() {
-            d.record_hotkey_capture = true;
+    let before = d.mkmacro_properties_preferences.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.strong("Macro Properties");
+        ui.checkbox(
+            &mut d.mkmacro_properties_preferences.master_open,
+            "Show sections",
+        );
+        if ui.small_button("Expand All").clicked() {
+            d.mkmacro_properties_preferences.expand_all();
         }
-        response
+        if ui.small_button("Collapse All").clicked() {
+            d.mkmacro_properties_preferences.collapse_all();
+        }
+        ui.checkbox(
+            &mut d.mkmacro_properties_preferences.focus_steps,
+            "Focus Steps",
+        );
     });
-    if d.record_hotkey_capture {
-        if let Some(chord) = ui.input(captured_chord) {
-            d.record_hotkey_capture = false;
-            if let Some(hotkey) = chord_hotkey(chord) {
-                if crate::mkmacro::hotkeys::compile_hotkey(&hotkey).is_some()
-                    && d.draft.settings.record_toggle_hotkey != hotkey
-                {
-                    d.draft.settings.record_toggle_hotkey = hotkey;
-                    d.mark_dirty();
-                }
-            }
+
+    let focus_steps = d.mkmacro_properties_preferences.focus_steps;
+    let master_open = d.mkmacro_properties_preferences.master_open;
+    if focus_steps || !master_open {
+        show_compact_summary(ui, d);
+    } else {
+        if let Some(macro_id) = d.selected_macro_id {
+            d.mkmacro_properties_preferences.identity_open = property_group(
+                ui,
+                "identity",
+                "Identity",
+                d.mkmacro_properties_preferences.identity_open,
+                |ui| show_identity(ui, d),
+            );
+            d.mkmacro_properties_preferences.activation_open = property_group(
+                ui,
+                "activation",
+                "Activation",
+                d.mkmacro_properties_preferences.activation_open,
+                |ui| show_activation(ui, d),
+            );
+            d.mkmacro_properties_preferences.playback_open = property_group(
+                ui,
+                "playback",
+                "Playback",
+                d.mkmacro_properties_preferences.playback_open,
+                |ui| show_playback(ui, d),
+            );
+            d.mkmacro_properties_preferences.reusable_signature_open = property_group(
+                ui,
+                "reusable_signature",
+                "Reusable Signature",
+                d.mkmacro_properties_preferences.reusable_signature_open,
+                |ui| super::signature_editor::show(ui, d, macro_id),
+            );
+        } else {
+            widgets::secondary_help(ui, "Select a macro to edit its properties.");
         }
-    }
-    let conflicts = crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[]);
-    if has_recording_toggle_conflict(&conflicts) {
-        widgets::semantic_status(
+        d.mkmacro_properties_preferences.recording_open = property_group(
             ui,
-            StatusTone::Error,
-            "hotkey conflicts with an enabled macro",
-            None,
+            "recording",
+            "Recording",
+            d.mkmacro_properties_preferences.recording_open,
+            |ui| show_recording(ui, d),
         );
     }
-    ui.separator();
-    let capturing = d.hotkey_capture;
-    let mut changed = false;
-    let mut capture = None;
-    let mut clear = false;
-    let mut picker_original = None;
+
+    let activation_visible = !focus_steps
+        && master_open
+        && d.selected_macro_id.is_some()
+        && d.mkmacro_properties_preferences.activation_open;
+    let recording_visible =
+        !focus_steps && master_open && d.mkmacro_properties_preferences.recording_open;
+    if !activation_visible {
+        d.hotkey_capture = false;
+    }
+    if !recording_visible {
+        d.cancel_property_record_hotkey_capture();
+    }
+    if before != d.mkmacro_properties_preferences {
+        d.queue_macro_properties_preferences();
+    }
+}
+
+fn property_group(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    title: &str,
+    mut open: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    ui.push_id(("mkmacro_property_group", id), |ui| {
+        let arrow = if open { "▼" } else { "▶" };
+        if ui
+            .selectable_label(open, format!("{arrow} {title}"))
+            .clicked()
+        {
+            open = !open;
+        }
+        if open {
+            ui.indent(("mkmacro_property_body", id), body);
+        }
+    });
+    open
+}
+
+fn show_compact_summary(ui: &mut egui::Ui, d: &MkMacroDialog) {
+    if let Some(macro_) = d.selected_macro() {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(&macro_.name);
+            ui.label(if macro_.enabled {
+                "Enabled"
+            } else {
+                "Disabled"
+            });
+            if let Some(folder) = macro_
+                .folder_id
+                .and_then(|id| d.draft.folders.iter().find(|folder| folder.id == id))
+            {
+                ui.label(format!("Folder: {}", folder.name));
+            }
+            if let Some(hotkey) = &macro_.hotkey {
+                ui.label(format!("Hotkey: {}", hotkey_name(hotkey)));
+            }
+        });
+    } else {
+        widgets::secondary_help(ui, "No macro selected.");
+    }
+}
+
+fn show_identity(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     let folders = folder_choices(&d.draft.folders);
     let mut folder_change = None;
-    let Some(m) = d.selected_macro_mut() else {
-        widgets::secondary_help(ui, "Select a macro to edit its properties.");
+    let Some(macro_) = d.selected_macro_mut() else {
         return;
     };
-    let macro_id = m.id;
-    widgets::compact_section_heading(
-        ui,
-        "Macro Properties",
-        Some("Edit identity, hotkey, scope, and playback behavior."),
-    );
+    let macro_id = macro_.id;
+    let mut changed = false;
     changed |=
-        widgets::labeled_form_row(ui, "Name", |ui| ui.text_edit_singleline(&mut m.name)).changed();
+        widgets::labeled_form_row(ui, "Name", |ui| ui.text_edit_singleline(&mut macro_.name))
+            .changed();
     changed |= widgets::labeled_form_row(ui, "Description", |ui| {
         ui.add(
-            egui::TextEdit::multiline(&mut m.description)
+            egui::TextEdit::multiline(&mut macro_.description)
                 .desired_rows(2)
                 .hint_text("Description"),
         )
     })
     .changed();
-    changed |= ui.checkbox(&mut m.enabled, "Enabled").changed();
-    let (selected_folder, folder_label) = current_folder_choice(&folders, m.folder_id);
+    changed |= ui.checkbox(&mut macro_.enabled, "Enabled").changed();
+    let (selected_folder, folder_label) = current_folder_choice(&folders, macro_.folder_id);
     widgets::labeled_form_row(ui, "Folder", |ui| {
         egui::ComboBox::from_id_salt(("macro_properties_folder", macro_id))
             .selected_text(folder_label)
@@ -154,8 +239,26 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
             })
             .response
     });
+    if changed {
+        d.mark_dirty();
+    }
+    if let Some(folder_id) = folder_change {
+        d.move_macro_to_folder(macro_id, folder_id);
+    }
+}
+
+fn show_activation(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
+    let capturing = d.hotkey_capture;
+    let mut changed = false;
+    let mut capture = false;
+    let mut clear = false;
+    let mut picker_original = None;
+    let Some(macro_) = d.selected_macro_mut() else {
+        return;
+    };
+    let macro_id = macro_.id;
     widgets::labeled_form_row(ui, "Hotkey", |ui| {
-        let label = m
+        let label = macro_
             .hotkey
             .as_ref()
             .map(hotkey_name)
@@ -163,16 +266,16 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         ui.horizontal(|ui| {
             let response = ui.button(if capturing { "Press a key…" } else { &label });
             if response.clicked() {
-                capture = Some(true);
+                capture = true;
             }
-            if m.hotkey.is_some() && ui.small_button("Clear").clicked() {
+            if macro_.hotkey.is_some() && ui.small_button("Clear").clicked() {
                 clear = true;
             }
             response
         })
         .inner
     });
-    let mut scope_enabled = matches!(m.hotkey_scope, MkHotkeyScope::ActiveWindow(_));
+    let mut scope_enabled = matches!(macro_.hotkey_scope, MkHotkeyScope::ActiveWindow(_));
     if widgets::labeled_form_row(ui, "Hotkey scope", |ui| {
         ui.checkbox(
             &mut scope_enabled,
@@ -181,11 +284,11 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     })
     .changed()
     {
-        changed |= set_hotkey_scope_enabled(&mut m.hotkey_scope, scope_enabled);
+        changed |= set_hotkey_scope_enabled(&mut macro_.hotkey_scope, scope_enabled);
     }
-    if matches!(m.hotkey_scope, MkHotkeyScope::ActiveWindow(_)) {
+    if matches!(macro_.hotkey_scope, MkHotkeyScope::ActiveWindow(_)) {
         let mut matcher_ui_changed = false;
-        changed |= edit_active_matcher(&mut m.hotkey_scope, |matcher| {
+        changed |= edit_active_matcher(&mut macro_.hotkey_scope, |matcher| {
             let outcome = matcher_ui(ui, matcher);
             matcher_ui_changed |= outcome.changed;
             if outcome.pick_window {
@@ -194,60 +297,28 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
         });
         changed |= matcher_ui_changed;
     }
-    egui::CollapsingHeader::new("Playback Settings").show(ui, |ui| {
-        changed |= ui
-            .add(egui::Slider::new(&mut m.playback.speed_percent, 1..=1000).text("Speed %"))
-            .changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut m.playback.random_delay_ms)
-                    .range(0..=60_000)
-                    .suffix(" ms random delay"),
-            )
-            .changed();
-        changed |= ui
-            .add(
-                egui::DragValue::new(&mut m.playback.random_offset_px)
-                    .range(0..=10_000)
-                    .suffix(" px random offset"),
-            )
-            .changed();
-    });
-    let _ = m;
-    super::signature_editor::show(ui, d, macro_id);
-    let m = d
-        .draft
-        .macros
-        .iter_mut()
-        .find(|m| m.id == macro_id)
-        .expect("selected macro remains present while rendering properties");
     if clear {
-        changed |= clear_hotkey(&mut m.hotkey);
+        changed |= clear_hotkey(&mut macro_.hotkey);
     }
-    let _ = m;
-    if let Some(folder_id) = folder_change {
-        d.move_macro_to_folder(macro_id, folder_id);
-    }
+    let _ = macro_;
     if let Some(original) = picker_original {
         d.window_picker.open(MatcherEditRequest {
             destination: MatcherDestination::MacroHotkey { macro_id },
             original,
         });
     }
-    if capture == Some(true) {
+    if capture {
         d.hotkey_capture = true;
     }
-    if capturing {
-        if let Some(result) = ui.input(captured_chord) {
-            d.hotkey_capture = false;
-            if let Some(m) = d.selected_macro_mut() {
-                changed |= apply_captured_hotkey(&mut m.hotkey, result);
-            }
+    if capturing && let Some(result) = ui.input(captured_chord) {
+        d.hotkey_capture = false;
+        if let Some(macro_) = d.selected_macro_mut() {
+            changed |= apply_captured_hotkey(&mut macro_.hotkey, result);
         }
     }
     for diagnostic in crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[])
         .into_iter()
-        .filter(|x| Some(x.macro_id) == d.selected_macro_id)
+        .filter(|diagnostic| Some(diagnostic.macro_id) == d.selected_macro_id)
     {
         widgets::semantic_status(
             ui,
@@ -261,10 +332,297 @@ pub(super) fn show(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
     }
 }
 
+fn show_playback(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
+    let Some(macro_) = d.selected_macro_mut() else {
+        return;
+    };
+    let mut changed = ui
+        .add(egui::Slider::new(&mut macro_.playback.speed_percent, 1..=1000).text("Speed %"))
+        .changed();
+    changed |= ui
+        .add(
+            egui::DragValue::new(&mut macro_.playback.random_delay_ms)
+                .range(0..=60_000)
+                .suffix(" ms random delay"),
+        )
+        .changed();
+    changed |= ui
+        .add(
+            egui::DragValue::new(&mut macro_.playback.random_offset_px)
+                .range(0..=10_000)
+                .suffix(" px random offset"),
+        )
+        .changed();
+    if changed {
+        d.mark_dirty();
+    }
+}
+
+fn show_recording(ui: &mut egui::Ui, d: &mut MkMacroDialog) {
+    widgets::labeled_form_row(ui, "Record Toggle", |ui| {
+        let label = hotkey_name(&d.draft.settings.record_toggle_hotkey);
+        let response = ui.button(if d.record_hotkey_capture {
+            "Press a key…"
+        } else {
+            &label
+        });
+        if response.clicked() {
+            d.start_property_record_hotkey_capture();
+        }
+        response
+    });
+    let conflicts = crate::mkmacro::hotkeys::validate_hotkeys(&d.draft, &[]);
+    if has_recording_toggle_conflict(&conflicts) {
+        widgets::semantic_status(
+            ui,
+            StatusTone::Error,
+            "hotkey conflicts with an enabled macro",
+            None,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::mkmacro::{MkHotkey, MkKey};
+
+    fn test_dialog() -> (tempfile::TempDir, MkMacroDialog) {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(directory.path()).unwrap();
+        (directory, MkMacroDialog::new(std::sync::Arc::new(store)))
+    }
+
+    fn input(screen_rect: egui::Rect, events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(screen_rect),
+            focused: true,
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn render_properties(
+        context: &egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen_rect: egui::Rect,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        context.run_ui(input(screen_rect, events), |context| {
+            egui::CentralPanel::default().show(context, |ui| show(ui, dialog));
+        })
+    }
+
+    fn render_contents(
+        context: &egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen_rect: egui::Rect,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        context.run_ui(input(screen_rect, events), |context| {
+            egui::CentralPanel::default().show(context, |ui| dialog.show_contents(ui));
+        })
+    }
+
+    fn accessible_bounds(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()?
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                if node.label() != Some(label) {
+                    return None;
+                }
+                let bounds = node.bounds()?;
+                Some(egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                ))
+            })
+    }
+
+    fn click(
+        context: &egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen_rect: egui::Rect,
+        point: egui::Pos2,
+    ) {
+        let pressed = render_properties(
+            context,
+            dialog,
+            screen_rect,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        pressed.drop_without_applying_deltas();
+        let released = render_properties(
+            context,
+            dialog,
+            screen_rect,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        released.drop_without_applying_deltas();
+    }
+
+    fn click_contents(
+        context: &egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen_rect: egui::Rect,
+        point: egui::Pos2,
+    ) {
+        let pressed = render_contents(
+            context,
+            dialog,
+            screen_rect,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ],
+        );
+        pressed.drop_without_applying_deltas();
+        let released = render_contents(
+            context,
+            dialog,
+            screen_rect,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+        );
+        released.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn property_controls_persist_presentation_without_mutating_macro_or_capture_controls() {
+        let (_directory, mut dialog) = test_dialog();
+        dialog.create_macro();
+        dialog.dirty = false;
+        let before_draft = dialog.draft.clone();
+        let before_revision = dialog.draft_revision();
+        let before_selected = dialog.selected_macro_id;
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 560.0));
+
+        let initial = render_properties(&context, &mut dialog, screen_rect, Vec::new());
+        let expand_bounds = accessible_bounds(&initial, "Expand All")
+            .expect("Expand All is available while properties are collapsed");
+        initial.drop_without_applying_deltas();
+        click(&context, &mut dialog, screen_rect, expand_bounds.center());
+        assert!(dialog.mkmacro_properties_preferences.master_open);
+        assert!(dialog.mkmacro_properties_preferences.playback_open);
+        assert!(
+            dialog
+                .mkmacro_properties_preferences
+                .reusable_signature_open
+        );
+
+        let expanded = render_properties(&context, &mut dialog, screen_rect, Vec::new());
+        let playback_bounds = accessible_bounds(&expanded, "▼ Playback")
+            .expect("the expanded Playback group can be collapsed independently");
+        expanded.drop_without_applying_deltas();
+        click(&context, &mut dialog, screen_rect, playback_bounds.center());
+        assert!(!dialog.mkmacro_properties_preferences.playback_open);
+
+        dialog.hotkey_capture = true;
+        dialog.start_property_record_hotkey_capture();
+        dialog.pause_record_hotkey_capture = true;
+        dialog.marker_record_hotkey_capture = true;
+        let expanded = render_properties(&context, &mut dialog, screen_rect, Vec::new());
+        let focus_bounds = accessible_bounds(&expanded, "Focus Steps")
+            .expect("Focus Steps remains available after expanding properties");
+        expanded.drop_without_applying_deltas();
+        click(&context, &mut dialog, screen_rect, focus_bounds.center());
+
+        assert!(dialog.mkmacro_properties_preferences.focus_steps);
+        assert!(dialog.mkmacro_properties_preferences.master_open);
+        assert!(dialog.mkmacro_properties_preferences.activation_open);
+        assert!(!dialog.hotkey_capture);
+        assert!(!dialog.record_hotkey_capture);
+        assert!(dialog.pause_record_hotkey_capture);
+        assert!(dialog.marker_record_hotkey_capture);
+        let focused = render_properties(&context, &mut dialog, screen_rect, Vec::new());
+        let focus_bounds = accessible_bounds(&focused, "Focus Steps")
+            .expect("Focus Steps can be turned off again");
+        focused.drop_without_applying_deltas();
+        click(&context, &mut dialog, screen_rect, focus_bounds.center());
+
+        assert!(!dialog.mkmacro_properties_preferences.focus_steps);
+        assert!(dialog.mkmacro_properties_preferences.master_open);
+        assert!(!dialog.mkmacro_properties_preferences.playback_open);
+        let restored_groups = render_properties(&context, &mut dialog, screen_rect, Vec::new());
+        assert!(accessible_bounds(&restored_groups, "▶ Playback").is_some());
+        restored_groups.drop_without_applying_deltas();
+        assert_eq!(dialog.draft, before_draft);
+        assert_eq!(dialog.draft_revision(), before_revision);
+        assert_eq!(dialog.selected_macro_id, before_selected);
+        assert!(!dialog.dirty);
+        assert_eq!(
+            dialog.take_macro_properties_preferences_for_persist(),
+            Some(dialog.mkmacro_properties_preferences.clone())
+        );
+        assert_eq!(dialog.take_macro_properties_preferences_for_persist(), None);
+    }
+
+    #[test]
+    fn recording_toggle_remains_available_without_a_selected_macro() {
+        let (_directory, mut dialog) = test_dialog();
+        dialog.mkmacro_properties_preferences.master_open = true;
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 560.0));
+        let record_label = hotkey_name(&dialog.draft.settings.record_toggle_hotkey);
+
+        let output = render_contents(&context, &mut dialog, screen_rect, Vec::new());
+        let record_bounds = accessible_bounds(&output, &record_label)
+            .expect("the document-wide Record Toggle is shown without a selected macro");
+        output.drop_without_applying_deltas();
+        click_contents(&context, &mut dialog, screen_rect, record_bounds.center());
+
+        let captured = render_contents(
+            &context,
+            &mut dialog,
+            screen_rect,
+            vec![egui::Event::Key {
+                key: egui::Key::F8,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        captured.drop_without_applying_deltas();
+
+        assert!(dialog.selected_macro_id.is_none());
+        assert!(!dialog.record_hotkey_capture);
+        assert_eq!(
+            hotkey_name(&dialog.draft.settings.record_toggle_hotkey),
+            "F8"
+        );
+        assert!(dialog.dirty);
+        assert_eq!(dialog.draft_revision(), 1);
+    }
 
     #[test]
     fn folder_choices_start_with_unfiled_and_preserve_document_order() {

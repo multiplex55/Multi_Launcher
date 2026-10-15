@@ -562,10 +562,18 @@ fn show_recording_annotation(ctx: &eframe::egui::Context, dialog: &mut MkMacroDi
 }
 
 fn process_recorder_hotkey_capture(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
-    let pause = if dialog.pause_record_hotkey_capture {
-        true
+    #[derive(Clone, Copy)]
+    enum CaptureTarget {
+        Toggle,
+        Pause,
+        Marker,
+    }
+    let target = if dialog.pause_record_hotkey_capture {
+        CaptureTarget::Pause
     } else if dialog.marker_record_hotkey_capture {
-        false
+        CaptureTarget::Marker
+    } else if dialog.record_hotkey_capture {
+        CaptureTarget::Toggle
     } else {
         return;
     };
@@ -579,19 +587,33 @@ fn process_recorder_hotkey_capture(ctx: &eframe::egui::Context, dialog: &mut MkM
             .events
             .retain(|event| !matches!(event, eframe::egui::Event::Key { pressed: true, .. }));
     });
-    dialog.pause_record_hotkey_capture = false;
-    dialog.marker_record_hotkey_capture = false;
-    let Some(hotkey) = super::key_capture::chord_hotkey(chord) else {
-        return;
-    };
-    let slot = if pause {
-        &mut dialog.draft.settings.recorder.pause_resume_hotkey
-    } else {
-        &mut dialog.draft.settings.recorder.marker_hotkey
-    };
-    if slot.as_ref() != Some(&hotkey) {
-        *slot = Some(hotkey);
-        dialog.mark_dirty();
+    match target {
+        CaptureTarget::Toggle => {
+            dialog.cancel_record_hotkey_capture();
+            if let Some(hotkey) = super::key_capture::chord_hotkey(chord)
+                && crate::mkmacro::hotkeys::compile_hotkey(&hotkey).is_some()
+                && dialog.draft.settings.record_toggle_hotkey != hotkey
+            {
+                dialog.draft.settings.record_toggle_hotkey = hotkey;
+                dialog.mark_dirty();
+            }
+        }
+        CaptureTarget::Pause | CaptureTarget::Marker => {
+            dialog.pause_record_hotkey_capture = false;
+            dialog.marker_record_hotkey_capture = false;
+            let Some(hotkey) = super::key_capture::chord_hotkey(chord) else {
+                return;
+            };
+            let slot = if matches!(target, CaptureTarget::Pause) {
+                &mut dialog.draft.settings.recorder.pause_resume_hotkey
+            } else {
+                &mut dialog.draft.settings.recorder.marker_hotkey
+            };
+            if slot.as_ref() != Some(&hotkey) {
+                *slot = Some(hotkey);
+                dialog.mark_dirty();
+            }
+        }
     }
 }
 
@@ -802,13 +824,13 @@ fn show_record_options(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog, ac
         options.clamp();
     }
     if capture_toggle {
-        dialog.record_hotkey_capture = true;
-        dialog.pause_record_hotkey_capture = false;
-        dialog.marker_record_hotkey_capture = false;
+        dialog.start_toolbar_record_hotkey_capture();
     } else if capture_pause {
+        dialog.cancel_record_hotkey_capture();
         dialog.pause_record_hotkey_capture = true;
         dialog.marker_record_hotkey_capture = false;
     } else if capture_marker {
+        dialog.cancel_record_hotkey_capture();
         dialog.marker_record_hotkey_capture = true;
         dialog.pause_record_hotkey_capture = false;
     }
@@ -828,6 +850,51 @@ fn show_record_options(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog, ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_record_toggle_capture_finishes_when_properties_are_hidden() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, _) = crate::mkmacro::MkMacroStore::open(directory.path()).unwrap();
+        let mut dialog = super::super::MkMacroDialog::new(std::sync::Arc::new(store));
+        dialog.mkmacro_properties_preferences.focus_steps = true;
+        dialog.start_toolbar_record_hotkey_capture();
+        let context = eframe::egui::Context::default();
+        let screen_rect = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::vec2(640.0, 480.0),
+        );
+
+        let output = context.run_ui(
+            eframe::egui::RawInput {
+                screen_rect: Some(screen_rect),
+                focused: true,
+                events: vec![eframe::egui::Event::Key {
+                    key: eframe::egui::Key::F8,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |context| {
+                eframe::egui::CentralPanel::default().show(context, |ui| {
+                    show(ui, &mut dialog);
+                    super::super::macro_properties::show(ui, &mut dialog);
+                });
+            },
+        );
+        output.drop_without_applying_deltas();
+
+        assert!(!dialog.record_hotkey_capture);
+        assert_eq!(
+            super::super::key_capture::hotkey_name(&dialog.draft.settings.record_toggle_hotkey),
+            "F8"
+        );
+        assert!(dialog.dirty);
+        assert_eq!(dialog.draft_revision(), 1);
+        assert!(dialog.mkmacro_properties_preferences.focus_steps);
+    }
 
     #[test]
     fn repeated_click_slider_uses_the_domain_range() {

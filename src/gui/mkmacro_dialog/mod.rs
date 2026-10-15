@@ -170,6 +170,14 @@ pub struct MkMacroAuthoringContext {
     pub launcher_actions: Arc<Vec<crate::actions::Action>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RecordHotkeyCaptureOwner {
+    #[default]
+    None,
+    Properties,
+    Toolbar,
+}
+
 pub struct MkMacroDialog {
     pub open: bool,
     pub store: Arc<MkMacroStore>,
@@ -203,6 +211,7 @@ pub struct MkMacroDialog {
     pub pending_unwrap_selection: Option<Selection>,
     pub hotkey_capture: bool,
     pub record_hotkey_capture: bool,
+    record_hotkey_capture_owner: RecordHotkeyCaptureOwner,
     pub pause_record_hotkey_capture: bool,
     pub marker_record_hotkey_capture: bool,
     pub action_catalog_visible: bool,
@@ -242,6 +251,9 @@ pub struct MkMacroDialog {
     pub runtime_inspector_is_current_debug_run: bool,
     runtime_inspector_observed_run: Option<(crate::mkmacro::RuntimeRunMode, u64)>,
     runtime_inspector_active_breakpoint: Option<crate::mkmacro::BreakpointOccurrence>,
+    /// Settings-owned presentation state, separate from the macro draft.
+    pub(crate) mkmacro_properties_preferences: crate::settings::MkMacroPropertiesPreferences,
+    pending_mkmacro_properties_preferences: Option<crate::settings::MkMacroPropertiesPreferences>,
     package_ui: package_ui::PackageUiState,
 }
 
@@ -406,6 +418,34 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
 
+        dialog.mkmacro_properties_preferences.master_open = true;
+        let mut expanded_previous: Option<egui::Rect> = None;
+        let mut expanded_viewport = None;
+        for _ in 0..4 {
+            let mut viewport = None;
+            let mut window_open = dialog.open;
+            let output = ctx.run_ui(input(), |ctx| {
+                dialog.sync_external();
+                viewport = dialog.show_main_window(ctx, &mut window_open);
+            });
+            dialog.open = window_open;
+            if let (Some(previous), Some(current)) = (expanded_previous, viewport) {
+                let stable = (previous.min.x - current.min.x).abs() < 0.5
+                    && (previous.min.y - current.min.y).abs() < 0.5
+                    && (previous.max.x - current.max.x).abs() < 0.5
+                    && (previous.max.y - current.max.y).abs() < 0.5;
+                if stable {
+                    expanded_viewport = Some(current);
+                }
+            }
+            expanded_previous = viewport;
+            output.drop_without_applying_deltas();
+        }
+        let expanded_height = expanded_viewport
+            .expect("expanded property layout settles")
+            .height();
+        dialog.mkmacro_properties_preferences.master_open = false;
+
         let mut previous_viewport: Option<egui::Rect> = None;
         let mut previous_actions_visible = None;
         let mut settled_viewport = None;
@@ -468,6 +508,11 @@ mod tests {
             "the step table keeps a positive minimum viewport: {step_viewport:?}"
         );
         assert!(
+            step_viewport.height() > expanded_height + 20.0,
+            "collapsing properties gives the step table more room ({expanded_height:.1} -> {:.1})",
+            step_viewport.height()
+        );
+        assert!(
             settled_actions_visible.into_iter().all(|visible| visible),
             "Save, Run, Record, and Stop remain inside the minimum-size window"
         );
@@ -505,6 +550,37 @@ mod tests {
             crate::mkmacro::runtime::record_stop_pending(),
             before_stop_pending
         );
+        assert_eq!(dialog.take_macro_properties_preferences_for_persist(), None);
+    }
+
+    #[test]
+    fn macro_property_preferences_survive_selection_sync_and_close() {
+        let (_directory, mut dialog) = dialog();
+        dialog.create_macro();
+        let mut preferences = crate::settings::MkMacroPropertiesPreferences::default();
+        preferences.expand_all();
+        preferences.focus_steps = true;
+        preferences.recording_open = false;
+        dialog.set_macro_properties_preferences(preferences.clone());
+        let revision = dialog.draft_revision();
+
+        dialog.hotkey_capture = true;
+        dialog.start_property_record_hotkey_capture();
+        dialog.pause_record_hotkey_capture = true;
+        dialog.marker_record_hotkey_capture = true;
+        dialog.set_selected_macro(None);
+        assert!(!dialog.hotkey_capture);
+        assert!(!dialog.record_hotkey_capture);
+        assert!(dialog.pause_record_hotkey_capture);
+        assert!(dialog.marker_record_hotkey_capture);
+        dialog.open();
+        dialog.sync_external();
+        dialog.close_children();
+        dialog.open();
+
+        assert_eq!(dialog.mkmacro_properties_preferences, preferences);
+        assert_eq!(dialog.draft_revision(), revision);
+        assert_eq!(dialog.take_macro_properties_preferences_for_persist(), None);
     }
 
     #[test]
@@ -4863,6 +4939,55 @@ fn build_recording_preview_document(
 }
 
 impl MkMacroDialog {
+    pub(super) fn start_property_record_hotkey_capture(&mut self) {
+        self.record_hotkey_capture = true;
+        self.record_hotkey_capture_owner = RecordHotkeyCaptureOwner::Properties;
+        self.pause_record_hotkey_capture = false;
+        self.marker_record_hotkey_capture = false;
+    }
+
+    pub(super) fn start_toolbar_record_hotkey_capture(&mut self) {
+        self.record_hotkey_capture = true;
+        self.record_hotkey_capture_owner = RecordHotkeyCaptureOwner::Toolbar;
+        self.pause_record_hotkey_capture = false;
+        self.marker_record_hotkey_capture = false;
+    }
+
+    pub(super) fn cancel_property_hotkey_captures(&mut self) {
+        self.hotkey_capture = false;
+        self.cancel_property_record_hotkey_capture();
+    }
+
+    pub(super) fn cancel_property_record_hotkey_capture(&mut self) {
+        if self.record_hotkey_capture_owner != RecordHotkeyCaptureOwner::Toolbar {
+            self.cancel_record_hotkey_capture();
+        }
+    }
+
+    pub(super) fn cancel_record_hotkey_capture(&mut self) {
+        self.record_hotkey_capture = false;
+        self.record_hotkey_capture_owner = RecordHotkeyCaptureOwner::None;
+    }
+
+    pub(crate) fn set_macro_properties_preferences(
+        &mut self,
+        preferences: crate::settings::MkMacroPropertiesPreferences,
+    ) {
+        self.mkmacro_properties_preferences = preferences;
+        self.pending_mkmacro_properties_preferences = None;
+    }
+
+    pub(super) fn queue_macro_properties_preferences(&mut self) {
+        self.pending_mkmacro_properties_preferences =
+            Some(self.mkmacro_properties_preferences.clone());
+    }
+
+    pub(crate) fn take_macro_properties_preferences_for_persist(
+        &mut self,
+    ) -> Option<crate::settings::MkMacroPropertiesPreferences> {
+        self.pending_mkmacro_properties_preferences.take()
+    }
+
     /// Returns an operation client for constructing dialog-scoped visual tools.
     pub fn visual_overlay_controller(&self) -> SharedVisualOverlayController {
         self.visual_overlay.clone()
@@ -4947,6 +5072,7 @@ impl MkMacroDialog {
             pending_unwrap_selection: None,
             hotkey_capture: false,
             record_hotkey_capture: false,
+            record_hotkey_capture_owner: RecordHotkeyCaptureOwner::None,
             pause_record_hotkey_capture: false,
             marker_record_hotkey_capture: false,
             action_catalog_visible: false,
@@ -4978,6 +5104,8 @@ impl MkMacroDialog {
             runtime_inspector_is_current_debug_run: false,
             runtime_inspector_observed_run: None,
             runtime_inspector_active_breakpoint: None,
+            mkmacro_properties_preferences: Default::default(),
+            pending_mkmacro_properties_preferences: None,
             package_ui: Default::default(),
         }
     }
@@ -5787,13 +5915,15 @@ impl MkMacroDialog {
         self.draft.macros.iter().find(|m| m.id == id)
     }
     pub fn set_selected_macro(&mut self, id: Option<u64>) {
-        if self.selected_macro_id != id {
+        let next_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
+        if self.selected_macro_id != next_id {
             self.selection.clear();
             self.editor_state.drag = None;
             self.editor_state.scroll_to = None;
             self.navigation.focus_table = false;
+            self.cancel_property_hotkey_captures();
         }
-        self.selected_macro_id = id.filter(|id| self.draft.macros.iter().any(|m| m.id == *id));
+        self.selected_macro_id = next_id;
         self.publish_recording_target();
     }
     pub(crate) fn recording_target(&self) -> Option<crate::mkmacro::RecordingTarget> {
@@ -6141,6 +6271,8 @@ impl MkMacroDialog {
         table_viewport
     }
     fn close_children(&mut self) {
+        self.hotkey_capture = false;
+        self.cancel_record_hotkey_capture();
         if self.recording_annotation_open {
             let _ = self.finish_recording_annotation(false);
         }
@@ -6175,6 +6307,13 @@ impl MkMacroDialog {
         toolbar::show(ui, self);
         let mut table_viewport = None;
         if self.draft.macros.is_empty() && self.draft.folders.is_empty() {
+            let properties_height = (ui.available_height() - 100.0).max(0.0);
+            eframe::egui::ScrollArea::vertical()
+                .id_salt("mkmacro_empty_macro_properties_scroll")
+                .auto_shrink([false, true])
+                .max_height(properties_height)
+                .show(ui, |ui| macro_properties::show(ui, self));
+            ui.separator();
             let body_size = ui.available_size();
             ui.allocate_ui_with_layout(
                 body_size,

@@ -9,11 +9,12 @@ Approved contract: `multi_launcher_ui_polish_codex_plan_20261015.md`.
 - Project: multi_launcher 0.1.0; rustc 1.99.0 (b940084d7), x86_64-pc-windows-msvc; Nextest 0.9.135.
 - Snapshot source observations confirmed: library hotkey no-op / binary restart channel split, six curated palettes, existing typography scale, unconditional branding.
 - No push, reset, rebase, or discard authorized.
+- User verification amendment (October 15): capture screenshots and record results autonomously for future milestones. Human screenshot review and manual verification are deferred until after the full goal is complete; do not stop for per-milestone user feedback. Record capture failures honestly and pursue available app diagnostics.
 
 | Milestone | State | Commit / evidence |
 |---|---|---|
 | UP-HK | complete | A `474e6377`, B1 `17ad560c`, B2 `4ff437eb`; targeted source gates and user-confirmed native acceptance passed |
-| UP-MK | pending | |
+| UP-MK | complete | Reviewed source, 32 targeted cases, lint/build/native checks and user-confirmed visual smoke passed |
 | UP-BR | pending | |
 | UP-PA | pending | |
 | UP-TX | pending | |
@@ -179,3 +180,48 @@ cargo nextest run -p multi_launcher --lib --bin multi_launcher --test settings_e
 
 - User explicitly confirmed: All of the hotkey related changes have worked, proceed. mark that as complete. This closes the remaining native threshold/off-on/Help/Quit acceptance gate. Prior direct user observations confirmed old/new live binding and shared tap/hold/release/visible-grid behavior; actual UI/disk evidence confirmed Save and safe unsupported-key rejection. No further hotkey native acceptance requested.
 - Source checkpoints474e6377/17ad560c/4ff437eb remain reviewed and verified (targeted43-caseunion and final3actualowner tests, check/build, scoped formatting, zero new/changed-line Clippy warnings; inherited debt documented). UP-HK complete. Full project goal remains active; UP-MK through UP-QA remain required.
+
+### UP-MK — complete
+
+Started after UP-HK acceptance commit `b831cc50`. Existing Implementer was the sole source writer; root owns Git and this ledger. Planner refreshed the handoff, and Reviewer accepted the final bounded source review. No later milestone source work has started.
+
+Implementation:
+- Settings owns serde-defaulted `mkmacro_properties` preferences, independent of macro documents, authoring revision/history and General Settings ownership. LauncherApp restores and persists meaningful changes with field-only atomic updates on the first UI pass.
+- Master folding, five property groups, Expand All/Collapse All, Focus Steps and a compact summary reclaim table space. Recording remains document-wide, including without a selected macro.
+- Review caught shared toolbar/property Record Toggle capture. The correction records its origin and uses one always-serviced toolbar processor. Hidden property captures cancel; toolbar capture survives folding/Focus Steps. Captured presses are consumed.
+- Tests cover defaults, stale Settings editor preservation, concurrent Save/rollback preservation, startup/selection/close lifecycle, actual view controls without document mutation, completed no-selection capture, toolbar capture, custom Focus Steps restoration and larger settled table viewport.
+
+Verification:
+- Preliminary 10-case run passed (10m37s compilation / 0.617s tests).
+- Expanded run `a9d3c0f3-0fde-4f5f-aea3-ad9247fb63fd`: 22 passed, one fixture failure, 5,370 skipped; 5m53s compilation. The fixture captured F9, already the default, while expecting a dirty revision. Production correctly treated that as unchanged. Only the test key/expected value changed to F8; dirty/revision assertions remained.
+- Corrected case `9dd8b084-2b1e-441d-87cd-3f52abe4c0c6`: 1/1 passed, 5,348 skipped, exit 0.
+- Authoring target `6f4a2dbe-69cb-4852-88f7-f3ba3726600b`: 9/9 passed, exit 0; 2m16s compilation / 0.092s tests. All 32 distinct targeted cases are covered by the 22 expanded passes, corrected case and nine authoring passes. No full Nextest suite ran.
+
+Exact targeted commands:
+```text
+cargo nextest run -p multi_launcher --lib --bin multi_launcher -E 'test(mkmacro_properties_preferences_default_compatibly_and_round_trip) | test(settings_editor_preserves_current_mkmacro_presentation_preferences) | test(launcher_initialization_restores_macro_property_preferences) | test(macro_property_preferences_survive_selection_sync_and_close) | test(property_controls_persist_presentation_without_mutating_macro_or_capture_controls) | test(recording_toggle_remains_available_without_a_selected_macro) | test(minimum_size_main_layout_keeps_toolbar_and_steps_reachable_without_mutation) | test(general_intent_changes_only_editor_owned_fields_and_plugin_keys) | test(acknowledged_apply_publication_merges_post_persistence_unrelated_writes) | test(confirmed_runtime_failure_rolls_back_owned_fields_and_keeps_concurrent_values) | test(toolbar_record_toggle_capture_finishes_when_properties_are_hidden) | test(rename_reorder_and_delete_preserve_ids_and_dangling_bindings) | test(table_uses_all_remaining_height) | test(row_count_cannot_affect_table_height) | test(folder_choices_start_with_unfiled_and_preserve_document_order) | test(folder_choice_resolves_existing_and_dangling_references) | test(hotkey_severity_maps_to_semantic_error_and_warning_tones) | test(recorder_summary_requires_a_recording_toggle_error) | test(enabling_scope_creates_a_default_matcher) | test(enabling_scope_again_preserves_existing_matcher) | test(disabling_scope_produces_any_window) | test(matcher_edits_report_a_document_change) | test(clear_removes_an_assigned_hotkey_and_reports_a_change)'
+cargo nextest run -p multi_launcher --lib -E 'test(recording_toggle_remains_available_without_a_selected_macro)'
+cargo nextest run -p multi_launcher --test mkmacro_authoring
+```
+
+- Parent final format check passed: `rustfmt --edition 2024 --check --config skip_children=true src/gui/mkmacro_dialog/mod.rs src/gui/mkmacro_dialog/macro_properties.rs src/gui/mkmacro_dialog/toolbar.rs src/gui/mkmacro_dialog/signature_editor.rs src/gui/mod.rs src/gui/render.rs src/settings/model.rs src/settings_editor/mapping.rs src/settings_save.rs`. Diff checks passed. Added-line scan found no new allow/debug/stub lines.
+- Clippy: `cargo clippy -p multi_launcher --lib --bin multi_launcher --tests --message-format=json`, exit 0, captured by PowerShell Out-File in `target/ui-polish-evidence/mk-clippy-20261015.jsonl`. The --tests flag compiled all test targets; no full test suite executed. Parent independently normalized Windows paths and intersected primary spans with all changed Rust hunks/new files: 1,089 warning diagnostics, 36 primary spans in touched files, zero changed-line/new-file hits. Remaining debt is inherited/repeated across targets. Future lint breadth should remain explicit and narrow.
+- `cargo build -p multi_launcher --bin multi_launcher` passed. Ordinary executable: 118,482,944 bytes, modified 2026-10-15T21:47:12Z. Source is frozen.
+- Generated default clipboard_modifiers.json was hash-backed up to ignored `target/ui-polish-evidence/mk-generated-clipboard-e8a60851b204.json` and only the matching root artifact removed after tests ended. SHA256: E8A60851B2043C2DC68EC51768BDB93F105949A938A762D0BEB93244A3A53C65. No user file discarded.
+
+Native evidence:
+- Isolated profile: `target/ui-polish-evidence/native-mk-20261015`, with two disabled sample macros and eight harmless rows each. Required mkmacro plugin enabled in this fixture only. Normal user settings/macros remain untouched.
+- Candidate executable SHA256: 877DAF8604DC2EDB207CDDC5BCD48F73AB7CF4E9806F2930E03302CE715EC0F7. Existing approved test executable path reused with the separate profile as working directory. Launch identity and nine source-file fingerprints are in the profile's launch.json.
+- Native accessibility/keyboard actions verified initial collapsed properties, Expand All revealing all five groups, a custom collapsed Identity group, Focus Steps hiding bodies with compact summary, exiting Focus Steps restoring custom choices, switching to sample B with choices intact and master collapsing with the correct B summary.
+- After a fresh application process (PID 17596, start 2026-10-15T21:58:46.9671271Z), reopening and selecting sample A restored the custom Identity-closed / other-four-open choices. Settings file independently confirms the expected flags.
+- Throughout view-only actions and restart, mkmacros.json retained SHA256 7946a6f4671b82ca9fbdcddb67146d130071c38104dde77ea9449a135108951d.
+- Graphics capture still fails FrameArrived timeout, then window capture timeout after fresh selection/activation/retry. Accessibility and keyboard controls work. Ctrl+W did not close the dialog; no close/reopen native pass is claimed from that shortcut. No unrelated shortcut change was made.
+- Pending user visual smoke: expand Identity, edit/save the sample name, resize smaller and confirm usable steps, then close/reopen and confirm property choices. Current candidate is prepared; root will not send input while the user performs this check.
+
+Next: finish native smoke, inspect final source/Git state, commit UP-MK, then delegate the prepared UP-BR milestone. UP-HK remains complete.
+
+- Parent final audit while user smoke pending: all nine source-file fingerprints match the tested native candidate; no obsolete independent Playback/Signature collapsing paths remain. Macro schema14, names and view-only file SHA256 remain unchanged. Git contains only intended source files and this ledger. No additional app input sent during the user check.
+
+- Blocked audit: final visual smoke remains unavailable across three consecutive goal turns. Latest revalidation checked the specific isolated candidate and sample macro file; no reported manual result has arrived. Capture recovery was exhausted with the documented graphics errors. Source and automated native gates remain passed; source files and this ledger are intentionally uncommitted pending acceptance. Goal blocked at this external observation gate; no UP-BR source work has started.
+
+- User explicitly confirmed UP-MK smoke/user test passed and the collapse/expand feature is successful. This closes the visual smoke gate. UP-MK complete; future human manual verification is deferred to after the full goal, per the user amendment above.

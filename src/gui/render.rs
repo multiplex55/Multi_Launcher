@@ -4042,6 +4042,22 @@ impl LauncherApp {
         self.mkmacro_dialog
             .set_coordinate_capture_active(self.coordinate_pick_blocks_other_screen_actions());
         self.mkmacro_dialog.ui(&ctx);
+        if first_ui_pass
+            && let Some(preferences) = self
+                .mkmacro_dialog
+                .take_macro_properties_preferences_for_persist()
+        {
+            let settings_path = self.settings_path.clone();
+            if let Err(error) = crate::settings::Settings::update(&settings_path, |settings| {
+                settings.mkmacro_properties = preferences;
+                Ok(())
+            }) {
+                self.report_ui_error(crate::gui::UiErrorEvent::new(
+                    "mkmacro.properties.preferences",
+                    error,
+                ));
+            }
+        }
         while first_ui_pass && let Some(notice) = self.mkmacro_dialog.take_ui_notice() {
             if self.enable_toasts {
                 push_toast(
@@ -5657,6 +5673,26 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn launcher_initialization_restores_macro_property_preferences() {
+        let context = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.mkmacro_properties.expand_all();
+        settings.mkmacro_properties.focus_steps = true;
+        settings.mkmacro_properties.recording_open = false;
+        let expected = settings.mkmacro_properties.clone();
+
+        let mut app = new_app_with_settings(&context, settings);
+
+        assert_eq!(app.mkmacro_dialog.mkmacro_properties_preferences, expected);
+        assert_eq!(
+            app.mkmacro_dialog
+                .take_macro_properties_preferences_for_persist(),
+            None,
+            "loading preferences does not schedule a redundant settings write"
+        );
     }
 
     #[test]

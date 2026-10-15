@@ -636,11 +636,66 @@ pub struct Settings {
     /// history and is intentionally tolerant of deleted entity IDs.
     #[serde(default)]
     pub radial_designer: RadialDesignerPreferences,
+    /// Local-only presentation state for the MkMacro editor's property pane.
+    /// It is deliberately separate from saved macro documents and authoring
+    /// history.
+    #[serde(default)]
+    pub mkmacro_properties: MkMacroPropertiesPreferences,
     /// Internal durable marker for the one-time radial submenu conversion.
     /// It deliberately lives outside the authorable RadialDocument so imports
     /// and authoring undo cannot erase migration recovery state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radial_submenu_migration: Option<SubmenuPresentationMigrationReceipt>,
+}
+
+/// Persistent, local presentation state for the MkMacro property pane.
+/// Focus Steps changes effective visibility without modifying the saved
+/// master or section expansion choices.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MkMacroPropertiesPreferences {
+    pub master_open: bool,
+    pub focus_steps: bool,
+    pub identity_open: bool,
+    pub activation_open: bool,
+    pub playback_open: bool,
+    pub recording_open: bool,
+    pub reusable_signature_open: bool,
+}
+
+impl MkMacroPropertiesPreferences {
+    pub fn expand_all(&mut self) {
+        self.master_open = true;
+        self.focus_steps = false;
+        self.identity_open = true;
+        self.activation_open = true;
+        self.playback_open = true;
+        self.recording_open = true;
+        self.reusable_signature_open = true;
+    }
+
+    pub fn collapse_all(&mut self) {
+        self.master_open = false;
+        self.identity_open = false;
+        self.activation_open = false;
+        self.playback_open = false;
+        self.recording_open = false;
+        self.reusable_signature_open = false;
+    }
+}
+
+impl Default for MkMacroPropertiesPreferences {
+    fn default() -> Self {
+        Self {
+            master_open: false,
+            focus_steps: false,
+            identity_open: true,
+            activation_open: true,
+            playback_open: false,
+            recording_open: true,
+            reusable_signature_open: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -927,6 +982,7 @@ impl Default for Settings {
             coordinate_tool: CoordinateToolPreferences::default(),
             radial: crate::radial::model::RadialFeatureSettings::default(),
             radial_designer: RadialDesignerPreferences::default(),
+            mkmacro_properties: MkMacroPropertiesPreferences::default(),
             radial_submenu_migration: None,
         }
     }
@@ -998,6 +1054,10 @@ mod tests {
         let parsed: Settings = serde_json::from_str("{}").expect("settings should deserialize");
         assert_eq!(parsed.note, NoteSettings::default());
         assert_eq!(parsed.coordinate_tool, CoordinateToolPreferences::default());
+        assert_eq!(
+            parsed.mkmacro_properties,
+            super::MkMacroPropertiesPreferences::default()
+        );
         let mut legacy_radial = RadialFeatureSettings::default();
         legacy_radial.default_submenu_presentation =
             crate::radial::model::SubmenuPresentation::Cascade;
@@ -1012,6 +1072,50 @@ mod tests {
             parsed.note.effective_default_view_mode(),
             NoteViewMode::Preview
         );
+    }
+
+    #[test]
+    fn mkmacro_properties_preferences_default_compatibly_and_round_trip() {
+        let defaults = super::MkMacroPropertiesPreferences::default();
+        assert!(!defaults.master_open);
+        assert!(!defaults.focus_steps);
+        assert!(!defaults.playback_open);
+        assert!(!defaults.reusable_signature_open);
+
+        let mut expanded = defaults.clone();
+        expanded.expand_all();
+        assert!(expanded.master_open);
+        assert!(!expanded.focus_steps);
+        assert!(expanded.identity_open);
+        assert!(expanded.activation_open);
+        assert!(expanded.playback_open);
+        assert!(expanded.recording_open);
+        assert!(expanded.reusable_signature_open);
+        expanded.focus_steps = true;
+        expanded.collapse_all();
+        assert!(!expanded.master_open);
+        assert!(expanded.focus_steps);
+        assert!(!expanded.identity_open);
+        assert!(!expanded.activation_open);
+        assert!(!expanded.playback_open);
+        assert!(!expanded.recording_open);
+        assert!(!expanded.reusable_signature_open);
+
+        let partial: super::MkMacroPropertiesPreferences =
+            serde_json::from_str(r#"{"master_open":true,"focus_steps":true}"#)
+                .expect("missing section choices use compatible defaults");
+        assert!(partial.master_open);
+        assert!(partial.focus_steps);
+        assert!(partial.identity_open);
+        assert!(!partial.playback_open);
+
+        let mut settings = Settings::default();
+        settings.mkmacro_properties = partial;
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.mkmacro_properties, settings.mkmacro_properties);
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.mkmacro_properties, defaults);
     }
 
     #[test]
