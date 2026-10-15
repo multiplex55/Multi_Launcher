@@ -12,7 +12,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/add_bookmark_dialog.rs` | M5-C4 | accepted responsive labeled forms/native footer; Unicode scroll/draft contract/review pass, initial Dark Tempfile/Light Bookmark images inspected; native input/create/open/close gaps explicit |
 | `src/gui/alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/bookmark_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
-| `src/gui/brightness_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/brightness_dialog.rs` | M5-C6 | source inspected coherent short native form accepted unchanged; lazy-load/native action owners retained; native visual/action gap |
 | `src/gui/calendar_event_details.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/calendar_event_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/calendar_popover.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -20,7 +20,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/clipboard_modify_dialog.rs` | M5-B2 | accepted semantic sections/status/footer/native constrained scrolling; scoped layout/state/persistence contracts and review pass; native visual/input coverage unobserved |
 | `src/gui/confirmation_modal.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/convert_panel.rs` | M5-C5 | inspected coherent existing native presentation accepted unchanged; session/clipboard/parser owners preserved, native interaction unobserved |
-| `src/gui/cpu_list_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/cpu_list_dialog.rs` | M5-C6 | accepted bounded labels/native footer, refresh/sort/count unchanged; scoped compilation/review pass, native visual gap and preexisting pinned count0 documented |
 | `src/gui/crop_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/dashboard_editor_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/data_recovery_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -57,7 +57,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/todo_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/todo_view_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/unused_assets_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/volume_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/volume_dialog.rs` | M5-C6 | accepted bounded snapshot rows/unique session IDs/pinned opening; four contracts/review pass, initial Light systemcontrols image inspected; native approws/actions/input/close unobserved |
 | `src/help_window.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/multi_manager/ui.rs` | M5-B4 | accepted shared main/settings chrome;9targeted contracts/review pass; Dark main/Light Settings initial framebuffers inspected, native input/scroll/close gaps explicit |
 | `src/settings_editor/render.rs` | M5-A | complete at94b4724d; section identity/collapse/footer and mapping tests, Dark852x460 rendered review |

@@ -3748,7 +3748,7 @@ impl LauncherApp {
                 }
             }
             Panel::ConvertPanel => self.convert_panel.open = true,
-            Panel::VolumeDialog => self.volume_dialog.open = true,
+            Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
             Panel::CpuListDialog => self.cpu_list_dialog.open = true,
             Panel::DataRecoveryDialog => {
@@ -5899,6 +5899,10 @@ mod tests {
 
         for panel in openable_panels {
             let mut app = new_app(&ctx);
+            if panel == Panel::VolumeDialog {
+                // An already-open synthetic snapshot keeps this fixture off audio hardware.
+                app.volume_dialog.open = true;
+            }
             app.ensure_open(panel);
             assert!(
                 app.any_panel_open(),
