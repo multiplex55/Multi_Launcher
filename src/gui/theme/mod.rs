@@ -689,7 +689,6 @@ fn apply_resolved_theme(style: &mut Style, resolved: ResolvedTheme) {
     style.spacing.item_spacing = egui::vec2(metrics.item_spacing_x, metrics.item_spacing_y);
     style.spacing.window_margin = egui::Margin::same(metrics.window_padding.round() as i8);
     style.spacing.menu_margin = egui::Margin::same(metrics.panel_padding.round() as i8);
-    style.spacing.scroll.content_margin = egui::Margin::same(metrics.panel_padding.round() as i8);
     style.spacing.button_padding = egui::vec2(metrics.button_padding_x, metrics.button_padding_y);
     style.spacing.interact_size.y = metrics.row_min_height;
     style.spacing.extra_text_line_spacing = (metrics.line_height - metrics.body_text_size).max(0.0);
@@ -1008,6 +1007,55 @@ mod tests {
             "the child viewport uses the single Context's committed style without a root pass"
         );
         assert_eq!(brand_texture_id(&ctx), Some(brand_id));
+    }
+
+    #[test]
+    fn theme_application_preserves_baseline_scroll_area_content_margin() {
+        let ctx = egui::Context::default();
+        let expected_margin = egui::Margin::same(13);
+        let mut dark_baseline = (*ctx.style_of(Theme::Dark)).clone();
+        dark_baseline.spacing.scroll.content_margin = expected_margin;
+        ctx.set_style_of(Theme::Dark, dark_baseline);
+
+        let mut settings = ThemeSettings {
+            mode: ThemeMode::Custom,
+            ..ThemeSettings::default()
+        };
+        initialize_runtime(&ctx, &settings);
+        assert_eq!(
+            ctx.style_of(Theme::Dark).spacing.scroll.content_margin,
+            expected_margin,
+            "theme runtime leaves scroll-area layout ownership with the captured egui baseline"
+        );
+
+        settings.custom_scheme.text = ThemeColor {
+            r: 91,
+            g: 143,
+            b: 197,
+            a: 255,
+        };
+        assert!(publish_committed(&ctx, &settings));
+        assert_eq!(
+            ctx.style_of(Theme::Dark).spacing.scroll.content_margin,
+            expected_margin,
+            "palette changes preserve the baseline scroll-area margin"
+        );
+
+        settings.preferences.density = ThemeDensity::Comfortable;
+        assert!(publish_committed(&ctx, &settings));
+        assert_eq!(
+            ctx.style_of(Theme::Dark).spacing.scroll.content_margin,
+            expected_margin,
+            "density changes preserve the baseline scroll-area margin"
+        );
+
+        settings.preferences.typography_scale = 1.25;
+        assert!(publish_committed(&ctx, &settings));
+        assert_eq!(
+            ctx.style_of(Theme::Dark).spacing.scroll.content_margin,
+            expected_margin,
+            "typography changes preserve the baseline scroll-area margin"
+        );
     }
 
     #[test]

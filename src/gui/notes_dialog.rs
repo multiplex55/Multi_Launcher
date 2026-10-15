@@ -1,4 +1,5 @@
 use crate::actions::Action;
+use crate::gui::theme::widgets::{self, ButtonEmphasis};
 use crate::gui::{ActivationSource, LauncherApp};
 use crate::plugins::note::{
     Note, append_note_content, delete_template, get_template, list_templates, note_backlink_count,
@@ -207,6 +208,30 @@ fn short_preview(content: &str) -> String {
         }
     }
     preview
+}
+
+fn edit_footer_button_height(ui: &egui::Ui) -> f32 {
+    let spacing = ui.spacing();
+    let style = ui.style();
+    let font_id = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .as_ref()
+                .map(|text_style| text_style.resolve(style))
+        })
+        .unwrap_or_else(|| egui::TextStyle::Body.resolve(style));
+    let text_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + spacing.extra_text_line_spacing;
+    let button_frame = style
+        .button_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Inactive,
+        )
+        .frame;
+    (text_height + button_frame.total_margin().sum().y).max(spacing.interact_size.y)
 }
 
 fn checkbox_count(content: &str) -> usize {
@@ -552,9 +577,8 @@ fn measure_notes_geometry(
         ctx.pixels_per_point(),
         style,
     );
-    let spacing_x = style.spacing.item_spacing.x;
     let spacing_y = style.spacing.item_spacing.y;
-    let header_wrap = style.wrap_mode.unwrap_or(egui::TextWrapMode::Extend);
+    let header_wrap = style.wrap_mode.unwrap_or(egui::TextWrapMode::Wrap);
     let preview_wrap = style.wrap_mode.unwrap_or(egui::TextWrapMode::Wrap);
     let mut prefix_width = viewport_width.max(0.0);
     let mut top = 0.0;
@@ -585,22 +609,16 @@ fn measure_notes_geometry(
             width_before,
             egui::Align::Center,
         );
-        let meta_width = (width_before - title_size.x - spacing_x).max(0.0);
         let meta_size = galley_size(
             ctx,
             style,
             egui::RichText::new(&metadata.meta).small().into(),
             header_wrap,
-            meta_width,
+            width_before,
             egui::Align::Center,
         );
-        let header_width = title_size.x + spacing_x + meta_size.x;
-        let header_height = style
-            .spacing
-            .interact_size
-            .y
-            .max(title_size.y)
-            .max(meta_size.y);
+        let header_width = title_size.x.max(meta_size.x);
+        let header_height = title_size.y + spacing_y + meta_size.y;
         prefix_width = prefix_width.max(header_width);
 
         let preview_size = if metadata.preview.is_empty() {
@@ -852,6 +870,16 @@ pub struct NotesDialog {
     test_menu_edit_rect: Option<egui::Rect>,
     #[cfg(test)]
     test_menu_remove_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_edit_scroll_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_edit_text_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_edit_scroll_content_size: egui::Vec2,
+    #[cfg(test)]
+    test_edit_save_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    test_edit_cancel_rect: Option<egui::Rect>,
 }
 
 #[cfg(test)]
@@ -925,7 +953,7 @@ impl TemplateManagerState {
             .min_width(320.0)
             .min_height(220.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.button("New Template").clicked() {
                         self.clear_editor();
                     }
@@ -935,7 +963,7 @@ impl TemplateManagerState {
                 });
                 ui.separator();
                 ui.columns(2, |columns| {
-                    columns[0].heading("Templates");
+                    widgets::compact_section_heading(&mut columns[0], "Saved templates", None);
                     egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
                         for name in self.templates.clone() {
                             ui.horizontal(|ui| {
@@ -961,23 +989,34 @@ impl TemplateManagerState {
                         }
                     });
 
-                    columns[1].heading(if self.selected.is_some() {
-                        "Edit Template"
-                    } else {
-                        "Create Template"
-                    });
-                    columns[1].label("Name");
+                    widgets::compact_section_heading(
+                        &mut columns[1],
+                        if self.selected.is_some() {
+                            "Edit template"
+                        } else {
+                            "Create template"
+                        },
+                        None,
+                    );
+                    widgets::secondary_help(&mut columns[1], "Name");
                     columns[1].add(
                         egui::TextEdit::singleline(&mut self.name).desired_width(f32::INFINITY),
                     );
-                    columns[1].label("Content");
+                    widgets::secondary_help(&mut columns[1], "Content");
                     columns[1].add(
                         egui::TextEdit::multiline(&mut self.content)
                             .desired_width(f32::INFINITY)
                             .desired_rows(10),
                     );
                     columns[1].horizontal(|ui| {
-                        if ui.button("Save Template").clicked() {
+                        let save_template_button = ui.button("Save Template");
+                        if widgets::with_button_emphasis(
+                            ui,
+                            save_template_button,
+                            ButtonEmphasis::Primary,
+                        )
+                        .clicked()
+                        {
                             match validate_template_name(&self.name).and_then(|name| {
                                 save_template(name, &self.content).map(|_| name.to_string())
                             }) {
@@ -1007,9 +1046,16 @@ impl TemplateManagerState {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label(format!("Delete template '{name}'?"));
+                    widgets::compact_section_heading(
+                        ui,
+                        &format!("Delete template '{name}'?"),
+                        None,
+                    );
                     ui.horizontal(|ui| {
-                        if ui.button("Delete").clicked() {
+                        let delete = ui.button("Delete");
+                        if widgets::with_button_emphasis(ui, delete, ButtonEmphasis::Destructive)
+                            .clicked()
+                        {
                             match delete_template(&name) {
                                 Ok(()) => {
                                     if self.selected.as_deref() == Some(name.as_str()) {
@@ -1530,6 +1576,11 @@ impl NotesDialog {
         {
             self.test_menu_edit_rect = None;
             self.test_menu_remove_rect = None;
+            self.test_edit_scroll_rect = None;
+            self.test_edit_text_rect = None;
+            self.test_edit_scroll_content_size = egui::Vec2::ZERO;
+            self.test_edit_save_rect = None;
+            self.test_edit_cancel_rect = None;
         }
         if !self.open {
             self.close_menu_owner();
@@ -1554,9 +1605,15 @@ impl NotesDialog {
             .min_height(150.0)
             .show(ctx, |ui| {
                 if let Some(idx) = self.edit_idx {
-                    ui.label("Text");
-                    egui::ScrollArea::vertical()
-                        .max_height(ui.available_height())
+                    widgets::compact_section_heading(ui, "Edit note", None);
+                    let footer_height = edit_footer_button_height(ui);
+                    let footer_gap = ui.spacing().item_spacing.y;
+                    let editor_max_height =
+                        (ui.available_height() - footer_height - footer_gap).max(0.0);
+                    let _edit_scroll = egui::ScrollArea::vertical()
+                        .max_height(editor_max_height)
+                        .min_scrolled_height(editor_max_height.min(64.0))
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
                             let output = egui::TextEdit::multiline(&mut self.text)
                                 .desired_width(f32::INFINITY)
@@ -1586,9 +1643,23 @@ impl NotesDialog {
                                 let modifiers = ctx.input(|i| i.modifiers);
                                 ctx.input_mut(|i| i.consume_key(modifiers, egui::Key::Enter));
                             }
+                            output.response.rect
                         });
+                    #[cfg(test)]
+                    {
+                        self.test_edit_scroll_rect = Some(_edit_scroll.inner_rect);
+                        self.test_edit_text_rect = Some(_edit_scroll.inner);
+                        self.test_edit_scroll_content_size = _edit_scroll.content_size;
+                    }
                     ui.horizontal(|ui| {
-                        if ui.button("Save").clicked() {
+                        let save_button = ui.button("Save");
+                        #[cfg(test)]
+                        {
+                            self.test_edit_save_rect = Some(save_button.rect);
+                        }
+                        if widgets::with_button_emphasis(ui, save_button, ButtonEmphasis::Primary)
+                            .clicked()
+                        {
                             if self.text.trim().is_empty() {
                                 app.report_error_message("ui operation", "Text required");
                             } else {
@@ -1615,13 +1686,21 @@ impl NotesDialog {
                                 save_edit = true;
                             }
                         }
-                        if ui.button("Cancel").clicked() {
+                        let cancel_button = ui.button("Cancel");
+                        #[cfg(test)]
+                        {
+                            self.test_edit_cancel_rect = Some(cancel_button.rect);
+                        }
+                        if cancel_button.clicked() {
                             self.edit_idx = None;
                         }
                     });
                 } else {
-                    ui.horizontal(|ui| {
-                        if ui.button("Add Note").clicked() {
+                    ui.horizontal_wrapped(|ui| {
+                        let add_note = ui.button("Add Note");
+                        if widgets::with_button_emphasis(ui, add_note, ButtonEmphasis::Primary)
+                            .clicked()
+                        {
                             self.edit_idx = Some(self.entries.len());
                             self.text.clear();
                         }
@@ -1635,7 +1714,7 @@ impl NotesDialog {
                             close = true;
                         }
                     });
-                    ui.label("Search");
+                    widgets::compact_section_heading(ui, "Search", None);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search).desired_width(f32::INFINITY),
                     );
@@ -1721,6 +1800,8 @@ impl NotesDialog {
                             render_positions.sort_unstable();
                             render_positions.dedup();
                             let content_size = geometry.content_size;
+                            let header_wrap =
+                                ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Wrap);
                             let render_rows = render_positions
                                 .into_iter()
                                 .filter_map(|position| geometry.rows.get(position).cloned())
@@ -1760,9 +1841,22 @@ impl NotesDialog {
                                     |ui| {
                                         ui.vertical(|ui| {
                                             let preview = row.preview.as_str();
-                                            let header = ui.horizontal(|ui| {
-                                                let title = ui.strong(&row.display_title);
-                                                let meta = ui.small(&row.meta);
+                                            let header = ui.vertical(|ui| {
+                                                let title = ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(&row.display_title)
+                                                            .strong(),
+                                                    )
+                                                    .wrap_mode(header_wrap),
+                                                );
+                                                let meta = ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(&row.meta)
+                                                            .small()
+                                                            .weak(),
+                                                    )
+                                                    .wrap_mode(header_wrap),
+                                                );
                                                 (title, meta)
                                             });
                                             let (title_response, meta_response) = header.inner;
@@ -2099,6 +2193,7 @@ mod tests {
             1,
             1,
         );
+        let header_wrap = ui.style().wrap_mode.unwrap_or(egui::TextWrapMode::Wrap);
         let mut rows = Vec::with_capacity(filtered_indices.len());
         let mut bounds = egui::Rect::NOTHING;
         for &original_index in filtered_indices {
@@ -2109,9 +2204,15 @@ mod tests {
                 continue;
             };
             let outer = ui.vertical(|ui| {
-                let header = ui.horizontal(|ui| {
-                    let title = ui.strong(&row.display_title);
-                    let meta = ui.small(&row.meta);
+                let header = ui.vertical(|ui| {
+                    let title = ui.add(
+                        egui::Label::new(egui::RichText::new(&row.display_title).strong())
+                            .wrap_mode(header_wrap),
+                    );
+                    let meta = ui.add(
+                        egui::Label::new(egui::RichText::new(&row.meta).small().weak())
+                            .wrap_mode(header_wrap),
+                    );
                     (title.rect, meta.rect)
                 });
                 let preview = if row.preview.is_empty() {
@@ -3211,11 +3312,17 @@ mod tests {
             note(&"Wrapped\n".repeat(20), "multiline", ""),
         ];
         let ctx = egui::Context::default();
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.wrap_mode = Some(egui::TextWrapMode::Extend);
+        ctx.set_style_of(ctx.theme(), style);
         let geometry = eager_notes_geometry(&ctx, &entries, 420.0);
 
         assert_eq!(geometry.rows.len(), entries.len());
         assert!(geometry.rows[1].outer.width() > geometry.viewport.width());
-        assert!(geometry.rows[0].preview.unwrap().height() > 10.0);
+        assert!(
+            geometry.rows[0].preview.unwrap().height() > 0.0,
+            "the explicit Extend fixture keeps a short preview visible on one line"
+        );
         assert!(geometry.rows[2].outer.min.y > geometry.rows[1].separator.min.y);
         assert!(geometry.rows[2].preview.is_none());
         assert!(geometry.rows[3].outer.height() > geometry.rows[0].outer.height());
@@ -3291,6 +3398,9 @@ mod tests {
         let workspace = workloads::IsolatedWorkspace::new();
         let ctx = egui::Context::default();
         let mut app = new_isolated_app(&ctx, workspace.root());
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.wrap_mode = Some(egui::TextWrapMode::Extend);
+        ctx.set_style_of(ctx.theme(), style);
         let notes = (0..240)
             .map(|index| {
                 let content = if index == 173 {
@@ -3326,10 +3436,17 @@ mod tests {
             .as_ref()
             .unwrap()
             .partial_capacity_bytes();
+        let wide_row = &dialog.notes_geometry.as_ref().unwrap().rows[0];
+        let wide_viewport = dialog.test_scroll_area_inner_rect.unwrap();
         assert!(
-            dialog.notes_geometry.as_ref().unwrap().rows[0].width_after
-                > dialog.test_scroll_area_inner_rect.unwrap().width(),
-            "an offscreen unwrapped title contributes to the full horizontal extent"
+            wide_row.width_after > wide_viewport.width(),
+            "an explicit Extend override preserves wide-title horizontal extent; wrap={:?}, title={:?}, header_width={}, width_before={}, width_after={}, viewport={:?}",
+            dialog.notes_geometry.as_ref().unwrap().key.wrap_mode,
+            &dialog.entries[wide_row.original_index].title,
+            wide_row.header_width,
+            wide_row.width_before,
+            wide_row.width_after,
+            wide_viewport
         );
         assert_eq!(
             dialog.notes_geometry.as_ref().unwrap().rows[1].width_before,
@@ -3510,10 +3627,13 @@ mod tests {
 
         let sparse_row = rendered_note_rect(&dialog, 174);
         let sparse_inner = dialog.test_scroll_area_inner_rect.unwrap();
+        use egui::emath::GuiRounding as _;
+        let pixels_per_point = ctx.pixels_per_point();
+        let sparse_header_pixels = sparse_row.header.round_to_pixels(pixels_per_point);
+        let sparse_inner_pixels = sparse_inner.round_to_pixels(pixels_per_point);
         assert!(
-            sparse_inner.contains_rect(sparse_row.header),
-            "settled sparse header is inside the viewport: header={:?}, inner={sparse_inner:?}",
-            sparse_row.header
+            sparse_inner_pixels.contains_rect(sparse_header_pixels),
+            "settled sparse header is inside the renderer-rounded viewport: header={sparse_header_pixels:?}, inner={sparse_inner_pixels:?}"
         );
         let header_pointer = header_gap_point(&sparse_row);
         assert!(sparse_inner.contains(header_pointer));
@@ -3706,6 +3826,88 @@ mod tests {
         drop(app);
         drop(_inserted_cache);
         drop(_cache);
+        drop(workspace);
+    }
+
+    #[test]
+    fn quick_notes_narrow_wrapped_headers_bound_metadata_and_reuse_geometry() {
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        app.note_settings.backlinks_enabled = true;
+        let mut target = note(
+            &"東京🙂W".repeat(32),
+            "target-slug-with-a-long-identifier",
+            "short body",
+        );
+        target.tags = vec![
+            "long tag describing the Unicode rendering behavior".to_owned(),
+            "additional metadata that should wrap within the row".to_owned(),
+        ];
+        target.content = "short body target-unique-needle".into();
+        let source = note(
+            "Backlink source",
+            "source-note",
+            &format!("the source note body [[{}]]", target.slug),
+        );
+        let notes = vec![target.clone(), source];
+        let cache = crate::plugins::note::publish_note_cache_for_test(notes);
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        dialog.search = "target-unique-needle".into();
+
+        for frame in 0..6 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
+        }
+
+        assert_eq!(dialog.filtered_indices, vec![0]);
+        assert!(dialog.row_metadata[0].meta.contains("1 backlinks"));
+        let viewport = dialog
+            .test_scroll_area_inner_rect
+            .expect("the narrow Quick Notes viewport was rendered");
+        let row = dialog
+            .notes_geometry
+            .as_ref()
+            .and_then(|geometry| geometry.rows.first())
+            .expect("the projected row has cached geometry");
+        let actual = rendered_note_rect(&dialog, 0);
+        let header_id = rendered_note_header_id(&dialog, &target.slug);
+        assert!(row.width_before <= viewport.width() + 0.5);
+        assert!(actual.title.height() > 24.0, "the long title wraps");
+        assert!(
+            actual.meta.height() > 18.0,
+            "slug, tags, and backlinks wrap"
+        );
+        assert!(actual.title.max.y <= actual.meta.min.y + 0.5);
+        assert!(!actual.title.intersects(actual.meta));
+        assert!(actual.header.contains_rect(actual.title));
+        assert!(actual.header.contains_rect(actual.meta));
+        assert!(actual.title.max.x <= dialog.test_content_origin.x + viewport.width() + 0.5);
+        assert!(actual.meta.max.x <= dialog.test_content_origin.x + viewport.width() + 0.5);
+
+        let rebuilds = dialog.test_geometry_rebuilds;
+        for frame in 6..10 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
+        }
+        assert_eq!(dialog.test_geometry_rebuilds, rebuilds);
+        assert_eq!(rendered_note_header_id(&dialog, &target.slug), header_id);
+        let style = ctx.style_of(ctx.theme()).as_ref().clone();
+        let eager = eager_notes_geometry_for_projection(
+            &egui::Context::default(),
+            &dialog.entries,
+            &dialog.filtered_indices,
+            viewport.size(),
+            &style,
+            app.note_settings.backlinks_enabled,
+            app.note_settings.task_lists_enabled,
+        );
+        assert_quick_notes_geometry_matches_eager(&dialog, &eager, &dialog.filtered_indices);
+
+        drop(dialog);
+        drop(app);
+        drop(cache);
         drop(workspace);
     }
 
@@ -4755,6 +4957,66 @@ mod tests {
     }
 
     #[test]
+    fn quick_notes_long_edit_keeps_footer_reachable_without_mutating_draft() {
+        use crate::performance::workloads;
+
+        let workspace = workloads::IsolatedWorkspace::new();
+        let ctx = egui::Context::default();
+        let mut app = new_isolated_app(&ctx, workspace.root());
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.override_font_id = Some(egui::FontId::new(31.0, egui::FontFamily::Proportional));
+        ctx.set_style_of(ctx.theme(), style);
+        let committed = note("Long draft", "long-draft", "original saved content");
+        let cache = crate::plugins::note::publish_note_cache_for_test(vec![committed.clone()]);
+        let mut dialog = NotesDialog::default();
+        dialog.open();
+        render_notes_frame(&ctx, &mut dialog, &mut app, 1.0);
+        dialog.open_edit(0);
+        let draft = (0..60)
+            .map(|line| format!("Line {line:02}: {}", "long note content ".repeat(12)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        dialog.text = draft.clone();
+
+        for frame in 1..5 {
+            render_notes_frame(&ctx, &mut dialog, &mut app, 1.0 + frame as f64 / 60.0);
+        }
+
+        assert_eq!(dialog.text, draft, "rendering leaves the draft untouched");
+        assert_eq!(dialog.edit_idx, Some(0));
+        assert_eq!(dialog.entries[0].content, committed.content);
+        let scroll = dialog
+            .test_edit_scroll_rect
+            .expect("the editor scroll viewport is rendered");
+        let text = dialog
+            .test_edit_text_rect
+            .expect("the multiline text editor is rendered");
+        let save = dialog
+            .test_edit_save_rect
+            .expect("Save remains visible in the edit footer");
+        let cancel = dialog
+            .test_edit_cancel_rect
+            .expect("Cancel remains visible in the edit footer");
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0));
+        assert!(screen.contains_rect(save));
+        assert!(screen.contains_rect(cancel));
+        assert!(
+            save.height() > 30.0,
+            "the 31 pt override reaches the native Save button"
+        );
+        assert!(screen.contains_rect(scroll));
+        assert!(scroll.intersects(text));
+        assert!(dialog.test_edit_scroll_content_size.y > scroll.height() + 0.5);
+        assert!(scroll.max.y <= save.min.y + 0.5);
+        assert!(save.min.y <= cancel.min.y + 0.5);
+
+        drop(dialog);
+        drop(app);
+        drop(cache);
+        drop(workspace);
+    }
+
+    #[test]
     fn existing_context_action_routes_are_unchanged() {
         assert_eq!(
             note_action("Open note", "note:open:alpha").action,
@@ -5627,6 +5889,11 @@ mod tests {
     ) -> TrackC2FState {
         let ctx = egui::Context::default();
         let mut app = new_isolated_app(&ctx, root);
+        if recipe == TrackC2FRecipe::EarlyWideUnicode {
+            let mut style = (*ctx.style_of(ctx.theme())).clone();
+            style.wrap_mode = Some(egui::TextWrapMode::Extend);
+            ctx.set_style_of(ctx.theme(), style);
+        }
         app.note_settings.backlinks_enabled = true;
         app.note_settings.task_lists_enabled = true;
 

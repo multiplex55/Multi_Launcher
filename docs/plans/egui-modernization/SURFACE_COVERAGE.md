@@ -38,8 +38,8 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/mouse_settings_dialog.rs` | M5-B7 | pending surface polish/review; runtime inheritance available |
 | `src/gui/multi_manager_actions.rs` | M5-B4 | pending surface polish/review; runtime inheritance available |
 | `src/gui/note_graph_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/note_panel.rs` | M5-B1 | pending surface polish/review; runtime inheritance available |
-| `src/gui/notes_dialog.rs` | M5-B1 | pending surface polish/review; runtime inheritance available |
+| `src/gui/note_panel.rs` | M5-B1 | implemented/source reviewed; strict window/save/discard/narrow tests pass; native after-image gap |
+| `src/gui/notes_dialog.rs` | M5-B1 | implemented/source reviewed;13 targeted contracts, after-image pending Escape/approval restriction; receipts/m5b1-notes-presentation.md |
 | `src/gui/qr_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_actions.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/radial_editor/mod.rs` | M5-B6 | pending surface polish/review; runtime inheritance available |
@@ -51,7 +51,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/snippet_prompt_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/tempfile_alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/tempfile_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | M3-C transaction and M3-D typography/icons accepted; M5-A adaptive shell polish pending; native visual gap |
+| `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | M5-A complete at94b4724d;21contracts and Dark/Light852x460 rendered footer reviewed; physical native gaps remain |
 | `src/gui/timer_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/toast_log_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/todo_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -60,7 +60,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/volume_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/help_window.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/multi_manager/ui.rs` | M5-B4 | pending surface polish/review; runtime inheritance available |
-| `src/settings_editor/render.rs` | M5-A | pending surface polish/review; runtime inheritance available |
+| `src/settings_editor/render.rs` | M5-A | complete at94b4724d; section identity/collapse/footer and mapping tests, Dark852x460 rendered review |
 
 Plugin settings_ui owners also require local presentation review alongside their surface group: browser_tabs, network, history, mkmacro, mouse_gestures, file_search, omni_search, virtual_desktop, note, diff, clipboard_modify, color_picker, screenshot, shell, clipboard and stopwatch. Preserve mappings/ranges and native control behavior.
 
@@ -90,3 +90,7 @@ Same immutable M4-B C95E QA binary, separate isolated startup pin fixtures, ROOT
 ### M5-A accepted rendered states
 
 Settings/theme-editor local shell work complete with21 targeted contracts, reviewed source and Dark/Light theme+DarkSettings852x460 after-images; see receipts/m5a-settings-theme-shells.md for source/build/capture identities. Theme footer nowvisible comparedwithretainedpre-shellclipping. Physicalfocus/hotkey/DPI remains separate QA gap. Notes/plugin work remains pending.
+
+### M5-B1 implementation and qualification
+
+Notes chrome/header/edit-footer implementation and shared ThemeRuntime scroll-padding ownership correction accepted by source review;13distinct targeted contracts pass004/005chain. Native after-image is unobserved due Escape stop/automatic approval restriction, not a passing visual check. FixturePID27204 remains running; theme-after fixture unlaunched. See receipts/m5b1-notes-presentation.md. Continue safe B2 source work; retain visual/manual follow-up.

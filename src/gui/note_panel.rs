@@ -4,6 +4,7 @@ use crate::file_search::actions::{
     ExplorerAction, execute_explorer_action, resolve_explorer_action,
 };
 use crate::gui::LauncherApp;
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use crate::notes_markdown::{
     MarkdownAnalysis, MarkdownCallout, MarkdownHeading, MarkdownSection, MarkdownTaskItem,
     PlainLinkConversionReport, analyze_markdown, convert_plain_links,
@@ -2209,18 +2210,20 @@ impl NotePanel {
                 .resizable(false)
                 .open(&mut open_link_new)
                 .show(ctx, |ui| {
-                    ui.label("New note name:");
+                    widgets::compact_section_heading(ui, "New note name", None);
                     ui.text_edit_singleline(&mut self.link_new_name);
                     let is_empty = self.link_new_name.trim().is_empty();
                     if is_empty {
-                        ui.colored_label(Color32::YELLOW, "Name is required");
+                        widgets::semantic_status(ui, StatusTone::Warning, "Name is required", None);
                     }
                     ui.horizontal(|ui| {
                         let confirm = ui.add_enabled(
                             !is_empty && self.last_textedit_id.is_some(),
                             egui::Button::new("Link"),
                         );
-                        if confirm.clicked() {
+                        if widgets::with_button_emphasis(ui, confirm, ButtonEmphasis::Primary)
+                            .clicked()
+                        {
                             if let Some(id) = self.last_textedit_id {
                                 self.insert_or_create_note_link(ctx, id, app);
                                 self.focus_textedit_next_frame = true;
@@ -2297,9 +2300,18 @@ impl NotePanel {
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .open(&mut prompt_open)
                 .show(ctx, |ui| {
-                    ui.label("This note has changes that have not been saved.");
+                    widgets::compact_section_heading(
+                        ui,
+                        "This note has changes that have not been saved.",
+                        None,
+                    );
                     ui.horizontal(|ui| {
                         let response = ui.button("Discard Changes");
+                        let response = widgets::with_button_emphasis(
+                            ui,
+                            response,
+                            ButtonEmphasis::Destructive,
+                        );
                         if let Some(observed) = observed_discard.as_deref_mut() {
                             *observed = super::query_observation::observe_note_discard_response(
                                 ui,
@@ -2308,7 +2320,13 @@ impl NotePanel {
                             );
                         }
                         discard = response.clicked();
-                        keep_editing = ui.button("Keep Editing").clicked();
+                        let keep_editing_button = ui.button("Keep Editing");
+                        keep_editing = widgets::with_button_emphasis(
+                            ui,
+                            keep_editing_button,
+                            ButtonEmphasis::Primary,
+                        )
+                        .clicked();
                     });
                 });
             if discard {
@@ -2329,9 +2347,16 @@ impl NotePanel {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label("A note with this name already exists.");
+                    widgets::compact_section_heading(
+                        ui,
+                        "A note with this name already exists.",
+                        None,
+                    );
                     ui.horizontal(|ui| {
-                        if ui.button("Overwrite").clicked() {
+                        let overwrite = ui.button("Overwrite");
+                        if widgets::with_button_emphasis(ui, overwrite, ButtonEmphasis::Destructive)
+                            .clicked()
+                        {
                             if let Err(e) = save_note(&mut self.note, true) {
                                 app.report_error(
                                     "ui operation",
@@ -2348,7 +2373,10 @@ impl NotePanel {
                                 self.overwrite_prompt = false;
                             }
                         }
-                        if ui.button("Save as New").clicked() {
+                        let save_as_new = ui.button("Save as New");
+                        if widgets::with_button_emphasis(ui, save_as_new, ButtonEmphasis::Primary)
+                            .clicked()
+                        {
                             self.note.slug.clear();
                             self.note.path = std::path::PathBuf::new();
                             if let Err(e) = save_note(&mut self.note, true) {
@@ -2375,8 +2403,12 @@ impl NotePanel {
 
     fn render_toolbar(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp) -> bool {
         let mut save_now = false;
-        ui.horizontal(|ui| {
-            if ui.button("Save").clicked() {
+        let _toolbar = ui.horizontal_wrapped(|ui| {
+            // Keep native button labels intact; the wrapping layout moves whole
+            // controls to another row when they do not fit.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            let save = ui.button("Save");
+            if widgets::with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
                 save_now = true;
             }
             let open_resp = ui.button("Open Externally");
@@ -4673,7 +4705,7 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
         NoteTarget::Ambiguous(slugs) => {
             let label = format!("{text} (ambiguous)");
             let resp = ui.add(
-                egui::Label::new(egui::RichText::new(label).color(Color32::YELLOW))
+                egui::Label::new(egui::RichText::new(label).color(ui.visuals().warn_fg_color))
                     .sense(egui::Sense::click()),
             );
             if resp.clicked() {
@@ -4688,7 +4720,8 @@ pub fn show_wiki_link(ui: &mut egui::Ui, app: &mut LauncherApp, l: &str) -> egui
             let slug = slugify(target);
             let resp = ui.add(
                 egui::Label::new(
-                    egui::RichText::new(format!("{text} (missing)")).color(Color32::RED),
+                    egui::RichText::new(format!("{text} (missing)"))
+                        .color(ui.visuals().error_fg_color),
                 )
                 .sense(egui::Sense::click()),
             );
@@ -10245,7 +10278,6 @@ mod tests {
         let original_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should be remembered after rendering");
-
         panel.note.title = "Renamed From Markdown".into();
         panel.note.content = "# Renamed From Markdown\n\nBody".into();
         app.note_panel_default_size = (760.0, 560.0);
@@ -10257,7 +10289,6 @@ mod tests {
         let renamed_rect = ctx
             .memory(|memory| memory.area_rect(window_id))
             .expect("note window rect should still be remembered after title changes");
-
         assert_eq!(renamed_rect, original_rect);
     }
 
