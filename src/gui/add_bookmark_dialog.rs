@@ -1,4 +1,5 @@
 use crate::gui::LauncherApp;
+use crate::gui::theme::widgets::{ButtonEmphasis, with_button_emphasis};
 use crate::plugins::bookmarks::{BOOKMARKS_FILE, append_bookmark_with_alias};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -25,16 +26,25 @@ impl AddBookmarkDialog {
         egui::Window::new("Add Bookmark")
             .open(&mut self.open)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("URL");
-                    ui.text_edit_singleline(&mut self.url);
+                ui.horizontal_wrapped(|ui| {
+                    let label = ui.label("URL");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.url)
+                            .desired_width(ui.available_width().min(320.0).max(72.0)),
+                    )
+                    .labelled_by(label.id);
                 });
-                ui.horizontal(|ui| {
-                    ui.label("Alias");
-                    ui.text_edit_singleline(&mut self.alias);
+                ui.horizontal_wrapped(|ui| {
+                    let label = ui.label("Alias");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.alias)
+                            .desired_width(ui.available_width().min(320.0).max(72.0)),
+                    )
+                    .labelled_by(label.id);
                 });
-                ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                ui.horizontal_wrapped(|ui| {
+                    let save = ui.button("Save");
+                    if with_button_emphasis(ui, save, ButtonEmphasis::Primary).clicked() {
                         if self.url.trim().is_empty() {
                             app.report_error_message("ui operation", "URL required");
                         } else if let Err(e) =

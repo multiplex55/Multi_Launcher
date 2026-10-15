@@ -9,7 +9,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/render.rs` | M4-A/B | M4-A/B accepted; Dark/Light852x460 ROOT framebuffer inspected, receipts/m4b-root-visual-review.md; physical focus/IME/DPI gaps remain |
 | `src/actions_editor.rs` | M5-C1 | accepted bounded full-command cards; scoped publication/layout contracts pass, Dark initial capture inspected; src/gui/actions.rs domain dispatch unchanged |
 | `src/gui/add_action_dialog.rs` | M5-C1 | accepted bounded Add/Edit form and native footer; exact draft/publication/layout contract passes; native Browse/input gap explicit |
-| `src/gui/add_bookmark_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/add_bookmark_dialog.rs` | M5-C4 | accepted responsive labeled forms/native footer; Unicode scroll/draft contract/review pass, initial Dark Tempfile/Light Bookmark images inspected; native input/create/open/close gaps explicit |
 | `src/gui/alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/bookmark_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
 | `src/gui/brightness_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -50,7 +50,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/snippet_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
 | `src/gui/snippet_prompt_dialog.rs` | M5-C2 | accepted shared bounded presentation;11privacy/input/transaction/layout contracts and review pass; Snippets/Favorites initial images inspected, Prompt/edit/native-input gaps explicit |
 | `src/gui/tempfile_alias_dialog.rs` | M5-C3 | accepted bounded full-target viewer/accessibility/actions; three strict constrained contracts/review pass; target-session native capture/input unobserved |
-| `src/gui/tempfile_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/tempfile_dialog.rs` | M5-C4 | accepted responsive labeled forms/native footer; Unicode scroll/draft contract/review pass, initial Dark Tempfile/Light Bookmark images inspected; native input/create/open/close gaps explicit |
 | `src/gui/theme_settings_dialog.rs` | M3-C/M5-A | M5-A complete at94b4724d;21contracts and Dark/Light852x460 rendered footer reviewed; physical native gaps remain |
 | `src/gui/timer_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/toast_log_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
