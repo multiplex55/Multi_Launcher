@@ -7,8 +7,8 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | Presentation owner | Group | Status / evidence |
 |---|---|---|
 | `src/gui/render.rs` | M4-A/B | M4-A/B accepted; Dark/Light852x460 ROOT framebuffer inspected, receipts/m4b-root-visual-review.md; physical focus/IME/DPI gaps remain |
-| `src/actions_editor.rs` | M5-C1 | pending App Editor presentation; src/gui/actions.rs domain dispatch remains unchanged |
-| `src/gui/add_action_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/actions_editor.rs` | M5-C1 | accepted bounded full-command cards; scoped publication/layout contracts pass, Dark initial capture inspected; src/gui/actions.rs domain dispatch unchanged |
+| `src/gui/add_action_dialog.rs` | M5-C1 | accepted bounded Add/Edit form and native footer; exact draft/publication/layout contract passes; native Browse/input gap explicit |
 | `src/gui/add_bookmark_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/bookmark_alias_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
@@ -31,7 +31,7 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/image_crop_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/image_panel.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/json_utility_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/macro_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
+| `src/gui/macro_dialog.rs` | M5-C1 | accepted legacy Macro browse/edit/picker chrome, pinned initial load/draft fix; seven contracts/review pass, populated Light browser capture inspected; native edit/play/input gap explicit |
 | `src/gui/mkmacro_dialog/mod.rs` | M5-B3 | main toolbar/properties/sidebar/diagnostics accepted;9contracts and initial main framebuffer pass; child chrome M5-C pending and native interaction gaps explicit |
 | `src/gui/mouse_gesture_settings_dialog.rs` | M5-B7 | accepted boundedbody/nativefooter and transitionopen/pinnedClose/unpinnedClose corrections; focusedactualcontract pass, initialLightcapture inspected; nativeinteraction gap explicit |
 | `src/gui/mouse_gestures_dialog.rs` | M5-B7 | accepted shared editor/picker/status chrome; persistence/read-only/recordinglabel contracts pass; authoredstroke/canvas unchanged, nativecapture/input gap explicit |
