@@ -10,6 +10,7 @@ use crate::file_search::settings::{
     DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES, FileSearchDiagnosticsState,
     FileSearchExecutableProbe, FileSearchSettings,
 };
+use crate::gui::theme::widgets::{StatusTone, semantic_status};
 use crate::plugin::Plugin;
 use eframe::egui;
 use std::path::{Path, PathBuf};
@@ -100,14 +101,12 @@ impl Plugin for FileSearchPlugin {
             egui::Slider::new(&mut cfg.max_matches_per_content_file, 1..=1_000)
                 .text("Max matches per content file"),
         );
-        ui.horizontal(|ui| {
-            ui.label("Max content-search file size (bytes)");
-            ui.add(
-                egui::DragValue::new(&mut cfg.max_content_search_file_size_bytes)
-                    .speed(1024.0)
-                    .range(1..=u64::MAX),
-            );
-        });
+        ui.label("Max content-search file size (bytes)");
+        ui.add(
+            egui::DragValue::new(&mut cfg.max_content_search_file_size_bytes)
+                .speed(1024.0)
+                .range(1..=u64::MAX),
+        );
         full_preview_limit_mib_editor(ui, &mut cfg.max_full_preview_file_size_bytes);
         ui.checkbox(&mut cfg.include_hidden_files, "Include hidden by default");
         ui.checkbox(&mut cfg.case_sensitive, "Case-sensitive by default");
@@ -115,8 +114,11 @@ impl Plugin for FileSearchPlugin {
             &mut cfg.everything_enabled,
             "Use Everything ES CLI for global filename search",
         );
-        ui.label(
-            "When disabled, global filename searches fall back to WalkDir/ripgrep as applicable.",
+        ui.add(
+            egui::Label::new(
+                "When disabled, global filename searches fall back to WalkDir/ripgrep as applicable.",
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
         );
         path_field(
             ui,
@@ -124,22 +126,25 @@ impl Plugin for FileSearchPlugin {
             &mut cfg.everything_executable_path,
         );
         ripgrep_settings_ui(ui, &mut cfg.ripgrep_executable_path, &mut self.ripgrep_ui);
-        ui.horizontal(|ui| {
-            ui.label("Preferred editor command");
-            ui.text_edit_singleline(&mut cfg.preferred_editor_command);
-        });
+        ui.label("Preferred editor command");
+        ui.add(
+            egui::TextEdit::singleline(&mut cfg.preferred_editor_command)
+                .desired_width(ui.available_width()),
+        );
         string_list_editor(ui, "Preferred editor args", &mut cfg.preferred_editor_args);
-        ui.horizontal(|ui| {
-            ui.label("Preferred terminal command");
-            ui.text_edit_singleline(&mut cfg.preferred_terminal_command);
-        });
+        ui.label("Preferred terminal command");
+        ui.add(
+            egui::TextEdit::singleline(&mut cfg.preferred_terminal_command)
+                .desired_width(ui.available_width()),
+        );
         string_list_editor(
             ui,
             "Preferred terminal args",
             &mut cfg.preferred_terminal_args,
         );
         for diagnostic in cfg.validate() {
-            ui.colored_label(egui::Color32::YELLOW, diagnostic.to_string());
+            let diagnostic = diagnostic.to_string();
+            semantic_status(ui, StatusTone::Warning, &diagnostic, None);
         }
         ui.collapsing("Diagnostics", |ui| {
             if ui.button("Refresh diagnostics").clicked() {
@@ -176,18 +181,16 @@ const BYTES_PER_MIB: u64 = 1024 * 1024;
 fn full_preview_limit_mib_editor(ui: &mut egui::Ui, bytes: &mut u64) {
     let max_mib = u64::MAX / BYTES_PER_MIB;
     let mut mib = (*bytes / BYTES_PER_MIB).max(1);
-    ui.horizontal(|ui| {
-        ui.label("Full-file preview limit (MiB)");
-        if ui
-            .add(egui::DragValue::new(&mut mib).speed(1.0).range(1..=max_mib))
-            .changed()
-        {
-            *bytes = mib
-                .max(1)
-                .checked_mul(BYTES_PER_MIB)
-                .unwrap_or(DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES);
-        }
-    });
+    ui.label("Full-file preview limit (MiB)");
+    if ui
+        .add(egui::DragValue::new(&mut mib).speed(1.0).range(1..=max_mib))
+        .changed()
+    {
+        *bytes = mib
+            .max(1)
+            .checked_mul(BYTES_PER_MIB)
+            .unwrap_or(DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES);
+    }
     if *bytes == 0 {
         *bytes = DEFAULT_MAX_FULL_PREVIEW_FILE_SIZE_BYTES;
     }
@@ -209,11 +212,14 @@ fn ripgrep_settings_ui_with_probe(
     ui.separator();
     ui.label("ripgrep executable");
     let mut text = path.display().to_string();
-    ui.horizontal(|ui| {
-        ui.label("Absolute path");
-        if ui.text_edit_singleline(&mut text).changed() {
-            *path = PathBuf::from(text.trim());
-        }
+    ui.label("Absolute path");
+    if ui
+        .add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width()))
+        .changed()
+    {
+        *path = PathBuf::from(text.trim());
+    }
+    ui.horizontal_wrapped(|ui| {
         if ui.button("Browse…").clicked() {
             #[cfg(windows)]
             let dialog = rfd::FileDialog::new().add_filter("Executable", &["exe"]);
@@ -225,12 +231,12 @@ fn ripgrep_settings_ui_with_probe(
         }
     });
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui.button("Auto-detect").clicked() {
             let context = ExecutableSearchContext::from_process();
             auto_detect_ripgrep(state, &context, probe);
         }
-        ui.label(auto_detect_label(state));
+        ui.add(egui::Label::new(auto_detect_label(state)).wrap_mode(egui::TextWrapMode::Wrap));
         if let Some(detected) = state
             .automatic_result
             .as_ref()
@@ -243,27 +249,25 @@ fn ripgrep_settings_ui_with_probe(
         }
     });
 
-    ui.horizontal(|ui| {
-        if ui.button("Test").clicked() {
-            let context = ExecutableSearchContext::from_process();
-            test_configured_ripgrep(state, path, &context, probe);
+    if ui.button("Test").clicked() {
+        let context = ExecutableSearchContext::from_process();
+        test_configured_ripgrep(state, path, &context, probe);
+    }
+    let label = configured_validation_label(state, path);
+    match configured_validation_label_kind(state, path) {
+        ValidationLabelKind::Available => {
+            semantic_status(ui, StatusTone::Success, &label, None);
         }
-        let label = configured_validation_label(state, path);
-        match configured_validation_label_kind(state, path) {
-            ValidationLabelKind::Available => {
-                ui.colored_label(egui::Color32::GREEN, label);
-            }
-            ValidationLabelKind::Warning => {
-                ui.colored_label(egui::Color32::YELLOW, label);
-            }
-            ValidationLabelKind::Failure => {
-                ui.colored_label(egui::Color32::RED, label);
-            }
-            ValidationLabelKind::Untested => {
-                ui.label(label);
-            }
+        ValidationLabelKind::Warning => {
+            semantic_status(ui, StatusTone::Warning, &label, None);
         }
-    });
+        ValidationLabelKind::Failure => {
+            semantic_status(ui, StatusTone::Error, &label, None);
+        }
+        ValidationLabelKind::Untested => {
+            ui.add(egui::Label::new(label).wrap_mode(egui::TextWrapMode::Wrap));
+        }
+    }
 
     let display_resolution = display_resolution_for_state(state, path);
     let open_folder_path = display_resolution
@@ -279,30 +283,38 @@ fn ripgrep_settings_ui_with_probe(
     });
 
     if let Some(resolution) = display_resolution {
-        ui.label(format!(
-            "Resolution source: {}",
-            resolution_source_label(&resolution.source)
-        ));
-        ui.label(format!(
-            "Detected version: {}",
-            resolution.version.as_deref().unwrap_or("not available")
-        ));
+        ui.add(
+            egui::Label::new(format!(
+                "Resolution source: {}",
+                resolution_source_label(&resolution.source)
+            ))
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+        ui.add(
+            egui::Label::new(format!(
+                "Detected version: {}",
+                resolution.version.as_deref().unwrap_or("not available")
+            ))
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
         for warning in &resolution.warnings {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                format!("Validation warning: {warning}"),
-            );
+            semantic_status(ui, StatusTone::Warning, "Validation warning", Some(warning));
         }
         if resolution.version.is_none() {
-            ui.colored_label(
-                egui::Color32::RED,
+            semantic_status(
+                ui,
+                StatusTone::Error,
                 "Validation error: no usable ripgrep executable resolved",
+                None,
             );
         }
     } else {
         ui.label("Resolution source: unavailable");
         ui.label("Detected version: not available");
-        ui.label("Validation error: not tested yet");
+        ui.add(
+            egui::Label::new("Validation error: not tested yet")
+                .wrap_mode(egui::TextWrapMode::Wrap),
+        );
     }
 }
 
@@ -434,20 +446,23 @@ fn resolution_source_label(source: &ExecutableResolutionSource) -> &'static str 
 
 fn path_field(ui: &mut egui::Ui, label: &str, path: &mut PathBuf) {
     let mut text = path.display().to_string();
-    ui.horizontal(|ui| {
-        ui.label(label);
-        if ui.text_edit_singleline(&mut text).changed() {
-            *path = PathBuf::from(text.trim());
-        }
-    });
+    if !label.is_empty() {
+        ui.add(egui::Label::new(label).wrap_mode(egui::TextWrapMode::Wrap));
+    }
+    if ui
+        .add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width()))
+        .changed()
+    {
+        *path = PathBuf::from(text.trim());
+    }
 }
 
 fn path_list_editor(ui: &mut egui::Ui, label: &str, paths: &mut Vec<PathBuf>) {
     ui.collapsing(label, |ui| {
         let mut remove = None;
         for (idx, path) in paths.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                path_field(ui, "", path);
+            path_field(ui, "", path);
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Remove").clicked() {
                     remove = Some(idx);
                 }
@@ -466,8 +481,8 @@ fn string_list_editor(ui: &mut egui::Ui, label: &str, items: &mut Vec<String>) {
     ui.collapsing(label, |ui| {
         let mut remove = None;
         for (idx, item) in items.iter_mut().enumerate() {
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(item);
+            ui.add(egui::TextEdit::singleline(item).desired_width(ui.available_width()));
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Remove").clicked() {
                     remove = Some(idx);
                 }
@@ -827,6 +842,159 @@ mod tests {
         assert!(state.configured_result.is_none());
         assert!(state.last_tested_path.is_none());
         assert!(!configured_ripgrep_result_is_current(&state, &path));
+    }
+
+    fn accesskit_bounds(
+        output: &egui::FullOutput,
+        role: egui::accesskit::Role,
+        expected_label: Option<&str>,
+        expected_value: Option<&str>,
+    ) -> Option<egui::Rect> {
+        output
+            .platform_output
+            .accesskit_update
+            .as_ref()?
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                let label_matches = expected_label
+                    .map(|expected| node.label() == Some(expected))
+                    .unwrap_or(true);
+                let value_matches = expected_value
+                    .map(|expected| node.value() == Some(expected))
+                    .unwrap_or(true);
+                if node.role() != role || !label_matches || !value_matches {
+                    return None;
+                }
+                let bounds = node.bounds()?;
+                Some(egui::Rect::from_min_max(
+                    egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                    egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+                ))
+            })
+    }
+
+    #[test]
+    fn settings_reflow_chrome_ripgrep_form_stays_bounded_without_probing_or_editing_state() {
+        let long_path = format!(
+            "C:\\{}\\configured-rg.exe",
+            (0..7)
+                .map(|index| format!("search-tool-directory-{index:02}-{}", "x".repeat(13)))
+                .collect::<Vec<_>>()
+                .join("\\")
+        );
+        let detected_path = format!(
+            "C:\\{}\\detected-rg.exe",
+            (0..7)
+                .map(|index| format!("search-tool-directory-{index:02}-{}", "y".repeat(13)))
+                .collect::<Vec<_>>()
+                .join("\\")
+        );
+        let configured_path = PathBuf::from(&long_path);
+        let detected = sample_ripgrep_resolution(&detected_path);
+        let mut path = configured_path.clone();
+        let mut state = RipgrepSettingsUiState {
+            automatic_result: Some(detected),
+            automatic_checked: true,
+            configured_result: Some(sample_ripgrep_resolution(&long_path)),
+            last_tested_path: Some(configured_path.clone()),
+        };
+        let path_before = path.clone();
+        let state_before = state.clone();
+        let probe_calls = Cell::new(0);
+        let probe = |_path: &Path, _context: &ExecutableSearchContext| {
+            probe_calls.set(probe_calls.get() + 1);
+            None
+        };
+
+        let context = egui::Context::default();
+        context.enable_accesskit();
+        context.style_mut_of(context.theme(), |style| style.animation_time = 0.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 720.0));
+        let expected_candidate = auto_detect_label(&state);
+        let mut observation = None;
+        for _ in 0..3 {
+            let mut viewport = egui::Rect::NOTHING;
+            let output = context.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        viewport = ui.clip_rect();
+                        ripgrep_settings_ui_with_probe(ui, &mut path, &mut state, &probe);
+                    });
+                },
+            );
+            let path_bounds = accesskit_bounds(
+                &output,
+                egui::accesskit::Role::TextInput,
+                None,
+                Some(&long_path),
+            );
+            let button_bounds = [
+                "Browse…",
+                "Auto-detect",
+                "Use detected path",
+                "Test",
+                "Open folder",
+            ]
+            .map(|label| {
+                accesskit_bounds(&output, egui::accesskit::Role::Button, Some(label), None)
+            });
+            let candidate_bounds = accesskit_bounds(
+                &output,
+                egui::accesskit::Role::Label,
+                None,
+                Some(&expected_candidate),
+            );
+            observation = Some((
+                viewport,
+                path_bounds,
+                button_bounds,
+                candidate_bounds,
+                path.clone(),
+                state.clone(),
+            ));
+            output.drop_without_applying_deltas();
+        }
+
+        let (viewport, path_bounds, button_bounds, candidate_bounds, path_after, state_after) =
+            observation.expect("the settled ripgrep form reports its rendered observations");
+        assert!(path_bounds.is_some_and(|bounds| viewport.contains_rect(bounds)));
+        assert!(
+            button_bounds
+                .iter()
+                .all(|bounds| bounds.is_some_and(|bounds| viewport.contains_rect(bounds)))
+        );
+        assert!(candidate_bounds.is_some_and(|bounds| viewport.contains_rect(bounds)));
+        assert_eq!(
+            probe_calls.get(),
+            0,
+            "rendering does not invoke the injected probe"
+        );
+        assert_eq!(
+            path_after, path_before,
+            "rendering does not edit the configured path"
+        );
+        assert_eq!(
+            state_after.automatic_result, state_before.automatic_result,
+            "rendering does not edit the automatic probe result"
+        );
+        assert_eq!(
+            state_after.automatic_checked, state_before.automatic_checked,
+            "rendering does not alter the automatic probe state"
+        );
+        assert_eq!(
+            state_after.configured_result, state_before.configured_result,
+            "rendering does not edit the configured probe result"
+        );
+        assert_eq!(
+            state_after.last_tested_path, state_before.last_tested_path,
+            "rendering does not change the tested path"
+        );
     }
 
     #[test]

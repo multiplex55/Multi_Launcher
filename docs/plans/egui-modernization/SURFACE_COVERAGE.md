@@ -92,11 +92,11 @@ Read-only local presentation review; unchanged dispositions are source review, n
 | color_picker | Coherent unchanged: native color editor with changed-only publication. |
 | shell | Coherent unchanged: single native checkbox/live atomic owner. |
 | stopwatch | Coherent unchanged: short precision/refresh controls. |
-| file_search | Pending: ripgrep path/editor/action and nested path rows need reflow/full control access; ordinary hardcoded validation colors need semantic statuses. src/plugins/file_search.rs render_ripgrep_settings_ui and list helpers. |
-| virtual_desktop | Pending: long rule labels/default-width fields overflow unwrapped rows in settings_ui; preserve native snapshot/rule/runtime owners. |
-| screenshot | Pending: screenshot directory label/editor/Browse row needs bounded reflow in settings_ui; preserve file dialog/serialization. |
+| file_search | C15 accepted bounded full-path/list editors and wrapped explicit actions/semantic tested statuses with neutral untested state; four cache/bounds/no-render-probe contracts pass, native expanded-form/actions gap explicit. |
+| virtual_desktop | C15 accepted stacked bounded rule fields/linked target selector with stable IDs, cached snapshot and runtime owners preserved; source review accepted, native actions unobserved. |
+| screenshot | C15 accepted full-width directory editor/explicit Browse row, mappings/file-dialog owner unchanged; source review accepted, native Browse/capture unobserved. |
 
-Mouse/Clipboard settings were inspected with their completed surface checkpoints. Vertical scrolling of the Settings shell alone does not solve the three remaining horizontal-overflow cases. These three settings owners form one bounded later checkpoint; no extra dependency, persistence or native-effects work.
+Mouse/Clipboard settings were inspected with their completed surface checkpoints. Vertical scrolling of the Settings shell alone does not solve the three remaining horizontal-overflow cases. These three settings owners were completed together at C15; no extra dependency, persistence or native-effects work.
 
 Diff ordinary-chrome source review after C9 also identified mod.rs conflict/error feedback and its long Reload/Keep row for bounded follow-up. Preserve measured window_chrome/inner_work_area and bounded path header. The three renderer rows above are explicit pending owners, separate from C14 rule/operation forms. No semantic content/projection/operations audit or native verification was performed for this read-only review.
 

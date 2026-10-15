@@ -191,9 +191,11 @@ impl Plugin for ScreenshotPlugin {
     fn settings_ui(&mut self, ui: &mut egui::Ui, value: &mut serde_json::Value) {
         let mut cfg: ScreenshotPluginSettings =
             serde_json::from_value(value.clone()).unwrap_or_default();
-        ui.horizontal(|ui| {
-            ui.label("Screenshot directory");
-            ui.text_edit_singleline(&mut cfg.screenshot_dir);
+        ui.label("Screenshot directory");
+        ui.add(
+            egui::TextEdit::singleline(&mut cfg.screenshot_dir).desired_width(ui.available_width()),
+        );
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Browse").clicked()
                 && let Some(dir) = FileDialog::new().pick_folder()
             {

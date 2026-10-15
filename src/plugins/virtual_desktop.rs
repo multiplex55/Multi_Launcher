@@ -766,28 +766,32 @@ impl Plugin for VirtualDesktopPlugin {
         for (index, rule) in settings.auto_switch_rules.iter_mut().enumerate() {
             ui.push_id((index, &rule.id), |ui| {
                 ui.group(|ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.checkbox(&mut rule.enabled, "Enabled");
                         if ui.button("Remove").clicked() {
                             remove = Some(index);
                         }
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("Application/process");
-                        ui.text_edit_singleline(&mut rule.executable);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Process path (optional)");
-                        ui.text_edit_singleline(&mut rule.process_path);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Window title contains (optional)");
-                        ui.text_edit_singleline(&mut rule.title);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Window class (optional)");
-                        ui.text_edit_singleline(&mut rule.class_name);
-                    });
+                    ui.label("Application/process");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut rule.executable)
+                            .desired_width(ui.available_width()),
+                    );
+                    ui.label("Process path (optional)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut rule.process_path)
+                            .desired_width(ui.available_width()),
+                    );
+                    ui.label("Window title contains (optional)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut rule.title)
+                            .desired_width(ui.available_width()),
+                    );
+                    ui.label("Window class (optional)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut rule.class_name)
+                            .desired_width(ui.available_width()),
+                    );
                     let selected = rule
                         .target
                         .as_ref()
@@ -798,7 +802,8 @@ impl Plugin for VirtualDesktopPlugin {
                                 .unwrap_or_else(|| binding.id.to_string())
                         })
                         .unwrap_or_else(|| "Select desktop".into());
-                    egui::ComboBox::from_label("Target desktop")
+                    let target_label = ui.label("Target desktop");
+                    egui::ComboBox::from_id_salt("Target desktop")
                         .selected_text(selected)
                         .show_ui(ui, |ui| {
                             if let Ok(snapshot) = &desktop_snapshot {
@@ -826,7 +831,9 @@ impl Plugin for VirtualDesktopPlugin {
                                     }
                                 }
                             }
-                        });
+                        })
+                        .response
+                        .labelled_by(target_label.id);
                     match (&rule.target, &desktop_snapshot) {
                         (None, _) => {
                             ui.colored_label(
