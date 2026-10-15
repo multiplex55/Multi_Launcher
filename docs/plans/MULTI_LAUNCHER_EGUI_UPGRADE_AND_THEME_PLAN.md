@@ -386,11 +386,11 @@ Current evidence and ownership are authoritative in `egui-modernization/status.m
 - [x] M3-D typography and icons
 - [x] M4-A root search polish
 - [x] M4-B list/grid polish
-- [ ] M4-C common UI primitives
-- [ ] M5-A settings and theme editor
-- [ ] M5-B plugin dialogs incrementally
-- [ ] M5-C remaining dialogs/secondary viewports
-- [ ] M6-A bounded optional effects (if accepted by evidence)
+- [x] M4-C common UI primitives (scoped evidence and native qualifications in status ledger)
+- [x] M5-A settings and theme editor
+- [x] M5-B plugin dialogs incrementally (B1–B8 source accepted; native gaps documented)
+- [x] M5-C remaining dialogs/secondary viewports (C1–C24 source accepted; M6 corrections/qualification active)
+- [x] M6-A optional invasive effects/motion explicitly omitted with justification in final receipt
 - [ ] M6-B final functional / visual / bounded responsiveness signoff
 - [ ] `docs/plans/egui-modernization/handoff.md` complete and checkpoint branch pushed if allowed
 

@@ -10801,7 +10801,24 @@ mod tests {
         panel.show_metadata = true;
         panel.outline_open = true;
 
-        render_panel_once(&ctx, &mut panel, &mut app);
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let mut input = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport is present in RawInput")
+            .inner_rect = Some(screen_rect);
+        let mut pane_frames = Vec::new();
+        for _ in 0..3 {
+            ctx.run_ui(input.clone(), |ctx| {
+                panel.ui(ctx, &mut app);
+            })
+            .drop_without_applying_deltas();
+            pane_frames.push((panel.last_outline_rect, panel.last_content_rect));
+        }
 
         assert!(panel.last_ui_sections.tags_visible);
         assert!(panel.last_ui_sections.links_visible);
@@ -10812,7 +10829,10 @@ mod tests {
             panel
                 .last_outline_rect
                 .expect("outline pane should be allocated while open")
-                .is_positive()
+                .is_positive(),
+            "outline/content frames={pane_frames:?}; default_size={:?}, screen={:?}",
+            app.note_panel_default_size,
+            ctx.content_rect()
         );
         assert!(
             panel

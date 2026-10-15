@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(160);
 const SEARCH_RETRY_BASE: Duration = Duration::from_millis(160);
 const SEARCH_RETRY_MAX: Duration = Duration::from_secs(2);
+const RESULT_SCROLL_MIN_HEIGHT: f32 = 64.0;
 const RESULT_SCROLL_MAX_HEIGHT: f32 = 190.0;
 static NEXT_EDITOR_EPOCH: AtomicU64 = AtomicU64::new(1);
 
@@ -20,6 +21,11 @@ fn in_result_scroll_column<R>(
     column_width_at_query_start: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    // Match the native frame's rounded origin at this scroll viewport boundary.
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    let top = ui.next_widget_position().y;
+    let aligned_top = (top * pixels_per_point).ceil() / pixels_per_point;
+    ui.add_space((aligned_top - top).max(0.0));
     let available = ui.available_size();
     let scroll = ui.spacing().scroll;
     let parent_scrollbar_hit_width = if reserve_parent_scrollbar {
@@ -30,10 +36,13 @@ fn in_result_scroll_column<R>(
         0.0
     };
     let list_width = available.x.min(column_width_at_query_start);
+    let list_height = available
+        .y
+        .clamp(RESULT_SCROLL_MIN_HEIGHT, RESULT_SCROLL_MAX_HEIGHT);
     let allocated = ui.allocate_ui_with_layout(
         egui::vec2(
             (list_width - parent_scrollbar_hit_width).max(0.0),
-            available.y.min(RESULT_SCROLL_MAX_HEIGHT),
+            list_height,
         ),
         egui::Layout::top_down(egui::Align::Min),
         add_contents,
@@ -66,6 +75,16 @@ fn trace_action_editor_scroll(
     if !crate::radial::acceptance_trace::enabled() && !cfg!(test) {
         return;
     }
+    #[cfg(test)]
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            egui::Id::new("radial-action-editor-test-result-scroll-owner"),
+            (
+                output.id,
+                (output.content_size.y - output.inner_rect.height()).max(0.0),
+            ),
+        );
+    });
     let pixels_per_point = ui.ctx().pixels_per_point();
     if !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
         return;
@@ -75,10 +94,10 @@ fn trace_action_editor_scroll(
     };
     let client_size = [viewport_rect.width(), viewport_rect.height()];
     let client_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, viewport_rect.size());
-    let Some(track_response) = ui.ctx().read_response(output.id.with(1)) else {
+    let Some(track_response) = ui.ctx().read_response(output.id.with(1usize)) else {
         return;
     };
-    if track_response.id != output.id.with(1) {
+    if track_response.id != output.id.with(1usize) {
         return;
     }
     let inner_height = output.inner_rect.height();
@@ -223,7 +242,7 @@ fn trace_action_editor_scroll(
         identity,
         crate::radial::acceptance_trace::ActionEditorScrollObservation {
             query_digest: crate::radial::acceptance_trace::private_trace_text_digest(query),
-            scroll_id: output.id.with(1).value(),
+            scroll_id: output.id.with(1usize).value(),
             frame_nr: ui.ctx().cumulative_frame_nr(),
             offset_y_milli,
             velocity_y_milli,
@@ -2642,6 +2661,7 @@ mod tests {
         outer_content_height: f32,
         outer_inner_height: f32,
         outer_bar_rects: Option<(egui::Rect, egui::Rect)>,
+        outer_scroll_id: egui::Id,
         intents: Vec<ActionBindingEditorIntent>,
     }
 
@@ -2773,6 +2793,7 @@ mod tests {
         let mut outer_content_height = 0.0;
         let mut outer_inner_height = 0.0;
         let mut outer_bar_rects = None;
+        let mut outer_scroll_id = egui::Id::NULL;
         let mut intents = Vec::new();
         let output = context.run_ui(input, |root_ui| {
             let frame_context = root_ui.ctx().clone();
@@ -2806,11 +2827,12 @@ mod tests {
                                 ui.small(format!("Inspector continuation {index}"));
                             }
                         });
+                    outer_scroll_id = outer.id;
                     outer_offset_y = outer.state.offset.y;
                     outer_content_height = outer.content_size.y;
                     outer_inner_height = outer.inner_rect.height();
                     outer_bar_rects = frame_context
-                        .read_response(outer.id.with(1))
+                        .read_response(outer.id.with(1usize))
                         .map(|response| (response.rect, response.interact_rect));
                 });
             });
@@ -2821,6 +2843,7 @@ mod tests {
             outer_content_height,
             outer_inner_height,
             outer_bar_rects,
+            outer_scroll_id,
             intents,
         }
     }
@@ -4787,6 +4810,22 @@ mod tests {
                 );
                 output.drop_without_applying_deltas();
                 assert!(intents.is_empty());
+                let _ = crate::radial::acceptance_trace::take_action_editor_control_test_events();
+                let (settled, intents) = render_editor_with_catalog(
+                    &context,
+                    &mut state,
+                    editor_scope.clone(),
+                    &binding,
+                    &empty_action_catalog,
+                    vec![egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::Vec2::ZERO,
+                        phase: egui::TouchPhase::End,
+                        modifiers: egui::Modifiers::NONE,
+                    }],
+                );
+                settled.drop_without_applying_deltas();
+                assert!(intents.is_empty());
                 for event in
                     crate::radial::acceptance_trace::take_action_editor_scroll_test_events()
                 {
@@ -4975,6 +5014,18 @@ mod tests {
             }
             inspector_controls
                 .extend(crate::radial::acceptance_trace::take_action_editor_control_test_events());
+            if latest_scroll.is_none()
+                && rendered.outer_content_height > rendered.outer_inner_height
+                && let Some(mut scroll) =
+                    egui::scroll_area::State::load(&context, rendered.outer_scroll_id)
+            {
+                // The expanded authoring chrome is below the initial outer viewport.
+                // Reach it through the actual parent scroll owner before testing the
+                // independent inner gutter; both offsets remain separately asserted.
+                scroll.offset.y =
+                    (rendered.outer_content_height - rendered.outer_inner_height).max(0.0);
+                scroll.store(&context, rendered.outer_scroll_id);
+            }
             if latest_scroll.is_some() && rendered.outer_bar_rects.is_some() {
                 initial_frame = Some(rendered);
                 break;
@@ -5068,6 +5119,72 @@ mod tests {
                 } if *displayed_text_digest == expected_label_digest
             )),
             "the compact Inspector keeps the complete first result label visible"
+        );
+        // Full wrapped identity and native actions may exceed the compact
+        // viewport together. Prove actual Pin reachability, then restore the
+        // initial inner offset before the independent native gutter drag.
+        let (inner_scroll_id, max_inner_offset) = context
+            .data(|data| {
+                data.get_temp::<(egui::Id, f32)>(egui::Id::new(
+                    "radial-action-editor-test-result-scroll-owner",
+                ))
+            })
+            .expect("the rendered inner ScrollArea exposes its actual owner");
+        let pin_bottom = inspector_controls
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                crate::radial::acceptance_trace::Event::DesignerActionEditorControl {
+                    control: "pin_result",
+                    control_index: Some(0),
+                    full_bottom_px,
+                    ..
+                } => Some(*full_bottom_px),
+                _ => None,
+            })
+            .expect("the first native Pin response is rendered");
+        let mut inner_state = egui::scroll_area::State::load(&context, inner_scroll_id)
+            .expect("actual inner ScrollArea state");
+        inner_state.offset.y = ((pin_bottom - geometry.inner[3]).max(0) as f32 / pixels_per_point
+            + 1.0)
+            .min(max_inner_offset);
+        inner_state.store(&context, inner_scroll_id);
+        for _ in 0..2 {
+            let frame = nested_inspector_frame(
+                &context,
+                &mut state,
+                inspector_scope.clone(),
+                &binding,
+                time,
+                Vec::new(),
+            );
+            time += 1.0 / 60.0;
+            frame.output.drop_without_applying_deltas();
+            inspector_controls
+                .extend(crate::radial::acceptance_trace::take_action_editor_control_test_events());
+            let _ = crate::radial::acceptance_trace::take_action_editor_scroll_test_events();
+        }
+        let mut inner_state = egui::scroll_area::State::load(&context, inner_scroll_id)
+            .expect("actual inner ScrollArea state remains available");
+        inner_state.offset.y = 0.0;
+        inner_state.store(&context, inner_scroll_id);
+        for _ in 0..2 {
+            let frame = nested_inspector_frame(
+                &context,
+                &mut state,
+                inspector_scope.clone(),
+                &binding,
+                time,
+                Vec::new(),
+            );
+            time += 1.0 / 60.0;
+            frame.output.drop_without_applying_deltas();
+            let _ = crate::radial::acceptance_trace::take_action_editor_control_test_events();
+            let _ = crate::radial::acceptance_trace::take_action_editor_scroll_test_events();
+        }
+        assert!(
+            egui::scroll_area::State::load(&context, inner_scroll_id)
+                .is_some_and(|scroll| scroll.offset.y == 0.0)
         );
         assert!(
             inspector_controls.iter().any(|event| matches!(

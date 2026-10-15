@@ -263,8 +263,8 @@ struct RootListGeometryKey {
     secondary_font: egui::FontId,
     wrap_mode: egui::TextWrapMode,
     extra_text_line_spacing_bits: u32,
-    button_padding_x_bits: u32,
-    button_padding_y_bits: u32,
+    selectable_margin_x_bits: u32,
+    selectable_margin_y_bits: u32,
     interaction_height_bits: u32,
     interaction_width_bits: u32,
     item_spacing_y_bits: u32,
@@ -279,6 +279,17 @@ struct RootListGeometryKey {
 /// Preserve the long-standing minimum button height across grid measurement,
 /// allocation, and selected-item scrolling.
 const ROOT_GRID_MIN_HEIGHT: f32 = 44.0;
+
+fn root_selectable_frame_margin(ui: &egui::Ui) -> egui::Vec2 {
+    ui.style()
+        .button_style(
+            &egui::widget_style::Classes::default(),
+            egui::widget_style::WidgetState::Inactive,
+        )
+        .frame
+        .total_margin()
+        .sum()
+}
 
 /// Cached actual SelectableLabel row geometry for the root list.
 ///
@@ -464,6 +475,7 @@ impl RootListGeometryCache {
     ) -> bool {
         let spacing = ui.spacing();
         let text_presentation = RootResultTextPresentation::new(ui);
+        let selectable_margin = root_selectable_frame_margin(ui);
         let key = RootListGeometryKey {
             result_generation: self.result_generation,
             result_count: results.len(),
@@ -474,8 +486,8 @@ impl RootListGeometryCache {
             secondary_font: text_presentation.secondary_font.clone(),
             wrap_mode: ui.wrap_mode(),
             extra_text_line_spacing_bits: spacing.extra_text_line_spacing.to_bits(),
-            button_padding_x_bits: spacing.button_padding.x.to_bits(),
-            button_padding_y_bits: spacing.button_padding.y.to_bits(),
+            selectable_margin_x_bits: selectable_margin.x.to_bits(),
+            selectable_margin_y_bits: selectable_margin.y.to_bits(),
             interaction_height_bits: spacing.interact_size.y.to_bits(),
             interaction_width_bits: spacing.interact_size.x.to_bits(),
             item_spacing_y_bits: spacing.item_spacing.y.to_bits(),
@@ -499,7 +511,10 @@ impl RootListGeometryCache {
         let started = std::time::Instant::now();
         let width = f32::from_bits(key.width_bits);
         let spacing_y = f32::from_bits(key.item_spacing_y_bits);
-        let padding = spacing.button_padding;
+        let margin = egui::vec2(
+            f32::from_bits(key.selectable_margin_x_bits),
+            f32::from_bits(key.selectable_margin_y_bits),
+        );
         let interaction_height = spacing.interact_size.y;
         let wrap_mode = key.wrap_mode;
         let mut row_tops = Vec::with_capacity(results.len());
@@ -527,13 +542,13 @@ impl RootListGeometryCache {
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
                     wrap_mode,
-                    (content_width - 2.0 * padding.x).max(0.0),
+                    (content_width - margin.x).max(0.0),
                 ),
                 egui::FontSelection::Style(egui::TextStyle::Button),
                 egui::Align::Center,
             );
-            let row_height = (size.y + 2.0 * padding.y).max(interaction_height);
-            let response_width = content_width.max(size.x + 2.0 * padding.x);
+            let row_height = (size.y + margin.y).max(interaction_height);
+            let response_width = content_width.max(size.x + margin.x);
             row_response_x_offsets.push(content_x_offset - (response_width - content_width) * 0.5);
             row_response_widths.push(response_width);
             content_x_offset -= (response_width - content_width) * 0.5;
@@ -576,6 +591,7 @@ impl RootListGeometryCache {
 
     fn ensure_grid(&mut self, ui: &egui::Ui, results: &[Action], columns: usize) -> bool {
         let spacing = ui.spacing();
+        let selectable_margin = root_selectable_frame_margin(ui);
         let columns = columns.max(1);
         let grid_spacing_x = 8.0_f32;
         let grid_spacing_y = 6.0_f32;
@@ -597,8 +613,8 @@ impl RootListGeometryCache {
             secondary_font: text_presentation.secondary_font.clone(),
             wrap_mode,
             extra_text_line_spacing_bits: spacing.extra_text_line_spacing.to_bits(),
-            button_padding_x_bits: spacing.button_padding.x.to_bits(),
-            button_padding_y_bits: spacing.button_padding.y.to_bits(),
+            selectable_margin_x_bits: selectable_margin.x.to_bits(),
+            selectable_margin_y_bits: selectable_margin.y.to_bits(),
             interaction_height_bits: spacing.interact_size.y.to_bits(),
             interaction_width_bits: spacing.interact_size.x.to_bits(),
             item_spacing_y_bits: spacing.item_spacing.y.to_bits(),
@@ -620,7 +636,10 @@ impl RootListGeometryCache {
 
         #[cfg(test)]
         let started = std::time::Instant::now();
-        let padding = spacing.button_padding;
+        let margin = egui::vec2(
+            f32::from_bits(key.selectable_margin_x_bits),
+            f32::from_bits(key.selectable_margin_y_bits),
+        );
         let interaction_width = spacing.interact_size.x;
         let interaction_height = spacing.interact_size.y;
         let actual_columns = columns.min(results.len());
@@ -641,15 +660,15 @@ impl RootListGeometryCache {
                 ui.style(),
                 egui::text::TextWrapping::from_wrap_mode_and_width(
                     key.wrap_mode,
-                    (nominal_width - 2.0 * padding.x).max(0.0),
+                    (nominal_width - margin.x).max(0.0),
                 ),
                 egui::FontSelection::Style(egui::TextStyle::Button),
                 egui::Align::Center,
             );
-            let cell_width = nominal_width.max(galley.size().x + 2.0 * padding.x);
+            let cell_width = nominal_width.max(galley.size().x + margin.x);
             let cell_height = ROOT_GRID_MIN_HEIGHT
                 .max(interaction_height)
-                .max(galley.size().y + 2.0 * padding.y);
+                .max(galley.size().y + margin.y);
             let column = index % columns;
             let row = index / columns;
             column_widths[column] = column_widths[column].max(cell_width);
@@ -1010,7 +1029,7 @@ fn root_grid_cell_response(
             |cell_ui| {
                 cell_ui.add_sized(
                     [geometry.grid_nominal_width, ROOT_GRID_MIN_HEIGHT],
-                    egui::Button::selectable(selected, text),
+                    egui::Button::selectable(selected, text).frame_when_inactive(true),
                 )
             },
         )
@@ -3416,6 +3435,12 @@ impl LauncherApp {
                     }
                 }
             } else {
+                // Align the viewport itself: aligning only scrolled content can be
+                // undone by the next scroll offset and still clip a native frame.
+                let pixels_per_point = ui.ctx().pixels_per_point();
+                let top = ui.next_widget_position().y;
+                let aligned_top = (top * pixels_per_point).ceil() / pixels_per_point;
+                ui.add_space((aligned_top - top).max(0.0));
                 let area_height = ui.available_height();
                 let _root_scroll_output = ScrollArea::vertical()
                     .max_height(area_height)
@@ -3690,10 +3715,13 @@ impl LauncherApp {
                                             |row_ui| {
                                                 #[cfg(test)]
                                                 let expected_response_id = row_ui.next_auto_id();
-                                                let response = row_ui.add(egui::Button::selectable(
-                                                    self.selected == Some(idx),
-                                                    text,
-                                                ));
+                                                let response = row_ui.add(
+                                                    egui::Button::selectable(
+                                                        self.selected == Some(idx),
+                                                        text,
+                                                    )
+                                                    .frame_when_inactive(true),
+                                                );
                                                 #[cfg(test)]
                                                 assert_eq!(
                                                     response.id, expected_response_id,
@@ -6031,7 +6059,7 @@ mod tests {
             layout.available_widths.push(available_width);
             let response = ui.add_sized(
                 [available_width, 0.0],
-                egui::Button::selectable(false, text),
+                egui::Button::selectable(false, text).frame_when_inactive(true),
             );
             layout.bounds = layout.bounds.union(response.rect);
             layout.rows.push(response.rect);
@@ -6283,7 +6311,12 @@ mod tests {
                             let response = row_ui
                                 .with_layout(
                                     egui::Layout::centered_and_justified(ui.layout().main_dir()),
-                                    |row_ui| row_ui.add(egui::Button::selectable(false, text)),
+                                    |row_ui| {
+                                        row_ui.add(
+                                            egui::Button::selectable(false, text)
+                                                .frame_when_inactive(true),
+                                        )
+                                    },
                                 )
                                 .inner;
                             virtual_rows.push(response.rect);
@@ -6409,7 +6442,8 @@ mod tests {
                         egui::Button::selectable(
                             false,
                             root_grid_result_text(action, &text_presentation),
-                        ),
+                        )
+                        .frame_when_inactive(true),
                     );
                     cells.push(response.rect);
                     if (index + 1) % columns == 0 {
@@ -10022,11 +10056,11 @@ mod tests {
         fn finish_row(
             &mut self,
             galley_size: egui::Vec2,
-            padding: egui::Vec2,
+            frame_margin: egui::Vec2,
             interaction_height: f32,
         ) {
-            let row_height = (galley_size.y + 2.0 * padding.y).max(interaction_height);
-            let response_width = self.content_width.max(galley_size.x + 2.0 * padding.x);
+            let row_height = (galley_size.y + frame_margin.y).max(interaction_height);
+            let response_width = self.content_width.max(galley_size.x + frame_margin.x);
             self.row_response_x_offsets
                 .push(self.content_x_offset - (response_width - self.content_width) * 0.5);
             self.row_response_widths.push(response_width);
@@ -10153,9 +10187,9 @@ mod tests {
             .visuals
             .override_text_color
             .unwrap_or(egui::Color32::PLACEHOLDER);
-        let padding = egui::vec2(
-            f32::from_bits(key.button_padding_x_bits),
-            f32::from_bits(key.button_padding_y_bits),
+        let frame_margin = egui::vec2(
+            f32::from_bits(key.selectable_margin_x_bits),
+            f32::from_bits(key.selectable_margin_y_bits),
         );
         let spacing_y = f32::from_bits(key.item_spacing_y_bits);
         let interaction_height = f32::from_bits(key.interaction_height_bits);
@@ -10197,7 +10231,7 @@ mod tests {
                         resolved_line_height.expect("metrics resolved once"),
                         text_color,
                         key.wrap_mode,
-                        (geometry.content_width - 2.0 * padding.x).max(0.0),
+                        (geometry.content_width - frame_margin.x).max(0.0),
                     );
                     times.job_build_ns += started.elapsed().as_nanos();
 
@@ -10206,7 +10240,7 @@ mod tests {
                     times.layout_ns += started.elapsed().as_nanos();
 
                     let started = std::time::Instant::now();
-                    geometry.finish_row(galley.size(), padding, interaction_height);
+                    geometry.finish_row(galley.size(), frame_margin, interaction_height);
                     times.vector_bookkeeping_ns += started.elapsed().as_nanos();
                 }
             });
@@ -10224,7 +10258,7 @@ mod tests {
                             style,
                             egui::text::TextWrapping::from_wrap_mode_and_width(
                                 key.wrap_mode,
-                                (geometry.content_width - 2.0 * padding.x).max(0.0),
+                                (geometry.content_width - frame_margin.x).max(0.0),
                             ),
                             egui::FontSelection::Style(egui::TextStyle::Button),
                             egui::Align::Center,
@@ -10257,7 +10291,7 @@ mod tests {
                             line_height,
                             text_color,
                             key.wrap_mode,
-                            (geometry.content_width - 2.0 * padding.x).max(0.0),
+                            (geometry.content_width - frame_margin.x).max(0.0),
                         );
                         times.job_build_ns += started.elapsed().as_nanos();
 
@@ -10270,7 +10304,7 @@ mod tests {
                 };
 
                 let started = std::time::Instant::now();
-                geometry.finish_row(galley.size(), padding, interaction_height);
+                geometry.finish_row(galley.size(), frame_margin, interaction_height);
                 times.vector_bookkeeping_ns += started.elapsed().as_nanos();
             }
         }
@@ -10299,7 +10333,7 @@ mod tests {
             .visuals
             .override_text_color
             .unwrap_or(egui::Color32::PLACEHOLDER);
-        let padding_x = f32::from_bits(key.button_padding_x_bits);
+        let frame_margin_x = f32::from_bits(key.selectable_margin_x_bits);
 
         for wrap_mode in [
             egui::TextWrapMode::Wrap,
@@ -10308,7 +10342,7 @@ mod tests {
         ] {
             let mut content_width = f32::from_bits(key.width_bits);
             for (index, text) in texts.iter().enumerate() {
-                let available_width = (content_width - 2.0 * padding_x).max(0.0);
+                let available_width = (content_width - frame_margin_x).max(0.0);
                 let current = egui::WidgetText::from(text.clone()).into_galley_impl(
                     ctx,
                     style,
@@ -10335,7 +10369,7 @@ mod tests {
                     current.size(),
                     "{wrap_mode:?} galley dimensions for row {index}"
                 );
-                content_width = content_width.max(current.size().x + 2.0 * padding_x);
+                content_width = content_width.max(current.size().x + frame_margin_x);
             }
         }
     }
@@ -11368,8 +11402,8 @@ mod tests {
             u64::from(key.grid_nominal_width_bits),
             old.map_or(0, font_id_signature),
             font_id_signature(key),
-            u64::from(spacing.button_padding.x.to_bits()),
-            u64::from(spacing.button_padding.y.to_bits()),
+            u64::from(key.selectable_margin_x_bits),
+            u64::from(key.selectable_margin_y_bits),
             u64::from(spacing.interact_size.y.to_bits()),
             u64::from(spacing.interact_size.x.to_bits()),
             u64::from(spacing.item_spacing.y.to_bits()),
