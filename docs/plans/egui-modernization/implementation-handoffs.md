@@ -4,7 +4,11 @@ Permanent user desktop policy (2026-10-14 clarification): **Do not use Computer 
 
 The user directive2026-10-14 and PERFORMANCE_ACCEPTANCE_ADDENDUM.md supersede every inherited performance-parity gate. Use the CURRENT STATUS / NEXT ACTION in status.md. The original architecture/behavior contracts remain useful; all earlier handoffs below are historical, not active work assignments.
 
-## Active coherent pipeline
+## Final pipeline disposition
+
+Implementation complete at sourceadcda8dd3bfa49b5f016bd55c2e6202ad61974ad; both tracks and C1–C24 reviewed, all12 M6 broad failures closed by179/179 affected-owner run. Normal/QA builds and four current-source theme frames passed; bounded normal sample qualified. All writers/processes released; no active implementation handoff or parity/benchmark prerequisite remains. handoff.md/final receipt and CURRENT STATUS govern the completed local branch. Native desktop restore AccessDenied and physical/input/focus/child/DPI/normal-close/hidden-idle gaps remain release qualification; future comprehensive performance/renderer work is not automatically activated. Historical assignments below cannot restart experiments or override the user desktop/push restrictions.
+
+## Completed coherent pipeline (reference only)
 
 1. **M2-A live correctness closeout — complete at71a41051.** Keep integrated6527ddc1/796 source; do not port isolated compact/row/ASCII/shaping candidates. Actual live guards compile and their affected contracts pass. Completed parent locked/offline fast-dev lib Nextest filter covers:
    - `gui::radial_editor::tests::closed_show_deferred_frames_skip_catalog_and_real_retained_callback_drains_close`

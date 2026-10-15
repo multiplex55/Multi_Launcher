@@ -2,6 +2,12 @@
 
 Authority: [PERFORMANCE_ACCEPTANCE_ADDENDUM.md](PERFORMANCE_ACCEPTANCE_ADDENDUM.md). Complete substantive Track B surface coverage and supported visual/functional checks. Record unavailable native/hardware observations and manual QA follow-up; do not endlessly retry unchanged tools or describe software/headless pixels as desktop/focus/hotkey proof. Earlier inventories below are historical evidence.
 
+## Current M6 closeout (2026-10-15)
+
+Final themed sourceadcda8dd3bfa49b5f016bd55c2e6202ad61974ad; both implementation tracks reviewed/compiled. Broad library0015251pass/12fail/43ignored retained; all12 failures closed by final affected-owner006179/179. Normal and QA Windows builds passed; four852x460 Dark/Light/System/Custom client captures inspected. Normal process sample82.6401273s:0.140625 CPU seconds, RSS+4681728B,51threads unchanged, settings bytes unchanged; not long-run resource/hidden-idle proof. Source/build/fixture/artifact hashes and all corrections are in receipts/m6-final-acceptance.md; final summary in handoff.md.
+
+Native desktop-membership/restore lookup returned AccessDenied during startup. Physical show/hide/hotkey/input/IME/focus/loaded-child closing/placement/DPI/RDP/normal UI close remain uncompleted; GPU/native latency and true hidden idle/long duration remain unmeasured. No unresolved automated/source critical defect identified after corrections, but no unconditional native release-readiness claim. Client framebuffer and OS Responding are qualified evidence. Computer Use remains prohibited. Performance debt accepted; comprehensive statistics/renderer comparison are future work, not launched.
+
 ## Historical record — unchanged, not operative
 
 # M0-B visual QA preparation

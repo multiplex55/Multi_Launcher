@@ -370,10 +370,10 @@ For the separate future benchmark task, use existing Track C PowerShell recipes 
 Current evidence and ownership are authoritative in `egui-modernization/status.md`; checked migration gates retain the documented native/manual QA gaps and accepted performance debt.
 
 - [x] M0-A preflight and branch
-- [ ] M0-B golden baseline and screenshots
+- [ ] M0-B historical original screenshot/fixture qualification gap retained; no baseline rebuild is an active gate
 - [x] M0-C API/dependency worklist
 - [x] M1-A dependency graph
-- [ ] M1-B lifecycle and startup
+- [x] M1-B lifecycle and startup implementation accepted via M2-D; physical native QA gaps retained
 - [x] M1-C widget APIs
 - [x] M1-D toast/markdown/texture integrations
 - [x] M2-A cache migration and Track C compatibility
@@ -391,7 +391,7 @@ Current evidence and ownership are authoritative in `egui-modernization/status.m
 - [x] M5-B plugin dialogs incrementally (B1–B8 source accepted; native gaps documented)
 - [x] M5-C remaining dialogs/secondary viewports (C1–C24 source accepted; M6 corrections/qualification active)
 - [x] M6-A optional invasive effects/motion explicitly omitted with justification in final receipt
-- [ ] M6-B final functional / visual / bounded responsiveness signoff
-- [ ] `docs/plans/egui-modernization/handoff.md` complete and checkpoint branch pushed if allowed
+- [x] M6-B implementation/automated/visual/bounded process signoff with explicit native release-qualification gaps
+- [x] `docs/plans/egui-modernization/handoff.md` complete; local checkpoint branch only, no push authorized
 
 **Done means BOTH migration and substantial visual improvements are implemented and reviewed, with actual functional checks, accepted performance debt, native/manual gaps and any release-blocking defects reported honestly. Comprehensive performance optimization remains a future task.**

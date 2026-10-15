@@ -2,6 +2,12 @@
 
 Authority: PERFORMANCE_ACCEPTANCE_ADDENDUM.md. This records available functional evidence and exact remaining manual QA; unavailable desktop observations are not invented passes or automatic blockers to safe theming. Accepted synthetic performance debt is not reopened.
 
+## Current M6 closeout (2026-10-15)
+
+Final themed sourceadcda8dd3bfa49b5f016bd55c2e6202ad61974ad; both implementation tracks reviewed/compiled. Broad library0015251pass/12fail/43ignored retained; all12 failures closed by final affected-owner006179/179. Normal and QA Windows builds passed; four852x460 Dark/Light/System/Custom client captures inspected. Normal process sample82.6401273s:0.140625 CPU seconds, RSS+4681728B,51threads unchanged, settings bytes unchanged; not long-run resource/hidden-idle proof. Source/build/fixture/artifact hashes and all corrections are in receipts/m6-final-acceptance.md; final summary in handoff.md.
+
+Native desktop-membership/restore lookup returned AccessDenied during startup. Physical show/hide/hotkey/input/IME/focus/loaded-child closing/placement/DPI/RDP/normal UI close remain uncompleted; GPU/native latency and true hidden idle/long duration remain unmeasured. No unresolved automated/source critical defect identified after corrections, but no unconditional native release-readiness claim. Client framebuffer and OS Responding are qualified evidence. Computer Use remains prohibited. Performance debt accepted; comprehensive statistics/renderer comparison are future work, not launched.
+
 ## Chosen source and available checks
 
 Current integrated runtime follows6527ddc1/79653eca; M2-A checkpoint71a41051 adds only explicit headless texture-output disposal in one strict radial lifecycle test. Actual Windows fast-dev compilation and all-target check passed. Both ClipboardModify contracts and the corrected radial closed-frame/real-callback contract passed; see receipts/m2a-live-correctness-closeout.md. Integrated vendor layout/preparation sources still match the accepted source796 reference after known text EOL normalization only.
