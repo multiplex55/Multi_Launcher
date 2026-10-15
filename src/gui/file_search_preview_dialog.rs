@@ -1,17 +1,18 @@
 use crate::file_search::actions::{execute_explorer_action, resolve_explorer_action};
 use crate::file_search::model::ContentMatch;
 use crate::file_search::preview::{
-    FilePreview, PreviewCoverage, PreviewKind, PreviewLoadOutcome, PreviewLoadStateMachine,
-    PreviewLoadingState, PreviewRequest, preview_file,
+    FilePreview, PreviewCoverage, PreviewKind, PreviewLine, PreviewLoadOutcome,
+    PreviewLoadStateMachine, PreviewLoadingState, PreviewRequest, preview_file,
 };
 use crate::file_search::settings::FileSearchSettings;
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use eframe::egui;
+use eframe::egui::{FontId, RichText, TextStyle};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 const DEFAULT_PREVIEW_WINDOW_SIZE: egui::Vec2 = egui::vec2(860.0, 620.0);
-const PREVIEW_ROW_HEIGHT: f32 = 18.0;
 
 pub fn preview_window_id_source() -> &'static str {
     "file_search_preview_window"
@@ -262,9 +263,20 @@ impl FileSearchPreviewDialogState {
             return;
         };
         match preview.kind {
-            PreviewKind::Text => self.render_text_preview(ui, &preview),
+            PreviewKind::Text => {
+                self.render_text_preview(ui, &preview);
+            }
             _ => {
-                ui.label("Preview is not available as text.");
+                widgets::semantic_status(
+                    ui,
+                    if preview.kind == PreviewKind::Error {
+                        StatusTone::Error
+                    } else {
+                        StatusTone::Warning
+                    },
+                    "Text preview unavailable",
+                    Some("Preview is not available as text."),
+                );
             }
         }
     }
@@ -276,23 +288,31 @@ impl FileSearchPreviewDialogState {
         _settings: &FileSearchSettings,
     ) {
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new(request.path.display().to_string()).strong());
+            widgets::compact_section_heading(ui, "Preview", None);
+            let path = request.path.display().to_string();
+            ui.add(egui::Label::new(RichText::new(&path).strong()).wrap());
             ui.horizontal_wrapped(|ui| {
                 if let Some(line) = self.selected_match.as_ref().map(|m| m.line_number) {
-                    ui.label(format!("Selected line: {line}"));
+                    widgets::secondary_help(ui, &format!("Selected line: {line}"));
                 }
                 if let Some(preview) = &self.loaded_preview {
-                    ui.label(format!("Status: {}", preview_status(preview)));
+                    widgets::semantic_status(
+                        ui,
+                        preview_status_tone(preview),
+                        "Preview status",
+                        Some(&preview_status(preview)),
+                    );
                     if should_show_file_size(preview) {
-                        ui.label(format!(
-                            "Size: {}",
-                            human_file_size(preview.metadata.len_bytes)
-                        ));
+                        widgets::secondary_help(
+                            ui,
+                            &format!("Size: {}", human_file_size(preview.metadata.len_bytes)),
+                        );
                     }
                 }
             });
-            ui.horizontal(|ui| {
-                if ui.button("Open in Explorer").clicked() {
+            ui.horizontal_wrapped(|ui| {
+                let open = ui.button("Open in Explorer");
+                if widgets::with_button_emphasis(ui, open, ButtonEmphasis::Primary).clicked() {
                     match resolve_explorer_action(&request.path).and_then(execute_explorer_action) {
                         Ok(()) => self.action_error_message = None,
                         Err(error) => self.action_error_message = Some(error.to_string()),
@@ -320,19 +340,23 @@ impl FileSearchPreviewDialogState {
             });
         });
         if let Some(error) = &self.action_error_message {
-            ui.colored_label(egui::Color32::RED, error);
+            widgets::semantic_status(ui, StatusTone::Error, "Action failed", Some(error));
         }
         if let Some(error) = &self.load_error_message {
-            ui.colored_label(egui::Color32::YELLOW, error);
+            widgets::semantic_status(ui, StatusTone::Error, "Preview failed", Some(error));
         }
         if let Some(preview) = &self.loaded_preview {
             for warning in &preview.warnings {
-                ui.colored_label(egui::Color32::YELLOW, warning);
+                widgets::semantic_status(ui, StatusTone::Warning, "Preview warning", Some(warning));
             }
         }
     }
 
-    fn render_text_preview(&mut self, ui: &mut egui::Ui, preview: &FilePreview) {
+    fn render_text_preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        preview: &FilePreview,
+    ) -> egui::scroll_area::ScrollAreaOutput<()> {
         let selected_line = self.selected_match.as_ref().map(|m| m.line_number);
         let scroll_target = self
             .pending_auto_scroll
@@ -350,41 +374,84 @@ impl FileSearchPreviewDialogState {
         );
         let path = preview.path.clone();
         let row_count = preview.lines.len();
+        let (font_id, row_height) = preview_row_metrics(ui);
 
-        egui::ScrollArea::both()
+        let output = egui::ScrollArea::both()
             .id_salt(preview_scroll_id_source(path))
             .auto_shrink([false, false])
-            .show_rows(ui, PREVIEW_ROW_HEIGHT, row_count, |ui, row_range| {
+            .show_rows(ui, row_height, row_count, |ui, row_range| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for row_index in row_range {
                     let Some(line) = preview.lines.get(row_index) else {
                         continue;
                     };
                     let is_selected = Some(line.line_number) == selected_line;
-                    let fill = is_selected.then(|| ui.visuals().selection.bg_fill);
-                    let inner = egui::Frame::NONE
-                        .fill(fill.unwrap_or(egui::Color32::TRANSPARENT))
-                        .show(ui, |ui| {
-                            ui.set_min_height(PREVIEW_ROW_HEIGHT);
-                            ui.horizontal(|ui| {
-                                ui.monospace(format!(
-                                    "{:>width$}",
-                                    line.line_number,
-                                    width = line_number_width
-                                ));
-                                ui.monospace("  ");
-                                ui.monospace(&line.text);
-                            });
-                        });
+                    let response = render_preview_line(
+                        ui,
+                        line,
+                        line_number_width,
+                        &font_id,
+                        row_height,
+                        is_selected,
+                    );
                     if scroll_target == Some(row_index) {
-                        inner.response.scroll_to_me(Some(egui::Align::Center));
+                        response.scroll_to_me(Some(egui::Align::Center));
                     }
                 }
             });
         if self.pending_auto_scroll {
             self.pending_auto_scroll = false;
         }
+        output
     }
+}
+
+fn preview_row_metrics(ui: &mut egui::Ui) -> (FontId, f32) {
+    let font_id = resolved_preview_font(ui);
+    let extra_line_spacing = ui.spacing().extra_text_line_spacing;
+    let height = (ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + extra_line_spacing)
+        .max(ui.spacing().interact_size.y);
+    (font_id, height)
+}
+
+fn render_preview_line(
+    ui: &mut egui::Ui,
+    line: &PreviewLine,
+    line_number_width: usize,
+    font_id: &FontId,
+    row_height: f32,
+    selected: bool,
+) -> egui::Response {
+    let fill = selected.then(|| ui.visuals().selection.bg_fill);
+    egui::Frame::NONE
+        .fill(fill.unwrap_or(egui::Color32::TRANSPARENT))
+        .show(ui, |ui| {
+            ui.set_min_height(row_height);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{:>width$}",
+                        line.line_number,
+                        width = line_number_width
+                    ))
+                    .font(font_id.clone()),
+                );
+                ui.label(RichText::new("  ").font(font_id.clone()));
+                ui.label(RichText::new(&line.text).font(font_id.clone()));
+            });
+        })
+        .response
+}
+
+fn resolved_preview_font(ui: &egui::Ui) -> FontId {
+    let style = ui.style();
+    style.override_font_id.clone().unwrap_or_else(|| {
+        style
+            .override_text_style
+            .clone()
+            .unwrap_or(TextStyle::Monospace)
+            .resolve(style)
+    })
 }
 
 fn displayed_index_for_source_line(
@@ -412,6 +479,16 @@ fn preview_status(preview: &FilePreview) -> String {
     match (preview.displayed_start_line, preview.displayed_end_line) {
         (Some(start), Some(end)) => format!("{coverage}; showing lines {start}-{end}"),
         _ => coverage.to_string(),
+    }
+}
+
+fn preview_status_tone(preview: &FilePreview) -> StatusTone {
+    match preview.coverage {
+        PreviewCoverage::Complete => StatusTone::Success,
+        PreviewCoverage::BeginningOnly | PreviewCoverage::MatchContextOnly => StatusTone::Warning,
+        PreviewCoverage::BinaryUnsupported
+        | PreviewCoverage::Unsupported
+        | PreviewCoverage::ReadError => StatusTone::Error,
     }
 }
 
@@ -534,6 +611,128 @@ mod tests {
         assert_eq!(line_number_column_width(9), 4);
         assert_eq!(line_number_column_width(1_000), 4);
         assert_eq!(line_number_column_width(1_000_000), 7);
+    }
+
+    #[test]
+    fn scaled_preview_rows_use_measured_font_height_without_changing_request_payload() {
+        let path = PathBuf::from(
+            r"G:\projects\a-long-preview-path\with-several\nested\directories\and\source.rs",
+        );
+        let selected_match = ContentMatch::new(42, "needle in source".into(), 10, 16);
+        let request = PreviewRequest::for_match(&path, 42, 10);
+        let preview = FilePreview {
+            path: path.clone(),
+            kind: PreviewKind::Text,
+            lines: vec![
+                preview_line(40),
+                preview_line(41),
+                preview_line(42),
+                preview_line(43),
+            ],
+            metadata: crate::file_search::preview::PreviewMetadata {
+                is_directory: false,
+                len_bytes: 48,
+                modified: None,
+                readonly: false,
+                sampled_bytes: 48,
+            },
+            binary_or_unsupported: None,
+            error: None,
+            coverage: PreviewCoverage::Complete,
+            displayed_start_line: Some(40),
+            displayed_end_line: Some(43),
+            warnings: Vec::new(),
+            lossy_utf8: false,
+            cache_hit: false,
+        };
+        let mut state = FileSearchPreviewDialogState {
+            current_request: Some(request.clone()),
+            loaded_preview: Some(preview.clone()),
+            selected_match: Some(selected_match.clone()),
+            pending_auto_scroll: true,
+            ..Default::default()
+        };
+        let mut rendered = None;
+        let ctx = egui::Context::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(520.0, 440.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.style_mut().override_font_id =
+                    Some(FontId::new(25.0, egui::FontFamily::Monospace));
+                let (font_id, row_height) = preview_row_metrics(ui);
+                let vertical_spacing = ui.spacing().item_spacing.y;
+                let interaction_height = ui.spacing().interact_size.y;
+                let row_rects = ui
+                    .vertical(|ui| {
+                        let first = render_preview_line(
+                            ui,
+                            &preview.lines[0],
+                            4,
+                            &font_id,
+                            row_height,
+                            false,
+                        );
+                        let second = render_preview_line(
+                            ui,
+                            &preview.lines[1],
+                            4,
+                            &font_id,
+                            row_height,
+                            false,
+                        );
+                        [first.rect, second.rect]
+                    })
+                    .inner;
+                state.render_header(ui, &request, &FileSearchSettings::default());
+                ui.separator();
+                let scroll = state.render_text_preview(ui, &preview);
+                rendered = Some((
+                    font_id,
+                    row_height,
+                    vertical_spacing,
+                    interaction_height,
+                    row_rects,
+                    scroll.content_size,
+                    scroll.inner_rect,
+                ));
+            },
+        );
+        output.drop_without_applying_deltas();
+
+        let (
+            font_id,
+            row_height,
+            vertical_spacing,
+            interaction_height,
+            row_rects,
+            content_size,
+            inner_rect,
+        ) = rendered.expect("preview header and rows render");
+        assert_eq!(font_id.size, 25.0);
+        assert!(row_height > 0.0);
+        assert!(row_height >= interaction_height);
+        assert!((row_rects[0].height() - row_height).abs() <= 0.5);
+        assert!(
+            ((row_rects[1].min.y - row_rects[0].min.y) - (row_height + vertical_spacing)).abs()
+                <= 0.5,
+            "actual row rects follow the measured row height plus layout spacing"
+        );
+        assert!(inner_rect.is_positive());
+        assert!(content_size.x > 0.0);
+        assert!(
+            content_size.y + 1.0 >= row_height * preview.lines.len() as f32,
+            "the scroll content includes every measured row"
+        );
+        assert_eq!(state.current_request, Some(request));
+        assert_eq!(state.selected_match, Some(selected_match));
+        assert_eq!(state.loaded_preview, Some(preview));
+        assert!(!state.pending_auto_scroll);
     }
 
     fn preview_line(line_number: usize) -> PreviewLine {

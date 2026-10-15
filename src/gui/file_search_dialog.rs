@@ -18,6 +18,7 @@ use crate::file_search::settings::{
     FileSearchContentSort, FileSearchFilenameSort, FileSearchSettings, FileSearchUiPreferences,
 };
 use crate::gui::file_search_preview_dialog::FileSearchPreviewDialogState;
+use crate::gui::theme::widgets::{self, ButtonEmphasis, StatusTone};
 use diagnostics::{FileSearchDiagnostics, format_status_line};
 use eframe::egui;
 use egui_extras::{Column, TableBuilder};
@@ -103,6 +104,18 @@ pub fn handle_escape_action(status: SearchStatus) -> FileSearchEscapeAction {
     }
 }
 
+fn search_status_tone(status: SearchStatus, truncated: bool) -> StatusTone {
+    if truncated {
+        return StatusTone::Warning;
+    }
+    match status {
+        SearchStatus::Pending | SearchStatus::Running => StatusTone::Info,
+        SearchStatus::Completed => StatusTone::Success,
+        SearchStatus::Cancelled => StatusTone::Warning,
+        SearchStatus::Failed => StatusTone::Error,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileSearchResultRowId {
     pub search_id: SearchId,
@@ -185,6 +198,53 @@ pub enum FileSearchRowPayload {
 pub struct FileSearchResultRow {
     pub id: FileSearchResultRowId,
     pub payload: FileSearchRowPayload,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct FilenameTableGeometry {
+    row_height: f32,
+    header_button_rect: Option<egui::Rect>,
+    header_cell_rect: Option<egui::Rect>,
+    header_clip_rect: Option<egui::Rect>,
+    body_item_rect: Option<egui::Rect>,
+    body_cell_rect: Option<egui::Rect>,
+    body_clip_rect: Option<egui::Rect>,
+}
+
+#[cfg(not(test))]
+type FilenameTableGeometry = ();
+
+fn filename_table_row_height(ui: &mut egui::Ui) -> f32 {
+    let style = ui.style();
+    let native_button_style = style.button_style(
+        &egui::widget_style::Classes::default(),
+        egui::widget_style::WidgetState::Inactive,
+    );
+    let header_font = style
+        .override_font_id
+        .clone()
+        .or_else(|| {
+            style
+                .override_text_style
+                .clone()
+                .map(|text_style| text_style.resolve(style))
+        })
+        .unwrap_or(native_button_style.text_style.font_id);
+    let body_font = results::resolved_ui_font(ui, egui::TextStyle::Button);
+    let header_frame_margin = native_button_style.frame.total_margin().sum().y;
+    let extra_line_spacing = ui.spacing().extra_text_line_spacing;
+    let vertical_button_padding = ui.spacing().button_padding.y;
+    let minimum_height = ui.spacing().interact_size.y;
+    let (header_text_height, body_text_height) =
+        ui.fonts_mut(|fonts| (fonts.row_height(&header_font), fonts.row_height(&body_font)));
+    let header_height = header_text_height + extra_line_spacing + header_frame_margin;
+    let body_height = body_text_height + extra_line_spacing + 2.0 * vertical_button_padding;
+    let height = header_height.max(body_height).max(minimum_height);
+    let pixels_per_point = ui.pixels_per_point();
+    // Native widgets round their allocated rectangles to physical pixels.
+    // Round this fixed table row up so it cannot undershoot that extent.
+    (height * pixels_per_point).ceil() / pixels_per_point
 }
 
 pub fn dedup_search_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
@@ -1050,8 +1110,13 @@ impl FileSearchDialogState {
     ) -> Vec<FileSearchUiCommand> {
         let mut commands = Vec::new();
         self.handle_result_keyboard_shortcuts(ui, coordinator);
+        widgets::compact_section_heading(
+            ui,
+            "Search",
+            Some("Choose what to search and where to look."),
+        );
         let previously_selected_mode = self.selected_mode;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.selectable_value(
                 &mut self.selected_mode,
                 FileSearchMode::Filename,
@@ -1071,32 +1136,35 @@ impl FileSearchDialogState {
                 "Directory",
             );
         });
-        ui.horizontal(|ui| {
-            ui.label("Search");
-            let search_response = ui.add(
+        let search_response = widgets::labeled_form_row(ui, "Search", |ui| {
+            ui.add(
                 egui::TextEdit::singleline(&mut self.search_text).id_salt(Self::search_field_id()),
-            );
-            if self.consume_search_focus_request() {
-                search_response.request_focus();
-            }
-            if search_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                self.start_search(coordinator);
-                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
-                ui.ctx().request_repaint();
-            }
+            )
         });
+        if self.consume_search_focus_request() {
+            search_response.request_focus();
+        }
+        if search_response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            self.start_search(coordinator);
+            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            ui.ctx().request_repaint();
+        }
         match self.selected_scope {
             FileSearchScopeMode::Global => {
                 let valid_global_roots =
                     resolve_valid_roots(self.settings.global_search_roots.clone());
-                ui.label(format!(
-                    "Global roots: {} configured",
-                    valid_global_roots.len()
-                ));
+                widgets::secondary_help(
+                    ui,
+                    &format!("Global roots: {} configured", valid_global_roots.len()),
+                );
                 if valid_global_roots.is_empty() {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "Configure at least one valid global search root in File Search settings.",
+                    widgets::semantic_status(
+                        ui,
+                        StatusTone::Warning,
+                        "No valid global roots",
+                        Some(
+                            "Configure at least one valid global search root in File Search settings.",
+                        ),
                     );
                 }
                 egui::CollapsingHeader::new("Global root list")
@@ -1109,16 +1177,18 @@ impl FileSearchDialogState {
             }
             FileSearchScopeMode::Directory => {
                 ui.vertical(|ui| {
-                    if ui.button("Add folder…").clicked()
-                        && let Some(path) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.custom_roots.push(path.display().to_string());
-                    }
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Add folder…").clicked()
+                            && let Some(path) = rfd::FileDialog::new().pick_folder()
+                        {
+                            self.custom_roots.push(path.display().to_string());
+                        }
+                    });
                     let mut remove = None;
                     let mut submit_search = false;
                     let focus_root_idx = self.consume_root_focus_request().then_some(0usize);
                     for (idx, root) in self.custom_roots.iter_mut().enumerate() {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.label("Root");
                             let root_response = ui.add(
                                 egui::TextEdit::singleline(root)
@@ -1139,7 +1209,16 @@ impl FileSearchDialogState {
                             let valid = PathBuf::from(root.trim())
                                 .canonicalize()
                                 .is_ok_and(|p| p.is_dir());
-                            ui.label(if valid { "valid" } else { "invalid" });
+                            widgets::semantic_status(
+                                ui,
+                                if valid {
+                                    StatusTone::Success
+                                } else {
+                                    StatusTone::Error
+                                },
+                                if valid { "valid" } else { "invalid" },
+                                None,
+                            );
                             if ui.button("Remove").clicked() {
                                 remove = Some(idx);
                             }
@@ -1154,7 +1233,7 @@ impl FileSearchDialogState {
                 });
             }
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.checkbox(&mut self.case_sensitive, "Case-sensitive");
             ui.checkbox(&mut self.include_hidden, "Include hidden");
             let search_enabled = !self.search_text.trim().is_empty()
@@ -1166,21 +1245,17 @@ impl FileSearchDialogState {
                         !resolve_valid_roots(self.custom_roots.iter().map(PathBuf::from)).is_empty()
                     }
                 };
-            if ui
-                .add_enabled(search_enabled, egui::Button::new("Search"))
-                .clicked()
-                && self.start_search(coordinator).is_some()
-            {
+            let search = ui.add_enabled(search_enabled, egui::Button::new("Search"));
+            let search = widgets::with_button_emphasis(ui, search, ButtonEmphasis::Primary);
+            if search.clicked() && self.start_search(coordinator).is_some() {
                 ui.ctx().request_repaint();
             }
             if ui.button("Cancel").clicked() {
                 self.cancel_search(coordinator);
                 ui.ctx().request_repaint();
             }
-            if ui
-                .add_enabled(self.can_open_selected_result(), egui::Button::new("Open"))
-                .clicked()
-            {
+            let open = ui.add_enabled(self.can_open_selected_result(), egui::Button::new("Open"));
+            if widgets::with_button_emphasis(ui, open, ButtonEmphasis::Primary).clicked() {
                 self.open_selected_result();
                 ui.ctx().request_repaint();
             }
@@ -1216,8 +1291,7 @@ impl FileSearchDialogState {
                 }
             });
         });
-        ui.horizontal(|ui| {
-            ui.label("Filter");
+        widgets::labeled_form_row(ui, "Filter", |ui| {
             let mut refinement = self.refinement_text.clone();
             let response = ui.add(
                 egui::TextEdit::singleline(&mut refinement)
@@ -1228,13 +1302,14 @@ impl FileSearchDialogState {
                 self.set_refinement_text(refinement);
                 ui.ctx().request_repaint();
             }
-            if ui
+            let clear = ui
                 .add_enabled(!self.refinement_text.is_empty(), egui::Button::new("Clear"))
-                .clicked()
-            {
+                .clicked();
+            if clear {
                 self.clear_refinement();
                 ui.ctx().request_repaint();
             }
+            response
         });
         self.filters_ui(ui);
         let counts = self.result_counts();
@@ -1244,11 +1319,13 @@ impl FileSearchDialogState {
         };
         let truncated = self.diagnostics.global_matched_file_truncation.is_some()
             || self.diagnostics.filename_result_limit_truncation.is_some();
-        ui.label(format_status_line(
-            self.current_status,
-            displayed,
-            truncated,
-        ));
+        let status = format_status_line(self.current_status, displayed, truncated);
+        widgets::semantic_status(
+            ui,
+            search_status_tone(self.current_status, truncated),
+            &status,
+            None,
+        );
         egui::CollapsingHeader::new("Diagnostics")
             .default_open(false)
             .show(ui, |ui| {
@@ -1268,7 +1345,16 @@ impl FileSearchDialogState {
                 }
             });
         if let Some(msg) = &self.warning_error_message {
-            ui.colored_label(egui::Color32::YELLOW, msg);
+            widgets::semantic_status(
+                ui,
+                if self.current_status == SearchStatus::Failed {
+                    StatusTone::Error
+                } else {
+                    StatusTone::Warning
+                },
+                msg,
+                None,
+            );
         }
         commands.extend(self.ripgrep_missing_prompt_ui(ui));
         let results_region_size = ui.available_size();
@@ -1278,7 +1364,9 @@ impl FileSearchDialogState {
                     .id_salt(results_scroll_id_source(self.selected_mode))
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.selected_mode {
-                        FileSearchMode::Filename => self.filename_results(ui, coordinator),
+                        FileSearchMode::Filename => {
+                            self.filename_results(ui, coordinator);
+                        }
                         FileSearchMode::Content => self.content_results(ui, coordinator),
                     });
             });
@@ -1296,18 +1384,26 @@ impl FileSearchDialogState {
         if !self.show_ripgrep_missing_prompt || self.ripgrep_missing_prompt_dismissed {
             return commands;
         }
-        ui.horizontal(|ui| {
-            ui.colored_label(egui::Color32::YELLOW, "ripgrep (rg) was not found. Native content search will continue; configure rg for faster future searches.");
+        widgets::semantic_status(
+            ui,
+            StatusTone::Warning,
+            "ripgrep (rg) was not found",
+            Some("Native content search will continue; configure rg for faster future searches."),
+        );
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Locate rg.exe").clicked()
-                && let Some(path) = rfd::FileDialog::new().add_filter("Executable", &["exe", ""]).pick_file() {
-                    match validate_ripgrep_selection(&path) {
-                        Ok(abs) => {
-                            commands.push(FileSearchUiCommand::ConfigureRipgrep(abs));
-                            self.show_ripgrep_missing_prompt = false;
-                        }
-                        Err(err) => self.warning_error_message = Some(err),
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Executable", &["exe", ""])
+                    .pick_file()
+            {
+                match validate_ripgrep_selection(&path) {
+                    Ok(abs) => {
+                        commands.push(FileSearchUiCommand::ConfigureRipgrep(abs));
+                        self.show_ripgrep_missing_prompt = false;
                     }
+                    Err(err) => self.warning_error_message = Some(err),
                 }
+            }
             if ui.button("Dismiss").clicked() {
                 self.dismiss_ripgrep_missing_prompt();
             }
@@ -1329,7 +1425,11 @@ impl FileSearchDialogState {
         Ok(FileSearchUiCommand::ConfigureRipgrep(abs))
     }
 
-    fn filename_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+    fn filename_results(
+        &mut self,
+        ui: &mut egui::Ui,
+        coordinator: &mut SearchCoordinator,
+    ) -> FilenameTableGeometry {
         let previous_columns = self.ui_preferences.visible_columns.clone();
         results::ensure_filename_columns_visible(&mut self.ui_preferences);
         if self.ui_preferences.visible_columns != previous_columns {
@@ -1397,6 +1497,14 @@ impl FileSearchDialogState {
             .collect();
 
         let visible_columns = self.ui_preferences.visible_columns.clone();
+        let row_height = filename_table_row_height(ui);
+        #[cfg(test)]
+        let mut geometry = FilenameTableGeometry {
+            row_height,
+            ..Default::default()
+        };
+        #[cfg(not(test))]
+        let geometry = ();
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -1420,15 +1528,31 @@ impl FileSearchDialogState {
         }
 
         table
-            .header(20.0, |mut header| {
+            .header(row_height, |mut header| {
                 for column in &visible_columns {
-                    header.col(|ui| {
+                    #[cfg(test)]
+                    let mut button_rect = None;
+                    #[cfg(test)]
+                    let mut cell_rect = None;
+                    #[cfg(test)]
+                    let mut clip_rect = None;
+                    let _ = header.col(|ui| {
+                        #[cfg(test)]
+                        {
+                            cell_rect = Some(ui.max_rect());
+                            clip_rect = Some(ui.clip_rect());
+                        }
                         let label = format!(
                             "{}{}",
                             results::column_label(*column),
                             results::filename_sort_indicator(self.ui_preferences.filename_sort, *column)
                         );
-                        if ui.button(label).clicked()
+                        let response = ui.button(label);
+                        #[cfg(test)]
+                        {
+                            button_rect = Some(response.rect);
+                        }
+                        if response.clicked()
                             && let Some(sort) = results::filename_sort_after_header_click(
                                 self.ui_preferences.filename_sort,
                                 *column,
@@ -1438,6 +1562,12 @@ impl FileSearchDialogState {
                                 self.pending_sort_change = true;
                         }
                     });
+                    #[cfg(test)]
+                    if geometry.header_button_rect.is_none() {
+                        geometry.header_button_rect = button_rect;
+                        geometry.header_cell_rect = cell_rect;
+                        geometry.header_clip_rect = clip_rect;
+                    }
                 }
             })
             .body(|mut body| {
@@ -1461,9 +1591,20 @@ impl FileSearchDialogState {
                             path_match_ranges: path_match_ranges.clone(),
                         },
                     };
-                    body.row(22.0, |mut row| {
+                    body.row(row_height, |mut row| {
                         for column in &visible_columns {
-                            row.col(|ui| {
+                            #[cfg(test)]
+                            let mut item_rect = None;
+                            #[cfg(test)]
+                            let mut cell_rect = None;
+                            #[cfg(test)]
+                            let mut clip_rect = None;
+                            let _ = row.col(|ui| {
+                                #[cfg(test)]
+                                {
+                                    cell_rect = Some(ui.max_rect());
+                                    clip_rect = Some(ui.clip_rect());
+                                }
                                 ui.push_id((result_row_id_source(row_id.search_id, &row_id), *column), |ui| {
                                     let response = match column {
                                         crate::file_search::settings::FileSearchColumn::Name => results::non_wrapping_selectable_label(ui, is_selected, egui::WidgetText::LayoutJob(results::highlighted_job_for_ui(ui, &display_filename, &filename_match_ranges, is_selected).into())),
@@ -1475,6 +1616,10 @@ impl FileSearchDialogState {
                                         _ => results::non_wrapping_selectable_label(ui, is_selected, ""),
                                     }
                                     .on_hover_text(path.display().to_string());
+                                    #[cfg(test)]
+                                    {
+                                        item_rect = Some(response.rect);
+                                    }
                                     let double_clicked = response.double_clicked();
                                     if is_selected {
                                         response.scroll_to_me(Some(egui::Align::Center));
@@ -1496,10 +1641,17 @@ impl FileSearchDialogState {
                                     }
                                 });
                             });
+                            #[cfg(test)]
+                            if geometry.body_item_rect.is_none() {
+                                geometry.body_item_rect = item_rect;
+                                geometry.body_cell_rect = cell_rect;
+                                geometry.body_clip_rect = clip_rect;
+                            }
                         }
                     });
                 }
             });
+        geometry
     }
 
     fn clear_selection_if_mode_changed(&mut self, previously_selected_mode: FileSearchMode) {
@@ -1536,11 +1688,12 @@ impl FileSearchDialogState {
                                 format!("{}:{}", path.display(), column.saturating_add(1))
                             })
                             .unwrap_or_else(|| path.display().to_string());
-                        let row_text = results::content_line_label(&content_match);
                         let is_selected = self
                             .selected_result()
                             .map(|selected| selected.row_id == row_id)
                             .unwrap_or(false);
+                        let row_text =
+                            results::content_line_label_for_ui(ui, &content_match, is_selected);
                         let response =
                             results::non_wrapping_selectable_label(ui, is_selected, row_text)
                                 .on_hover_text(hover_location);
@@ -3167,6 +3320,114 @@ mod tests {
 
         assert!(!state.pending_sort_change);
         assert_eq!(state.result_rows[0].id.path, PathBuf::from("/tmp/a.txt"));
+    }
+
+    #[test]
+    fn filename_table_header_and_body_fit_the_effective_button_font() {
+        let search_id = SearchId(73);
+        let mut state = FileSearchDialogState {
+            selected_mode: FileSearchMode::Filename,
+            active_search_id: Some(search_id),
+            ..Default::default()
+        };
+        state.apply_event(SearchEvent::Result {
+            id: search_id,
+            result: filename_search_result("/tmp/large-font-result.txt"),
+        });
+        let selected = state.result_rows[0].clone();
+        state.select_result(&selected);
+        state.search_text = "preserved query".into();
+        results::ensure_filename_columns_visible(&mut state.ui_preferences);
+        let selected_before = state.selected_result().cloned();
+        let preferences_before = state.ui_preferences.clone();
+
+        let ctx = egui::Context::default();
+        let mut coordinator = SearchCoordinator::new();
+        let mut geometry = None;
+        let mut window_open = true;
+        for _ in 0..3 {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1024.0, 720.0),
+                    )),
+                    ..Default::default()
+                },
+                |root_ui| {
+                    egui::Window::new("File Search")
+                        .open(&mut window_open)
+                        .default_size(DEFAULT_WINDOW_SIZE)
+                        .min_size(egui::vec2(520.0, 360.0))
+                        .show(root_ui.ctx(), |ui| {
+                            let style = ui.style_mut();
+                            style
+                                .text_styles
+                                .insert(egui::TextStyle::Body, egui::FontId::proportional(32.0));
+                            style
+                                .text_styles
+                                .insert(egui::TextStyle::Button, egui::FontId::proportional(24.0));
+                            let results_region_size = ui.available_size();
+                            ui.allocate_ui_with_layout(results_region_size, *ui.layout(), |ui| {
+                                ui.push_id(FileSearchDialogState::result_list_id(), |ui| {
+                                    egui::ScrollArea::both()
+                                        .id_salt(results_scroll_id_source(FileSearchMode::Filename))
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            geometry =
+                                                Some(state.filename_results(ui, &mut coordinator));
+                                        });
+                                });
+                            });
+                        });
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+
+        let geometry = geometry.expect("filename table should render");
+        assert_eq!(state.search_text, "preserved query");
+        assert_eq!(state.selected_result(), selected_before.as_ref());
+        assert_eq!(state.ui_preferences, preferences_before);
+        let header_button = geometry
+            .header_button_rect
+            .expect("filename table header button should render");
+        let header_cell = geometry
+            .header_cell_rect
+            .expect("filename table header cell should render");
+        let header_clip = geometry
+            .header_clip_rect
+            .expect("filename table header cell should have a clip rect");
+        let body_item = geometry
+            .body_item_rect
+            .expect("filename table result label should render");
+        let body_cell = geometry
+            .body_cell_rect
+            .expect("filename table result cell should render");
+        let body_clip = geometry
+            .body_clip_rect
+            .expect("filename table result cell should have a clip rect");
+
+        assert!(geometry.row_height > 32.0);
+        assert!(header_button.height() > body_item.height());
+        for (name, item, cell, clip) in [
+            ("header button", header_button, header_cell, header_clip),
+            ("body result", body_item, body_cell, body_clip),
+        ] {
+            assert!(
+                (cell.height() - geometry.row_height).abs() <= 0.1,
+                "{name} cell height {} should match row height {}",
+                cell.height(),
+                geometry.row_height
+            );
+            assert!(
+                item.min.y >= cell.min.y - 0.1
+                    && item.max.y <= cell.max.y + 0.1
+                    && item.min.y >= clip.min.y - 0.1
+                    && item.max.y <= clip.max.y + 0.1,
+                "{name} rect {item:?} should fit in its table cell {cell:?}"
+            );
+        }
     }
 
     #[test]

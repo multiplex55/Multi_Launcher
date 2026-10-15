@@ -295,7 +295,25 @@ pub fn highlighted_job_for_ui(
     selected: bool,
 ) -> LayoutJob {
     let ranges: Vec<_> = ranges.iter().map(|r| (r.byte_start, r.byte_end)).collect();
-    highlighted_job_from_byte_ranges(text, &ranges, visual_highlight_formats(ui, selected))
+    highlighted_job_from_byte_ranges(
+        text,
+        &ranges,
+        visual_highlight_formats(ui, selected, egui::TextStyle::Button),
+    )
+}
+
+pub fn highlighted_content_job_for_ui(
+    ui: &egui::Ui,
+    text: &str,
+    ranges: &[ContentMatchRange],
+    selected: bool,
+) -> LayoutJob {
+    let ranges: Vec<_> = ranges.iter().map(|r| (r.byte_start, r.byte_end)).collect();
+    highlighted_job_from_byte_ranges(
+        text,
+        &ranges,
+        visual_highlight_formats(ui, selected, egui::TextStyle::Button),
+    )
 }
 
 fn default_highlight_formats() -> (TextFormat, TextFormat) {
@@ -311,8 +329,24 @@ fn default_highlight_formats() -> (TextFormat, TextFormat) {
     (normal, highlight)
 }
 
-fn visual_highlight_formats(ui: &egui::Ui, selected: bool) -> (TextFormat, TextFormat) {
+pub(super) fn resolved_ui_font(ui: &egui::Ui, default_style: egui::TextStyle) -> FontId {
+    let style = ui.style();
+    style.override_font_id.clone().unwrap_or_else(|| {
+        style
+            .override_text_style
+            .clone()
+            .unwrap_or(default_style)
+            .resolve(style)
+    })
+}
+
+fn visual_highlight_formats(
+    ui: &egui::Ui,
+    selected: bool,
+    default_style: egui::TextStyle,
+) -> (TextFormat, TextFormat) {
     let visuals = ui.visuals();
+    let font_id = resolved_ui_font(ui, default_style);
     let normal_color = if selected {
         visuals.selection.stroke.color
     } else {
@@ -329,12 +363,12 @@ fn visual_highlight_formats(ui: &egui::Ui, selected: bool) -> (TextFormat, TextF
         visuals.strong_text_color()
     };
     let normal = TextFormat {
-        font_id: FontId::proportional(14.0),
+        font_id: font_id.clone(),
         color: normal_color,
         ..Default::default()
     };
     let highlight = TextFormat {
-        font_id: FontId::proportional(14.0),
+        font_id,
         color: highlight_color,
         background: highlight_bg,
         underline: Stroke::new(1.0_f32, highlight_color),
@@ -445,13 +479,30 @@ pub(super) fn non_wrapping_selectable_label(
 }
 
 pub fn content_line_label(m: &ContentMatch) -> WidgetText {
+    content_line_label_with_job(
+        m,
+        highlighted_content_job(&m.line, &m.ranges),
+        TextFormat::default(),
+    )
+}
+
+pub fn content_line_label_for_ui(ui: &egui::Ui, m: &ContentMatch, selected: bool) -> WidgetText {
+    let prefix_format = visual_highlight_formats(ui, selected, egui::TextStyle::Button).0;
+    let highlighted = highlighted_content_job_for_ui(ui, &m.line, &m.ranges, selected);
+    content_line_label_with_job(m, highlighted, prefix_format)
+}
+
+fn content_line_label_with_job(
+    m: &ContentMatch,
+    highlighted: LayoutJob,
+    prefix_format: TextFormat,
+) -> WidgetText {
     let prefix = match m.column {
         Some(column) => format!("{}:{}: ", m.line_number, column.saturating_add(1)),
         None => format!("{}: ", m.line_number),
     };
     let mut job = LayoutJob::default();
-    job.append(&prefix, 0.0, TextFormat::default());
-    let highlighted = highlighted_content_job(&m.line, &m.ranges);
+    job.append(&prefix, 0.0, prefix_format);
     for section in highlighted.sections {
         let text = &highlighted.text[section.byte_range.start.0..section.byte_range.end.0];
         job.append(text, section.leading_space, section.format);
@@ -619,6 +670,95 @@ mod tests {
                 section.byte_range.start.0 == 6 && section.byte_range.end.0 == 12
             })
         );
+    }
+
+    #[test]
+    fn highlighting_resolves_the_button_font_and_preserves_utf8_ranges() {
+        let ctx = egui::Context::default();
+        let mut captured = Vec::new();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 360.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let override_font = FontId::new(23.0, egui::FontFamily::Monospace);
+                ui.style_mut().override_text_style = Some(egui::TextStyle::Heading);
+                ui.style_mut().override_font_id = Some(override_font.clone());
+                let selected_job = highlighted_job_for_ui(
+                    ui,
+                    "café needle",
+                    &[TextMatchRange {
+                        byte_start: 6,
+                        byte_end: 12,
+                    }],
+                    true,
+                );
+                captured.push((
+                    selected_job.text.clone(),
+                    selected_job
+                        .sections
+                        .iter()
+                        .map(|section| {
+                            (
+                                section.byte_range.start.0,
+                                section.byte_range.end.0,
+                                section.format.font_id.clone(),
+                                section.format.background,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                    override_font,
+                    ui.visuals().selection.bg_fill,
+                ));
+
+                ui.style_mut().override_font_id = None;
+                let style_font = egui::TextStyle::Heading.resolve(ui.style());
+                let styled_job = highlighted_job_for_ui(
+                    ui,
+                    "café needle",
+                    &[TextMatchRange {
+                        byte_start: 6,
+                        byte_end: 12,
+                    }],
+                    false,
+                );
+                captured.push((
+                    styled_job.text,
+                    styled_job
+                        .sections
+                        .iter()
+                        .map(|section| {
+                            (
+                                section.byte_range.start.0,
+                                section.byte_range.end.0,
+                                section.format.font_id.clone(),
+                                section.format.background,
+                            )
+                        })
+                        .collect(),
+                    style_font,
+                    ui.visuals().faint_bg_color,
+                ));
+            },
+        );
+        output.drop_without_applying_deltas();
+
+        assert_eq!(captured.len(), 2);
+        for (text, sections, expected_font, selected_background) in captured {
+            assert_eq!(text, "café needle");
+            assert!(
+                sections
+                    .iter()
+                    .all(|(_, _, font, _)| font == &expected_font)
+            );
+            assert!(sections.iter().any(|(start, end, _, background)| {
+                *start == 6 && *end == 12 && *background == selected_background
+            }));
+        }
     }
 
     #[test]

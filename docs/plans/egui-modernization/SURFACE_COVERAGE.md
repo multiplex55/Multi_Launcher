@@ -26,8 +26,8 @@ M5-B groups: B1 Quick Notes/note panel; B2 Clipboard/Modify; B3 MKMacro; B4 Mult
 | `src/gui/data_recovery_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/diff_dialog/mod.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/fav_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
-| `src/gui/file_search_dialog.rs` | M5-B5 | pending surface polish/review; runtime inheritance available |
-| `src/gui/file_search_preview_dialog.rs` | M5-B5 | pending surface polish/review; runtime inheritance available |
+| `src/gui/file_search_dialog.rs` | M5-B5 | accepted wrapped chrome/font-aware highlight/table metrics;14distinctcontracts/review pass; initialDark002 framebuffer inspected, populatednative/input gaps explicit |
+| `src/gui/file_search_preview_dialog.rs` | M5-B5 | accepted wrapped header/status/measured native rows; scoped line-map/payload/row-stride contracts pass; native selected-preview capture/input gap explicit |
 | `src/gui/image_crop_editor.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/image_panel.rs` | M5-C | pending surface polish/review; runtime inheritance available |
 | `src/gui/json_utility_dialog.rs` | M5-C | pending surface polish/review; runtime inheritance available |
