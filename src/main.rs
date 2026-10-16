@@ -6072,6 +6072,76 @@ mod tests {
     }
 
     #[test]
+    fn reloaded_sequence_binding_dispatches_through_the_shared_route_event() {
+        use multi_launcher::hotkey::launcher_invocation::{
+            PasteSequenceHotkeyAction, RelatedAction, ServiceNotice,
+        };
+        use multi_launcher::paste_sequence::{PlaybackMode, SequenceDraft, SequenceStore, Step};
+
+        let directory = tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join("paste_sequences.json"));
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot
+            .upsert(SequenceDraft {
+                id: None,
+                name: "Reloaded route".into(),
+                hotkey: Some(multi_launcher::paste_sequence::HotkeyChord::new("Ctrl+F8").unwrap()),
+                mode: PlaybackMode::Automatic,
+                delay_ms: 0,
+                steps: vec![Step::LiteralText {
+                    text: "private body".into(),
+                }],
+            })
+            .unwrap();
+        store.commit(&mut snapshot).unwrap();
+        let reloaded = store.load().unwrap();
+        let settings = Settings::default();
+        let routes = paste_sequence_hotkey_routes_from_snapshot(&settings, &reloaded).unwrap();
+        let bindings = related_launcher_bindings_with_sequences(
+            &settings,
+            &RadialDocument::starter(),
+            true,
+            &routes,
+        );
+        let shared_action = bindings
+            .iter()
+            .find_map(|binding| match &binding.action {
+                RelatedAction::PasteSequence(
+                    action @ PasteSequenceHotkeyAction::Start(route_id),
+                ) if *route_id == id => Some(action.clone()),
+                _ => None,
+            })
+            .expect("the reloaded stable ID is present in shared related bindings");
+
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let _registration = multi_launcher::gui::register_event_sender(event_tx);
+        let mut notice = ServiceNotice {
+            recovery: None,
+            intents: Vec::new(),
+            error: None,
+            action: Some(RelatedAction::PasteSequence(shared_action)),
+            cancellation: None,
+        };
+        apply_service_related_action(&mut notice, None, None, None, None);
+
+        let mut delivered = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let multi_launcher::gui::WatchEvent::PasteSequenceHotkey(
+                PasteSequenceHotkeyAction::Start(delivered_id),
+            ) = event
+            {
+                assert_eq!(delivered_id, id);
+                delivered = true;
+                break;
+            }
+        }
+        assert!(
+            delivered,
+            "the shared route must deliver a typed GUI start event"
+        );
+    }
+
+    #[test]
     fn paste_sequence_hotkey_conflicts_with_existing_launcher_routes() {
         use multi_launcher::paste_sequence::{PlaybackMode, SequenceDraft, SequenceStore, Step};
 

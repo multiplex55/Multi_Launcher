@@ -741,9 +741,10 @@ mod tests {
     };
     use crate::active_window::ExternalForegroundWindow;
     use crate::paste_sequence::{
-        PlaybackMode, Sequence, SequenceId, SequenceInvocationContext, SequencePreflight,
-        SequenceTarget, Step,
+        PlaybackMode, Sequence, SequenceDraft, SequenceId, SequenceInvocationContext,
+        SequencePreflight, SequenceStore, SequenceTarget, Step,
     };
+    use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition};
     use chrono::DateTime;
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::{Duration, Instant};
@@ -1010,6 +1011,192 @@ mod tests {
         controller.begin_preparing().unwrap();
         controller.set_ready(run).unwrap();
         controller
+    }
+
+    #[test]
+    fn reloaded_mixed_sequence_resolves_before_both_playback_modes_and_preserves_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join(super::super::PASTE_SEQUENCES_FILE));
+        let history_text = "history snapshot\n雪";
+        let mut draft = SequenceDraft::new(
+            "Mixed saved sequence",
+            vec![
+                Step::SnippetRef {
+                    alias: "hidden_reply".into(),
+                },
+                Step::SnippetRef {
+                    alias: "context_values".into(),
+                },
+                Step::clipboard_history_reference(history_text),
+                Step::LiteralText {
+                    text: "Temporary 🌌\nsecond line".into(),
+                },
+            ],
+        );
+        draft.mode = PlaybackMode::ManualAdvance;
+        draft.delay_ms = 275;
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot.upsert(draft).unwrap();
+        store.commit(&mut snapshot).unwrap();
+        let loaded = store.load().unwrap();
+        let snippets = vec![
+            crate::plugins::snippets::SnippetEntry {
+                alias: "hidden_reply".into(),
+                text: "Hello {{name}} at {{sys.date:%Y-%m-%d}}".into(),
+                hide_contents: true,
+                prompt_for_fields: true,
+                fields: vec![SnippetFieldDefinition::new("name")],
+                tags: Vec::new(),
+            },
+            SnippetEntry {
+                alias: "context_values".into(),
+                text: "{{sys.time:%H:%M}}|{{sys.clipboard}}|{{sys.window_title}}".into(),
+                hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
+                tags: Vec::new(),
+            },
+        ];
+        let history = vec![history_text.to_owned()];
+        let context = SequenceInvocationContext::new(
+            DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+            Some("captured clipboard".into()),
+            SequenceTarget::from_external_window(
+                ExternalForegroundWindow {
+                    hwnd: 10,
+                    process_id: 20,
+                    thread_id: 30,
+                    title: Some("origin editor".into()),
+                },
+                999,
+            )
+            .unwrap(),
+        );
+        let expected = [
+            "Hello Ada at 2024-01-02",
+            "03:04|captured clipboard|origin editor",
+            history_text,
+            "Temporary 🌌\nsecond line",
+        ];
+
+        for mode in [PlaybackMode::Automatic, PlaybackMode::ManualAdvance] {
+            let mut sequence = loaded.sequence(id).unwrap().clone();
+            sequence.mode = mode;
+            let mut preflight =
+                SequencePreflight::begin(sequence, &snippets, &history, context.clone()).unwrap();
+            assert_eq!(preflight.current_prompt().unwrap().step_index, 0);
+
+            let start = Instant::now();
+            let mut platform = FakePlatform::at(start);
+            assert!(
+                platform.events.is_empty(),
+                "preflight must not touch the clipboard or input"
+            );
+            preflight
+                .submit_current_prompt(&std::collections::HashMap::from([(
+                    "name".into(),
+                    "Ada".into(),
+                )]))
+                .unwrap();
+            let run = preflight.finish(&snippets, &history).unwrap();
+            assert_eq!(
+                (0..expected.len())
+                    .map(|index| run.step_text(index).unwrap())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let preview = run.preview();
+            assert!(preview.steps[0].hidden);
+            assert!(preview.steps[0].text.is_none());
+            assert_eq!(preview.steps[1].text.as_deref(), Some(expected[1]));
+
+            let mut controller = ready_controller(run);
+            assert!(platform.events.is_empty(), "preparing Ready must not paste");
+            controller.start(&mut platform).unwrap();
+            assert_eq!(platform.clipboard.as_deref(), Some(expected[0]));
+            assert_eq!(platform.paste_count(), 1);
+            assert_eq!(
+                controller.status(),
+                if mode == PlaybackMode::ManualAdvance {
+                    SequencePlaybackStatus::AwaitAdvance
+                } else {
+                    SequencePlaybackStatus::Running
+                }
+            );
+
+            for (step_index, elapsed_ms) in [(1usize, 275u64), (2, 550), (3, 825)] {
+                let before_deadline = start + Duration::from_millis(elapsed_ms - 1);
+                let deadline = start + Duration::from_millis(elapsed_ms);
+                if mode == PlaybackMode::ManualAdvance {
+                    assert_eq!(
+                        next(&mut controller, &mut platform, before_deadline),
+                        Err(SequencePlaybackError::TooSoon)
+                    );
+                    tick(&mut controller, &mut platform, deadline);
+                    next(&mut controller, &mut platform, deadline).unwrap();
+                } else {
+                    tick(&mut controller, &mut platform, before_deadline);
+                    assert_eq!(platform.paste_count(), step_index);
+                    tick(&mut controller, &mut platform, deadline);
+                }
+                assert_eq!(platform.clipboard.as_deref(), Some(expected[step_index]));
+                assert_eq!(platform.paste_count(), step_index + 1);
+            }
+
+            assert_eq!(controller.status(), SequencePlaybackStatus::Completed);
+            tick(
+                &mut controller,
+                &mut platform,
+                start + Duration::from_millis(1_005),
+            );
+            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+        }
+    }
+
+    #[test]
+    fn shutdown_restore_plan_restores_only_if_sequence_still_owns_clipboard() {
+        let start = Instant::now();
+        let mut controller = ready_controller(prepared_run(
+            PlaybackMode::ManualAdvance,
+            0,
+            &["sequence text", "not pasted after shutdown"],
+        ));
+        let mut platform = FakePlatform::at(start);
+        controller.start(&mut platform).unwrap();
+        assert_eq!(platform.clipboard.as_deref(), Some("sequence text"));
+
+        let plan = controller
+            .take_shutdown_restore_plan(start + Duration::from_millis(40))
+            .expect("shutdown must retain one conditional restore");
+        assert!(plan.due >= start + Duration::from_millis(180));
+        assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
+        assert_eq!(platform.paste_count(), 1);
+        assert_eq!(
+            platform.restore_clipboard_if_owned(plan.expected_sequence, &plan.original),
+            ClipboardRestoreOutcome::Restored
+        );
+        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+
+        let mut interrupted = ready_controller(prepared_run(
+            PlaybackMode::ManualAdvance,
+            0,
+            &["sequence text", "not pasted after shutdown"],
+        ));
+        let mut interrupted_platform = FakePlatform::at(start);
+        interrupted.start(&mut interrupted_platform).unwrap();
+        let plan = interrupted
+            .take_shutdown_restore_plan(start + Duration::from_millis(40))
+            .unwrap();
+        interrupted_platform.external_copy("user replacement");
+        assert_eq!(
+            interrupted_platform.restore_clipboard_if_owned(plan.expected_sequence, &plan.original),
+            ClipboardRestoreOutcome::OwnershipLost
+        );
+        assert_eq!(
+            interrupted_platform.clipboard.as_deref(),
+            Some("user replacement")
+        );
+        assert_eq!(interrupted_platform.paste_count(), 1);
     }
 
     #[test]

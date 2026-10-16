@@ -1301,8 +1301,7 @@ impl LauncherApp {
     fn submit_sequence_prompt(
         &mut self,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
-        let completed = self.snippet_prompt_dialog.submit_sequence_with(
-            &self.egui_ctx,
+        self.submit_sequence_prompt_using(
             || {
                 crate::plugins::snippets::load_snippets_for_reload(
                     crate::plugins::snippets::SNIPPETS_FILE,
@@ -1319,6 +1318,18 @@ impl LauncherApp {
                     .map(|history| history.into_iter().collect())
                     .map_err(|_| ())
             },
+        )
+    }
+
+    fn submit_sequence_prompt_using(
+        &mut self,
+        current_snippets: impl FnOnce() -> Result<Vec<crate::plugins::snippets::SnippetEntry>, ()>,
+        current_history: impl FnOnce() -> Result<Vec<String>, ()>,
+    ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        let completed = self.snippet_prompt_dialog.submit_sequence_with(
+            &self.egui_ctx,
+            current_snippets,
+            current_history,
         )?;
         if let Some(run) = completed {
             self.panel_states.snippet_prompt_dialog = false;
@@ -1754,6 +1765,134 @@ mod tests {
             ],
         };
         assert_eq!(sequence_source_requirements(&referenced), (true, true));
+    }
+
+    #[test]
+    fn saved_sequence_waits_for_its_prompt_before_becoming_ready_for_playback() {
+        use crate::paste_sequence::{PlaybackMode, SequenceDraft, SequenceStore, Step};
+        use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let history_text = "history item\n雪";
+        let mut draft = SequenceDraft::new(
+            "Mixed integration",
+            vec![
+                Step::SnippetRef {
+                    alias: "private_reply".into(),
+                },
+                Step::SnippetRef {
+                    alias: "context_values".into(),
+                },
+                Step::clipboard_history_reference(history_text),
+                Step::LiteralText {
+                    text: "One-off 🌌\nsecond line".into(),
+                },
+            ],
+        );
+        draft.mode = PlaybackMode::ManualAdvance;
+        draft.delay_ms = 275;
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot.upsert(draft).unwrap();
+        store.commit(&mut snapshot).unwrap();
+        let reloaded = store.load().unwrap();
+        let sequence = reloaded.sequence(id).unwrap().clone();
+
+        let snippets = vec![
+            SnippetEntry {
+                alias: "private_reply".into(),
+                text: "Hello {{name}} at {{sys.date:%Y-%m-%d}}".into(),
+                hide_contents: true,
+                prompt_for_fields: true,
+                fields: vec![SnippetFieldDefinition::new("name")],
+                tags: Vec::new(),
+            },
+            SnippetEntry {
+                alias: "context_values".into(),
+                text: "{{sys.time:%H:%M}}|{{sys.clipboard}}|{{sys.window_title}}".into(),
+                hide_contents: false,
+                prompt_for_fields: false,
+                fields: Vec::new(),
+                tags: Vec::new(),
+            },
+        ];
+        let history = vec![history_text.to_owned()];
+        let context = crate::paste_sequence::SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+            Some("captured clipboard".into()),
+            crate::paste_sequence::SequenceTarget::from_external_window(
+                external_window(11, "Origin editor 🖋"),
+                std::process::id(),
+            )
+            .unwrap(),
+        );
+
+        let mut app = inert_test_app(directory.path());
+        let mut context_captures = 0;
+        let provided_context = context.clone();
+        app.begin_paste_sequence_preflight_using_context(
+            sequence,
+            &snippets,
+            &history,
+            crate::commands::ActivationSource::Hotkey,
+            |_, source| {
+                assert_eq!(source, crate::commands::ActivationSource::Hotkey);
+                context_captures += 1;
+                Ok(provided_context)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(context_captures, 1);
+        assert!(app.snippet_prompt_dialog.is_sequence_preflight());
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Preparing
+        );
+        assert!(app.sequence_playback.prepared_preview().is_none());
+
+        app.snippet_prompt_dialog.set_value("name", "Ada".into());
+        let mut snippet_loads = 0;
+        let mut history_loads = 0;
+        app.submit_sequence_prompt_using(
+            || {
+                snippet_loads += 1;
+                Ok(snippets.clone())
+            },
+            || {
+                history_loads += 1;
+                Ok(history.clone())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(snippet_loads, 1);
+        assert_eq!(history_loads, 1);
+        assert!(!app.snippet_prompt_dialog.is_open());
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Ready
+        );
+        assert!(!app.sequence_playback.needs_tick());
+        let preview = app.sequence_playback.prepared_preview().unwrap();
+        assert_eq!(preview.mode, PlaybackMode::ManualAdvance);
+        assert_eq!(preview.delay_ms, 275);
+        assert_eq!(preview.item_count, 4);
+        assert!(preview.steps[0].hidden);
+        assert!(preview.steps[0].text.is_none());
+        assert_eq!(
+            preview.steps[1].text.as_deref(),
+            Some("03:04|captured clipboard|Origin editor 🖋")
+        );
+        assert_eq!(preview.steps[2].text.as_deref(), Some(history_text));
+        assert_eq!(
+            preview.steps[3].text.as_deref(),
+            Some("One-off 🌌\nsecond line")
+        );
     }
 
     #[test]
