@@ -201,3 +201,7 @@ CL-QA-F6 frozen: seven source files/77reported sites, three local tuplealiases u
 F6commit29c67872. Strictpass7exited101: tenowned diagnostics across main executable tests/startup_catalog plus induced nonconstassert_eq in copiedprofile. All77F6diagnostics no longerreported. F7minimal threefilebatch authorized: fiveDefaultfixtures, three nonDrop borrow-ending calls uselexicalscope, moveunchangedtestmoduletoend, preserve equalitypredicate via constassert!(==). No newexceptions/architecture; fmt/diffonly, finaltestsnotstarted. Vendor11unchanged/excluded.
 
 CL-QA-F7 frozen; Root full threefilediff accepted. Observer module moved byte-equivalent toend; production calls unaffected. FiveSettingsfixturespreserve values including candidateclonebeforeoriginalshared_tap_holdchange. Threecontextscopes endborrows atsameboundariesandretain allrouteassertions. constequalitypredicate retained using assert!(==). fmt/diffpass; no newallow/productionbehavior/APIchanges. Strictpass8aftercheckpoint.
+
+F7commit5109abf0. Strictpass8exited101 onlyfiveinduced E0433fixturepaths: mainbinary has no crate::radial, newtypes mustrefer exportedlibrary multi_launcher::radial::model::RadialFeatureSettings. Rootreviewmissedpath, F8exactfivepathcorrectionauthorized. Vendor11unchanged; no newotherdiagnostics. fmt/diffonly; strictpass9next.
+
+F8frozen; Rootexactfivepathdiffaccepted publicRadialFeatureSettingsexportverifiedmodel76. fmt/diffpass nootheredits. Strictpass9aftercommit.

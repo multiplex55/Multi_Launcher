@@ -5701,7 +5701,7 @@ mod tests {
             multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
         let mut settings = Settings {
             hotkey: Some("Ctrl+F2".into()),
-            radial: crate::radial::model::RadialFeatureSettings {
+            radial: multi_launcher::radial::model::RadialFeatureSettings {
                 enabled: false,
                 ..Default::default()
             },
@@ -5850,7 +5850,7 @@ mod tests {
             multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
         let old_settings = Settings {
             hotkey: Some("Ctrl+F2".into()),
-            radial: crate::radial::model::RadialFeatureSettings {
+            radial: multi_launcher::radial::model::RadialFeatureSettings {
                 enabled: false,
                 shared_tap_hold: false,
                 ..Default::default()
@@ -6096,7 +6096,7 @@ mod tests {
             hotkey: Some("Ctrl+F2".into()),
             quit_hotkey: Some("Ctrl+Q".into()),
             help_hotkey: Some("Ctrl+H".into()),
-            radial: crate::radial::model::RadialFeatureSettings {
+            radial: multi_launcher::radial::model::RadialFeatureSettings {
                 enabled: true,
                 shared_tap_hold: true,
                 ..Default::default()
@@ -6353,7 +6353,7 @@ mod tests {
             hotkey: Some("Ctrl+F2".into()),
             quit_hotkey: Some("Ctrl+Q".into()),
             help_hotkey: Some("Ctrl+H".into()),
-            radial: crate::radial::model::RadialFeatureSettings {
+            radial: multi_launcher::radial::model::RadialFeatureSettings {
                 enabled: true,
                 shared_tap_hold: true,
                 ..Default::default()
@@ -6459,7 +6459,7 @@ mod tests {
         let settings = Settings {
             hotkey: Some("Ctrl+F2".into()),
             quit_hotkey: Some("F13".into()),
-            radial: crate::radial::model::RadialFeatureSettings {
+            radial: multi_launcher::radial::model::RadialFeatureSettings {
                 enabled: true,
                 shared_tap_hold: true,
                 ..Default::default()
