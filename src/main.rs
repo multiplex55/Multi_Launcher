@@ -122,7 +122,7 @@ fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
         reserved.push(("help launcher".into(), hotkey.into()));
     }
     if let Ok(Some(hotkey)) = screen_draw_launch_hotkey_text(settings) {
-        reserved.push(("launch Screen Draw".into(), hotkey.into()));
+        reserved.push(("launch Screen Draw".into(), hotkey));
     }
     if let Ok(Some(hotkey)) = screen_draw_emergency_hotkey_text(settings) {
         reserved.push(("Screen Draw emergency".into(), hotkey));
@@ -401,21 +401,23 @@ fn related_launcher_bindings(
             action: RelatedAction::Help,
         });
     }
-    if include_process_hotkeys && let Ok(Some(text)) = screen_draw_launch_hotkey_text(settings) {
-        if let Some(hotkey) = parse_hotkey(&text) {
-            bindings.push(RelatedBinding {
-                hotkey,
-                action: RelatedAction::ScreenDrawLaunch,
-            });
-        }
+    if include_process_hotkeys
+        && let Ok(Some(text)) = screen_draw_launch_hotkey_text(settings)
+        && let Some(hotkey) = parse_hotkey(&text)
+    {
+        bindings.push(RelatedBinding {
+            hotkey,
+            action: RelatedAction::ScreenDrawLaunch,
+        });
     }
-    if include_process_hotkeys && let Ok(Some(text)) = screen_draw_emergency_hotkey_text(settings) {
-        if let Some(hotkey) = parse_hotkey(&text) {
-            bindings.push(RelatedBinding {
-                hotkey,
-                action: RelatedAction::ScreenDrawEmergency,
-            });
-        }
+    if include_process_hotkeys
+        && let Ok(Some(text)) = screen_draw_emergency_hotkey_text(settings)
+        && let Some(hotkey) = parse_hotkey(&text)
+    {
+        bindings.push(RelatedBinding {
+            hotkey,
+            action: RelatedAction::ScreenDrawEmergency,
+        });
     }
     for trigger in document
         .custom_triggers
@@ -2117,14 +2119,14 @@ fn spawn_gui(
                         tracing::error!(%error, "failed to install QA framebuffer capture");
                     }
                 }
-                if let Some(startup) = startup_indexing_for_window {
-                    if let Err(error) = app.install_startup_indexing(
+                if let Some(startup) = startup_indexing_for_window
+                    && let Err(error) = app.install_startup_indexing(
                         startup.coordinator,
                         startup.config,
                         startup.generation,
-                    ) {
-                        app.report_error_message("index.startup", error.to_string());
-                    }
+                    )
+                {
+                    app.report_error_message("index.startup", error.to_string());
                 }
                 app.install_visibility_revision(visibility_revision);
                 app.install_root_window_bridge(root_window_bridge_for_gui.clone());
@@ -2467,9 +2469,7 @@ fn main() -> anyhow::Result<()> {
         let mut radial_generation_replaced = false;
         if radial_changes.document {
             let reload = radial_store.reload_external_with(|_| {
-                let _ = multi_launcher::gui::send_event(
-                    multi_launcher::gui::WatchEvent::RadialInvalidate,
-                );
+                multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
                 radial_controller.close(
                     multi_launcher::radial::native::CloseReason::SettingsReload,
                     None,
@@ -2605,13 +2605,13 @@ fn main() -> anyhow::Result<()> {
                             event_tx.clone(),
                         );
                     }
-                    let _ = multi_launcher::gui::send_event(
+                    multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialConfigDiagnostic(None),
                     );
                 }
                 Err(error) => {
                     tracing::warn!(%error, "retaining last valid radial document after external change");
-                    let _ = multi_launcher::gui::send_event(
+                    multi_launcher::gui::send_event(
                         multi_launcher::gui::WatchEvent::RadialConfigDiagnostic(Some(
                             error.to_string(),
                         )),
@@ -2625,9 +2625,7 @@ fn main() -> anyhow::Result<()> {
                 service.invalidate_resources();
             }
             if !radial_generation_replaced {
-                let _ = multi_launcher::gui::send_event(
-                    multi_launcher::gui::WatchEvent::RadialInvalidate,
-                );
+                multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
                 radial_controller.invalidate_resources();
             }
             // If the asset tree was created after watcher acquisition, rebuild

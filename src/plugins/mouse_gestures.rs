@@ -644,7 +644,7 @@ impl Plugin for MouseGesturesPlugin {
         });
 
         labeled_form_row(ui, "Cancel behavior", |ui| {
-            let response = egui::ComboBox::from_id_salt("mg_cancel_behavior")
+            egui::ComboBox::from_id_salt("mg_cancel_behavior")
                 .selected_text(cancel_behavior_label(cfg.cancel_behavior))
                 .show_ui(ui, |ui| {
                     changed |= ui
@@ -662,12 +662,11 @@ impl Plugin for MouseGesturesPlugin {
                         )
                         .changed();
                 })
-                .response;
-            response
+                .response
         });
 
         labeled_form_row(ui, "No-match behavior", |ui| {
-            let response = egui::ComboBox::from_id_salt("mg_no_match_behavior")
+            egui::ComboBox::from_id_salt("mg_no_match_behavior")
                 .selected_text(no_match_behavior_label(cfg.no_match_behavior))
                 .show_ui(ui, |ui| {
                     changed |= ui
@@ -692,8 +691,7 @@ impl Plugin for MouseGesturesPlugin {
                         )
                         .changed();
                 })
-                .response;
-            response
+                .response
         });
         ui.small(
             "Fallback runs when a gesture does not match; default is pass-through right-click.",

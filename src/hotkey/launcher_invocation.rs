@@ -450,12 +450,10 @@ impl LauncherInvocationAdapter {
         let mut intents = self
             .reducer
             .reduce(InvocationEvent::RadialCloseRequested { id, session_id });
-        if was_active {
-            if let Some(session_id) = self.reducer.radial_lifecycle().session_id() {
-                intents.push(InvocationIntent::CloseRadial {
-                    session_id: Some(session_id),
-                });
-            }
+        if was_active && let Some(session_id) = self.reducer.radial_lifecycle().session_id() {
+            intents.push(InvocationIntent::CloseRadial {
+                session_id: Some(session_id),
+            });
         }
         intents
     }
@@ -1279,7 +1277,7 @@ impl LauncherInvocationService {
     ) -> Result<Self, String> {
         #[cfg(all(windows, not(test)))]
         {
-            return native_service::start(config, related, owner, wake);
+            native_service::start(config, related, owner, wake)
         }
         #[cfg(any(not(windows), test))]
         {
@@ -1293,7 +1291,7 @@ impl LauncherInvocationService {
     pub fn feedback(&self, event: InvocationEvent) -> Result<(), String> {
         #[cfg(all(windows, not(test)))]
         {
-            return self.send_command(ServiceCommand::Feedback(event));
+            self.send_command(ServiceCommand::Feedback(event))
         }
         #[cfg(any(not(windows), test))]
         {
@@ -1337,7 +1335,7 @@ impl LauncherInvocationService {
     pub fn cancel_lifecycle(&self, reason: LifecycleCancellation) -> Result<(), String> {
         #[cfg(all(windows, not(test)))]
         {
-            return self.send_command(ServiceCommand::Cancel(reason));
+            self.send_command(ServiceCommand::Cancel(reason))
         }
         #[cfg(any(not(windows), test))]
         {
@@ -1348,7 +1346,7 @@ impl LauncherInvocationService {
     pub fn set_exclusive(&self, active: bool) -> Result<(), String> {
         #[cfg(all(windows, not(test)))]
         {
-            return self.send_command(ServiceCommand::Exclusive(active));
+            self.send_command(ServiceCommand::Exclusive(active))
         }
         #[cfg(any(not(windows), test))]
         {
@@ -1359,7 +1357,7 @@ impl LauncherInvocationService {
     pub fn set_active_menu(&self, active: Option<(SessionId, MenuId)>) -> Result<(), String> {
         #[cfg(all(windows, not(test)))]
         {
-            return self.send_command(ServiceCommand::ActiveMenu(active));
+            self.send_command(ServiceCommand::ActiveMenu(active))
         }
         #[cfg(any(not(windows), test))]
         {
@@ -1932,10 +1930,10 @@ mod native_service {
                         let eligible = related_binding_eligible(&state.down, &binding.hotkey);
                         if eligible && !*latched {
                             let priority = related_priority(&binding.action);
-                            if selected.as_ref().is_none_or(|(p, _, _)| priority < *p) {
-                                if let Some(primary) = vk_from_key(binding.hotkey.key) {
-                                    selected = Some((priority, binding.action.clone(), primary));
-                                }
+                            if selected.as_ref().is_none_or(|(p, _, _)| priority < *p)
+                                && let Some(primary) = vk_from_key(binding.hotkey.key)
+                            {
+                                selected = Some((priority, binding.action.clone(), primary));
                             }
                         }
                         *latched = eligible;
@@ -2492,93 +2490,93 @@ mod native_service {
                             }
                         }
                     } else if msg.message == WM_TIMER {
-                        if let Ok(mut s) = lock.lock() {
-                            if let Some(state) = s.as_mut() {
-                                let timer = msg.wParam.0;
-                                if let Some(id) = state.timers.iter().find_map(|(id, actual)| {
-                                    (actual.timer_id == timer).then_some(*id)
-                                }) {
-                                    let at = state.epoch.elapsed().as_millis() as u64;
-                                    let deadline_ms = state
-                                        .timers
-                                        .get(&id)
-                                        .map(|timer| timer.deadline_ms)
-                                        .unwrap_or(at);
-                                    if let Some(delay_ms) =
-                                        super::early_timer_rearm_delay_ms(deadline_ms, at)
-                                    {
-                                        if let Some(timer) = state.timers.remove(&id) {
-                                            timer.cancel(false, "early deadline timer rearm");
-                                        }
-                                        let rearmed = unsafe { SetTimer(None, 0, delay_ms, None) };
-                                        if rearmed == 0 {
-                                            let error = format!(
-                                                "failed to re-arm early radial deadline for {}",
-                                                id.0
-                                            );
-                                            state.shutdown_requested = true;
-                                            let intents = cancel_lifecycle(
-                                                state,
-                                                LifecycleCancellation::HookFailure,
-                                            );
-                                            let _ = state.notices.send(ServiceNotice {
-                                                recovery: None,
-                                                intents,
-                                                error: Some(error),
-                                                action: None,
-                                                cancellation: Some(
-                                                    LifecycleCancellation::HookFailure,
-                                                ),
-                                            });
-                                            let _ = state.wake.send(());
-                                            unsafe { PostQuitMessage(0) };
-                                            continue;
-                                        }
-                                        state.timers.insert(
-                                            id,
-                                            ServiceTimer {
-                                                timer_id: rearmed,
-                                                deadline_ms,
-                                            },
+                        if let Ok(mut s) = lock.lock()
+                            && let Some(state) = s.as_mut()
+                        {
+                            let timer = msg.wParam.0;
+                            if let Some(id) = state
+                                .timers
+                                .iter()
+                                .find_map(|(id, actual)| (actual.timer_id == timer).then_some(*id))
+                            {
+                                let at = state.epoch.elapsed().as_millis() as u64;
+                                let deadline_ms = state
+                                    .timers
+                                    .get(&id)
+                                    .map(|timer| timer.deadline_ms)
+                                    .unwrap_or(at);
+                                if let Some(delay_ms) =
+                                    super::early_timer_rearm_delay_ms(deadline_ms, at)
+                                {
+                                    if let Some(timer) = state.timers.remove(&id) {
+                                        timer.cancel(false, "early deadline timer rearm");
+                                    }
+                                    let rearmed = unsafe { SetTimer(None, 0, delay_ms, None) };
+                                    if rearmed == 0 {
+                                        let error = format!(
+                                            "failed to re-arm early radial deadline for {}",
+                                            id.0
                                         );
-                                        acceptance_trace::emit(Event::HookDeadline {
-                                            edge: HookDeadlineEdge::RearmedEarly,
-                                            invocation_id: id.0,
-                                            timer_id: rearmed as u64,
-                                            delay_ms: u64::from(delay_ms),
-                                            radial_intent: false,
-                                            global_exclusive_owners: super::exclusive_owners(),
+                                        state.shutdown_requested = true;
+                                        let intents = cancel_lifecycle(
+                                            state,
+                                            LifecycleCancellation::HookFailure,
+                                        );
+                                        let _ = state.notices.send(ServiceNotice {
+                                            recovery: None,
+                                            intents,
+                                            error: Some(error),
+                                            action: None,
+                                            cancellation: Some(LifecycleCancellation::HookFailure),
                                         });
+                                        let _ = state.wake.send(());
+                                        unsafe { PostQuitMessage(0) };
                                         continue;
                                     }
-                                    if let Some(timer) = state.timers.remove(&id) {
-                                        timer.cancel(false, "one-shot timer fire");
-                                    }
-                                    let generation = state.adapter.config().generation;
-                                    let intents = state.adapter.deadline(id, at, generation);
+                                    state.timers.insert(
+                                        id,
+                                        ServiceTimer {
+                                            timer_id: rearmed,
+                                            deadline_ms,
+                                        },
+                                    );
                                     acceptance_trace::emit(Event::HookDeadline {
-                                        edge: HookDeadlineEdge::Fired,
+                                        edge: HookDeadlineEdge::RearmedEarly,
                                         invocation_id: id.0,
-                                        timer_id: timer as u64,
-                                        delay_ms: 0,
-                                        radial_intent: intents.iter().any(|intent| {
-                                            matches!(
-                                                intent,
-                                                InvocationIntent::OpenRadial { .. }
-                                                    | InvocationIntent::CloseRadial { .. }
-                                            )
-                                        }),
+                                        timer_id: rearmed as u64,
+                                        delay_ms: u64::from(delay_ms),
+                                        radial_intent: false,
                                         global_exclusive_owners: super::exclusive_owners(),
                                     });
-                                    let _ = state.notices.send(ServiceNotice {
-                                        recovery: None,
-                                        intents,
-                                        error: None,
-                                        action: None,
-                                        cancellation: None,
-                                    });
-                                    let _ = state.wake.send(());
+                                    continue;
                                 }
+                                if let Some(timer) = state.timers.remove(&id) {
+                                    timer.cancel(false, "one-shot timer fire");
+                                }
+                                let generation = state.adapter.config().generation;
+                                let intents = state.adapter.deadline(id, at, generation);
+                                acceptance_trace::emit(Event::HookDeadline {
+                                    edge: HookDeadlineEdge::Fired,
+                                    invocation_id: id.0,
+                                    timer_id: timer as u64,
+                                    delay_ms: 0,
+                                    radial_intent: intents.iter().any(|intent| {
+                                        matches!(
+                                            intent,
+                                            InvocationIntent::OpenRadial { .. }
+                                                | InvocationIntent::CloseRadial { .. }
+                                        )
+                                    }),
+                                    global_exclusive_owners: super::exclusive_owners(),
+                                });
+                                let _ = state.notices.send(ServiceNotice {
+                                    recovery: None,
+                                    intents,
+                                    error: None,
+                                    action: None,
+                                    cancellation: None,
+                                });
+                                let _ = state.wake.send(());
                             }
                         }
                     } else if let Some(reason) =

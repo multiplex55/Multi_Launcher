@@ -1065,20 +1065,19 @@ fn activate_with_observation(
             .as_ref()
             .is_err_and(|error| error.kind == WindowActivationErrorKind::Superseded)
         && let Some(fence) = fence
-    {
-        if let RootFocusReconcileResult::Unresolved(reason) = reconcile_superseded_root_activation(
+        && let RootFocusReconcileResult::Unresolved(reason) = reconcile_superseded_root_activation(
             backend,
             fence,
             request.hwnd,
             previous_foreground,
             observation,
-        ) {
-            tracing::warn!(
-                hwnd = request.hwnd,
-                reason,
-                "ROOT focus reconciliation is unresolved"
-            );
-        }
+        )
+    {
+        tracing::warn!(
+            hwnd = request.hwnd,
+            reason,
+            "ROOT focus reconciliation is unresolved"
+        );
     }
     result
 }
@@ -1562,10 +1561,9 @@ fn activate_with_fence_inner(
             && current_thread != 0
             && thread != current_thread
             && !guard.attached.contains(&(thread, current_thread))
+            && let Err(error) = guard.attach(thread, current_thread, fence, request.hwnd)
         {
-            if let Err(error) = guard.attach(thread, current_thread, fence, request.hwnd) {
-                attach_failures.push(error);
-            }
+            attach_failures.push(error);
         }
     }
 

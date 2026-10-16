@@ -912,7 +912,7 @@ pub(crate) fn save_note_image_asset_in_dir_at(
     dir: &std::path::Path,
     timestamp: chrono::DateTime<Local>,
 ) -> anyhow::Result<String> {
-    std::fs::create_dir_all(&dir)
+    std::fs::create_dir_all(dir)
         .with_context(|| format!("create note assets directory {}", dir.display()))?;
 
     // Keep staging and destination on the same filesystem. The temporary name
@@ -921,7 +921,7 @@ pub(crate) fn save_note_image_asset_in_dir_at(
     let mut staged = tempfile::Builder::new()
         .prefix(".note-image-staging-")
         .suffix(".tmp")
-        .tempfile_in(&dir)
+        .tempfile_in(dir)
         .with_context(|| format!("create staged note image in {}", dir.display()))?;
     image::DynamicImage::ImageRgba8(image.clone())
         .write_to(&mut staged, image::ImageOutputFormat::Png)
@@ -1869,16 +1869,15 @@ pub fn save_notes(notes: &[Note]) -> anyhow::Result<()> {
     }
 
     for (path, _) in &original_files {
-        if !expected.contains(path) {
-            if let Err(error) = std::fs::remove_file(path)
+        if !expected.contains(path)
+            && let Err(error) = std::fs::remove_file(path)
                 .with_context(|| format!("remove stale note {}", path.display()))
-            {
-                let rollback = restore(&changed_paths);
-                return match rollback {
-                    Ok(()) => Err(error),
-                    Err(rollback) => Err(error.context(format!("rollback failed: {rollback:#}"))),
-                };
-            }
+        {
+            let rollback = restore(&changed_paths);
+            return match rollback {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(error.context(format!("rollback failed: {rollback:#}"))),
+            };
         }
     }
     publish_note_cache(

@@ -143,7 +143,7 @@ impl UniversalActionInvocationContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ActionGroup {
     Primary,
     OpenEdit,
@@ -153,13 +153,8 @@ pub enum ActionGroup {
     Organization,
     Automation,
     Destructive,
+    #[default]
     Other,
-}
-
-impl Default for ActionGroup {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

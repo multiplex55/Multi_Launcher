@@ -459,15 +459,15 @@ impl RootWindowBridge {
                     .compare_exchange(raw, 0, Ordering::AcqRel, Ordering::Acquire);
                 return;
             }
-            if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
-                if !unsafe { ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE) }.as_bool() {
-                    let error = windows::core::Error::from_win32();
-                    tracing::warn!(
-                        %error,
-                        hwnd = raw,
-                        "failed to wake hidden root window before queued viewport commands"
-                    );
-                }
+            if !unsafe { IsWindowVisible(hwnd) }.as_bool()
+                && !unsafe { ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE) }.as_bool()
+            {
+                let error = windows::core::Error::from_win32();
+                tracing::warn!(
+                    %error,
+                    hwnd = raw,
+                    "failed to wake hidden root window before queued viewport commands"
+                );
             }
         }
     }

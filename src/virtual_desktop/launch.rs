@@ -52,7 +52,7 @@ impl LaunchWorkflowBackend for ProductionLaunchBackend {
         #[cfg(windows)]
         {
             let hwnd = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
-            return (!hwnd.0.is_null()).then_some(hwnd.0 as usize);
+            (!hwnd.0.is_null()).then_some(hwnd.0 as usize)
         }
         #[cfg(not(windows))]
         None

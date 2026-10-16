@@ -165,7 +165,7 @@ impl SystemDataRuntime {
                 }
             })
             .expect("start plugin system-data worker");
-        let runtime = Self {
+        Self {
             cache: SystemDataCache {
                 state,
                 wake,
@@ -174,7 +174,6 @@ impl SystemDataRuntime {
             publication,
             worker: Some(worker),
         };
-        runtime
     }
 
     pub(crate) fn cache(&self) -> SystemDataCache {

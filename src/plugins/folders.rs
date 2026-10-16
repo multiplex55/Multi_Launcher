@@ -235,10 +235,10 @@ fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> an
         LoadState::Empty => default_folders(),
         LoadState::Loaded(folders) => folders,
     };
-    if let Ok(mut current) = data.lock() {
-        if *current != folders {
-            *current = folders;
-        }
+    if let Ok(mut current) = data.lock()
+        && *current != folders
+    {
+        *current = folders;
     }
     Ok(())
 }

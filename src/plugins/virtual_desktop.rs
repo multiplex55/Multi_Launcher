@@ -941,13 +941,12 @@ fn capability_diagnostics(snapshot: &VirtualDesktopSnapshot) -> Vec<Action> {
     ];
     capabilities
         .into_iter()
-        .filter_map(|(available, name)| {
-            (!available).then(|| {
-                diagnostic_action(
-                    format!("Unavailable: {name}"),
-                    format!("This Windows build does not expose a verified ABI for {name}"),
-                )
-            })
+        .filter(|(available, _)| !*available)
+        .map(|(_, name)| {
+            diagnostic_action(
+                format!("Unavailable: {name}"),
+                format!("This Windows build does not expose a verified ABI for {name}"),
+            )
         })
         .collect()
 }
