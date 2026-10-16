@@ -22,6 +22,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+mod playback;
+
+pub(crate) use playback::{
+    ClipboardRestorePlan, NativeSequencePlaybackPlatform, SequencePlaybackController,
+    SequencePlaybackError, SequencePlaybackPlatform, SequencePlaybackStatus,
+};
+
 pub const PASTE_SEQUENCES_FILE: &str = "paste_sequences.json";
 pub const MAX_SEQUENCES: usize = 100;
 pub const MAX_STEPS_PER_SEQUENCE: usize = 100;
@@ -711,6 +718,7 @@ impl fmt::Debug for SequenceInvocationContext {
 /// clipboard data and rendered text are never included in these errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SequencePreflightError {
+    SequenceAlreadyActive,
     InvalidSequence,
     InvalidTargetIdentity,
     LauncherTarget,
@@ -728,6 +736,7 @@ pub(crate) enum SequencePreflightError {
 impl SequencePreflightError {
     pub(crate) fn message(self) -> &'static str {
         match self {
+            Self::SequenceAlreadyActive => "Another paste sequence is already active.",
             Self::InvalidSequence => "The sequence is empty or invalid.",
             Self::InvalidTargetIdentity => "The originating window could not be identified.",
             Self::LauncherTarget => "The launcher cannot be used as a sequence target.",

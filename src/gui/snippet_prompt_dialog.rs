@@ -1061,6 +1061,7 @@ fn map_sequence_preflight_error(
             SnippetPromptError::StaleTemplate
         }
         crate::paste_sequence::SequencePreflightError::InvalidSequence
+        | crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive
         | crate::paste_sequence::SequencePreflightError::InvalidTargetIdentity
         | crate::paste_sequence::SequencePreflightError::LauncherTarget
         | crate::paste_sequence::SequencePreflightError::NotReady => {

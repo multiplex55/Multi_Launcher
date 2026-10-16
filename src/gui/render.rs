@@ -2659,6 +2659,21 @@ impl LauncherApp {
         for err in crate::plugins::macros::take_error_messages() {
             tracing::debug!("{err}");
         }
+
+        let playback_now = std::time::Instant::now();
+        if self.sequence_playback.needs_tick() {
+            let mut platform = crate::paste_sequence::NativeSequencePlaybackPlatform::new(
+                self.launcher_hwnd,
+                Some(ctx.clone()),
+            );
+            self.sequence_playback.tick(&mut platform, playback_now);
+            if let Some(delay) = self
+                .sequence_playback
+                .next_wake_after(std::time::Instant::now())
+            {
+                ctx.request_repaint_after(delay);
+            }
+        }
         geometry_cause
     }
 
@@ -4909,6 +4924,16 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(plan) = self
+            .sequence_playback
+            .take_shutdown_restore_plan(std::time::Instant::now())
+            && let Err(error) = crate::paste_sequence::NativeSequencePlaybackPlatform::restore_after_shutdown(
+                plan,
+                self.launcher_hwnd,
+            )
+        {
+            tracing::warn!(reason = error.message(), "paste-sequence clipboard cleanup failed");
+        }
         if let Err(error) = self.shutdown_indexing() {
             self.report_error_message("index.shutdown", error.to_string());
         }

@@ -990,8 +990,7 @@ impl LauncherApp {
     }
 
     /// Start preflight from an already inspected sequence and provider snapshots.
-    /// Captures context before opening the existing prompt form; the returned run
-    /// is available through `take_prepared_sequence_run` when no prompt is needed.
+    /// The controller owns admission throughout a pending prompt and the ready run.
     pub(crate) fn begin_paste_sequence_preflight(
         &mut self,
         sequence: crate::paste_sequence::Sequence,
@@ -1022,27 +1021,90 @@ impl LauncherApp {
             crate::paste_sequence::SequencePreflightError,
         >,
     ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
-        // Starting a new attempt invalidates any older prepared run even when
-        // context capture, source resolution, or prompt setup fails.
-        self.prepared_sequence_run = None;
-        let context = capture_context(self, source)?;
-        let preflight =
-            crate::paste_sequence::SequencePreflight::begin(sequence, snippets, history, context)?;
+        if self.snippet_prompt_dialog.is_open() {
+            return Err(crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive);
+        }
+        self.sequence_playback
+            .begin_preparing()
+            .map_err(|_| crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive)?;
+        let context = match capture_context(self, source) {
+            Ok(context) => context,
+            Err(error) => {
+                self.sequence_playback.preparation_failed();
+                return Err(error);
+            }
+        };
+        let preflight = match crate::paste_sequence::SequencePreflight::begin(
+            sequence, snippets, history, context,
+        ) {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.sequence_playback.preparation_failed();
+                return Err(error);
+            }
+        };
         if preflight.current_prompt().is_some() {
-            self.snippet_prompt_dialog
+            if self
+                .snippet_prompt_dialog
                 .begin_sequence_preflight(&self.egui_ctx, preflight)
-                .map_err(|_| crate::paste_sequence::SequencePreflightError::InvalidSnippet)?;
+                .is_err()
+            {
+                self.sequence_playback.preparation_failed();
+                return Err(crate::paste_sequence::SequencePreflightError::InvalidSnippet);
+            }
             self.focus_panel(super::Panel::SnippetPromptDialog);
         } else {
-            self.prepared_sequence_run = Some(preflight.finish(snippets, history)?);
+            let run = match preflight.finish(snippets, history) {
+                Ok(run) => run,
+                Err(error) => {
+                    self.sequence_playback.preparation_failed();
+                    return Err(error);
+                }
+            };
+            if self.sequence_playback.set_ready(run).is_err() {
+                self.sequence_playback.preparation_failed();
+                return Err(crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive);
+            }
         }
         Ok(())
     }
 
-    pub(crate) fn take_prepared_sequence_run(
+    pub(crate) fn start_sequence_playback(
         &mut self,
-    ) -> Option<crate::paste_sequence::PreparedSequenceRun> {
-        self.prepared_sequence_run.take()
+    ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        let mut platform = crate::paste_sequence::NativeSequencePlaybackPlatform::new(
+            self.launcher_hwnd,
+            Some(self.egui_ctx.clone()),
+        );
+        let result = self.sequence_playback.start(&mut platform);
+        self.schedule_sequence_playback_wake(std::time::Instant::now());
+        result
+    }
+
+    pub(crate) fn next_sequence_playback(
+        &mut self,
+    ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
+        let now = std::time::Instant::now();
+        let mut platform = crate::paste_sequence::NativeSequencePlaybackPlatform::new(
+            self.launcher_hwnd,
+            Some(self.egui_ctx.clone()),
+        );
+        let result = self.sequence_playback.next(&mut platform, now);
+        self.schedule_sequence_playback_wake(std::time::Instant::now());
+        result
+    }
+
+    pub(crate) fn cancel_sequence_playback(&mut self) {
+        let now = std::time::Instant::now();
+        self.sequence_playback.cancel(now);
+        self.schedule_sequence_playback_wake(now);
+    }
+
+    fn schedule_sequence_playback_wake(&self, now: std::time::Instant) {
+        self.egui_ctx.request_repaint();
+        if let Some(delay) = self.sequence_playback.next_wake_after(now) {
+            self.egui_ctx.request_repaint_after(delay);
+        }
     }
 
     fn submit_sequence_prompt(
@@ -1071,7 +1133,9 @@ impl LauncherApp {
             self.panel_states.snippet_prompt_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
-            self.prepared_sequence_run = Some(run);
+            self.sequence_playback
+                .set_ready(run)
+                .map_err(|_| super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightFailed)?;
         }
         Ok(())
     }
@@ -1163,7 +1227,11 @@ impl LauncherApp {
         &mut self,
     ) -> Option<crate::plugins::snippets::SnippetEntry> {
         let was_preview = self.snippet_prompt_dialog.is_preview_only();
+        let was_sequence = self.snippet_prompt_dialog.is_sequence_preflight();
         let draft = self.snippet_prompt_dialog.cancel(&self.egui_ctx);
+        if was_sequence {
+            self.cancel_sequence_playback();
+        }
         self.panel_states.snippet_prompt_dialog = false;
         self.panel_stack
             .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
@@ -1693,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_new_sequence_preflight_invalidates_an_older_prepared_run() {
+    fn new_sequence_preflight_is_rejected_while_an_older_run_is_ready() {
         let directory = tempfile::tempdir().unwrap();
         let store = crate::paste_sequence::SequenceStore::new(
             directory
@@ -1736,20 +1804,27 @@ mod tests {
             ))
             .unwrap();
         let mut app = inert_test_app(directory.path());
-        app.prepared_sequence_run = Some(old_run);
+        app.sequence_playback.begin_preparing().unwrap();
+        app.sequence_playback.set_ready(old_run).unwrap();
 
         let result = app.begin_paste_sequence_preflight_using_context(
             snapshot.sequence(failed_id).unwrap().clone(),
             &[],
             &[],
             crate::commands::ActivationSource::Click,
-            move |_, _| Ok(context),
+            move |_, _| {
+                let _ = context;
+                panic!("overlapping sequence attempts must be rejected before capture")
+            },
         );
         assert!(matches!(
             result,
-            Err(crate::paste_sequence::SequencePreflightError::MissingSnippet)
+            Err(crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive)
         ));
-        assert!(app.take_prepared_sequence_run().is_none());
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Ready
+        );
     }
 
     #[test]
