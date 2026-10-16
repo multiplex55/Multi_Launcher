@@ -432,7 +432,7 @@ fn designer_scroll_viewport_measurement<R>(
             value.round()
         };
         (value.is_finite() && value >= i32::MIN as f32 && value <= i32::MAX as f32)
-            .then(|| value as i32)
+            .then_some(value as i32)
     };
     let measured = DesignerAuthoringScrollViewport {
         owner,
@@ -666,9 +666,7 @@ pub(super) fn menu_cell_ids_digest(menu: &MenuDefinition) -> u64 {
 
 fn stable_cell_id_digest(cell_id: &str) -> u64 {
     static HASH_STATE: OnceLock<RandomState> = OnceLock::new();
-    let mut hasher = HASH_STATE.get_or_init(RandomState::new).build_hasher();
-    cell_id.hash(&mut hasher);
-    hasher.finish() & i64::MAX as u64
+    HASH_STATE.get_or_init(RandomState::new).hash_one(cell_id) & i64::MAX as u64
 }
 
 fn designer_viewport_builder(open: bool, launcher_always_on_top: bool) -> egui::ViewportBuilder {
@@ -1032,10 +1030,10 @@ impl DesignerIntentBridge {
             let mut index = pending.len();
             while index > 0 {
                 index -= 1;
-                if pending[index].0.cancellation.load(Ordering::Acquire) {
-                    if let Some((request, _)) = pending.remove(index) {
-                        stale.push(request);
-                    }
+                if pending[index].0.cancellation.load(Ordering::Acquire)
+                    && let Some((request, _)) = pending.remove(index)
+                {
+                    stale.push(request);
                 }
             }
             let ready_index = pending.iter().position(|(_, ready_at)| *ready_at <= now);
@@ -1580,7 +1578,7 @@ pub(super) fn show_radial_diagnostics<'a>(
                 .max_height(180.0)
                 .show(ui, |ui| {
                     for diagnostic in &model.expected_layout {
-                        ui.small(format!("{}", diagnostic.message));
+                        ui.small(diagnostic.message.to_string());
                     }
                 });
         });
@@ -1805,12 +1803,16 @@ fn designer_pane_layout(
         0.0
     };
     let gaps = (DESIGNER_PANE_GAP + horizontal_item_spacing) * gap_count as f32;
-    let mut tree = tree_visible
-        .then(|| tree_width.clamp(MIN_TREE, 420.0))
-        .unwrap_or(0.0);
-    let mut inspector = inspector_visible
-        .then(|| inspector_width.clamp(MIN_INSPECTOR, 560.0))
-        .unwrap_or(0.0);
+    let mut tree = if tree_visible {
+        tree_width.clamp(MIN_TREE, 420.0)
+    } else {
+        0.0
+    };
+    let mut inspector = if inspector_visible {
+        inspector_width.clamp(MIN_INSPECTOR, 560.0)
+    } else {
+        0.0
+    };
     let side_total = tree + inspector;
     let side_budget = (width - gaps - MIN_CANVAS).max(0.0);
     if side_total > side_budget && side_total > 0.0 {
@@ -2041,9 +2043,9 @@ impl RadialEditorState {
                 .draft
                 .menus
                 .iter()
-                .find(|menu| &menu.id == &menu_id)
-                .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == &ring_id))
-                .and_then(|ring| ring.cells.iter().find(|cell| &cell.id == &cell_id))
+                .find(|menu| menu.id == menu_id)
+                .and_then(|menu| menu.rings.iter().find(|ring| ring.id == ring_id))
+                .and_then(|ring| ring.cells.iter().find(|cell| cell.id == cell_id))
                 .and_then(|cell| match &cell.content {
                     CellContent::Action { binding } => Some(binding.clone()),
                     _ => None,
@@ -3057,10 +3059,10 @@ impl RadialEditorState {
     }
 
     fn maybe_finish_close(&mut self) {
-        if self.close_intent != CloseIntent::Requested {
-            if self.close_intent != CloseIntent::DiscardRequested {
-                return;
-            }
+        if self.close_intent != CloseIntent::Requested
+            && self.close_intent != CloseIntent::DiscardRequested
+        {
+            return;
         }
         let Some(session) = self.session.as_ref() else {
             self.open = false;
@@ -3286,9 +3288,9 @@ impl RadialEditorState {
         }
         menu::set_cell_content(
             session,
-            &menu_id,
-            &ring_id,
-            &cell_id,
+            menu_id,
+            ring_id,
+            cell_id,
             CellContent::Action {
                 binding: binding.clone(),
             },
@@ -3852,18 +3854,14 @@ impl RadialEditorState {
             DesignerNavigationIntent::Back => {
                 if let Some((menu_id, selection)) = self.visited_path.back_location(before.clone())
                 {
-                    session.select(Some(
-                        selection.unwrap_or_else(|| StableSelection::Menu(menu_id)),
-                    ));
+                    session.select(Some(selection.unwrap_or(StableSelection::Menu(menu_id))));
                     next_selection = session.selection.clone();
                     focus_target = next_selection.clone();
                 }
             }
             DesignerNavigationIntent::Breadcrumb(index) => {
                 if let Some((menu_id, selection)) = self.visited_path.go_to_breadcrumb(index) {
-                    session.select(Some(
-                        selection.unwrap_or_else(|| StableSelection::Menu(menu_id)),
-                    ));
+                    session.select(Some(selection.unwrap_or(StableSelection::Menu(menu_id))));
                     next_selection = session.selection.clone();
                     focus_target = next_selection.clone();
                 }
@@ -4566,28 +4564,28 @@ impl RadialEditorState {
                 }
             }
         }
-        if viewport_class != egui::ViewportClass::EmbeddedWindow {
-            if let Some(rect) = ctx.input(|input| input.viewport().outer_rect) {
-                let position = (rect.min.x, rect.min.y);
-                let scale_factor = ctx.pixels_per_point();
-                if position.0.is_finite()
-                    && position.1.is_finite()
-                    && scale_factor.is_finite()
-                    && (crate::settings::RadialDesignerPreferences::MIN_WINDOW_SCALE_FACTOR
-                        ..=crate::settings::RadialDesignerPreferences::MAX_WINDOW_SCALE_FACTOR)
-                        .contains(&scale_factor)
-                {
-                    let position_changed = self.preferences.window_position != Some(position);
-                    let scale_changed = self.preferences.window_scale_factor != Some(scale_factor);
-                    if position_changed {
-                        self.preferences.window_position = Some(position);
-                    }
-                    if scale_changed {
-                        self.preferences.window_scale_factor = Some(scale_factor);
-                    }
-                    if position_changed || scale_changed {
-                        self.mark_preferences_changed();
-                    }
+        if viewport_class != egui::ViewportClass::EmbeddedWindow
+            && let Some(rect) = ctx.input(|input| input.viewport().outer_rect)
+        {
+            let position = (rect.min.x, rect.min.y);
+            let scale_factor = ctx.pixels_per_point();
+            if position.0.is_finite()
+                && position.1.is_finite()
+                && scale_factor.is_finite()
+                && (crate::settings::RadialDesignerPreferences::MIN_WINDOW_SCALE_FACTOR
+                    ..=crate::settings::RadialDesignerPreferences::MAX_WINDOW_SCALE_FACTOR)
+                    .contains(&scale_factor)
+            {
+                let position_changed = self.preferences.window_position != Some(position);
+                let scale_changed = self.preferences.window_scale_factor != Some(scale_factor);
+                if position_changed {
+                    self.preferences.window_position = Some(position);
+                }
+                if scale_changed {
+                    self.preferences.window_scale_factor = Some(scale_factor);
+                }
+                if position_changed || scale_changed {
+                    self.mark_preferences_changed();
                 }
             }
         }
@@ -5137,10 +5135,8 @@ impl RadialEditorState {
                 self.properties_popup = None;
                 self.properties_draft = None;
                 self.properties_handoff_prompt = false;
-                if pending_scope_change_current {
-                    if let Some(pending) = pending {
-                        self.apply_pending_scope_change(pending);
-                    }
+                if pending_scope_change_current && let Some(pending) = pending {
+                    self.apply_pending_scope_change(pending);
                 }
                 return;
             }
@@ -5847,30 +5843,26 @@ impl RadialEditorState {
                 navigation = Some(DesignerNavigationIntent::CreateSkin);
             }
         });
-        if let Some(StableSelection::Skin(skin_id)) = session.selection.clone() {
-            if let Some(skin) = session.draft.skins.iter().find(|skin| skin.id == skin_id) {
-                let mut name = skin.name.clone();
-                let response = ui.text_edit_singleline(&mut name);
-                if response.changed() || response.lost_focus() {
-                    let _ = skin_editor::rename_skin(
-                        session,
-                        &skin_id,
-                        name,
-                        widget_edit_phase(&response),
-                    );
+        if let Some(StableSelection::Skin(skin_id)) = session.selection.clone()
+            && let Some(skin) = session.draft.skins.iter().find(|skin| skin.id == skin_id)
+        {
+            let mut name = skin.name.clone();
+            let response = ui.text_edit_singleline(&mut name);
+            if response.changed() || response.lost_focus() {
+                let _ =
+                    skin_editor::rename_skin(session, &skin_id, name, widget_edit_phase(&response));
+            }
+            if ui.button("Duplicate skin").clicked() {
+                navigation = Some(DesignerNavigationIntent::DuplicateSkin(skin_id.clone()));
+            }
+            let impact = crate::radial::store::references_to_skin(&session.draft, &skin_id);
+            if impact.paths.is_empty() {
+                let delete = ui.button("Delete skin");
+                if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
+                    let _ = skin_editor::delete_skin(session, &skin_id);
                 }
-                if ui.button("Duplicate skin").clicked() {
-                    navigation = Some(DesignerNavigationIntent::DuplicateSkin(skin_id.clone()));
-                }
-                let impact = crate::radial::store::references_to_skin(&session.draft, &skin_id);
-                if impact.paths.is_empty() {
-                    let delete = ui.button("Delete skin");
-                    if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
-                        let _ = skin_editor::delete_skin(session, &skin_id);
-                    }
-                } else {
-                    ui.label(format!("In use: {}", impact.paths.join(", ")));
-                }
+            } else {
+                ui.label(format!("In use: {}", impact.paths.join(", ")));
             }
         }
         let scope = match session.selection.clone() {
@@ -6142,11 +6134,11 @@ impl RadialEditorState {
                 self.intent_bridge
                     .enqueue_file_dialog(DesignerFileDialogRequest::PreviewPackage);
             }
-            if ui.button("Export selected menu").clicked() {
-                if let Some(menu_id) = selected_menu_id(session) {
-                    self.intent_bridge
-                        .enqueue_file_dialog(DesignerFileDialogRequest::ExportMenu { menu_id });
-                }
+            if ui.button("Export selected menu").clicked()
+                && let Some(menu_id) = selected_menu_id(session)
+            {
+                self.intent_bridge
+                    .enqueue_file_dialog(DesignerFileDialogRequest::ExportMenu { menu_id });
             }
             if ui.button("Export full package").clicked() {
                 let roots = session
@@ -6541,81 +6533,75 @@ impl RadialEditorState {
                 submenu_presentation: defaults.default_submenu_presentation,
             });
         }
-        if propose_new_ring {
-            if let (Some(session), Some(menu_id)) = (self.session.as_mut(), selected_menu.as_ref())
-            {
-                let ring_id = session.allocate_ring_id("ring");
-                let cell_ids = (0..8)
-                    .map(|index| session.allocate_cell_id(&format!("cell-{index}")))
-                    .collect();
-                match menu::propose_new_ring(
-                    &session.draft,
-                    session.generation,
-                    menu_id,
-                    ring_id,
-                    cell_ids,
-                ) {
-                    Ok(proposal) => self.install_ring_proposal(proposal),
-                    Err(error) => session.last_error = Some(format!("Add ring failed: {error:?}")),
-                }
+        if propose_new_ring
+            && let (Some(session), Some(menu_id)) = (self.session.as_mut(), selected_menu.as_ref())
+        {
+            let ring_id = session.allocate_ring_id("ring");
+            let cell_ids = (0..8)
+                .map(|index| session.allocate_cell_id(&format!("cell-{index}")))
+                .collect();
+            match menu::propose_new_ring(
+                &session.draft,
+                session.generation,
+                menu_id,
+                ring_id,
+                cell_ids,
+            ) {
+                Ok(proposal) => self.install_ring_proposal(proposal),
+                Err(error) => session.last_error = Some(format!("Add ring failed: {error:?}")),
             }
         }
-        if preview_resize {
-            if let (Some(session), Some((menu_id, ring_id))) =
+        if preview_resize
+            && let (Some(session), Some((menu_id, ring_id))) =
                 (self.session.as_mut(), selected_ring.as_ref())
-            {
-                let count = session
-                    .draft
-                    .menus
-                    .iter()
-                    .find(|menu| &menu.id == menu_id)
-                    .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
-                    .map_or(0, |ring| ring.cells.len());
-                let requested = self
-                    .ring_resize_drafts
-                    .get(&(menu_id.clone(), ring_id.clone()))
-                    .copied()
-                    .unwrap_or(count);
-                match menu::resize_plan(&session.draft, menu_id, ring_id, requested) {
-                    Ok(plan) if plan.requires_resolution() => {
-                        self.resize_prompt = Some(plan);
-                        self.ring_proposal = None;
-                        self.ring_proposal_nonce = None;
-                    }
-                    Ok(_) => {
-                        let ids = (0..requested.saturating_sub(count))
-                            .map(|_| session.allocate_cell_id("cell"))
-                            .collect();
-                        match menu::propose_ring_resize(
-                            &session.draft,
-                            session.generation,
-                            menu_id,
-                            ring_id,
-                            requested,
-                            ids,
-                        ) {
-                            Ok(proposal) => self.install_ring_proposal(proposal),
-                            Err(error) => {
-                                session.last_error =
-                                    Some(format!("Slot proposal failed: {error:?}"))
-                            }
+        {
+            let count = session
+                .draft
+                .menus
+                .iter()
+                .find(|menu| &menu.id == menu_id)
+                .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == ring_id))
+                .map_or(0, |ring| ring.cells.len());
+            let requested = self
+                .ring_resize_drafts
+                .get(&(menu_id.clone(), ring_id.clone()))
+                .copied()
+                .unwrap_or(count);
+            match menu::resize_plan(&session.draft, menu_id, ring_id, requested) {
+                Ok(plan) if plan.requires_resolution() => {
+                    self.resize_prompt = Some(plan);
+                    self.ring_proposal = None;
+                    self.ring_proposal_nonce = None;
+                }
+                Ok(_) => {
+                    let ids = (0..requested.saturating_sub(count))
+                        .map(|_| session.allocate_cell_id("cell"))
+                        .collect();
+                    match menu::propose_ring_resize(
+                        &session.draft,
+                        session.generation,
+                        menu_id,
+                        ring_id,
+                        requested,
+                        ids,
+                    ) {
+                        Ok(proposal) => self.install_ring_proposal(proposal),
+                        Err(error) => {
+                            session.last_error = Some(format!("Slot proposal failed: {error:?}"))
                         }
                     }
-                    Err(error) => {
-                        session.last_error = Some(format!("Slot proposal failed: {error:?}"))
-                    }
                 }
+                Err(error) => session.last_error = Some(format!("Slot proposal failed: {error:?}")),
             }
         }
-        if apply_proposal {
-            if let (Some(proposal), Some(nonce)) =
+        if apply_proposal
+            && let (Some(proposal), Some(nonce)) =
                 (self.ring_proposal.clone(), self.ring_proposal_nonce)
-            {
-                self.queue_editor_operation(DeferredEditorOperation::ApplyRingProposal {
-                    proposal: Box::new(proposal),
-                    nonce,
-                });
-            }
+        {
+            self.queue_editor_operation(DeferredEditorOperation::ApplyRingProposal {
+                proposal: Box::new(proposal),
+                nonce,
+            });
         }
         if cancel_proposal {
             self.ring_proposal = None;
@@ -7217,24 +7203,22 @@ impl RadialEditorState {
                                         }
                                         if response.hovered()
                                             && ui.input(|input| input.pointer.any_released())
-                                        {
-                                            if let Some((
+                                            && let Some((
                                                 source_menu,
                                                 source_ring,
                                                 cell,
                                                 expected_generation,
                                             )) = drag_source.take()
-                                            {
-                                                post_render.push(EditorCommand::MoveCell {
-                                                    source_menu,
-                                                    source_ring,
-                                                    cell,
-                                                    destination_menu: menu.id.clone(),
-                                                    destination_ring: ring.id.clone(),
-                                                    index,
-                                                    expected_generation,
-                                                });
-                                            }
+                                        {
+                                            post_render.push(EditorCommand::MoveCell {
+                                                source_menu,
+                                                source_ring,
+                                                cell,
+                                                destination_menu: menu.id.clone(),
+                                                destination_ring: ring.id.clone(),
+                                                index,
+                                                expected_generation,
+                                            });
                                         }
                                     }
                                 },
@@ -7507,15 +7491,14 @@ impl RadialEditorState {
             if ui
                 .add_enabled(menu_index > 0, egui::Button::new("Move up"))
                 .clicked()
+                && menu::move_menu(session, &menu_id, menu_index.saturating_sub(1)).is_ok()
             {
-                if menu::move_menu(session, &menu_id, menu_index.saturating_sub(1)).is_ok() {
-                    self.focus_restore = session.selection.clone();
-                }
+                self.focus_restore = session.selection.clone();
             }
-            if ui.button("Move down").clicked() {
-                if menu::move_menu(session, &menu_id, menu_index + 1).is_ok() {
-                    self.focus_restore = session.selection.clone();
-                }
+            if ui.button("Move down").clicked()
+                && menu::move_menu(session, &menu_id, menu_index + 1).is_ok()
+            {
+                self.focus_restore = session.selection.clone();
             }
         });
         if ui.button("Duplicate (link submenus)").clicked() {
@@ -7529,10 +7512,10 @@ impl RadialEditorState {
         let delete = ui
             .add_enabled(!configured_default, egui::Button::new("Delete menu"))
             .on_disabled_hover_text("This menu is selected as the default in Settings");
-        if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
-            if let Err(error) = menu::delete_menu(session, &menu_id) {
-                self.delete_message = Some(format!("Delete blocked: {error:?}"));
-            }
+        if with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked()
+            && let Err(error) = menu::delete_menu(session, &menu_id)
+        {
+            self.delete_message = Some(format!("Delete blocked: {error:?}"));
         }
     }
 
@@ -7693,17 +7676,15 @@ impl RadialEditorState {
             if ui
                 .add_enabled(ring_index > 0, egui::Button::new("Move inward"))
                 .clicked()
-            {
-                if menu::move_ring(session, &menu_id, &ring_id, ring_index.saturating_sub(1))
+                && menu::move_ring(session, &menu_id, &ring_id, ring_index.saturating_sub(1))
                     .is_ok()
-                {
-                    self.focus_restore = session.selection.clone();
-                }
+            {
+                self.focus_restore = session.selection.clone();
             }
-            if ui.button("Move outward").clicked() {
-                if menu::move_ring(session, &menu_id, &ring_id, ring_index + 1).is_ok() {
-                    self.focus_restore = session.selection.clone();
-                }
+            if ui.button("Move outward").clicked()
+                && menu::move_ring(session, &menu_id, &ring_id, ring_index + 1).is_ok()
+            {
+                self.focus_restore = session.selection.clone();
             }
         });
         secondary_help(
@@ -8427,15 +8408,14 @@ impl RadialEditorState {
             if ui
                 .add_enabled(linked_menu.is_some(), egui::Button::new("Link existing"))
                 .clicked()
+                && let Some(linked_menu) = linked_menu
             {
-                if let Some(linked_menu) = linked_menu {
-                    deferred_operation = Some(DeferredEditorOperation::LinkExistingSubmenu {
-                        menu_id: menu_id.clone(),
-                        ring_id: ring_id.clone(),
-                        cell_id: cell_id.clone(),
-                        linked_menu,
-                    });
-                }
+                deferred_operation = Some(DeferredEditorOperation::LinkExistingSubmenu {
+                    menu_id: menu_id.clone(),
+                    ring_id: ring_id.clone(),
+                    cell_id: cell_id.clone(),
+                    linked_menu,
+                });
             }
         }
         if ui.button("Copy cell").clicked() {
@@ -9625,28 +9605,22 @@ impl RadialEditorState {
                     if ui
                         .button(format!("Move cells to {destination} and delete"))
                         .clicked()
+                        && let Some(session) = self.session.as_mut()
                     {
-                        if let Some(session) = self.session.as_mut() {
-                            match relocate_and_delete_ring(
-                                session,
-                                &menu_id,
-                                &ring_id,
-                                &destination,
-                            ) {
-                                Ok(()) => self.delete_ring_prompt = None,
-                                Err(error) => self.delete_message = Some(error),
-                            }
+                        match relocate_and_delete_ring(session, &menu_id, &ring_id, &destination) {
+                            Ok(()) => self.delete_ring_prompt = None,
+                            Err(error) => self.delete_message = Some(error),
                         }
                     }
                 }
                 let discard = ui.button("Discard populated cells and delete");
-                if with_button_emphasis(ui, discard, ButtonEmphasis::Destructive).clicked() {
-                    if let Some(session) = self.session.as_mut() {
-                        match menu::delete_ring(session, &menu_id, &ring_id) {
-                            Ok(()) => self.delete_ring_prompt = None,
-                            Err(error) => {
-                                self.delete_message = Some(format!("Delete failed: {error:?}"))
-                            }
+                if with_button_emphasis(ui, discard, ButtonEmphasis::Destructive).clicked()
+                    && let Some(session) = self.session.as_mut()
+                {
+                    match menu::delete_ring(session, &menu_id, &ring_id) {
+                        Ok(()) => self.delete_ring_prompt = None,
+                        Err(error) => {
+                            self.delete_message = Some(format!("Delete failed: {error:?}"))
                         }
                     }
                 }
@@ -11651,7 +11625,7 @@ fn acceptance_identity_digest(parts: &[&str]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for (index, part) in parts.iter().enumerate() {
         if index > 0 {
-            hash = (hash ^ 0).wrapping_mul(0x100000001b3);
+            hash = hash.wrapping_mul(0x100000001b3);
         }
         for byte in part.as_bytes() {
             hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3);

@@ -929,83 +929,81 @@ impl AppearanceGallery {
                         || *generation != session.generation
                         || *menu != menu_id
                 })
+                && let Some(menu) = session.draft.menus.iter().find(|menu| menu.id == menu_id)
             {
-                if let Some(menu) = session.draft.menus.iter().find(|menu| menu.id == menu_id) {
-                    state.session_id = session.editor_session.0;
-                    state.generation = session.generation.0;
-                    state.menu_digest = digest(&menu.id);
-                    state.bindings_digest = digest(&(
-                        &menu.center_action,
-                        &menu.center_secondary_action,
-                        &menu.background_action,
-                        &menu.background_secondary_action,
-                        menu.rings
-                            .iter()
-                            .flat_map(|ring| &ring.cells)
-                            .map(|cell| {
-                                (
-                                    &cell.id,
-                                    &cell.content,
-                                    &cell.alternate_clicks,
-                                    &cell.alternate_controls,
-                                    &cell.shortcuts,
-                                    &cell.hotstrings,
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    ));
-                    state.other_menus_digest = digest(
-                        &session
-                            .draft
-                            .menus
-                            .iter()
-                            .filter(|other| other.id != menu_id)
-                            .collect::<Vec<_>>(),
-                    );
-                    state.raw_overrides_digest = digest(&(
-                        &menu.style,
-                        menu.rings
-                            .iter()
-                            .map(|ring| {
-                                (
-                                    &ring.style,
-                                    ring.cells
-                                        .iter()
-                                        .map(|cell| &cell.style)
-                                        .collect::<Vec<_>>(),
-                                )
-                            })
-                            .collect::<Vec<_>>(),
-                    ));
-                    state.authored_cell_count =
-                        menu.rings.iter().map(|ring| ring.cells.len()).sum();
-                    if let Some(skin) = session
-                        .draft
-                        .skins
+                state.session_id = session.editor_session.0;
+                state.generation = session.generation.0;
+                state.menu_digest = digest(&menu.id);
+                state.bindings_digest = digest(&(
+                    &menu.center_action,
+                    &menu.center_secondary_action,
+                    &menu.background_action,
+                    &menu.background_secondary_action,
+                    menu.rings
                         .iter()
-                        .find(|skin| skin.id == menu.skin_id)
-                    {
-                        state.current_builtin = BUILTIN_SKINS
-                            .iter()
-                            .position(|preset| preset.definition().style == skin.style)
-                            .map_or(-1, |i| i as i32);
-                    }
-                    if let Ok(simple) = simple_state(&session.draft, &menu_id) {
-                        state.effective_digest = digest(&simple.values);
-                        state.opacity_milli =
-                            simple.opacity.map_or(-1, |v| (v * 1000.0).round() as i32);
-                        state.scale_milli = value(&simple.values.geometry.menu_scale)
-                            .map_or(0, |v| (v * 1000.0).round() as i32);
-                        state.spacing_milli = value(&simple.values.geometry.radius_scale)
-                            .map_or(0, |v| (v * 1000.0).round() as i32);
-                        state.label_size_milli = value(&simple.values.text.font_size)
-                            .map_or(0, |v| (v * 1000.0).round() as i32);
-                        state.labels_visible = value(&simple.values.text.visible).unwrap_or(false);
-                        state.masked_fields = simple.masks.len();
-                    }
-                    self.observed_base =
-                        Some((session.editor_session, session.generation, menu_id, state));
+                        .flat_map(|ring| &ring.cells)
+                        .map(|cell| {
+                            (
+                                &cell.id,
+                                &cell.content,
+                                &cell.alternate_clicks,
+                                &cell.alternate_controls,
+                                &cell.shortcuts,
+                                &cell.hotstrings,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+                state.other_menus_digest = digest(
+                    &session
+                        .draft
+                        .menus
+                        .iter()
+                        .filter(|other| other.id != menu_id)
+                        .collect::<Vec<_>>(),
+                );
+                state.raw_overrides_digest = digest(&(
+                    &menu.style,
+                    menu.rings
+                        .iter()
+                        .map(|ring| {
+                            (
+                                &ring.style,
+                                ring.cells
+                                    .iter()
+                                    .map(|cell| &cell.style)
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                ));
+                state.authored_cell_count = menu.rings.iter().map(|ring| ring.cells.len()).sum();
+                if let Some(skin) = session
+                    .draft
+                    .skins
+                    .iter()
+                    .find(|skin| skin.id == menu.skin_id)
+                {
+                    state.current_builtin = BUILTIN_SKINS
+                        .iter()
+                        .position(|preset| preset.definition().style == skin.style)
+                        .map_or(-1, |i| i as i32);
                 }
+                if let Ok(simple) = simple_state(&session.draft, &menu_id) {
+                    state.effective_digest = digest(&simple.values);
+                    state.opacity_milli =
+                        simple.opacity.map_or(-1, |v| (v * 1000.0).round() as i32);
+                    state.scale_milli = value(&simple.values.geometry.menu_scale)
+                        .map_or(0, |v| (v * 1000.0).round() as i32);
+                    state.spacing_milli = value(&simple.values.geometry.radius_scale)
+                        .map_or(0, |v| (v * 1000.0).round() as i32);
+                    state.label_size_milli = value(&simple.values.text.font_size)
+                        .map_or(0, |v| (v * 1000.0).round() as i32);
+                    state.labels_visible = value(&simple.values.text.visible).unwrap_or(false);
+                    state.masked_fields = simple.masks.len();
+                }
+                self.observed_base =
+                    Some((session.editor_session, session.generation, menu_id, state));
             }
             if let Some((_, _, _, base)) = &self.observed_base {
                 state = *base;
@@ -1094,13 +1092,12 @@ impl AppearanceGallery {
         if let Some((key, tile)) = selected_key
             .and_then(|key| self.cache.get(&key).map(|tile| (key, tile)))
             .filter(|(_, tile)| tile.result.is_ok())
+            && let Ok(tile) = &tile.result
         {
-            if let Ok(tile) = &tile.result {
-                state.tile_key = digest(&key);
-                state.tile_scene_digest = tile.scene_digest;
-                state.tile_geometry_digest = tile.geometry_digest;
-                state.tile_selected_emphasis = tile.selected_emphasis;
-            }
+            state.tile_key = digest(&key);
+            state.tile_scene_digest = tile.scene_digest;
+            state.tile_geometry_digest = tile.geometry_digest;
+            state.tile_selected_emphasis = tile.selected_emphasis;
         }
         state
     }

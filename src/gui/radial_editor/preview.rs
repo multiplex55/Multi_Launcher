@@ -91,6 +91,7 @@ pub(super) struct InterceptedDynamicDispatch {
     pub(super) provenance: crate::radial::bindings::ProjectedDynamicProvenance,
 }
 
+#[derive(Default)]
 pub(super) struct EmbeddedPreview {
     reducer: Option<SessionReducer>,
     root: Option<MenuId>,
@@ -118,39 +119,6 @@ pub(super) struct EmbeddedPreview {
     last_traced_render: Option<(u64, u64, u64)>,
     #[cfg(test)]
     preparation_attempts: usize,
-}
-
-impl Default for EmbeddedPreview {
-    fn default() -> Self {
-        Self {
-            reducer: None,
-            root: None,
-            document_generation: 0,
-            selection_token: String::new(),
-            frame_token: String::new(),
-            resource_revision: 0,
-            failed_frame_token: None,
-            preparation_notice: None,
-            compositor: CompositorCache::default(),
-            texture: None,
-            intercepted_dispatches: 0,
-            last_intercepted_dynamic_dispatch: None,
-            simulated_drags: 0,
-            drag_cell: None,
-            navigation_frames: BTreeMap::new(),
-            pending_frame_id: None,
-            pending_frame_token: None,
-            pending_frame_generation: None,
-            frozen_center: None,
-            frozen_scale: None,
-            tooltip_preferences: TooltipPreferences::default(),
-            tooltip_hover: TooltipHoverState::default(),
-            hovered_cell: None,
-            last_traced_render: None,
-            #[cfg(test)]
-            preparation_attempts: 0,
-        }
-    }
 }
 
 impl EmbeddedPreview {
@@ -378,7 +346,7 @@ impl EmbeddedPreview {
                         frame.selected.clone()
                     },
                     visible_tooltip: (frame.frame_id == frame_id)
-                        .then_some(visible_tooltip.map(Clone::clone))
+                        .then_some(visible_tooltip.cloned())
                         .flatten(),
                 })
             })
@@ -1230,7 +1198,7 @@ impl EmbeddedPreview {
                 menu,
                 generation,
                 editor_session,
-                &input,
+                input,
                 authoring_session,
                 projected_selection,
                 drag_payload,
@@ -1413,7 +1381,7 @@ impl EmbeddedPreview {
             selected,
             current_identity.as_ref(),
             input.work_area,
-            &input,
+            input,
         );
         let layout = display_layout;
         let Ok(frame) = self.compositor.compose(&scene, layout.scale_factor, 0) else {
@@ -1847,7 +1815,6 @@ impl EmbeddedPreview {
                                 }
                             } else {
                                 let result = authoring_session
-                                    .as_deref_mut()
                                     .ok_or(
                                         crate::radial::authoring::menu::MenuEditError::MissingEntity,
                                     )
@@ -1860,13 +1827,13 @@ impl EmbeddedPreview {
                                             payload.generation,
                                         )
                                     });
-                                if let Err(error) = result {
-                                    if let Some(destination) = destination {
-                                        *projected_selection = Some(ProjectedSelection {
-                                            label: format!("Drop cancelled: {error:?}"),
-                                            provenance: destination,
-                                        });
-                                    }
+                                if let Err(error) = result
+                                    && let Some(destination) = destination
+                                {
+                                    *projected_selection = Some(ProjectedSelection {
+                                        label: format!("Drop cancelled: {error:?}"),
+                                        provenance: destination,
+                                    });
                                 }
                             }
                         }
@@ -1934,7 +1901,7 @@ impl EmbeddedPreview {
             {
                 // The center affordance is a placement draft only.  It never
                 // enters the runtime reducer or dispatch path.
-                let empty_slots = empty_authored_slots(&menu);
+                let empty_slots = empty_authored_slots(menu);
                 let label = match empty_slots.as_slice() {
                     [] => "No empty authored slot — add or resize a ring first".into(),
                     [_] => "Placement draft · choose content in the inspector".into(),
@@ -2170,8 +2137,8 @@ fn projected_provenance(
     if let Some(authored) = document
         .menus
         .iter()
-        .find(|menu| &menu.id == menu_id)
-        .and_then(|menu| menu.rings.iter().find(|ring| &ring.id == &cell.ring_id))
+        .find(|menu| menu.id == menu_id)
+        .and_then(|menu| menu.rings.iter().find(|ring| ring.id == cell.ring_id))
         .and_then(|ring| {
             ring.cells
                 .iter()

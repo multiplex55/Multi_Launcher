@@ -26,7 +26,7 @@
 | CL3-A | implemented; final gates pending | MkMacro domain/runtime idioms: 29 sites / 14 files |
 | CL3-B | implemented; final gates pending | MkMacro GUI/editor/overlay idioms: 63 sites / 19 files |
 | CL3-C1 | implemented; final gates pending | Radial runtime/resources/evidence idioms: 49 sites / 12 files |
-| CL3-C2 | pending | Radial Designer/editor idioms: 45 sites / 6 files |
+| CL3-C2 | implemented; final gates pending | Radial Designer/editor idioms: 45 sites / 6 files |
 | CL3-D1 | pending | Remaining presentation/compiler idioms: 52 sites / 26 files |
 | CL3-D2 | pending | Remaining routing/plugins/integration idioms: 29 sites / 11 files |
 | CL4 | pending | Acceptance/smoke idioms followed by argument ownership at existing native-click, trace-observation and suite-run boundaries |
@@ -137,3 +137,6 @@ CL3-B final correction formatted; fmt/diff exit0 (line-ending notices only). 19s
 CL3-B commit: `c605ffaa`. CL3-C1 12-file49-site localradialruntimeidioms authorized using ignoredscopeartifact; no substantialchanges/Cargo validation untilallcleanup. PreservepreviousAPI/hotpathattributes.
 
 CL3-C1 review accepted: Root inspected arithmetic/font/current-host loop diffs and full scope; Reviewer no concrete findings. GIF denominator-zero/ceiling/saturation, tooltip fallback/minimum/cast, pixel full-chunk/remainder/channel behavior unchanged. Native-preview host reevaluates each iteration, lease snapshot/handling/notice order preserved. Derived defaults preserve StickyClick/Cascade/Inherit and generic Override without new T bound or serde shape. All native calls retained with same ordering. Twelve source files / 49 sites, fmt/diff exit0; no check/lint/tests under user revision. Commit `refactor(radial): [CL3-C1] simplify runtime and resource idioms`; final acceptance pending.
+CL3-C1 commit: `d124d7ef`. CL3-C2 six-file45-site Designer/editor localidiom packet authorized; staticseededhashowner/mask andstagedUIboundariespreserved, noCargo validation beforeallcleanup.
+
+CL3-C2 reviewed/implemented: six source files / 45 sites. Root inspected hash/default/expression/scope diffs; Reviewer no correctness/compatibility findings. Same static RandomState/i64::MAX mask and field-for-field EmbeddedPreview default; staged properties/scope/popup/drag/drop collapses retain ordering and one callback. Final Option<&mut AuthoringSession> use remains last use. fmt/diff exit0; no tests/checks/Clippy per user. Commit `refactor(radial): [CL3-C2] simplify Designer editor idioms`; acceptance pending final gates.

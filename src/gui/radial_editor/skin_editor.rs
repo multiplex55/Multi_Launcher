@@ -265,7 +265,7 @@ pub(super) fn rows(document: &RadialDocument, scope: &StyleScope) -> Result<Vec<
                 field: field.clone(),
                 current: current.clone(),
                 inherited,
-                source: style_field(section, field).and_then(|field| provenance(field)),
+                source: style_field(section, field).and_then(&provenance),
             });
         }
     }

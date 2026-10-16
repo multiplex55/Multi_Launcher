@@ -962,20 +962,20 @@ impl LauncherApp {
                         crate::radial::model::AfterActionPolicy::Inherit,
                     );
                 }
-                if prepared.availability == FrozenAvailability::Available {
-                    if let Ok(binding) = binding_resolver.resolve_frozen_with_context(
+                if prepared.availability == FrozenAvailability::Available
+                    && let Ok(binding) = binding_resolver.resolve_frozen_with_context(
                         &prepared.binding,
                         &request.context,
                         &prepared.history_query,
                         super::universal_action_catalog::action_resolution_context_for_target,
-                    ) {
-                        prepared.requirement = radial_requirement_for_snippet_entries(
-                            &binding.action,
-                            binding.requirement,
-                            confirmation_required,
-                            snippet_entries.as_deref(),
-                        );
-                    }
+                    )
+                {
+                    prepared.requirement = radial_requirement_for_snippet_entries(
+                        &binding.action,
+                        binding.requirement,
+                        confirmation_required,
+                        snippet_entries.as_deref(),
+                    );
                 }
                 reject_deferred_confirmation_keep_open(prepared, confirmation_required);
                 apply_keep_open_compatibility(prepared);

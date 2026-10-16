@@ -583,7 +583,7 @@ impl VisitedMenuPath {
             let menu_id = self.current()?.clone();
             return Some((
                 menu_id.clone(),
-                returned.or_else(|| Some(StableSelection::Menu(menu_id))),
+                returned.or(Some(StableSelection::Menu(menu_id))),
             ));
         }
         let location = self.previous_locations.pop()?;
