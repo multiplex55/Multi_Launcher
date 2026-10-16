@@ -8,6 +8,7 @@ fn theme_settings_round_trip_serialization() {
             "sunset".to_string(),
             ColorScheme::light(),
         )]),
+        named_preset_typography_scales: Default::default(),
         custom_scheme: ColorScheme::dark(),
         preferences: Default::default(),
     };

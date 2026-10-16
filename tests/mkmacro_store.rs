@@ -286,7 +286,7 @@ fn schema_seven_new_actions_migrate_and_survive_store_round_trips() {
 fn schema_seven_notification_sequence_preserves_order_and_payloads() {
     let dir = tempdir().unwrap();
     let (store, _) = MkMacroStore::open(dir.path()).unwrap();
-    let actions = vec![
+    let actions = [
         MkAction::SetVariable {
             name: "files_copied".into(),
             value: MkValue::Number(42.0),
@@ -861,13 +861,15 @@ fn schema_thirteen_recorder_defaults_migrate_canonically_without_macro_changes()
 fn schema_thirteen_preserves_an_existing_recorder_object() {
     let dir = tempdir().unwrap();
     let path = dir.path().join(MKMACROS_FILE);
-    let mut expected = MkRecorderSettings::default();
-    expected.record_keyboard = false;
-    expected.minimum_idle_delay_ms = 432;
-    expected.marker_hotkey = Some(MkHotkey {
-        key: MkKey::Insert,
-        modifiers: vec![MkKey::Control],
-    });
+    let expected = MkRecorderSettings {
+        record_keyboard: false,
+        minimum_idle_delay_ms: 432,
+        marker_hotkey: Some(MkHotkey {
+            key: MkKey::Insert,
+            modifiers: vec![MkKey::Control],
+        }),
+        ..MkRecorderSettings::default()
+    };
     let mut document = MkMacroDocument::default();
     document.settings.recorder = expected.clone();
     let mut value = serde_json::to_value(document).unwrap();

@@ -43,7 +43,7 @@ fn new_tags_match(normalized_filter_tags: &[String], entry: &TodoEntry) -> bool 
     })
 }
 
-fn old_sort_entries(entries: &mut Vec<(usize, TodoEntry)>) {
+fn old_sort_entries(entries: &mut [(usize, TodoEntry)]) {
     entries.sort_by(|a, b| {
         a.1.text
             .to_lowercase()

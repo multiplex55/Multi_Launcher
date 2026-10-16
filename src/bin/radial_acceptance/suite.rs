@@ -29419,7 +29419,7 @@ fn run_second_hold_case(
             })?;
         } else {
             child
-                .focus_window(&root)
+                .focus_window(root)
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         }
         let cursor = trace_lines(trace_path).len();
