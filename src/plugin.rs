@@ -23,6 +23,7 @@ use crate::plugins::fav::FavPlugin;
 use crate::plugins::file_search::FileSearchPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
+use crate::plugins::hash_generator::HashGeneratorPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::ip::IpPlugin;
 use crate::plugins::json_utility::JsonUtilityPlugin;
@@ -901,6 +902,7 @@ impl PluginManager {
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
+        self.register_with_settings(HashGeneratorPlugin, plugin_settings);
         self.register_with_settings(RegexTesterPlugin, plugin_settings);
         self.register_with_settings(QrPlugin, plugin_settings);
         self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);

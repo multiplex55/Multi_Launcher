@@ -4539,6 +4539,7 @@ impl LauncherApp {
             self.clipboard_modify_dialog = cm_dlg;
         }
         self.json_utility_dialog.show(&ctx);
+        self.hash_generator_dialog.show(&ctx);
         self.regex_tester_dialog.show(&ctx);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
@@ -4927,6 +4928,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.hash_generator_dialog.shutdown();
         if let Some(plan) = self
             .sequence_playback
             .take_shutdown_restore_plan(std::time::Instant::now())

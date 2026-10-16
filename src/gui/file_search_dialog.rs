@@ -310,6 +310,7 @@ pub enum FileSearchContextMenuAction {
     OpenContainingDirectory,
     CopyFullPath,
     CopyFilename,
+    CalculateHash,
     CopyMatchingLine,
     OpenTerminal,
     NestedFilenameSearch,
@@ -319,6 +320,7 @@ pub enum FileSearchContextMenuAction {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FileSearchUiCommand {
+    OpenHash(PathBuf),
     ConfigureRipgrep(PathBuf),
     PersistPreferences(FileSearchUiPreferences),
 }
@@ -1365,9 +1367,11 @@ impl FileSearchDialogState {
                     .auto_shrink([false, false])
                     .show(ui, |ui| match self.selected_mode {
                         FileSearchMode::Filename => {
-                            self.filename_results(ui, coordinator);
+                            self.filename_results(ui, coordinator, &mut commands);
                         }
-                        FileSearchMode::Content => self.content_results(ui, coordinator),
+                        FileSearchMode::Content => {
+                            self.content_results(ui, coordinator, &mut commands)
+                        }
                     });
             });
         });
@@ -1429,6 +1433,7 @@ impl FileSearchDialogState {
         &mut self,
         ui: &mut egui::Ui,
         coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
     ) -> FilenameTableGeometry {
         let previous_columns = self.ui_preferences.visible_columns.clone();
         results::ensure_filename_columns_visible(&mut self.ui_preferences);
@@ -1634,6 +1639,7 @@ impl FileSearchDialogState {
                                             kind == crate::file_search::model::FileKind::Directory,
                                             None,
                                             coordinator,
+                                            commands,
                                         )
                                     });
                                     if double_clicked {
@@ -1660,7 +1666,12 @@ impl FileSearchDialogState {
         }
     }
 
-    fn content_results(&mut self, ui: &mut egui::Ui, coordinator: &mut SearchCoordinator) {
+    fn content_results(
+        &mut self,
+        ui: &mut egui::Ui,
+        coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
+    ) {
         let rows = self.visible_result_rows();
         for display_row in rows {
             match display_row.payload {
@@ -1670,7 +1681,7 @@ impl FileSearchDialogState {
                             .label(egui::RichText::new(header).strong())
                             .on_hover_text(path.display().to_string());
                         response.context_menu(|ui| {
-                            self.result_context_menu(ui, &path, false, None, coordinator)
+                            self.result_context_menu(ui, &path, false, None, coordinator, commands)
                         });
                     });
                 }
@@ -1719,6 +1730,7 @@ impl FileSearchDialogState {
                                 &path,
                                 content_match.clone(),
                                 coordinator,
+                                commands,
                             )
                         });
                         if double_clicked {
@@ -1737,13 +1749,14 @@ impl FileSearchDialogState {
         path: &std::path::Path,
         content_match: ContentMatch,
         coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
     ) {
         if ui.button("Show all matches in this file").clicked() {
             self.start_file_content_search(path, coordinator);
             ui.ctx().request_repaint();
             ui.close();
         }
-        self.result_context_menu(ui, path, false, Some(content_match), coordinator);
+        self.result_context_menu(ui, path, false, Some(content_match), coordinator, commands);
     }
 
     pub fn can_open_selected_result(&self) -> bool {
@@ -1884,6 +1897,9 @@ impl FileSearchDialogState {
             FileSearchContextMenuAction::CopyFullPath,
             FileSearchContextMenuAction::CopyFilename,
         ];
+        if !is_directory {
+            actions.push(FileSearchContextMenuAction::CalculateHash);
+        }
         if content_match.is_some() {
             actions.push(FileSearchContextMenuAction::CopyMatchingLine);
         }
@@ -1953,6 +1969,7 @@ impl FileSearchDialogState {
         is_directory: bool,
         first_match: Option<ContentMatch>,
         coordinator: &mut SearchCoordinator,
+        commands: &mut Vec<FileSearchUiCommand>,
     ) {
         if ui.button("Open in configured editor").clicked() {
             let settings = self.settings.clone();
@@ -2009,6 +2026,10 @@ impl FileSearchDialogState {
                 clipboard::set_text(&name)?;
                 Ok(())
             });
+            ui.close();
+        }
+        if !is_directory && ui.button("Calculate hash").clicked() {
+            commands.push(FileSearchUiCommand::OpenHash(path.to_path_buf()));
             ui.close();
         }
         if let Some(content_match) = first_match.as_ref()
@@ -3217,10 +3238,76 @@ mod tests {
         assert!(actions.contains(&FileSearchContextMenuAction::OpenContainingDirectory));
         assert!(actions.contains(&FileSearchContextMenuAction::CopyFullPath));
         assert!(actions.contains(&FileSearchContextMenuAction::CopyFilename));
+        assert!(actions.contains(&FileSearchContextMenuAction::CalculateHash));
         assert!(actions.contains(&FileSearchContextMenuAction::OpenTerminal));
         assert!(actions.contains(&FileSearchContextMenuAction::NestedFilenameSearch));
         assert!(actions.contains(&FileSearchContextMenuAction::NestedContentSearch));
         assert!(!actions.contains(&FileSearchContextMenuAction::ShowAllMatchesInThisFile));
+    }
+
+    #[test]
+    fn hash_generator_file_context() {
+        let mut row = FileSearchResultRow {
+            id: FileSearchResultRowId {
+                search_id: SearchId(1),
+                result_key: FileSearchResultKey::Filename {
+                    path: PathIdentity::from_path(std::path::Path::new("/tmp/a/report.csv")),
+                },
+                match_index: None,
+                path: "report.csv".into(),
+                line_number: None,
+                column: None,
+            },
+            payload: FileSearchRowPayload::Filename {
+                path: PathBuf::from("/tmp/a/report.csv"),
+                display_filename: "report.csv".into(),
+                parent_directory_display: "/tmp/a".into(),
+                kind: FileKind::File,
+                size: None,
+                modified: None,
+                rank: crate::file_search::model::FilenameRank::FilenameContains,
+                match_quality: crate::file_search::model::FilenameRank::FilenameContains,
+                filename_match_ranges: Vec::new(),
+                path_match_ranges: Vec::new(),
+            },
+        };
+        let file_intent = FileSearchDialogState::context_menu_intents_for_row(&row)
+            .into_iter()
+            .find(|intent| intent.action == FileSearchContextMenuAction::CalculateHash)
+            .expect("regular files expose a hash action");
+        assert_eq!(file_intent.path, PathBuf::from("/tmp/a/report.csv"));
+        assert!(!file_intent.is_directory);
+
+        row.payload = FileSearchRowPayload::ContentGroupHeader {
+            path: PathBuf::from("/tmp/a/report.csv"),
+            header: "report.csv".into(),
+            total_matches: 1,
+            truncated: false,
+            modified: None,
+        };
+        let header_intent = FileSearchDialogState::context_menu_intents_for_row(&row)
+            .into_iter()
+            .find(|intent| intent.action == FileSearchContextMenuAction::CalculateHash)
+            .expect("content-file headers expose a hash action");
+        assert_eq!(header_intent.path, PathBuf::from("/tmp/a/report.csv"));
+
+        row.payload = FileSearchRowPayload::Filename {
+            path: PathBuf::from("/tmp/a"),
+            display_filename: "a".into(),
+            parent_directory_display: "/tmp".into(),
+            kind: FileKind::Directory,
+            size: None,
+            modified: None,
+            rank: crate::file_search::model::FilenameRank::FilenameContains,
+            match_quality: crate::file_search::model::FilenameRank::FilenameContains,
+            filename_match_ranges: Vec::new(),
+            path_match_ranges: Vec::new(),
+        };
+        assert!(
+            !FileSearchDialogState::context_menu_intents_for_row(&row)
+                .iter()
+                .any(|intent| intent.action == FileSearchContextMenuAction::CalculateHash)
+        );
     }
 
     #[test]
@@ -3344,6 +3431,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut coordinator = SearchCoordinator::new();
         let mut geometry = None;
+        let mut commands = Vec::new();
         let mut window_open = true;
         for _ in 0..3 {
             let output = ctx.run_ui(
@@ -3375,7 +3463,11 @@ mod tests {
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
                                             geometry =
-                                                Some(state.filename_results(ui, &mut coordinator));
+                                                Some(state.filename_results(
+                                                    ui,
+                                                    &mut coordinator,
+                                                    &mut commands,
+                                                ));
                                         });
                                 });
                             });

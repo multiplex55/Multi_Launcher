@@ -44,6 +44,7 @@ mod numpad_navigation;
 mod ocr;
 mod ocr_view;
 mod paste_sequence_dialog;
+mod hash_generator_dialog;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;
@@ -127,6 +128,7 @@ pub use note_panel::{
 };
 pub use notes_dialog::NotesDialog;
 pub(crate) use paste_sequence_dialog::PasteSequenceDialog;
+pub use hash_generator_dialog::HashGeneratorDialogState;
 #[cfg(feature = "qa-framebuffer-capture")]
 pub use qa_framebuffer::QaFramebufferRequest;
 pub use qr_dialog::QrDialogState;
@@ -211,7 +213,7 @@ use search::{COMPLETION_REBUILD_DEBOUNCE, NOTE_SEARCH_DEBOUNCE};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Display;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{
@@ -609,6 +611,7 @@ pub enum Panel {
     ShellCmdDialog,
     SnippetDialog,
     PasteSequenceDialog,
+    HashGeneratorDialog,
     SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
@@ -664,6 +667,7 @@ impl Panel {
             Self::ShellCmdDialog => "Shell Commands",
             Self::SnippetDialog => "Snippets",
             Self::PasteSequenceDialog => "Paste Sequences",
+            Self::HashGeneratorDialog => "Hash Generator",
             Self::SnippetPromptDialog => "Snippet Prompt",
             Self::MacroDialog => "Macros",
             Self::MkMacroDialog => "MKMacro",
@@ -720,6 +724,7 @@ struct PanelStates {
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
     paste_sequence_dialog: bool,
+    hash_generator_dialog: bool,
     snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
@@ -951,6 +956,7 @@ pub struct LauncherApp {
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
     paste_sequence_dialog: PasteSequenceDialog,
+    pub hash_generator_dialog: HashGeneratorDialogState,
     snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
@@ -1660,6 +1666,7 @@ impl LauncherApp {
 
     pub(crate) fn handle_file_search_ui_command(&mut self, command: FileSearchUiCommand) {
         match command {
+            FileSearchUiCommand::OpenHash(path) => self.open_hash_generator_for_file(path),
             FileSearchUiCommand::PersistPreferences(preferences) => {
                 match crate::settings::Settings::update(&self.settings_path, |settings| {
                     let mut cfg = settings
@@ -1734,6 +1741,11 @@ impl LauncherApp {
                 }
             }
         }
+    }
+
+    pub(crate) fn open_hash_generator_for_file(&mut self, path: PathBuf) {
+        self.hash_generator_dialog.open_with_file(path);
+        self.focus_panel(Panel::HashGeneratorDialog);
     }
 
     pub(crate) fn merge_file_search_ui_preferences_into_settings(
@@ -2542,6 +2554,7 @@ impl LauncherApp {
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
             paste_sequence_dialog: PasteSequenceDialog::default(),
+            hash_generator_dialog: HashGeneratorDialogState::default(),
             snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
@@ -3239,7 +3252,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 50] = [
+    const TRACKED_PANELS: [Panel; 51] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -3252,6 +3265,7 @@ impl LauncherApp {
         Panel::ShellCmdDialog,
         Panel::SnippetDialog,
         Panel::PasteSequenceDialog,
+        Panel::HashGeneratorDialog,
         Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
@@ -3306,6 +3320,7 @@ impl LauncherApp {
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open,
             Panel::SnippetDialog => self.snippet_dialog.open,
             Panel::PasteSequenceDialog => self.paste_sequence_dialog.open,
+            Panel::HashGeneratorDialog => self.hash_generator_dialog.open,
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
@@ -3455,6 +3470,10 @@ impl LauncherApp {
             Panel::PasteSequenceDialog => {
                 self.paste_sequence_dialog.end_session();
                 self.panel_states.paste_sequence_dialog = false;
+            }
+            Panel::HashGeneratorDialog => {
+                self.hash_generator_dialog.end_session();
+                self.panel_states.hash_generator_dialog = false;
             }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
@@ -3687,6 +3706,10 @@ impl LauncherApp {
                 self.paste_sequence_dialog.end_session();
                 self.panel_states.paste_sequence_dialog = false;
             }
+            Panel::HashGeneratorDialog => {
+                self.hash_generator_dialog.end_session();
+                self.panel_states.hash_generator_dialog = false;
+            }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
             }
@@ -3872,6 +3895,7 @@ impl LauncherApp {
                     self.capture_sequence_context(crate::commands::ActivationSource::Click);
                 self.paste_sequence_dialog.open_with_context(context);
             }
+            Panel::HashGeneratorDialog => self.hash_generator_dialog.ensure_open(),
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
             Panel::MkMacroDialog => self.mkmacro_dialog.open(),
@@ -4017,6 +4041,7 @@ impl LauncherApp {
         check!(shell_cmd_dialog, Panel::ShellCmdDialog);
         check!(snippet_dialog, Panel::SnippetDialog);
         check!(paste_sequence_dialog, Panel::PasteSequenceDialog);
+        check!(hash_generator_dialog, Panel::HashGeneratorDialog);
         check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);

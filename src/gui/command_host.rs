@@ -214,6 +214,11 @@ impl DialogCommandHost for LauncherApp {
         self.focus_panel(super::Panel::PasteSequenceDialog);
     }
 
+    fn open_hash_generator_dialog(&mut self) {
+        self.hash_generator_dialog.ensure_open();
+        self.focus_panel(super::Panel::HashGeneratorDialog);
+    }
+
     fn run_paste_sequence(
         &mut self,
         id: crate::paste_sequence::SequenceId,
@@ -1065,6 +1070,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
+            | Command::HashGenerator(_)
             | Command::ColorPick(_)
             | Command::Ocr(_)
             | Command::CoordinateTool(_)
@@ -3169,6 +3175,13 @@ mod tests {
             crate::commands::JsonUtilityCommand::Open {
                 intent: crate::commands::JsonUtilityIntent::Format,
             },
+        )));
+    }
+
+    #[test]
+    fn hash_generator_commands_reject_query_override_reclassification() {
+        assert!(!command_accepts_query_override(&Command::HashGenerator(
+            crate::commands::HashGeneratorCommand::Open,
         )));
     }
 

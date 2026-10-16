@@ -26,6 +26,7 @@ It’s designed to be “one hotkey away” from:
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
+- [Hash Generator](#hash-generator)
 - [Mouse coordinates and crosshair](#mouse-coordinates-and-crosshair)
 - [Regex Tester](#regex-tester)
 - [Screen region OCR](#screen-region-ocr)
@@ -584,6 +585,23 @@ Formatting and minifying do not write the clipboard. Objects, arrays, and primit
 JSON values are supported; comments and trailing commas are rejected.
 `cm json-pretty` and `cm json-minify` continue using the same JSON transformation
 implementation, including in saved Clipboard Modify pipelines.
+
+## Hash Generator
+
+Type `hash` to open the resizable Hash Generator. Enter text, explicitly choose
+**Load Clipboard** to hash a clipboard snapshot, or choose a local file. File
+hashes stream through a bounded buffer in a worker; progress and cancellation
+keep the launcher responsive. The tool supports SHA-256, SHA-512, and SHA-1 for
+legacy checksum compatibility. SHA-1 is not collision-resistant for modern
+security decisions. Enter an optional expected hexadecimal digest to see a
+Match or Mismatch result; surrounding whitespace and letter case are ignored.
+Changing the source or algorithm clears the previous digest. Use **Copy Digest**
+to write the result to the clipboard. The tool does not log input text or file
+names, and it never reads the clipboard until **Load Clipboard** is selected.
+
+File Search also offers **Calculate hash** from a non-directory result's context
+menu. It opens the same tool with that selected path; calculation remains an
+explicit action in the dialog. `hash:open` is the payload-free launcher command.
 
 `color pick` parks the launcher and freezes the Windows virtual desktop. Move the
 pointer to inspect pixels in the magnifier; its center marker identifies the exact

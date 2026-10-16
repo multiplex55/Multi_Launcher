@@ -283,6 +283,9 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     if let Some(command) = parse_json_utility(s) {
         return Ok(Command::JsonUtility(command));
     }
+    if s == "hash:open" {
+        return Ok(Command::HashGenerator(HashGeneratorCommand::Open));
+    }
 
     // These protocols bypass query-override application in the existing activation path.
     if let Some(command) = parse_clipboard_modify(action) {

@@ -178,6 +178,9 @@ fn execute_with_external(
         Command::JsonUtility(_) => {
             anyhow::bail!("JSON utility commands require the launcher interface")
         }
+        Command::HashGenerator(_) => {
+            anyhow::bail!("Hash Generator commands require the launcher interface")
+        }
         Command::Radial(_) => anyhow::bail!("radial commands require the launcher interface"),
         Command::ScreenDraw(_) => {
             anyhow::bail!("screen draw commands require the launcher interface")

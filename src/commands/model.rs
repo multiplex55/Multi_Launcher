@@ -86,6 +86,7 @@ pub enum Command {
     Macro(MacroCommand),
     Crop(CropCommand),
     JsonUtility(JsonUtilityCommand),
+    HashGenerator(HashGeneratorCommand),
     ColorPick(ColorPickCommand),
     Ocr(OcrCommand),
     Data(DataCommand),
@@ -125,6 +126,7 @@ impl Command {
             Self::Macro(_) => "macro",
             Self::Crop(_) => "crop",
             Self::JsonUtility(_) => "json_utility",
+            Self::HashGenerator(_) => "hash_generator",
             Self::ColorPick(_) => "color_pick",
             Self::Ocr(_) => "ocr",
             Self::Data(_) => "data",
@@ -163,6 +165,7 @@ impl Command {
             Self::Macro(v) => v.kind_name(),
             Self::Crop(v) => v.kind_name(),
             Self::JsonUtility(v) => v.kind_name(),
+            Self::HashGenerator(v) => v.kind_name(),
             Self::ColorPick(v) => v.kind_name(),
             Self::Ocr(v) => v.kind_name(),
             Self::Data(v) => v.kind_name(),
@@ -780,6 +783,13 @@ pub enum JsonUtilityCommand {
 }
 
 kinds!(JsonUtilityCommand, Self::Open { .. } => "open");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HashGeneratorCommand {
+    Open,
+}
+
+kinds!(HashGeneratorCommand, Self::Open => "open");
 
 /// User-facing data maintenance commands.
 ///

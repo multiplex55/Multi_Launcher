@@ -19,6 +19,7 @@ pub mod fav;
 pub mod file_search;
 pub mod folders;
 pub mod help;
+pub mod hash_generator;
 pub mod history;
 pub mod ip;
 pub mod json_utility;

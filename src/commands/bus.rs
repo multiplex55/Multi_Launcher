@@ -3,7 +3,7 @@ use crate::commands::handlers::{
     handle_calendar, handle_clipboard_modify_with_history_query, handle_color_pick,
     handle_coordinate_tool, handle_crop, handle_data, handle_diff, handle_file_search,
     handle_headless_gui_with_history_query, handle_json_utility, handle_launcher, handle_link,
-    handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence,
+    handle_hash_generator, handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence,
     handle_query,
     handle_radial, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run,
     handle_todo,
@@ -42,6 +42,7 @@ impl CommandBus {
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
+            Command::HashGenerator(command) => Ok(handle_hash_generator(host, command)),
             Command::ColorPick(command) => handle_color_pick(host, command),
             Command::Ocr(command) => handle_ocr(host, command),
             Command::Calendar(command) => Ok(handle_calendar(host, command)),
@@ -125,6 +126,7 @@ mod tests {
         color_pick_requests: usize,
         ocr_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
+        hash_generator_opens: usize,
         radial_calls: usize,
     }
 
@@ -183,6 +185,9 @@ mod tests {
         }
         fn open_snippet_dialog(&mut self) {
             self.dialog_calls += 1;
+        }
+        fn open_hash_generator_dialog(&mut self) {
+            self.hash_generator_opens += 1;
         }
         fn open_snippet_editor(&mut self, _: &str) {
             self.dialog_calls += 1;
@@ -738,6 +743,23 @@ mod tests {
         );
         assert_eq!(host.clipboard_modify_calls, 0);
         assert!(host.data_calls.is_empty());
+        assert_eq!(outcome.query, QueryPolicy::Keep);
+        assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn hash_generator_dispatch_uses_the_dialog_host_without_other_side_effects() {
+        let mut host = FakeHost::default();
+        let invocation = invocation(Command::HashGenerator(
+            crate::commands::HashGeneratorCommand::Open,
+        ));
+
+        let outcome = CommandBus.dispatch(&invocation, &mut host).unwrap();
+
+        assert_eq!(host.hash_generator_opens, 1);
+        assert_eq!(host.headless_calls, 0);
         assert_eq!(outcome.query, QueryPolicy::Keep);
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
