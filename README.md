@@ -591,6 +591,10 @@ are not keys, and object/array summaries are not searched as values. **Both**
 shows one result per matched node in document order; Previous/Next expands and
 scrolls to each result. Search results use the parsed snapshot and clear while
 the source is edited or invalid.
+Tree paths use JSON Pointer: the root path is the empty string, and path
+segments escape `~` as `~0` and `/` as `~1`. For string nodes, **Copy Value**
+copies decoded text, while **Copy Subtree** copies the quoted and escaped JSON
+string; container copies contain their JSON serialization.
 `cm json-pretty` and `cm json-minify` continue using the same JSON transformation
 implementation, including in saved Clipboard Modify pipelines.
 

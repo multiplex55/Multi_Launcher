@@ -676,6 +676,8 @@ struct JsonEditorState {
     tree_worker_error: Option<String>,
     #[cfg(test)]
     projection_builds_started: usize,
+    #[cfg(test)]
+    search_builds_started: usize,
 }
 
 impl JsonEditorState {
@@ -931,6 +933,10 @@ impl JsonEditorState {
         };
         self.tree.search.mark_requested(generation);
         if let Some(worker) = &self.worker {
+            #[cfg(test)]
+            {
+                self.search_builds_started += 1;
+            }
             worker.submit(JsonWorkerRequest::Search(request));
         }
     }
@@ -1018,6 +1024,7 @@ impl JsonEditorState {
             snapshot,
         });
         self.tree.search.mark_requested(generation);
+        self.search_builds_started += 1;
         self.accept_worker_completion(request.build());
     }
 }
@@ -1030,6 +1037,8 @@ pub struct JsonUtilityDialogState {
     focus_editor: bool,
     #[cfg(test)]
     tree_panel_layout: Option<(f32, f32, f32, f32)>,
+    #[cfg(test)]
+    rendered_tree_rows: usize,
 }
 
 impl Default for JsonUtilityDialogState {
@@ -1041,6 +1050,8 @@ impl Default for JsonUtilityDialogState {
             focus_editor: false,
             #[cfg(test)]
             tree_panel_layout: None,
+            #[cfg(test)]
+            rendered_tree_rows: 0,
         }
     }
 }
@@ -1184,6 +1195,7 @@ impl JsonUtilityDialogState {
         #[cfg(test)]
         {
             self.tree_panel_layout = None;
+            self.rendered_tree_rows = 0;
         }
         let generation = self.editor.generation;
         let ready = self.editor.tree.current_snapshot(generation).is_some();
@@ -1322,12 +1334,18 @@ impl JsonUtilityDialogState {
                     self.editor.tree.visible_rows.len(),
                 ));
             }
+            #[cfg(test)]
+            let mut rendered_rows = 0;
             tree_scroll.show_rows(
                 ui,
                 row_height,
                 self.editor.tree.visible_rows.len(),
                 |ui, range| {
                     for index in range {
+                        #[cfg(test)]
+                        {
+                            rendered_rows += 1;
+                        }
                         let row = self.editor.tree.visible_rows[index];
                         let Some(node) = snapshot.projection.node(row.id) else {
                             continue;
@@ -1390,6 +1408,10 @@ impl JsonUtilityDialogState {
                     }
                 },
             );
+            #[cfg(test)]
+            {
+                self.rendered_tree_rows = rendered_rows;
+            }
         }
         ui.separator();
         let _details_scroll = egui::ScrollArea::vertical()
@@ -2015,5 +2037,68 @@ mod tests {
         assert!(details_max_height <= TREE_DETAILS_PANEL_MAX_HEIGHT);
         assert!(details_height <= details_max_height + 0.1);
         assert!(details_content_height > details_height);
+    }
+
+    #[test]
+    fn large_tree_dialog_virtualizes_rows_and_keeps_idle_snapshots_cached() {
+        const ARRAY_LEN: usize = 2_048;
+        let mut values: Vec<String> = (0..ARRAY_LEN).map(|index| index.to_string()).collect();
+        values[ARRAY_LEN - 1] = format!(r#""{}needle""#, "long-value-".repeat(128));
+        let clipboard = FakeClipboard::new(&format!("[{}]", values.join(",")));
+        let mut dialog = JsonUtilityDialogState::default();
+        initialize_for_test(&mut dialog, &clipboard);
+        dialog.editor.tree.view = JsonUtilityView::Tree;
+        dialog.editor.tree.search.query = "needle".to_owned();
+        dialog.editor.tree.search.fields = JsonSearchFields::Values;
+        dialog.editor.tree.search.invalidate_results();
+        dialog.editor.complete_search_for_test();
+
+        let generation = dialog.editor.generation;
+        let projection_builds = dialog.editor.projection_builds_started;
+        let search_builds = dialog.editor.search_builds_started;
+        let row_rebuilds = dialog.editor.tree.visible_rows_rebuilds;
+        let visible_row_count = dialog.editor.tree.visible_rows.len();
+        assert_eq!(visible_row_count, ARRAY_LEN + 1);
+        assert_eq!(dialog.editor.tree.search.matches.len(), 1);
+        let selected = dialog.editor.tree.selected.unwrap();
+        assert!(
+            dialog
+                .editor
+                .tree
+                .search
+                .match_by_node
+                .contains_key(&selected)
+        );
+        assert_eq!(
+            dialog
+                .editor
+                .tree
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .projection
+                .path(selected)
+                .unwrap()
+                .to_json_pointer(),
+            "/2047"
+        );
+
+        let context = egui::Context::default();
+        context
+            .run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx))
+            .drop_without_applying_deltas();
+        let first_frame_rows = dialog.rendered_tree_rows;
+        assert!(first_frame_rows > 0);
+        assert!(first_frame_rows <= 64, "rendered {first_frame_rows} rows");
+        assert!(first_frame_rows < visible_row_count);
+
+        context
+            .run_ui(egui::RawInput::default(), |ctx| dialog.show(ctx))
+            .drop_without_applying_deltas();
+        assert!(dialog.rendered_tree_rows <= 64);
+        assert_eq!(dialog.editor.generation, generation);
+        assert_eq!(dialog.editor.projection_builds_started, projection_builds);
+        assert_eq!(dialog.editor.search_builds_started, search_builds);
+        assert_eq!(dialog.editor.tree.visible_rows_rebuilds, row_rebuilds);
     }
 }
