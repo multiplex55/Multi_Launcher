@@ -45,6 +45,13 @@ const HEAVY_RECOMPUTE_IDLE_DEBOUNCE: Duration = Duration::from_millis(250);
 const HEAVY_RECOMPUTE_RETRY_DELAY: Duration = Duration::from_secs(1);
 const NOTE_LINK_CONTEXT_MENU_RESULT_LIMIT: usize = 50;
 
+fn effective_note_font_size(ctx: &egui::Context, local_size: f32) -> f32 {
+    let overall_scale = crate::gui::theme::resolved_for_current_context(ctx)
+        .map(|theme| theme.metrics.body_text_size / 14.0)
+        .unwrap_or(1.0);
+    local_size * overall_scale
+}
+
 // C1-B attribution is compiled only into test builds and is active only while
 // a test owns a `NoteRefreshObservationScope`. It intentionally does not feed
 // the existing Track C collector or alter frozen C0/C1-A result artifacts.
@@ -973,6 +980,8 @@ pub struct NotePanel {
     #[cfg(test)]
     last_editor_rect: Option<egui::Rect>,
     #[cfg(test)]
+    last_editor_font_size: Option<f32>,
+    #[cfg(test)]
     last_split_editor_rect: Option<egui::Rect>,
     #[cfg(test)]
     last_split_preview_rect: Option<egui::Rect>,
@@ -981,11 +990,17 @@ pub struct NotePanel {
     #[cfg(test)]
     last_preview_heading_rects: Vec<egui::Rect>,
     #[cfg(test)]
+    last_preview_heading_font_sizes: Vec<f32>,
+    #[cfg(test)]
     test_markdown_fragment_ids: Vec<(String, egui::Id, egui::Id)>,
     #[cfg(test)]
     test_capture_markdown_fragment_ids: bool,
     #[cfg(test)]
     last_preview_fallback_rect: Option<egui::Rect>,
+    #[cfg(test)]
+    last_preview_fallback_font_size: Option<f32>,
+    #[cfg(test)]
+    last_inline_note_font_size: Option<f32>,
     #[cfg(test)]
     metadata_details_render_count: usize,
     #[cfg(test)]
@@ -1342,6 +1357,8 @@ impl NotePanel {
             #[cfg(test)]
             last_editor_rect: None,
             #[cfg(test)]
+            last_editor_font_size: None,
+            #[cfg(test)]
             last_split_editor_rect: None,
             #[cfg(test)]
             last_split_preview_rect: None,
@@ -1350,11 +1367,17 @@ impl NotePanel {
             #[cfg(test)]
             last_preview_heading_rects: Vec::new(),
             #[cfg(test)]
+            last_preview_heading_font_sizes: Vec::new(),
+            #[cfg(test)]
             test_markdown_fragment_ids: Vec::new(),
             #[cfg(test)]
             test_capture_markdown_fragment_ids: false,
             #[cfg(test)]
             last_preview_fallback_rect: None,
+            #[cfg(test)]
+            last_preview_fallback_font_size: None,
+            #[cfg(test)]
+            last_inline_note_font_size: None,
             #[cfg(test)]
             metadata_details_render_count: 0,
             #[cfg(test)]
@@ -2129,10 +2152,13 @@ impl NotePanel {
                     self.last_ui_sections = NotePanelUiSections::default();
                     self.last_content_rect = None;
                     self.last_editor_rect = None;
+                    self.last_editor_font_size = None;
                     self.last_split_editor_rect = None;
                     self.last_split_preview_rect = None;
                     self.last_outline_rect = None;
                     self.last_preview_heading_rects.clear();
+                    self.last_preview_heading_font_sizes.clear();
+                    self.last_inline_note_font_size = None;
                 }
                 if ui
                     .ctx()
@@ -3279,10 +3305,11 @@ impl NotePanel {
         desired_size: Option<egui::Vec2>,
     ) -> egui::Response {
         let desired_width = desired_size.map_or(f32::INFINITY, |size| size.x);
+        let font_size = effective_note_font_size(ui.ctx(), app.note_font_size);
         let text_edit = egui::TextEdit::multiline(&mut self.note.content)
             .id(editor_id)
             .desired_width(desired_width)
-            .font(FontId::monospace(app.note_font_size))
+            .font(FontId::monospace(font_size))
             .lock_focus(true);
         let response = if let Some(size) = desired_size {
             ui.add_sized(size, text_edit)
@@ -3293,6 +3320,7 @@ impl NotePanel {
         #[cfg(test)]
         {
             self.last_editor_rect = Some(response.rect);
+            self.last_editor_font_size = Some(font_size);
         }
         response
     }
@@ -3624,12 +3652,15 @@ impl NotePanel {
                     self.persist_collapsed_sections_state(app);
                 }
 
+                let note_font_size = effective_note_font_size(ui.ctx(), app.note_font_size);
                 let size = match section.heading.level {
-                    1 => app.note_font_size * 1.45,
-                    2 => app.note_font_size * 1.30,
-                    3 => app.note_font_size * 1.15,
-                    _ => app.note_font_size,
+                    1 => note_font_size * 1.45,
+                    2 => note_font_size * 1.30,
+                    3 => note_font_size * 1.15,
+                    _ => note_font_size,
                 };
+                #[cfg(test)]
+                self.last_preview_heading_font_sizes.push(size);
                 ui.label(
                     egui::RichText::new(heading_display_text(&section.heading))
                         .size(size)
@@ -3978,12 +4009,13 @@ impl NotePanel {
         let fragment_id = cache_id.to_string();
         let fragment_ui_id = ui.make_persistent_id(("note_seg", fragment_id.as_str()));
         let fragment_width = ui.available_width().max(0.0);
+        let note_font_size = effective_note_font_size(ui.ctx(), app.note_font_size);
         #[cfg(test)]
         let capture_fragment_ids = self.test_capture_markdown_fragment_ids;
         ui.scope_builder(egui::UiBuilder::new().id(fragment_ui_id), |ui| {
             ui.set_min_width(fragment_width);
             ui.set_max_width(fragment_width);
-            ui.style_mut().override_font_id = Some(FontId::proportional(app.note_font_size));
+            ui.style_mut().override_font_id = Some(FontId::proportional(note_font_size));
             let processed = preprocess_preview_markdown(
                 fragment,
                 &self.note.slug,
@@ -4039,6 +4071,11 @@ impl NotePanel {
         }
         let mut fallback = fragment.to_string();
         let fallback_width = ui.available_width().max(0.0);
+        let note_font_size = effective_note_font_size(ui.ctx(), app.note_font_size);
+        #[cfg(test)]
+        {
+            self.last_preview_fallback_font_size = Some(note_font_size);
+        }
         ui.set_min_width(fallback_width);
         ui.set_max_width(fallback_width);
         let response = egui::ScrollArea::horizontal()
@@ -4049,7 +4086,7 @@ impl NotePanel {
                     egui::vec2(fallback_width, 0.0),
                     egui::TextEdit::multiline(&mut fallback)
                         .desired_width(fallback_width)
-                        .font(FontId::monospace(app.note_font_size))
+                        .font(FontId::monospace(note_font_size))
                         .interactive(false),
                 )
             })
@@ -4065,7 +4102,11 @@ impl NotePanel {
     }
 
     fn render_inline_note_text(&mut self, ui: &mut egui::Ui, app: &mut LauncherApp, text: &str) {
-        let font = FontId::proportional(app.note_font_size);
+        let font = FontId::proportional(effective_note_font_size(ui.ctx(), app.note_font_size));
+        #[cfg(test)]
+        {
+            self.last_inline_note_font_size = Some(font.size);
+        }
         let mut cursor = 0;
 
         while cursor < text.len() {
@@ -8968,6 +9009,81 @@ mod tests {
     }
 
     #[test]
+    fn note_custom_fonts_compose_overall_typography_with_local_zoom_once() {
+        for (overall_scale, local_size) in [(0.75, 20.0), (1.0, 16.0), (2.0, 12.0)] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            app.note_font_size = local_size;
+            app.note_settings.rich_markdown_enabled = true;
+            app.note_settings.collapsible_sections_enabled = true;
+            let mut theme = crate::settings::ThemeSettings::default();
+            theme.preferences.typography_scale = overall_scale;
+            crate::gui::theme::publish_committed(&ctx, &theme);
+
+            let mut panel =
+                NotePanel::from_note(empty_note("# Main\n\n## Second\n\n### Third\n\nBody text"));
+            panel.show_metadata = false;
+            panel.view_mode = NoteViewMode::Preview;
+            panel.outline_open = false;
+            let editor_id = egui::Id::new(("typography-note-editor", overall_scale.to_bits()));
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(720.0, 540.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        panel.render_editor(ui, &app, editor_id, None);
+                    });
+                },
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(
+                panel.last_editor_font_size,
+                Some(local_size * overall_scale),
+                "editor text preserves local zoom and applies the active overall scale once"
+            );
+
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(720.0, 540.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        panel.render_inline_note_text(ui, &mut app, "Inline body [[target|label]]");
+                    });
+                },
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(
+                panel.last_inline_note_font_size,
+                Some(local_size * overall_scale),
+                "inline text preserves local zoom and applies the active overall scale once"
+            );
+
+            render_note_body_once(&ctx, &mut panel, &mut app, egui::vec2(720.0, 540.0));
+            assert_eq!(panel.last_preview_heading_font_sizes.len(), 3);
+            for (size, ratio) in panel
+                .last_preview_heading_font_sizes
+                .iter()
+                .zip([1.45, 1.30, 1.15])
+            {
+                assert!(
+                    (size - local_size * overall_scale * ratio).abs() < 0.001,
+                    "heading size composes local zoom, overall typography, and heading ratio once: size={size}, scale={overall_scale}, local={local_size}, ratio={ratio}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn note_window_initial_focus_survives_invisible_layout_without_stealing_later_focus() {
         let ctx = egui::Context::default();
         let mut app = new_app(&ctx);
@@ -10702,40 +10818,50 @@ mod tests {
 
     #[test]
     fn split_preview_fallback_keeps_long_unbroken_text_inside_preview_pane() {
-        let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
-        let mut panel = NotePanel::from_note(empty_note(""));
         let long_unbroken_preview = "x".repeat(10_000);
         let pane_width = 240.0;
-        let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
+        for overall_scale in [0.75, 1.0, 2.0] {
+            let ctx = egui::Context::default();
+            let mut app = new_app(&ctx);
+            let mut theme = crate::settings::ThemeSettings::default();
+            theme.preferences.typography_scale = overall_scale;
+            crate::gui::theme::publish_committed(&ctx, &theme);
+            let mut panel = NotePanel::from_note(empty_note(""));
+            let raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
 
-        ctx.run_ui(raw_input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(pane_width, 300.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(pane_width);
-                        panel.render_preview_fallback(ui, &mut app, &long_unbroken_preview);
-                    },
-                );
-            });
-        })
-        .drop_without_applying_deltas();
+            ctx.run_ui(raw_input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(pane_width, 300.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_width(pane_width);
+                            panel.render_preview_fallback(ui, &mut app, &long_unbroken_preview);
+                        },
+                    );
+                });
+            })
+            .drop_without_applying_deltas();
 
-        let fallback_rect = panel
-            .last_preview_fallback_rect
-            .expect("fallback TextEdit should be rendered");
-        assert!(
-            fallback_rect.width() <= pane_width + 1.0,
-            "fallback text edit should stay within the preview pane width instead of expanding the dialog, pane_width={pane_width}, fallback={fallback_rect:?}"
-        );
+            let fallback_rect = panel
+                .last_preview_fallback_rect
+                .expect("fallback TextEdit should be rendered");
+            assert!(
+                fallback_rect.width() <= pane_width + 1.0,
+                "fallback text edit should stay within the preview pane width instead of expanding the dialog, pane_width={pane_width}, fallback={fallback_rect:?}"
+            );
+            assert_eq!(
+                panel.last_preview_fallback_font_size,
+                Some(16.0 * overall_scale),
+                "fallback source text applies the active overall typography scale once"
+            );
+        }
     }
 
     #[test]
@@ -11039,6 +11165,14 @@ More text.
                 panel.last_preview_heading_rects
             );
         }
+        assert!(
+            !panel.last_preview_heading_font_sizes.is_empty()
+                && panel
+                    .last_preview_heading_font_sizes
+                    .iter()
+                    .all(|size| (*size - 16.0 * 1.45).abs() < 0.001),
+            "markdown heading size preserves the October 15 note size and heading ratio at 100%"
+        );
 
         let first_y = panel.last_preview_heading_rects[0].min.y;
         assert!(

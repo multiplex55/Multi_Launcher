@@ -49,6 +49,45 @@ fn utf8_prefix(text: &str, maximum_bytes: usize) -> &str {
     &text[..end]
 }
 
+fn pattern_font(ui: &egui::Ui) -> egui::FontId {
+    let mut font = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(14.0));
+    // The regex pattern historically used 18 pt while the theme's installed
+    // monospace role is 14 pt at 100%. Preserve that baseline and let the
+    // installed theme role carry the overall typography scale exactly once.
+    font.size *= 18.0 / 14.0;
+    font
+}
+
+fn oversized_pattern_font(ui: &egui::Ui) -> egui::FontId {
+    ui.style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(14.0))
+}
+
+fn pattern_editor_height(ui: &egui::Ui, font: &egui::FontId) -> f32 {
+    pattern_editor_height_at_baseline(ui, font, 18.0)
+}
+
+fn pattern_editor_height_at_baseline(
+    ui: &egui::Ui,
+    font: &egui::FontId,
+    baseline_size: f32,
+) -> f32 {
+    let typography_scale = font.size / baseline_size;
+    let text_height =
+        ui.ctx().fonts_mut(|fonts| fonts.row_height(font)) + ui.spacing().extra_text_line_spacing;
+    (28.0 * typography_scale)
+        .max(text_height)
+        .max(ui.spacing().interact_size.y)
+}
+
 /// Fixed allocations stop editor scroll extents from growing the native window.
 fn bounded_area(ui: &mut egui::Ui, rect: egui::Rect, id: &str, render: impl FnOnce(&mut egui::Ui)) {
     ui.allocate_rect(rect, egui::Sense::hover());
@@ -72,20 +111,38 @@ struct CoreLayout {
 }
 
 impl CoreLayout {
+    #[cfg(test)]
     fn new(bounds: egui::Rect, information_open: bool, invalid_pattern: bool) -> Self {
-        let header_height = 100.0_f32.min(bounds.height() * 0.45);
-        let status_height = 24.0_f32.min(bounds.height() * 0.15);
+        Self::with_header_height(bounds, information_open, invalid_pattern, 100.0)
+    }
+
+    fn with_header_height(
+        bounds: egui::Rect,
+        information_open: bool,
+        invalid_pattern: bool,
+        desired_header_height: f32,
+    ) -> Self {
         let gap = 8.0_f32.min(bounds.height() * 0.03);
+        let status_height = 24.0_f32.min(bounds.height() * 0.15);
+        let validation_height = invalid_pattern.then(|| 80.0_f32.min(bounds.height() * 0.2));
+        let minimum_content_height = if information_open { 2.0 + gap } else { 1.0 };
+        let reserved_height =
+            status_height + validation_height.unwrap_or(0.0) + 2.0 * gap + minimum_content_height;
+        let maximum_header_height = (bounds.height() - reserved_height).max(1.0);
+        let header_height = desired_header_height
+            .max(1.0)
+            .min(bounds.height() * 0.85)
+            .min(maximum_header_height);
         let header =
             egui::Rect::from_min_size(bounds.min, egui::vec2(bounds.width(), header_height));
         let status = egui::Rect::from_min_max(
             egui::pos2(bounds.left(), bounds.bottom() - status_height),
             bounds.max,
         );
-        let validation = invalid_pattern.then(|| {
+        let validation = validation_height.map(|height| {
             egui::Rect::from_min_size(
                 egui::pos2(bounds.left(), header.bottom()),
-                egui::vec2(bounds.width(), 80.0_f32.min(bounds.height() * 0.16)),
+                egui::vec2(bounds.width(), height),
             )
         });
         let content_top = validation.map_or(header.bottom(), |area| area.bottom());
@@ -109,7 +166,10 @@ impl CoreLayout {
             // A stacked information area needs room below its section selector.
             // Validation already occupies extra space; retain editor room then.
             let info_fraction = if invalid_pattern { 0.3 } else { 0.5 };
-            let info_height = (content.height() * info_fraction).min(160.0);
+            let max_info_height = (content.height() - gap - 1.0).max(1.0);
+            let info_height = (content.height() * info_fraction)
+                .min(160.0)
+                .min(max_info_height);
             let split = content.bottom() - info_height;
             (
                 egui::Rect::from_min_max(content.min, egui::pos2(content.right(), split - gap)),
@@ -127,6 +187,13 @@ impl CoreLayout {
             status,
         }
     }
+}
+
+fn pattern_header_height(ui: &egui::Ui) -> f32 {
+    let font = pattern_font(ui);
+    let pattern_height = pattern_editor_height(ui, &font);
+    (2.0 * ui.spacing().interact_size.y + pattern_height + 2.0 * ui.spacing().item_spacing.y)
+        .max(100.0)
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +226,16 @@ pub struct RegexTesterDialogState {
     selected_capture: usize,
     clipboard: Arc<dyn ClipboardBackend>,
     copy_feedback: Option<Result<&'static str, String>>,
+    #[cfg(test)]
+    last_pattern_geometry: Option<(egui::Rect, egui::FontId)>,
+    #[cfg(test)]
+    last_oversized_preview_geometry: Option<(egui::Rect, egui::FontId)>,
+    #[cfg(test)]
+    last_header_viewport: Option<egui::Rect>,
+    #[cfg(test)]
+    last_metadata_geometry: Option<(egui::Rect, f32, f32)>,
+    #[cfg(test)]
+    last_pattern_controls: Option<(Option<egui::Rect>, [egui::Rect; 5])>,
 }
 
 impl Default for RegexTesterDialogState {
@@ -184,6 +261,16 @@ impl RegexTesterDialogState {
             selected_capture: 0,
             clipboard,
             copy_feedback: None,
+            #[cfg(test)]
+            last_pattern_geometry: None,
+            #[cfg(test)]
+            last_oversized_preview_geometry: None,
+            #[cfg(test)]
+            last_header_viewport: None,
+            #[cfg(test)]
+            last_metadata_geometry: None,
+            #[cfg(test)]
+            last_pattern_controls: None,
         }
     }
 
@@ -280,12 +367,25 @@ impl RegexTesterDialogState {
         self.session.ensure_initial_evaluation(now);
         let bounds = ui.available_rect_before_wrap();
         let had_error = self.validation_error().is_some();
+        let header_height = pattern_header_height(ui);
         // Recompute after the toggle so collapsing frees editor space this frame.
-        let header = CoreLayout::new(bounds, self.information_open, had_error).header;
+        let header =
+            CoreLayout::with_header_height(bounds, self.information_open, had_error, header_height)
+                .header;
         bounded_area(ui, header, "regex_tester_header", |ui| {
-            self.pattern_area(ui)
+            let _output = egui::ScrollArea::vertical()
+                .id_salt("regex_tester_header_scroll")
+                .auto_shrink([true, false])
+                .max_width(header.width())
+                .max_height(ui.available_height())
+                .show(ui, |ui| self.pattern_area(ui));
+            #[cfg(test)]
+            {
+                self.last_header_viewport = Some(_output.inner_rect);
+            }
         });
-        let layout = CoreLayout::new(bounds, self.information_open, had_error);
+        let layout =
+            CoreLayout::with_header_height(bounds, self.information_open, had_error, header_height);
         bounded_area(ui, layout.editor, "regex_tester_editor_area", |ui| {
             self.text_area(ui)
         });
@@ -317,7 +417,11 @@ impl RegexTesterDialogState {
     }
 
     fn pattern_area(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        let font = pattern_font(ui);
+        let editor_height = pattern_editor_height(ui, &font);
+        #[cfg(test)]
+        let metadata_available_width = ui.available_width();
+        let _metadata_row = ui.horizontal_wrapped(|ui| {
             secondary_help(ui, "Engine: Rust regex · all matches");
             let label = if self.information_open {
                 "Hide info"
@@ -331,6 +435,18 @@ impl RegexTesterDialogState {
                 self.information_open = !self.information_open;
             }
         });
+        #[cfg(test)]
+        let pattern_row_available_width = ui.available_width();
+        #[cfg(test)]
+        {
+            self.last_metadata_geometry = Some((
+                _metadata_row.response.rect,
+                metadata_available_width,
+                pattern_row_available_width,
+            ));
+        }
+        #[cfg(test)]
+        let mut suffix_rect = None;
         ui.horizontal(|ui| {
             compact_section_heading(ui, "Pattern", None);
             if self.session.draft.pattern.len() > self.session.policy().pattern_bytes {
@@ -340,13 +456,13 @@ impl RegexTesterDialogState {
             if self.session.draft.pattern.len() > crate::regex_tester::policy::NORMAL_PATTERN_BYTES {
                 ui.colored_label(ui.visuals().warn_fg_color, "Large").on_hover_text("Pattern exceeds the normal 1 KiB range; interactive evaluation remains bounded at 4 KiB.");
             }
-            ui.label(egui::RichText::new("/").monospace().size(18.0));
+            ui.label(egui::RichText::new("/").font(font.clone()));
             let suffix = format!("/{}", self.session.draft.flags.suffix());
             let suffix_width = ui.ctx().fonts_mut(|fonts| {
                 fonts
                     .layout_no_wrap(
                         suffix.clone(),
-                        egui::FontId::monospace(18.0),
+                        font.clone(),
                         ui.visuals().text_color(),
                     )
                     .size()
@@ -355,14 +471,15 @@ impl RegexTesterDialogState {
             let width =
                 (ui.available_width() - suffix_width - ui.spacing().item_spacing.x).max(1.0);
             let maximum_bytes = self.session.policy().pattern_bytes;
+            let layouter_font = font.clone();
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, width: f32| {
-                editor_layout::plain(ui, text.as_str(), width, maximum_bytes, egui::FontId::monospace(18.0), true)
+                editor_layout::plain(ui, text.as_str(), width, maximum_bytes, layouter_font.clone(), true)
             };
             let pattern = ui.add_sized(
-                [width, 28.0],
+                [width, editor_height],
                 egui::TextEdit::singleline(&mut self.session.draft.pattern)
                     .id(egui::Id::new("regex_tester_pattern"))
-                    .font(egui::FontId::monospace(18.0))
+                    .font(font.clone())
                     .layouter(&mut layouter)
                     .hint_text("Regular expression"),
             );
@@ -371,11 +488,24 @@ impl RegexTesterDialogState {
             }
             if self.focus_pattern {
                 pattern.request_focus();
+                pattern.scroll_to_me(Some(egui::Align::Center));
                 self.focus_pattern = false;
             }
-            ui.label(egui::RichText::new(suffix).monospace().size(18.0));
+            #[cfg(test)]
+            {
+                self.last_pattern_geometry = Some((pattern.rect, font.clone()));
+            }
+            let _suffix = ui.label(egui::RichText::new(suffix).font(font));
+            #[cfg(test)]
+            {
+                suffix_rect = Some(_suffix.rect);
+            }
         });
-        ui.horizontal(|ui| self.flags_area(ui));
+        let _flags = ui.horizontal_wrapped(|ui| self.flags_area(ui)).inner;
+        #[cfg(test)]
+        {
+            self.last_pattern_controls = Some((suffix_rect, _flags.map(|response| response.rect)));
+        }
     }
 
     fn flags_area(&mut self, ui: &mut egui::Ui) -> [egui::Response; 5] {
@@ -416,17 +546,23 @@ impl RegexTesterDialogState {
 
     fn oversized_pattern_area(&mut self, ui: &mut egui::Ui) {
         let width = (ui.available_width() - 100.0).max(1.0);
+        let font = oversized_pattern_font(ui);
+        let editor_height = pattern_editor_height_at_baseline(ui, &font, 14.0);
         let mut preview = utf8_prefix(&self.session.draft.pattern, 128);
-        ui.add_sized(
-            [width, 28.0],
+        let _preview_response = ui.add_sized(
+            [width, editor_height],
             egui::TextEdit::singleline(&mut preview)
                 .id(egui::Id::new("regex_tester_pattern_preview"))
-                .font(egui::TextStyle::Monospace)
+                .font(font.clone())
                 .interactive(false),
         ).on_hover_text(format!(
             "Read-only preview: first 128 bytes or fewer. Pattern is {} bytes; editing and evaluation pause above {} bytes. Original pattern is retained.",
             self.session.draft.pattern.len(), self.session.policy().pattern_bytes
         ));
+        #[cfg(test)]
+        {
+            self.last_oversized_preview_geometry = Some((_preview_response.rect, font));
+        }
         if ui.button("Clear pattern").clicked() {
             self.session.draft.pattern.clear();
             self.mark_changed();
@@ -968,11 +1104,12 @@ mod tests {
     fn regex_tester_theme_scaled_layout_keeps_core_regions_and_source_bounded() {
         // Representative states, not a pixel matrix: each stresses a distinct
         // presentation path and retains the logical draft at different scales.
-        for (size, scale, light, pattern, text, section, expanded) in [
+        for (size, scale, light, overall_scale, pattern, text, section, expanded) in [
             (
                 egui::vec2(960.0, 680.0),
                 1.0,
                 false,
+                1.0,
                 "a{1,2}".repeat(400),
                 "a".repeat(4000),
                 InformationSection::MatchDetails,
@@ -982,6 +1119,7 @@ mod tests {
                 egui::vec2(360.0, 240.0),
                 1.5,
                 true,
+                0.75,
                 "missing".into(),
                 "é🦀".repeat(400),
                 InformationSection::Substitution,
@@ -991,6 +1129,7 @@ mod tests {
                 egui::vec2(1280.0, 800.0),
                 2.0,
                 false,
+                2.0,
                 ".".into(),
                 "a".repeat(1001),
                 InformationSection::Matches,
@@ -1000,6 +1139,7 @@ mod tests {
                 egui::vec2(360.0, 240.0),
                 2.0,
                 true,
+                2.0,
                 String::new(),
                 String::new(),
                 InformationSection::Matches,
@@ -1007,8 +1147,19 @@ mod tests {
             ),
             (
                 egui::vec2(360.0, 240.0),
+                1.0,
+                false,
+                2.0,
+                "[".into(),
+                "source".into(),
+                InformationSection::Explanation,
+                true,
+            ),
+            (
+                egui::vec2(360.0, 240.0),
                 1.5,
                 false,
+                0.75,
                 "[".into(),
                 "source".into(),
                 InformationSection::Explanation,
@@ -1021,7 +1172,14 @@ mod tests {
             } else {
                 egui::Visuals::dark()
             });
-            ctx.set_pixels_per_point(scale);
+            let mut theme = crate::settings::ThemeSettings::default();
+            theme.preferences.typography_scale = overall_scale;
+            crate::gui::theme::publish_committed(&ctx, &theme);
+            if (overall_scale - 2.0).abs() < f32::EPSILON {
+                let mut style = (*ctx.style_of(ctx.theme())).clone();
+                style.override_font_id = Some(egui::FontId::proportional(33.0));
+                ctx.set_style_of(ctx.theme(), style);
+            }
             let mut dialog = RegexTesterDialogState::default();
             dialog.session.draft.pattern = pattern;
             dialog.session.draft.test_text = text;
@@ -1036,15 +1194,42 @@ mod tests {
                 .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
             let draft = dialog.session.draft.clone();
             let revision = dialog.session.revision();
+            let mut core_geometry = None;
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            input
+                .viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .expect("default raw input includes the root viewport")
+                .native_pixels_per_point = Some(scale);
             ctx.run_ui(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                    ..Default::default()
-                },
+                input,
                 |ctx| {
+                    assert_eq!(ctx.viewport_rect().size(), size);
+                    assert!((ctx.pixels_per_point() - scale).abs() < 0.001);
                     egui::CentralPanel::default().show(ctx, |ui| {
                         let bounds = ui.available_rect_before_wrap();
                         let layout = dialog.body(ui);
+                        core_geometry = Some((bounds, layout.header));
+                        if let Some((pattern_rect, ..)) = &dialog.last_pattern_geometry {
+                            assert!(
+                                pattern_rect.left() >= layout.header.left() - 0.1
+                                    && pattern_rect.right() <= layout.header.right() + 0.1,
+                                "the pattern editor remains within the horizontally bounded header at overall scale {overall_scale}: header={:?}, pattern={pattern_rect:?}, metadata={:?}",
+                                layout.header,
+                                dialog.last_metadata_geometry
+                            );
+                        }
+                        if let Some((metadata_rect, before, after)) =
+                            dialog.last_metadata_geometry
+                        {
+                            assert!(before <= layout.header.width() + 0.1);
+                            assert!(after <= layout.header.width() + 0.1);
+                            assert!(metadata_rect.left() >= layout.header.left() - 0.1);
+                            assert!(metadata_rect.right() <= layout.header.right() + 0.1);
+                        }
                         for area in [
                             Some(layout.header),
                             layout.validation,
@@ -1073,9 +1258,170 @@ mod tests {
                 },
             )
             .drop_without_applying_deltas();
+            let (pattern_rect, pattern_font) = dialog
+                .last_pattern_geometry
+                .as_ref()
+                .expect("pattern editor records its actual layout font and rectangle");
+            let (core_bounds, header_rect) =
+                core_geometry.expect("the central panel supplies bounded core geometry");
+            assert!(
+                egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains_rect(*pattern_rect),
+                "pattern input must stay inside the viewport {size:?}; viewport={:?}, scale={scale}, core={core_bounds:?}, header={header_rect:?}, actual={pattern_rect:?}",
+                ctx.viewport_rect()
+            );
+            assert!(
+                (pattern_font.size - 18.0 * overall_scale).abs() < 0.01,
+                "regex pattern retains its 18 pt baseline while applying overall typography once: actual={}, scale={overall_scale}",
+                pattern_font.size
+            );
+            let style = ctx.style_of(ctx.theme());
+            let text_height = ctx.fonts_mut(|fonts| fonts.row_height(pattern_font))
+                + style.spacing.extra_text_line_spacing;
+            let expected_height = (28.0 * overall_scale)
+                .max(text_height)
+                .max(style.spacing.interact_size.y);
+            assert!(
+                pattern_rect.height() >= expected_height - 0.1,
+                "pattern input height must accommodate its effective font"
+            );
             assert_eq!(dialog.session.draft, draft);
             assert_eq!(dialog.session.revision(), revision);
         }
+    }
+
+    fn render_scaled_regex_frame(
+        ctx: &egui::Context,
+        dialog: &mut RegexTesterDialogState,
+        size: egui::Vec2,
+        pixels_per_point: f32,
+        events: Vec<egui::Event>,
+    ) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("default raw input includes the root viewport")
+            .native_pixels_per_point = Some(pixels_per_point);
+        ctx.run_ui(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+        })
+        .drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn regex_narrow_header_keeps_pattern_and_flags_reachable_at_200_percent() {
+        let size = egui::vec2(360.0, 240.0);
+        let pixels_per_point = 2.0;
+        let ctx = egui::Context::default();
+        let mut theme = crate::settings::ThemeSettings::default();
+        theme.preferences.typography_scale = 2.0;
+        crate::gui::theme::publish_committed(&ctx, &theme);
+        let mut style = (*ctx.style_of(ctx.theme())).clone();
+        style.animation_time = 0.0;
+        style.scroll_animation = egui::style::ScrollAnimation::none();
+        ctx.set_style_of(ctx.theme(), style);
+
+        let mut dialog = RegexTesterDialogState::default();
+        dialog.session.draft.pattern = "[".into();
+        dialog.session.draft.test_text = "source".into();
+        dialog.information_section = InformationSection::Explanation;
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        dialog
+            .session
+            .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog.open();
+
+        for _ in 0..3 {
+            render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        }
+        let header_viewport = dialog
+            .last_header_viewport
+            .expect("the header scroll area records its actual viewport");
+        let pattern_rect = dialog
+            .last_pattern_geometry
+            .as_ref()
+            .expect("the focused pattern editor is laid out")
+            .0;
+        assert!(
+            header_viewport.contains_rect(pattern_rect),
+            "opening the dialog scrolls the focused pattern into view: viewport={header_viewport:?}, pattern={pattern_rect:?}"
+        );
+        let suffix_rect = dialog
+            .last_pattern_controls
+            .as_ref()
+            .and_then(|(suffix, _)| *suffix)
+            .expect("the editable pattern keeps its flag suffix visible in the pattern row");
+        assert!(header_viewport.contains_rect(suffix_rect));
+        assert!(ctx.memory(|memory| memory.has_focus(egui::Id::new("regex_tester_pattern"))));
+
+        let wheel_position = egui::pos2(header_viewport.center().x, header_viewport.center().y);
+        render_scaled_regex_frame(
+            &ctx,
+            &mut dialog,
+            size,
+            pixels_per_point,
+            vec![
+                egui::Event::PointerMoved(wheel_position),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -1200.0),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
+        let header_viewport = dialog.last_header_viewport.unwrap();
+        let (_, flag_rects) = dialog
+            .last_pattern_controls
+            .as_ref()
+            .expect("flags and suffix retain response geometry")
+            .clone();
+        assert!(
+            flag_rects
+                .iter()
+                .all(|rect| header_viewport.contains_rect(*rect)),
+            "scrolling the bounded header reveals every flag control: viewport={header_viewport:?}, flags={flag_rects:?}"
+        );
+        assert!(flag_rects[0].left() >= header_viewport.left() - 0.1);
+        assert!(flag_rects[4].right() <= header_viewport.right() + 0.1);
+
+        let revision = dialog.session.revision();
+        let flag_position = flag_rects[0].center();
+        render_scaled_regex_frame(
+            &ctx,
+            &mut dialog,
+            size,
+            pixels_per_point,
+            vec![
+                egui::Event::PointerMoved(flag_position),
+                egui::Event::PointerButton {
+                    pos: flag_position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render_scaled_regex_frame(
+            &ctx,
+            &mut dialog,
+            size,
+            pixels_per_point,
+            vec![egui::Event::PointerButton {
+                pos: flag_position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(dialog.session.draft.flags.case_insensitive);
+        assert_eq!(dialog.session.revision(), revision + 1);
     }
 
     fn keyboard_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
@@ -2488,6 +2834,9 @@ mod tests {
         dialog.session.draft.pattern = "文🦀".repeat(dialog.session.policy().pattern_bytes);
         dialog.session.draft.flags.case_insensitive = true;
         let original = dialog.session.draft.clone();
+        let mut theme = crate::settings::ThemeSettings::default();
+        theme.preferences.typography_scale = 1.0;
+        crate::gui::theme::publish_committed(&ctx, &theme);
         for _ in 0..2 {
             ctx.run_ui(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
@@ -2506,6 +2855,31 @@ mod tests {
             Some(EvaluationResult::Suspended(_))
         ));
         assert!(dialog.session.pending_delay(Instant::now()).is_none());
+        let (_, font) = dialog
+            .last_oversized_preview_geometry
+            .as_ref()
+            .expect("the oversized pattern preview records its installed font");
+        assert!((font.size - 14.0).abs() < 0.01);
+
+        theme.preferences.typography_scale = 2.0;
+        crate::gui::theme::publish_committed(&ctx, &theme);
+        ctx.run_ui(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| dialog.body(ui));
+        })
+        .drop_without_applying_deltas();
+        let (preview_rect, font) = dialog
+            .last_oversized_preview_geometry
+            .as_ref()
+            .expect("the scaled oversized preview records its actual geometry");
+        assert!((font.size - 28.0).abs() < 0.01);
+        let style = ctx.style_of(ctx.theme());
+        let minimum_height = 56.0_f32
+            .max(
+                ctx.fonts_mut(|fonts| fonts.row_height(font))
+                    + style.spacing.extra_text_line_spacing,
+            )
+            .max(style.spacing.interact_size.y);
+        assert!(preview_rect.height() >= minimum_height - 0.1);
     }
 
     #[test]

@@ -291,6 +291,29 @@ pub fn show(ui: &mut egui::Ui, workspace: u64, view: u64, model: &mut TextViewMo
 
 const TEXT_INSET: f32 = 72.0;
 
+fn monospace_font(ui: &egui::Ui) -> egui::FontId {
+    ui.style()
+        .text_styles
+        .get(&egui::TextStyle::Monospace)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::monospace(14.0))
+}
+
+fn minimum_visual_row_height(ui: &egui::Ui, font: &egui::FontId) -> f32 {
+    ui.ctx()
+        .fonts_mut(|fonts| fonts.row_height(font))
+        .max(crate::diff::model::MIN_VISUAL_LINE_HEIGHT)
+}
+
+fn monospace_glyph_width(ui: &egui::Ui, font: &egui::FontId) -> f32 {
+    ui.ctx().fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap("0".to_owned(), font.clone(), ui.visuals().text_color())
+            .size()
+            .x
+    })
+}
+
 fn prepare_row_measurements(
     ui: &egui::Ui,
     model: &mut TextViewModel,
@@ -301,8 +324,11 @@ fn prepare_row_measurements(
         model.row_measurements = Default::default();
         return;
     };
-    let left_width = (left_pane - TEXT_INSET).max(1.0);
-    let right_width = (right_pane - TEXT_INSET).max(1.0);
+    let font = monospace_font(ui);
+    let inset = TEXT_INSET * (font.size / 14.0);
+    let row_height = minimum_visual_row_height(ui, &font);
+    let left_width = (left_pane - inset).max(1.0);
+    let right_width = (right_pane - inset).max(1.0);
     let projected = crate::diff::text_compare::row_projection(
         c,
         model.projection_mode,
@@ -310,7 +336,10 @@ fn prepare_row_measurements(
     );
     let mut identity = std::collections::hash_map::DefaultHasher::new();
     ui.visuals().dark_mode.hash(&mut identity);
-    egui::FontId::monospace(14.0).family.hash(&mut identity);
+    font.family.hash(&mut identity);
+    font.size.to_bits().hash(&mut identity);
+    row_height.to_bits().hash(&mut identity);
+    ui.ctx().pixels_per_point().to_bits().hash(&mut identity);
     let key = crate::diff::model::RowMeasureKey {
         left_revision: model.left.revision,
         right_revision: model.right.revision,
@@ -318,7 +347,7 @@ fn prepare_row_measurements(
         left_text_width_bits: left_width.to_bits(),
         right_text_width_bits: right_width.to_bits(),
         font_theme: identity.finish(),
-        text_style: 14.0f32.to_bits() as u64,
+        text_style: font.size.to_bits() as u64,
         display_config: ((model.syntax as u64) << 3)
             | ((model.visible_whitespace as u64) << 2)
             | ((model.visible_line_endings as u64) << 1)
@@ -354,11 +383,11 @@ fn prepare_row_measurements(
                     line.to_owned()
                 };
                 if !model.wrap {
-                    return crate::diff::model::MIN_VISUAL_LINE_HEIGHT;
+                    return row_height;
                 }
                 let mut job = egui::text::LayoutJob::simple(
                     displayed.replace('\t', "    "),
-                    egui::FontId::monospace(14.0),
+                    font.clone(),
                     ui.visuals().text_color(),
                     width,
                 );
@@ -474,7 +503,10 @@ fn render_pane_contents(
         model.projection_context,
     );
     let rows = &c.rows;
-    let row_height = crate::diff::model::MIN_VISUAL_LINE_HEIGHT;
+    let font = monospace_font(ui);
+    let row_height = minimum_visual_row_height(ui, &font);
+    let glyph_width = monospace_glyph_width(ui, &font);
+    let gutter_width = TEXT_INSET * (font.size / 14.0);
     let measured_heights = model.row_measurements.heights.clone();
     let measured_offsets = model.row_measurements.offsets.clone();
     let measurement_cache = model.row_measurements.clone();
@@ -515,7 +547,7 @@ fn render_pane_contents(
         if !wrapped {
             let canvas_width = source
                 .lines()
-                .map(|line| unwrapped_content_width(line, 8.5, 72.0))
+                .map(|line| unwrapped_content_width(line, glyph_width, gutter_width))
                 .fold(ui.available_width(), f32::max);
             ui.set_min_width(canvas_width);
         }
@@ -597,7 +629,7 @@ fn render_pane_contents(
                         let mut job = egui::text::LayoutJob::default();
                         for fragment in fragments {
                             let mut format = egui::TextFormat {
-                                font_id: egui::FontId::monospace(14.0),
+                                font_id: font.clone(),
                                 color: fragment.rgb.map_or(ui.visuals().text_color(), |c| {
                                     Color32::from_rgb(c[0], c[1], c[2])
                                 }),
@@ -621,7 +653,7 @@ fn render_pane_contents(
                                 "¶",
                                 0.0,
                                 egui::TextFormat {
-                                    font_id: egui::FontId::monospace(14.0),
+                                    font_id: font.clone(),
                                     color: Color32::LIGHT_BLUE,
                                     ..Default::default()
                                 },
@@ -925,6 +957,39 @@ mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
 
+    fn render_text_view_frame(
+        context: &egui::Context,
+        model: &mut TextViewModel,
+        size: egui::Vec2,
+    ) {
+        render_text_view_frame_at_native_scale(context, model, size, 1.0);
+    }
+
+    fn render_text_view_frame_at_native_scale(
+        context: &egui::Context,
+        model: &mut TextViewModel,
+        size: egui::Vec2,
+        pixels_per_point: f32,
+    ) {
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("default raw input includes the root viewport")
+            .native_pixels_per_point = Some(pixels_per_point);
+        context
+            .run_ui(input, |ctx| {
+                assert_eq!(ctx.viewport_rect().size(), size);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    show(ui, 7, 11, model);
+                });
+            })
+            .drop_without_applying_deltas();
+    }
+
     fn accessible_widget_bounds(
         output: &egui::FullOutput,
         role: egui::accesskit::Role,
@@ -955,6 +1020,8 @@ mod tests {
     #[test]
     fn diff_workspace_chrome_scaled_text_controls_remain_reachable() {
         let context = egui::Context::default();
+        let theme = crate::settings::ThemeSettings::default();
+        crate::gui::theme::publish_committed(&context, &theme);
         context.enable_accesskit();
         context.style_mut_of(context.theme(), |style| {
             style.animation_time = 0.0;
@@ -1038,6 +1105,172 @@ mod tests {
         assert!(!model.left.is_dirty());
         assert!(!model.right.is_dirty());
         assert!(!model.saved_filesystem_mutation);
+        assert_eq!(
+            f32::from_bits(model.row_measurements.key.as_ref().unwrap().text_style as u32),
+            14.0,
+            "diff content keeps its installed Mono role despite an unrelated style override"
+        );
+    }
+
+    #[test]
+    fn diff_text_rows_measure_and_paint_with_the_effective_monospace_scale() {
+        let left = format!("short row\n{}\nlast", "left token ".repeat(4));
+        let right = format!("short row\n{}\nlast", "right token ".repeat(4));
+
+        for wrap in [false, true] {
+            let context = egui::Context::default();
+            let mut model = TextViewModel::from_test_text(left.clone(), right.clone());
+            model.wrap = wrap;
+            model.scroll.wrapped = wrap;
+            let mut keys = Vec::new();
+            let mut heights_at_scale = Vec::new();
+            let mut expected_row_heights = Vec::new();
+
+            for overall_scale in [0.75, 1.0, 2.0] {
+                let mut theme = crate::settings::ThemeSettings::default();
+                theme.preferences.typography_scale = overall_scale;
+                crate::gui::theme::publish_committed(&context, &theme);
+                render_text_view_frame(&context, &mut model, egui::vec2(420.0, 620.0));
+                let style = context.style_of(context.theme());
+                expected_row_heights.push(
+                    context
+                        .fonts_mut(|fonts| {
+                            fonts.row_height(&style.text_styles[&egui::TextStyle::Monospace])
+                        })
+                        .max(crate::diff::model::MIN_VISUAL_LINE_HEIGHT),
+                );
+
+                let key = model
+                    .row_measurements
+                    .key
+                    .as_ref()
+                    .expect("the comparison has a measured font key");
+                let font_size = f32::from_bits(key.text_style as u32);
+                assert!(
+                    (font_size - 14.0 * overall_scale).abs() < 0.01,
+                    "diff uses the installed 14 pt monospace role at scale {overall_scale}, actual {font_size}"
+                );
+                assert!(
+                    model
+                        .row_measurements
+                        .heights
+                        .iter()
+                        .all(|height| *height >= crate::diff::model::MIN_VISUAL_LINE_HEIGHT),
+                    "all measured rows retain the established minimum height"
+                );
+                assert!(!model.row_measurements.heights.is_empty());
+                keys.push(key.clone());
+                heights_at_scale.push(model.row_measurements.heights.clone());
+            }
+
+            assert_ne!(
+                keys[0], keys[1],
+                "75% and 100% fonts have distinct cache keys"
+            );
+            assert_ne!(
+                keys[1], keys[2],
+                "100% and 200% fonts have distinct cache keys"
+            );
+            if wrap {
+                let tallest = |heights: &[f32]| heights.iter().copied().fold(0.0, f32::max);
+                assert!(tallest(&heights_at_scale[2]) > tallest(&heights_at_scale[1]));
+                assert!(tallest(&heights_at_scale[1]) > tallest(&heights_at_scale[0]));
+            } else {
+                assert!(
+                    heights_at_scale[0].iter().all(|height| (*height
+                        - crate::diff::model::MIN_VISUAL_LINE_HEIGHT)
+                        .abs()
+                        < 0.01),
+                    "the 75% unwrapped rows retain the historical 20 pt minimum"
+                );
+                assert!(
+                    heights_at_scale[1]
+                        .iter()
+                        .all(|height| (*height - expected_row_heights[1]).abs() < 0.01),
+                    "100% unwrapped rows use the actual monospace galley height with the historical minimum"
+                );
+                assert!(
+                    heights_at_scale[2]
+                        .iter()
+                        .all(|height| *height > crate::diff::model::MIN_VISUAL_LINE_HEIGHT),
+                    "200% unwrapped row height follows the effective font"
+                );
+
+                let warm_key = model.row_measurements.key.clone();
+                model.row_measurements.set_height(0, 173.0);
+                render_text_view_frame(&context, &mut model, egui::vec2(420.0, 620.0));
+                assert_eq!(model.row_measurements.key, warm_key);
+                assert_eq!(model.row_measurements.heights[0], 173.0);
+
+                let mut theme = crate::settings::ThemeSettings::default();
+                theme.preferences.typography_scale = 1.0;
+                crate::gui::theme::publish_committed(&context, &theme);
+                render_text_view_frame(&context, &mut model, egui::vec2(420.0, 620.0));
+                assert_ne!(model.row_measurements.key, warm_key);
+                assert!(model.row_measurements.heights[0] < 173.0);
+
+                let base_key = model.row_measurements.key.clone();
+                model.row_measurements.set_height(0, 173.0);
+                let mut style = (*context.style_of(context.theme())).clone();
+                style.spacing.extra_text_line_spacing += 5.0;
+                context.set_style_of(context.theme(), style);
+                render_text_view_frame(&context, &mut model, egui::vec2(420.0, 620.0));
+                assert_eq!(model.row_measurements.key, base_key);
+                assert_eq!(
+                    model.row_measurements.heights[0], 173.0,
+                    "a line-spacing change that does not affect explicit fragment galleys reuses cached rows"
+                );
+
+                let spacing_key = model.row_measurements.key.clone();
+                let mut style = (*context.style_of(context.theme())).clone();
+                style
+                    .text_styles
+                    .get_mut(&egui::TextStyle::Monospace)
+                    .unwrap()
+                    .family = egui::FontFamily::Proportional;
+                context.set_style_of(context.theme(), style);
+                render_text_view_frame(&context, &mut model, egui::vec2(420.0, 620.0));
+                assert_ne!(model.row_measurements.key, spacing_key);
+                assert!(model.row_measurements.heights[0] < 173.0);
+
+                let family_key = model
+                    .row_measurements
+                    .key
+                    .clone()
+                    .expect("the family change follows a measured comparison");
+                let logical_widths = (
+                    family_key.left_text_width_bits,
+                    family_key.right_text_width_bits,
+                );
+                render_text_view_frame_at_native_scale(
+                    &context,
+                    &mut model,
+                    egui::vec2(420.0, 620.0),
+                    1.5,
+                );
+                assert!((context.pixels_per_point() - 1.5).abs() < 0.001);
+                assert_ne!(model.row_measurements.key.as_ref(), Some(&family_key));
+                let dpi_key = model
+                    .row_measurements
+                    .key
+                    .clone()
+                    .expect("native DPI changes a measured cache identity");
+                assert_eq!(
+                    (dpi_key.left_text_width_bits, dpi_key.right_text_width_bits,),
+                    logical_widths,
+                    "native DPI changes the cache identity without changing logical pane widths"
+                );
+                model.row_measurements.set_height(0, 173.0);
+                render_text_view_frame_at_native_scale(
+                    &context,
+                    &mut model,
+                    egui::vec2(420.0, 620.0),
+                    1.5,
+                );
+                assert_eq!(model.row_measurements.key.as_ref(), Some(&dpi_key));
+                assert_eq!(model.row_measurements.heights[0], 173.0);
+            }
+        }
     }
 
     #[test]

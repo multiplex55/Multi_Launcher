@@ -16535,6 +16535,31 @@ mod tests {
             after_typography_change,
             "unchanged typography reuses the rebuilt list geometry"
         );
+        app.list_scale = 1.25;
+        for overall_scale in [0.75, 1.0, 2.0] {
+            let mut combined_theme = typography_theme.clone();
+            combined_theme.preferences.typography_scale = overall_scale;
+            assert!(crate::gui::theme::publish_committed(&ctx, &combined_theme));
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
+            frame += 1;
+            let key = app.root_list_geometry.key.as_ref().unwrap();
+            assert!(
+                (key.button_font.size - 14.0 * overall_scale * app.list_scale).abs() < 0.01,
+                "list-local scaling composes with overall typography once: actual={}, overall={overall_scale}, local={}",
+                key.button_font.size,
+                app.list_scale
+            );
+            let observation = app.root_list_geometry.test_observation();
+            run_root_list_frame(&ctx, &mut app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
+            frame += 1;
+            assert_eq!(
+                app.root_list_geometry.test_observation(),
+                observation,
+                "unchanged combined font scaling reuses list geometry"
+            );
+        }
 
         drop(app);
         drop(workspace);
@@ -22219,6 +22244,56 @@ mod tests {
             query.is_empty(),
             "the placeholder does not become query text"
         );
+    }
+
+    #[test]
+    fn root_query_local_zoom_composes_with_overall_typography_once() {
+        const QUERY_SCALE: f32 = 1.35;
+        for overall_scale in [0.75, 1.0, 2.0] {
+            let ctx = egui::Context::default();
+            let mut theme = crate::settings::ThemeSettings::default();
+            theme.preferences.typography_scale = overall_scale;
+            crate::gui::theme::publish_committed(&ctx, &theme);
+            let mut query = String::new();
+            let query_id = egui::Id::new(("combined-font-query", overall_scale.to_bits()));
+            let mut presentation = None;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(420.0, 180.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    scale_ui(ui, QUERY_SCALE, |ui| {
+                        presentation = Some(show_root_query_editor(
+                            ui,
+                            &mut query,
+                            query_id,
+                            QUERY_SCALE,
+                            true,
+                        ));
+                    });
+                },
+            )
+            .drop_without_applying_deltas();
+
+            let actual_font = presentation
+                .expect("query presentation was rendered")
+                .output
+                .galley
+                .job
+                .sections[0]
+                .format
+                .font_id
+                .size;
+            assert!(
+                (actual_font - 14.0 * overall_scale * QUERY_SCALE).abs() < 0.01,
+                "query local zoom composes with overall typography once: actual={actual_font}, overall={overall_scale}, local={QUERY_SCALE}"
+            );
+            assert!(query.is_empty());
+        }
     }
 
     #[test]
