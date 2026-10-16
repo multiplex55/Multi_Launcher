@@ -1642,6 +1642,10 @@ enum EventBudgetAdmission {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "BudgetTraceEntry is consumed synchronously by the trace publisher; boxing its inline event would allocate for each accepted trace event."
+)]
 enum BudgetTraceEntry {
     Exhausted {
         trace_sequence: u64,

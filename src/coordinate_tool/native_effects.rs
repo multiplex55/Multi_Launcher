@@ -23,6 +23,10 @@ pub(crate) enum EffectKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "EffectLiveSource keeps validated per-sample zoom geometry inline for the worker cache; boxing it would add a heap allocation on the live-source path."
+)]
 pub(crate) enum EffectLiveSource {
     Halo(PhysicalPoint),
     Zoom(ZoomPresentationGeometry),

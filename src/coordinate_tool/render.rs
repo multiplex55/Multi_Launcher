@@ -664,11 +664,10 @@ fn place_offset_axis(
     let mirrored_center = cursor
         .checked_sub(offset)
         .ok_or(ZoomGeometryError::ArithmeticOverflow)?;
-    if offset != 0 {
-        if let Some(leading) = axis_leading_if_fits(mirrored_center, bound_start, bound_end, extent)
-        {
-            return Ok((leading, mirrored_center, ZoomAxisPlacement::MirroredOffset));
-        }
+    if offset != 0
+        && let Some(leading) = axis_leading_if_fits(mirrored_center, bound_start, bound_end, extent)
+    {
+        return Ok((leading, mirrored_center, ZoomAxisPlacement::MirroredOffset));
     }
 
     let requested_leading = requested_center

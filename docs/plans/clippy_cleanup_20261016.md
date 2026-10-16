@@ -20,8 +20,9 @@
 | CL1-B | complete | Core/native idioms; preserve pixel remainders, cfg branches, side effects and test instrumentation |
 | CL2-A | complete | Preserve eight exported enum representations and exact authoring reply error contract with individually documented necessary exceptions; additive Default/is_empty |
 | CL2-B | complete | Private GUI intent/error payload ownership |
-| CL2-C1 | pending | Allocation-free native effects cache/views plus deferred coordinate render idiom |
-| CL2-C2 | pending | Allocation-free synchronous trace publication views |
+| CL2-C1 | rolled_back | Native ownership migration canceled; only own uncommitted edits restored |
+| CL2-C | implemented; final gates pending | Minimal hot-path documented exceptions plus deferred coordinate render idiom; final gates deferred |
+| CL2-C2 | superseded | Borrowed trace migration canceled by user no-substantial-refactor constraint |
 | CL3-A | pending | MkMacro domain/runtime idioms: 29 sites / 14 files |
 | CL3-B | pending | MkMacro GUI/editor/overlay idioms: 63 sites / 19 files |
 | CL3-C1 | pending | Radial runtime/resources/evidence idioms: 49 sites / 12 files |
@@ -112,3 +113,14 @@ Test-generated clipboard_modifiers.json (baseline absent) matched exact known fi
 - Final `cargo clippy -p multi_launcher --lib --all-features --message-format=json --no-deps`: exit 0, 273 later-owned warnings; no assigned size/error or WatchEvent warning. Evidence cl2b-clippy-final-with-watch-event.jsonl / .stderr.
 - Final `cargo fmt --all -- --check`: exit 0, evidence cl2b-final-fmt-check.txt. `git diff --check`: pass. No repeat tests for final attribute-only addition. All Cargo terminal.
 - Commit subject: `refactor(gui): [CL2-B] right-size private intent payloads`; hash in next update.
+CL2-B commit: `49605306`. CL2-C1 allocation-free native ownership packet authorized (plus deferred coordinate render conditional); CL2-C2 held.
+
+## User steering — revised authoritative workflow
+
+User: "Don't run nextest after each change. Make all the clippy changes then manually run clippy to verify that it worked. Do not make substational changes in order to fix a clippy lint."
+
+This overrides earlier per-packet verification and structural handoffs. Stop per-change Nextest and diagnostic Clippy runs; finish all minimal Clippy edits first, then explicitly run the required strict workspace/all-target/all-feature Clippy command. Original full Nextest request remains a single final gate, not an iteration loop. No substantial lint-driven refactors. Preserve existing committed checkpoints and user work. Uncommitted CL2-C1 native-cache migration is being rolled back only in its three owned source files; active Nextest session 68419 stopped with Ctrl-C (exit 1), not a test failure result. No milestone acceptance claim for C1.
+
+Remaining local idioms proceed in practical checkpoint commits based on scoped diff/format review. Native effects/trace hot payloads and extensive acceptance argument-owner migrations require minimal fixes or individually documented necessary exemptions under the new no-substantial-change constraint. Do not implement the earlier structural C1/C2 or CL4 context migrations. Planner/Reviewer revise minimal handoffs without more Cargo runs. Vendor remains excluded; no blanket suppressions.
+Rollback terminal: only the three owned C1 source files restored byte-for-byte to committed HEAD 49605306; status only Root ledger + user log, no Cargo remains. Provisional check success is not evidence for any retained change. Revised CL2-C minimal packet authorized: two individually documented hot-path large-enum exemptions (EffectLiveSource and BudgetTraceEntry) preserving existing owned representations, plus original coordinate render condition idiom. Formatting/diff review only; lint/tests deferred until all cleanup. No borrowed cache/trace ownership migration.
+CL2-C minimal implementation ready: Root inspected exact three-file diff (two reasoned item attributes, one short-circuit condition collapse). Existing owned cache and trace representations unchanged; no source lifetime/payload/API migration. Twelve narrowly documented necessary exceptions cumulatively (ten exported API, two hot inline payloads under user no-substantial-refactor budget). `cargo fmt --all` and `git diff --check` pass; no lint/check/Nextest commands executed. Final gate acceptance pending, not marked complete. Commit subject `chore(clippy): [CL2-C] document hot inline payload constraints`.
