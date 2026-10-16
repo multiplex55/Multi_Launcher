@@ -750,19 +750,19 @@ pub(crate) fn analyze_macro(
                     for part in scan_template(&field.value) {
                         match part {
                             Ok(TemplatePart::Reference(name)) => names.push(name),
-                            Err(reason) => {
+                            Err(reason)
                                 if !out.iter().any(|d| {
                                     d.macro_id == owner.id
                                         && d.step_id == Some(step.id)
                                         && d.code.contains("interpolation")
-                                }) {
-                                    out.push(MkDiagnostic::fatal(
-                                        owner.id,
-                                        Some(step.id),
-                                        "invalid_interpolation",
-                                        format!("{}: {reason}", field.path),
-                                    ));
-                                }
+                                }) =>
+                            {
+                                out.push(MkDiagnostic::fatal(
+                                    owner.id,
+                                    Some(step.id),
+                                    "invalid_interpolation",
+                                    format!("{}: {reason}", field.path),
+                                ));
                             }
                             _ => {}
                         }
@@ -813,18 +813,18 @@ pub(crate) fn analyze_macro(
     // Suppress a warning whenever any reachable read may use this name. This
     // deliberately avoids claiming an overwritten/loop-carried value is unused.
     for descriptor in catalog.history() {
-        if !reads.contains(&descriptor.name) {
-            if let VariableSource::Step(source) = &descriptor.source {
-                out.push(MkDiagnostic::warning(
-                    owner.id,
-                    Some(source.step_id),
-                    "unused_local",
-                    format!(
-                        "Local variable '{}' has no known reachable reads",
-                        descriptor.name
-                    ),
-                ));
-            }
+        if !reads.contains(&descriptor.name)
+            && let VariableSource::Step(source) = &descriptor.source
+        {
+            out.push(MkDiagnostic::warning(
+                owner.id,
+                Some(source.step_id),
+                "unused_local",
+                format!(
+                    "Local variable '{}' has no known reachable reads",
+                    descriptor.name
+                ),
+            ));
         }
     }
     if !owner.signature.outputs.is_empty() && flow.falls_through {

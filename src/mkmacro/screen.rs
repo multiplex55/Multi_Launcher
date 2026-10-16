@@ -528,14 +528,23 @@ impl std::fmt::Display for CaptureGeometryError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SearchRegion {
+    #[default]
     Desktop,
-    Monitor { index: usize },
-    Window { matcher: MkWindowMatcher },
-    ClientArea { matcher: MkWindowMatcher },
-    Rectangle { rect: ScreenRect },
+    Monitor {
+        index: usize,
+    },
+    Window {
+        matcher: MkWindowMatcher,
+    },
+    ClientArea {
+        matcher: MkWindowMatcher,
+    },
+    Rectangle {
+        rect: ScreenRect,
+    },
 }
 
 /// Live monitor metadata safe to expose to authoring UI. `index` is the exact
@@ -559,12 +568,6 @@ impl MonitorDescriptor {
         )
     }
 }
-impl Default for SearchRegion {
-    fn default() -> Self {
-        Self::Desktop
-    }
-}
-
 #[cfg(test)]
 mod capture_geometry_tests {
     use super::*;

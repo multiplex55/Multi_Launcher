@@ -318,11 +318,11 @@ impl<'executor, 'observer> RootSession<'executor, 'observer> {
                     attempt = attempt.attempt,
                     "executing macro step"
                 );
-                if matches!(step.action, MkAction::CallMacro(_) | MkAction::Return(_)) {
-                    if let Err(error) = self.executor.control.checkpoint() {
-                        self.complete_attempt(frame, attempt, Err(error))?;
-                        return Ok(None);
-                    }
+                if matches!(step.action, MkAction::CallMacro(_) | MkAction::Return(_))
+                    && let Err(error) = self.executor.control.checkpoint()
+                {
+                    self.complete_attempt(frame, attempt, Err(error))?;
+                    return Ok(None);
                 }
                 let result = match &step.action {
                     MkAction::CallMacro(call) => match self.prepare_child(frame, call, program) {

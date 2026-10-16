@@ -686,31 +686,31 @@ fn worker_loop(
 ) {
     let mut session: Option<Session> = None;
     loop {
-        let command = if session.is_none() {
-            match commands.recv() {
-                Ok(command) => Some(command),
-                Err(_) => break,
-            }
-        } else {
+        let command = if let Some(active_session) = session.as_mut() {
             match commands.try_recv() {
                 Ok(command) => Some(command),
                 Err(mpsc::TryRecvError::Disconnected) => break,
                 Err(mpsc::TryRecvError::Empty) => {
-                    if let Some(event) = session.as_mut().unwrap().backlog.pop_front() {
-                        accept(session.as_mut().unwrap(), event, enricher);
-                        publish(snapshot, session.as_ref());
+                    if let Some(event) = active_session.backlog.pop_front() {
+                        accept(active_session, event, enricher);
+                        publish(snapshot, Some(active_session));
                         continue;
                     }
                     match events.recv_timeout(Duration::from_millis(20)) {
                         Ok(event) => {
-                            accept(session.as_mut().unwrap(), event, enricher);
-                            publish(snapshot, session.as_ref());
+                            accept(active_session, event, enricher);
+                            publish(snapshot, Some(active_session));
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                     None
                 }
+            }
+        } else {
+            match commands.recv() {
+                Ok(command) => Some(command),
+                Err(_) => break,
             }
         };
         let Some(command) = command else { continue };

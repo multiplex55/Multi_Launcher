@@ -94,16 +94,16 @@ fn source(
                     format!("Binding literal must be {}", expected.unwrap().label()),
                 );
             }
-            if let MkValue::String(template) = value {
-                if let Err(reason) = super::validation::interpolation_syntax(template) {
-                    push(
-                        out,
-                        owner,
-                        Some(step),
-                        "invalid_binding_interpolation",
-                        reason,
-                    );
-                }
+            if let MkValue::String(template) = value
+                && let Err(reason) = super::validation::interpolation_syntax(template)
+            {
+                push(
+                    out,
+                    owner,
+                    Some(step),
+                    "invalid_binding_interpolation",
+                    reason,
+                );
             }
         }
         MkValueSource::Variable { name } => {

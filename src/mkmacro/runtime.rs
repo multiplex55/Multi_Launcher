@@ -885,13 +885,14 @@ fn set_step_state(
 }
 
 fn set_active_step(snapshot: &mut RuntimeSnapshot, context: ExecutionFrameContext, step_id: u64) {
-    if let Some(frame) = snapshot.call_stack.last() {
-        if frame.context == context && frame.active_step_id != Some(step_id) {
-            Arc::make_mut(&mut snapshot.call_stack)
-                .last_mut()
-                .unwrap()
-                .active_step_id = Some(step_id);
-        }
+    if let Some(frame) = snapshot.call_stack.last()
+        && frame.context == context
+        && frame.active_step_id != Some(step_id)
+    {
+        Arc::make_mut(&mut snapshot.call_stack)
+            .last_mut()
+            .unwrap()
+            .active_step_id = Some(step_id);
     }
     if context.depth == 1 {
         snapshot.step_id = Some(step_id);
@@ -1473,7 +1474,7 @@ fn set_shared_store_components(
         Some((translator, factory, enricher)) => RecorderRuntime::with_guard_and_components(
             store.clone(),
             recorder_hooks,
-            Arc::new(SystemRecorderClock::default()),
+            Arc::new(SystemRecorderClock),
             guard,
             translator,
             factory,
@@ -1482,7 +1483,7 @@ fn set_shared_store_components(
         None => RecorderRuntime::with_guard(
             store.clone(),
             recorder_hooks,
-            Arc::new(SystemRecorderClock::default()),
+            Arc::new(SystemRecorderClock),
             guard,
         ),
     };

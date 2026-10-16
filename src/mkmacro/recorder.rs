@@ -288,7 +288,8 @@ fn simplify_move_run(run: &[RecordedStep], tolerance_px: f64) -> Vec<RecordedSte
     }
     run.iter()
         .zip(keep)
-        .filter_map(|(step, keep)| keep.then(|| step.clone()))
+        .filter(|(_, keep)| *keep)
+        .map(|(step, _)| step.clone())
         .collect()
 }
 

@@ -743,18 +743,17 @@ fn cleanup_delays(steps: &mut [PlannedStep], threshold: u64, quantum: u64) {
 fn cleanup_mouse(steps: &mut Vec<PlannedStep>) {
     let mut output: Vec<PlannedStep> = Vec::new();
     for mut step in steps.drain(..) {
-        if let MkAction::MouseMove(_) = &step.action {
-            if let Some(previous) = output.last_mut()
-                && let (MkAction::MouseMove(a), MkAction::MouseMove(b)) =
-                    (&previous.action, &step.action)
-                && a.target == b.target
-            {
-                previous.delay_after_ms = step.delay_after_ms;
-                previous.source.last = step.source.last;
-                previous.association_source = step.association_source;
-                previous.provenance = RecordingProvenance::MouseCleanup;
-                continue;
-            }
+        if let MkAction::MouseMove(_) = &step.action
+            && let Some(previous) = output.last_mut()
+            && let (MkAction::MouseMove(a), MkAction::MouseMove(b)) =
+                (&previous.action, &step.action)
+            && a.target == b.target
+        {
+            previous.delay_after_ms = step.delay_after_ms;
+            previous.source.last = step.source.last;
+            previous.association_source = step.association_source;
+            previous.provenance = RecordingProvenance::MouseCleanup;
+            continue;
         }
         let redundant_pre_click =
             output
@@ -805,8 +804,10 @@ fn author_window_context(steps: &mut Vec<PlannedStep>, enriched: &[EnrichedRecor
             .filter(|window| window.process_id != Some(std::process::id()));
         let matcher = window.and_then(WindowContext::matcher);
         let identity = window.and_then(window_identity);
-        if relevant && matcher.is_some() && identity != active {
-            let matcher = matcher.unwrap();
+        if relevant
+            && identity != active
+            && let Some(matcher) = matcher
+        {
             output.push(make_step(
                 context_source,
                 context_source,

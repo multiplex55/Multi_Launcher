@@ -684,24 +684,24 @@ impl RecorderObserverSession {
         click_distance_px: i32,
     ) {
         let timestamp_us = event.timestamp_us();
-        if let Some(context) = context {
-            if let Some(root) = context.foreground.native_root_id {
-                let mut window = context.foreground.clone();
-                self.fill_known_start(&mut window);
-                let identity = (
-                    root,
-                    window.process_id.unwrap_or(0),
-                    window.process_started_at.unwrap_or(0),
-                );
-                if self.foreground.replace(identity) != Some(identity) {
-                    self.windows.push(WindowObservation {
-                        timestamp_us,
-                        source_hint: None,
-                        kind: WindowObservationKind::Foreground,
-                        window,
-                        visible_top_level: true,
-                    });
-                }
+        if let Some(context) = context
+            && let Some(root) = context.foreground.native_root_id
+        {
+            let mut window = context.foreground.clone();
+            self.fill_known_start(&mut window);
+            let identity = (
+                root,
+                window.process_id.unwrap_or(0),
+                window.process_started_at.unwrap_or(0),
+            );
+            if self.foreground.replace(identity) != Some(identity) {
+                self.windows.push(WindowObservation {
+                    timestamp_us,
+                    source_hint: None,
+                    kind: WindowObservationKind::Foreground,
+                    window,
+                    visible_top_level: true,
+                });
             }
         }
         match *event {

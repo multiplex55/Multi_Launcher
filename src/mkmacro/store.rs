@@ -325,14 +325,12 @@ impl MkMacroStore {
                     })
                     .and_then(|_| fs::read(path).ok())
                     .is_some_and(|bytes| bytes == *owned_bytes);
-                if still_owned {
-                    if let Err(rollback_error) = fs::remove_file(path) {
-                        tracing::error!(
-                            path = %path.display(),
-                            error = %rollback_error,
-                            "failed to roll back package-owned image"
-                        );
-                    }
+                if still_owned && let Err(rollback_error) = fs::remove_file(path) {
+                    tracing::error!(
+                        path = %path.display(),
+                        error = %rollback_error,
+                        "failed to roll back package-owned image"
+                    );
                 }
             }
             return Err(error);
@@ -910,13 +908,14 @@ fn migrate_v10_to_v11(value: &mut serde_json::Value, document_path: &Path) -> Re
                 let candidate = sanitize_legacy_filename(&friendly, id);
                 let destination = choose_migration_destination(&candidate, &bytes, &planned)?;
                 let image = MkImageRef::new(destination.clone()).map_err(anyhow::Error::msg)?;
-                if !planned.contains_key(&destination) {
+                if let std::collections::hash_map::Entry::Vacant(entry) = planned.entry(destination)
+                {
                     fs::create_dir_all(&root)?;
-                    let path = root.join(&destination);
+                    let path = root.join(entry.key());
                     save_atomic(&path, &bytes)
                         .with_context(|| format!("copy legacy image {}", source.display()))?;
                     created.push(path);
-                    planned.insert(destination, bytes);
+                    entry.insert(bytes);
                 }
                 source_destinations.insert(source, image.clone());
                 mapping.insert(id, image);
@@ -1095,7 +1094,7 @@ fn missing_image_ref(
         candidate = format!("{base}_{suffix}.png");
         suffix += 1;
     }
-    Ok(MkImageRef::new(candidate).map_err(anyhow::Error::msg)?)
+    MkImageRef::new(candidate).map_err(anyhow::Error::msg)
 }
 /// Converts schema-7 resolved Launcher actions into the temporary compatibility
 /// state used by schema 8. No Serde aliases accept the old shape outside here.
@@ -1401,11 +1400,10 @@ fn migrate_v4_to_v5(value: &mut serde_json::Value) -> Result<()> {
                         if let Some(data) = action.get_mut("data") {
                             condition(data)?;
                         }
-                    } else if matches!(ty, Some("while_start" | "wait_until")) {
-                        if let Some(c) = action.get_mut("data").and_then(|v| v.get_mut("condition"))
-                        {
-                            condition(c)?;
-                        }
+                    } else if matches!(ty, Some("while_start" | "wait_until"))
+                        && let Some(c) = action.get_mut("data").and_then(|v| v.get_mut("condition"))
+                    {
+                        condition(c)?;
                     }
                 }
             }
@@ -1435,23 +1433,22 @@ fn migrate_v2_to_v3(value: &mut serde_json::Value) -> Result<()> {
     for mac in macros {
         if let Some(steps) = mac.get_mut("steps").and_then(|v| v.as_array_mut()) {
             for step in steps {
-                if let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut()) {
-                    if matches!(
+                if let Some(action) = step.get_mut("action").and_then(|v| v.as_object_mut())
+                    && matches!(
                         action.get("type").and_then(|v| v.as_str()),
                         Some("image_find" | "image_click")
-                    ) {
-                        if let Some(data) = action.get_mut("data").and_then(|v| v.as_object_mut()) {
-                            data.entry("region")
-                                .or_insert_with(|| serde_json::json!({"type":"desktop"}));
-                            data.entry("tolerance")
-                                .or_insert_with(|| serde_json::json!(0));
-                            data.entry("alpha")
-                                .or_insert_with(|| serde_json::json!("compare"));
-                            data.entry("return_point")
-                                .or_insert_with(|| serde_json::json!("center"));
-                            data.remove("confidence");
-                        }
-                    }
+                    )
+                    && let Some(data) = action.get_mut("data").and_then(|v| v.as_object_mut())
+                {
+                    data.entry("region")
+                        .or_insert_with(|| serde_json::json!({"type":"desktop"}));
+                    data.entry("tolerance")
+                        .or_insert_with(|| serde_json::json!(0));
+                    data.entry("alpha")
+                        .or_insert_with(|| serde_json::json!("compare"));
+                    data.entry("return_point")
+                        .or_insert_with(|| serde_json::json!("center"));
+                    data.remove("confidence");
                 }
             }
         }
@@ -1511,21 +1508,21 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
     let mut changed = false;
     let mut used = HashSet::new();
     for m in &mut d.macros {
-        if m.id == 0 || !used.insert(m.id) {
-            if let Some(replacement) = next_unused_id(&used, &mut next) {
-                m.id = replacement;
-                used.insert(replacement);
-                changed = true
-            }
+        if (m.id == 0 || !used.insert(m.id))
+            && let Some(replacement) = next_unused_id(&used, &mut next)
+        {
+            m.id = replacement;
+            used.insert(replacement);
+            changed = true
         }
         let mut steps = HashSet::new();
         for s in &mut m.steps {
-            if s.id == 0 || !steps.insert(s.id) {
-                if let Some(replacement) = next_unused_id(&steps, &mut next) {
-                    s.id = replacement;
-                    steps.insert(replacement);
-                    changed = true
-                }
+            if (s.id == 0 || !steps.insert(s.id))
+                && let Some(replacement) = next_unused_id(&steps, &mut next)
+            {
+                s.id = replacement;
+                steps.insert(replacement);
+                changed = true
             }
         }
     }
@@ -1541,12 +1538,12 @@ pub fn repair_ids(d: &mut MkMacroDocument) -> bool {
     let mut next_folder_id = max_folder_id.checked_add(1).unwrap_or(1);
     let mut used_folder_ids = HashSet::new();
     for folder in &mut d.folders {
-        if folder.id == 0 || !used_folder_ids.insert(folder.id) {
-            if let Some(replacement) = next_unused_id(&used_folder_ids, &mut next_folder_id) {
-                folder.id = replacement;
-                used_folder_ids.insert(replacement);
-                changed = true;
-            }
+        if (folder.id == 0 || !used_folder_ids.insert(folder.id))
+            && let Some(replacement) = next_unused_id(&used_folder_ids, &mut next_folder_id)
+        {
+            folder.id = replacement;
+            used_folder_ids.insert(replacement);
+            changed = true;
         }
     }
 

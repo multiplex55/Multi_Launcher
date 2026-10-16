@@ -103,10 +103,10 @@ impl ImageDecodeCache {
             len: metadata.len(),
             modified: metadata.modified().ok(),
         };
-        if let Some(entry) = self.images.get(&cache_key) {
-            if entry.identity == identity {
-                return Ok(entry.image.clone());
-            }
+        if let Some(entry) = self.images.get(&cache_key)
+            && entry.identity == identity
+        {
+            return Ok(entry.image.clone());
         }
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,

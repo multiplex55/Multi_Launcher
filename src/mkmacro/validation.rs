@@ -269,18 +269,19 @@ fn ocr_search(
     let has_reference = syntax_valid
         && super::interpolation::scan_template(&search.text)
             .any(|part| matches!(part, Ok(super::interpolation::TemplatePart::Reference(_))));
-    if syntax_valid && !has_reference && search.match_mode == MkOcrMatchMode::Regex {
-        if let Ok(pattern) = super::interpolate(&search.text, &RuntimeVariables::default())
-            && let Err(reason) = Regex::new(&pattern)
-        {
-            push(
-                out,
-                m,
-                s,
-                "invalid_ocr_regex",
-                format!("OCR regular expression is invalid: {reason}"),
-            );
-        }
+    if syntax_valid
+        && !has_reference
+        && search.match_mode == MkOcrMatchMode::Regex
+        && let Ok(pattern) = super::interpolate(&search.text, &RuntimeVariables::default())
+        && let Err(reason) = Regex::new(&pattern)
+    {
+        push(
+            out,
+            m,
+            s,
+            "invalid_ocr_regex",
+            format!("OCR regular expression is invalid: {reason}"),
+        );
     }
     if matches!(search.occurrence, MkOcrOccurrence::Nth(0)) {
         push(

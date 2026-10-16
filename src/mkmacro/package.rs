@@ -361,15 +361,15 @@ pub fn plan_package_import(
     let mut assets_to_create = Vec::new();
     for (source, bytes) in decoded_assets {
         let folded = windows_fold(source.filename());
-        if let Some((actual, existing)) = existing_by_fold.get(&folded) {
-            if existing == &bytes {
-                image_map.insert(
-                    source.filename().to_owned(),
-                    MkImageRef::new(actual.clone()).map_err(anyhow::Error::msg)?,
-                );
-                summary.reused_images += 1;
-                continue;
-            }
+        if let Some((actual, existing)) = existing_by_fold.get(&folded)
+            && existing == &bytes
+        {
+            image_map.insert(
+                source.filename().to_owned(),
+                MkImageRef::new(actual.clone()).map_err(anyhow::Error::msg)?,
+            );
+            summary.reused_images += 1;
+            continue;
         }
         let destination = if reserved.contains(&folded) {
             summary.renamed_images += 1;

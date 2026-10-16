@@ -660,10 +660,10 @@ pub fn rewrite_step_image_refs(
         if field.kind() != FieldKind::Image {
             return;
         }
-        if let Some(replacement) = replacements.get(field.value()) {
-            if let Err(reason) = field.replace(replacement.filename().to_owned()) {
-                error = Some(reason);
-            }
+        if let Some(replacement) = replacements.get(field.value())
+            && let Err(reason) = field.replace(replacement.filename().to_owned())
+        {
+            error = Some(reason);
         }
     });
     error.map_or(Ok(()), Err)
