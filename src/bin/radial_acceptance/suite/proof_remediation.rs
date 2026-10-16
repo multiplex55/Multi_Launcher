@@ -101,8 +101,9 @@ fn moved_root_position(root: [i32; 4], displays: &[[i32; 4]]) -> Result<[i32; 2]
 const FIXTURE_NOTE_MARKER: &str = "# radial acceptance q11";
 const MAX_NOTE_CLOSE_PHASES: usize = 24;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 enum NoteCloseMeasurement<T> {
+    #[default]
     NotAttempted,
     Pending,
     Observed(T),
@@ -134,12 +135,6 @@ impl<T> NoteCloseMeasurement<T> {
             original_bytes: message.len(),
             truncated: message.len() > 512,
         })
-    }
-}
-
-impl<T> Default for NoteCloseMeasurement<T> {
-    fn default() -> Self {
-        Self::NotAttempted
     }
 }
 
@@ -1047,7 +1042,7 @@ fn placement_toggle(
             .filter_map(|(index, line)| {
                 parse_hotkey_candidate_event(
                     line,
-                    HotkeyCandidateStream::MainCandidate,
+                    HotkeyCandidateStream::Main,
                     1,
                     HotkeyRunnerInputPurpose::LauncherChord,
                     index + 1,
@@ -1357,13 +1352,13 @@ fn finish_l08_with_cleanup<R>(
             Err(error)
         }
     };
-    if let Err(error) = &mut result {
-        if !captured.errors.is_empty() {
-            error.message.push_str("; pre-note-cleanup capture: ");
-            error
-                .message
-                .push_str(&bounded_text(&captured.errors.join("; "), 512));
-        }
+    if let Err(error) = &mut result
+        && !captured.errors.is_empty()
+    {
+        error.message.push_str("; pre-note-cleanup capture: ");
+        error
+            .message
+            .push_str(&bounded_text(&captured.errors.join("; "), 512));
     }
     QueryCaseRun {
         result,
@@ -1606,7 +1601,7 @@ fn priority_interval(
         }
         if let Some(event) = parse_hotkey_candidate_event(
             line,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             1,
             HotkeyRunnerInputPurpose::LauncherChord,
             index + 1,
@@ -1872,10 +1867,10 @@ fn toolbar_observation_boundary(
                 })
                 .map(|admission| (admission.event_ordinal, 0)),
         };
-        if let Some(candidate) = candidate {
-            if boundary.replace(candidate).is_some() {
-                return Err("toolbar readiness boundary is not unique".into());
-            }
+        if let Some(candidate) = candidate
+            && boundary.replace(candidate).is_some()
+        {
+            return Err("toolbar readiness boundary is not unique".into());
         }
     }
     Ok(boundary)
@@ -2385,13 +2380,13 @@ fn finish_h15_with_cleanup(
             ),
         )),
     };
-    if let (Err(error), Some(captured)) = (&mut result, &captured) {
-        if !captured.errors.is_empty() {
-            error.message.push_str("; pre-close capture diagnostics: ");
-            error
-                .message
-                .push_str(&bounded_text(&captured.errors.join("; "), 512));
-        }
+    if let (Err(error), Some(captured)) = (&mut result, &captured)
+        && !captured.errors.is_empty()
+    {
+        error.message.push_str("; pre-close capture diagnostics: ");
+        error
+            .message
+            .push_str(&bounded_text(&captured.errors.join("; "), 512));
     }
     (result, captured.map(|captured| captured.paths))
 }
@@ -4697,7 +4692,7 @@ mod tests {
     ) -> L08FirstFailureDiagnostic {
         let state = L08PrecleanupState::from_context(context);
         L08FirstFailureDiagnostic {
-            qualification: FailedHotkeyQualification::UNQUALIFIED,
+            qualification: FailedHotkeyQualification::Unqualified,
             state,
             status: state.status(),
             case_id: "L08",
@@ -4756,7 +4751,7 @@ mod tests {
         };
         let toggle = |visible, cursor: usize, invocation_id, revision| {
             let command = HotkeyCandidateEventEvidence {
-                stream: HotkeyCandidateStream::MainCandidate,
+                stream: HotkeyCandidateStream::Main,
                 input_group_id: 1,
                 input_purpose: HotkeyRunnerInputPurpose::LauncherChord,
                 event_ordinal: (cursor + 5) as u32,
@@ -5772,7 +5767,7 @@ mod tests {
         let diagnostic: FailedHotkeyDiagnostic = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             diagnostic.qualification,
-            FailedHotkeyQualification::UNQUALIFIED
+            FailedHotkeyQualification::Unqualified
         );
         assert_eq!(diagnostic.status, CaseStatus::Failed);
         assert_eq!(diagnostic.failure_stage, FailureStage::GestureDecision);
@@ -7989,7 +7984,7 @@ mod tests {
         assert!(
             parse_hotkey_candidate_event(
                 partial,
-                HotkeyCandidateStream::MainCandidate,
+                HotkeyCandidateStream::Main,
                 1,
                 HotkeyRunnerInputPurpose::LauncherChord,
                 2

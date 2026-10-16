@@ -347,11 +347,11 @@ enum HotkeyExpectedState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, serde::Deserialize)]
 enum HotkeyCandidateStream {
     #[serde(rename = "main")]
-    MainCandidate,
+    Main,
     #[serde(rename = "alternate")]
-    AlternateProfileCandidate,
+    Alternate,
     #[serde(rename = "legacy")]
-    LegacyFallbackCandidate,
+    Legacy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -1750,17 +1750,15 @@ fn hotkey_terminal_successor<'a>(
                 && event.event_ordinal > source.event_ordinal
         })
         .min_by_key(|event| event.event_ordinal)
-    {
-        if events
+        && events
             .iter()
             .filter(|command| hotkey_command_belongs_to_intent(command, source))
             .any(|command| {
                 command.event_ordinal >= first_newer.event_ordinal
                     || command.elapsed_ms > first_newer.elapsed_ms
             })
-        {
-            return None;
-        }
+    {
+        return None;
     }
     let mut successors = events
         .iter()
@@ -1916,13 +1914,13 @@ fn validate_hotkey_evidence_packet_with_context(
                 packet.case_id
             ));
         }
-        if let Some((last_ordinal, last_elapsed)) = last_by_stream.get(&event.stream) {
-            if event.event_ordinal <= *last_ordinal || event.elapsed_ms < *last_elapsed {
-                return Err(format!(
-                    "{} candidate trace order is invalid",
-                    packet.case_id
-                ));
-            }
+        if let Some((last_ordinal, last_elapsed)) = last_by_stream.get(&event.stream)
+            && (event.event_ordinal <= *last_ordinal || event.elapsed_ms < *last_elapsed)
+        {
+            return Err(format!(
+                "{} candidate trace order is invalid",
+                packet.case_id
+            ));
         }
         last_by_stream.insert(event.stream, (event.event_ordinal, event.elapsed_ms));
         match event.kind {
@@ -1938,13 +1936,12 @@ fn validate_hotkey_evidence_packet_with_context(
                     ));
                 }
             }
-            HotkeyTraceEventKind::PrimaryRelease => {
+            HotkeyTraceEventKind::PrimaryRelease
                 if event.invocation_id.is_none()
                     || event.modifiers_match.is_none()
-                    || event.provenance != Some(HotkeyInputProvenance::ExternalInjected)
-                {
-                    return Err(format!("{} primary release is malformed", packet.case_id));
-                }
+                    || event.provenance != Some(HotkeyInputProvenance::ExternalInjected) =>
+            {
+                return Err(format!("{} primary release is malformed", packet.case_id));
             }
             _ => {}
         }
@@ -1992,13 +1989,13 @@ fn validate_hotkey_evidence_packet_with_context(
         if gesture.input_group_id == 0 {
             return Err(format!("{} gesture evidence is malformed", packet.case_id));
         }
-        if let Some(short_tap_elapsed_ms) = gesture.short_tap_elapsed_ms {
-            if short_tap_elapsed_ms < gesture.release_elapsed_ms {
-                return Err(format!(
-                    "{} short tap precedes its primary release",
-                    packet.case_id
-                ));
-            }
+        if let Some(short_tap_elapsed_ms) = gesture.short_tap_elapsed_ms
+            && short_tap_elapsed_ms < gesture.release_elapsed_ms
+        {
+            return Err(format!(
+                "{} short tap precedes its primary release",
+                packet.case_id
+            ));
         }
         let release_events = packet
             .candidate_events
@@ -2095,16 +2092,15 @@ fn validate_hotkey_evidence_packet_with_context(
                         packet.case_id
                     ));
                 }
-                if let Some(observed) = &span.observed_presentation {
-                    if observed.elapsed_ms < span.command_elapsed_ms
+                if let Some(observed) = &span.observed_presentation
+                    && (observed.elapsed_ms < span.command_elapsed_ms
                         || observed.command_to_observed_ms
-                            != observed.elapsed_ms.saturating_sub(span.command_elapsed_ms)
-                    {
-                        return Err(format!(
-                            "{} ROOT presentation latency arithmetic is invalid",
-                            packet.case_id
-                        ));
-                    }
+                            != observed.elapsed_ms.saturating_sub(span.command_elapsed_ms))
+                {
+                    return Err(format!(
+                        "{} ROOT presentation latency arithmetic is invalid",
+                        packet.case_id
+                    ));
                 }
             }
             if !root_commands.iter().any(|span| {
@@ -2435,64 +2431,64 @@ fn validate_hotkey_evidence_packet_with_context(
     };
     match packet.case_id.as_str() {
         "H01" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[true],
         )?,
         "H02" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false],
         )?,
         "H06" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[true],
         )?,
         "H07" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false, true, false],
         )?,
         "H08" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false],
         )?,
         "H11" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false, true, false, true, false],
         )?,
         "H12" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false],
         )?,
         "H15" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false],
         )?,
         "H16" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[false, true],
         )?,
         "H17" => {
             require_sequence(
-                HotkeyCandidateStream::MainCandidate,
+                HotkeyCandidateStream::Main,
                 HotkeyRunnerInputPurpose::LauncherChord,
                 &[true],
             )?;
             require_sequence(
-                HotkeyCandidateStream::AlternateProfileCandidate,
+                HotkeyCandidateStream::Alternate,
                 HotkeyRunnerInputPurpose::LauncherChord,
                 &[true],
             )?;
         }
         "H18" => require_sequence(
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             HotkeyRunnerInputPurpose::LauncherChord,
             &[true],
         )?,
@@ -2518,7 +2514,7 @@ fn validate_hotkey_evidence_packet_with_context(
                 );
             }
             for (index, (group_id, gestures)) in matrix_groups.iter().enumerate() {
-                let mut ordered = gestures.iter().copied().collect::<Vec<_>>();
+                let mut ordered = gestures.to_vec();
                 ordered.sort_by_key(|gesture| gesture.release_elapsed_ms);
                 if *group_id != u32::try_from(index + 1).unwrap_or(u32::MAX)
                     || ordered.len() != expected_taps[index]
@@ -2541,7 +2537,7 @@ fn validate_hotkey_evidence_packet_with_context(
                 }
             }
             require_sequence(
-                HotkeyCandidateStream::MainCandidate,
+                HotkeyCandidateStream::Main,
                 HotkeyRunnerInputPurpose::ReadableCadence,
                 &[true, false, true],
             )?;
@@ -2550,7 +2546,7 @@ fn validate_hotkey_evidence_packet_with_context(
     }
     if packet.case_id == "H16"
         && !packet.standalone_decisions.iter().any(|decision| {
-            decision.stream == HotkeyCandidateStream::LegacyFallbackCandidate
+            decision.stream == HotkeyCandidateStream::Legacy
                 && decision.source == HotkeyVisibilitySource::LegacyTrigger
         })
     {
@@ -2560,11 +2556,11 @@ fn validate_hotkey_evidence_packet_with_context(
         && (!packet
             .gestures
             .iter()
-            .any(|gesture| gesture.stream == HotkeyCandidateStream::MainCandidate)
+            .any(|gesture| gesture.stream == HotkeyCandidateStream::Main)
             || !packet
                 .gestures
                 .iter()
-                .any(|gesture| gesture.stream == HotkeyCandidateStream::AlternateProfileCandidate))
+                .any(|gesture| gesture.stream == HotkeyCandidateStream::Alternate))
     {
         return Err("H17 evidence omitted a profile candidate stream".into());
     }
@@ -2825,7 +2821,7 @@ fn validate_screen_draw_priority(
     let root = packet
         .root_identities
         .iter()
-        .find(|root| root.stream == HotkeyCandidateStream::MainCandidate)
+        .find(|root| root.stream == HotkeyCandidateStream::Main)
         .ok_or("H15 omitted the owned ROOT identity")?;
     let valid_root = |sample: &QueryRootPresentationEvidence| {
         owned_root_presentation_is_valid(
@@ -3039,7 +3035,7 @@ fn validate_screen_draw_priority(
     )?;
     let mut last_event = None;
     for event in &proof.candidate_events {
-        if event.stream != HotkeyCandidateStream::MainCandidate
+        if event.stream != HotkeyCandidateStream::Main
             || event.input_group_id != 1
             || event.input_purpose != HotkeyRunnerInputPurpose::LauncherChord
             || event.event_ordinal <= cursor
@@ -3078,7 +3074,7 @@ fn validate_screen_draw_priority(
         || restore.invocation_id != proof.baseline_invocation_id
         || !restore.visible
         || restore.intent_elapsed_ms != intents[0].elapsed_ms
-        || restore.stream != HotkeyCandidateStream::MainCandidate
+        || restore.stream != HotkeyCandidateStream::Main
         || restore.input_group_id != 1
         || restore.root_commands.is_empty()
         || !proof.candidate_events.iter().any(|event| {
@@ -3410,9 +3406,9 @@ fn visibility_intent_proof_count(
     }
 }
 
-fn all_root_command_spans<'a>(
-    packet: &'a HotkeyCaseEvidence,
-) -> Vec<(HotkeyCandidateStream, &'a HotkeyRootCommandSpan)> {
+fn all_root_command_spans(
+    packet: &HotkeyCaseEvidence,
+) -> Vec<(HotkeyCandidateStream, &HotkeyRootCommandSpan)> {
     let mut spans = Vec::new();
     for gesture in &packet.gestures {
         if let HotkeyDecisionProof::Applied { root_commands, .. } = &gesture.decision {
@@ -3726,7 +3722,7 @@ fn is_h16_legacy_trigger_pair_group(
     purpose: HotkeyRunnerInputPurpose,
 ) -> bool {
     if packet.case_id != "H16"
-        || stream != HotkeyCandidateStream::LegacyFallbackCandidate
+        || stream != HotkeyCandidateStream::Legacy
         || purpose != HotkeyRunnerInputPurpose::LauncherChord
     {
         return false;
@@ -3801,7 +3797,7 @@ fn h16_legacy_candidate_group_has_exact_complex_chord(
         return false;
     };
     if case_id != "H16"
-        || press.stream != HotkeyCandidateStream::LegacyFallbackCandidate
+        || press.stream != HotkeyCandidateStream::Legacy
         || press.input_purpose != HotkeyRunnerInputPurpose::LauncherChord
         || press.kind != HotkeyTraceEventKind::PrimaryPress
         || press.modifiers_match != Some(false)
@@ -3947,14 +3943,13 @@ fn validate_runner_edge_groups(
             })
             .collect::<Vec<_>>();
         let group_hotkey = match (*stream, packet.case_id.as_str()) {
-            (HotkeyCandidateStream::AlternateProfileCandidate, "H17")
-            | (HotkeyCandidateStream::LegacyFallbackCandidate, "H16") => {
+            (HotkeyCandidateStream::Alternate, "H17") | (HotkeyCandidateStream::Legacy, "H16") => {
                 opposite_hotkey(configured_hotkey)
             }
             _ => configured_hotkey,
         };
         let expected = if *purpose == HotkeyRunnerInputPurpose::DirectTrigger {
-            let key = if *stream == HotkeyCandidateStream::LegacyFallbackCandidate {
+            let key = if *stream == HotkeyCandidateStream::Legacy {
                 0x59
             } else {
                 0x54
@@ -3997,8 +3992,7 @@ fn validate_runner_edge_groups(
 
     for gesture in &packet.gestures {
         let chord = match (gesture.stream, packet.case_id.as_str()) {
-            (HotkeyCandidateStream::AlternateProfileCandidate, "H17")
-            | (HotkeyCandidateStream::LegacyFallbackCandidate, "H16") => {
+            (HotkeyCandidateStream::Alternate, "H17") | (HotkeyCandidateStream::Legacy, "H16") => {
                 opposite_hotkey(configured_hotkey)
             }
             _ => configured_hotkey,
@@ -5894,7 +5888,7 @@ fn gate_d_hotkey_edges_digest(edges: &[(u32, bool)]) -> u64 {
 
 fn gate_c_trace_text_digest(text: &str) -> u64 {
     let mut hash = gate_c_private_digest(text.as_bytes());
-    hash = (hash ^ 0).wrapping_mul(0x100000001b3);
+    hash = hash.wrapping_mul(0x100000001b3);
     hash
 }
 
@@ -11566,7 +11560,7 @@ fn query_placement_toggle_is_valid(
         && toggle.input.visible_before != visible
         && toggle.input.desired_visible == visible
         && toggle.visibility_revision > 0
-        && command.stream == HotkeyCandidateStream::MainCandidate
+        && command.stream == HotkeyCandidateStream::Main
         && command.input_purpose == HotkeyRunnerInputPurpose::LauncherChord
         && command.input_group_id > 0
         && command.kind == HotkeyTraceEventKind::RootCommand
@@ -12005,7 +11999,7 @@ fn validate_h04_contamination_artifact(
         || artifact.root_identity.stream != artifact.stream
         || artifact.prior_group_ids.is_empty()
         || artifact.prior_group_ids.len() > 13
-        || artifact.prior_group_ids.iter().any(|group| *group == 0)
+        || artifact.prior_group_ids.contains(&0)
         || artifact
             .prior_group_ids
             .windows(2)
@@ -14900,7 +14894,7 @@ fn run_windows(arguments: Arguments) -> Result<(PathBuf, bool), String> {
     };
     let mut copied_passed = copied_report
         .as_ref()
-        .map_or(true, AcceptanceReport::passed_native_cases);
+        .is_none_or(AcceptanceReport::passed_native_cases);
     let mut copied_reports_persisted = true;
     if let (Some(copy_path), Some(copied_report)) = (copied_path.as_deref(), copied_report.as_mut())
     {
@@ -14986,7 +14980,7 @@ fn aggregate_native_cases_passed(
     copied_reports_persisted: bool,
 ) -> bool {
     deterministic_passed
-        && copied_report.map_or(true, AcceptanceReport::passed_native_cases)
+        && copied_report.is_none_or(AcceptanceReport::passed_native_cases)
         && (copied_report.is_none() || copied_reports_persisted)
 }
 
@@ -15053,7 +15047,7 @@ fn persist_copied_report_pair(
     let staged_text = staging.path().join("copied.txt");
     write_report(&staged_json, report)?;
     write_text_report(&staged_text, report)?;
-    if let Err(_) = fs::rename(&staged_json, report_path) {
+    if fs::rename(&staged_json, report_path).is_err() {
         return Err("publish verified copied-profile JSON report".into());
     }
     if fs::rename(&staged_text, &text_path).is_err() {
@@ -15301,10 +15295,10 @@ fn run_copied_profile_windows(
         Err(_) => (fallback_report, None),
     };
     let mut runner_log = OpenOptions::new().append(true).open(&runner_log_path).ok();
-    if report.environment.child_process_id.is_none() {
-        if let Some(runner_log) = runner_log.as_mut() {
-            let _ = writeln!(runner_log, "copied-profile native driver did not launch");
-        }
+    if report.environment.child_process_id.is_none()
+        && let Some(runner_log) = runner_log.as_mut()
+    {
+        let _ = writeln!(runner_log, "copied-profile native driver did not launch");
     }
     report.cleanup.input_desktop_released = match input_desktop_handle {
         Some(handle) => native::close_input_desktop_after_driver_exit(handle).is_ok(),
@@ -15385,11 +15379,11 @@ fn run_copied_profile_windows(
                 let retained = staged.retain();
                 retained_private_directory = Some(retained.directory.clone());
                 report.private_artifacts = Some(retained.summary.clone());
-                if artifact_evidence_complete {
-                    if let Some(case) = report.cases.iter_mut().find(|case| case.id == "CP_R1") {
-                        case.observed = private_artifact_evidence(&retained.summary);
-                        case.failure_stage = None;
-                    }
+                if artifact_evidence_complete
+                    && let Some(case) = report.cases.iter_mut().find(|case| case.id == "CP_R1")
+                {
+                    case.observed = private_artifact_evidence(&retained.summary);
+                    case.failure_stage = None;
                 }
             } else {
                 let summary = staged.ephemeral_summary();
@@ -15756,7 +15750,7 @@ fn validate_copied_profile_after_run(
     copy_root: &Path,
     metadata: &CopiedProfileMetadata,
 ) -> Result<(), String> {
-    let settings = match Settings::load_typed(&copy_root.join("settings.json"))
+    let settings = match Settings::load_typed(copy_root.join("settings.json"))
         .map_err(|_| "copied settings could not be reloaded after native acceptance".to_string())?
     {
         LoadState::Loaded(settings) => settings,
@@ -16658,9 +16652,10 @@ fn validate_r0_report(
 
 #[cfg(windows)]
 fn copied_status_contract_is_valid(report: &AcceptanceReport) -> bool {
-    let copied_summary_is_valid = report.copied_profile.as_ref().map_or(true, |summary| {
-        validate_copied_profile_summary(report, summary).is_ok()
-    });
+    let copied_summary_is_valid = report
+        .copied_profile
+        .as_ref()
+        .is_none_or(|summary| validate_copied_profile_summary(report, summary).is_ok());
     if !copied_summary_is_valid {
         return false;
     }
@@ -17456,10 +17451,7 @@ fn observed_field<'a>(observed: &'a str, prefix: &str) -> Option<&'a str> {
         .find_map(|field| field.strip_prefix(prefix))
 }
 
-fn h04_retry_ledger<'a>(
-    status: CaseStatus,
-    observed: &'a str,
-) -> Result<(u8, u8, Vec<&'a str>), String> {
+fn h04_retry_ledger(status: CaseStatus, observed: &str) -> Result<(u8, u8, Vec<&str>), String> {
     let attempts = observed_field(observed, "matrix_attempts=")
         .and_then(|value| value.parse::<u8>().ok())
         .ok_or_else(|| "H04 retry ledger has no bounded matrix-attempt count".to_string())?;
@@ -17844,19 +17836,24 @@ fn deterministic_fixture_for_hotkey(
     mouse_gesture_mode: MouseGestureMode,
     hotkey: AcceptanceHotkey,
 ) -> Result<DeterministicFixture, String> {
-    let mut settings = Settings::default();
-    settings.hotkey = Some(hotkey.as_str().to_string());
-    settings.help_hotkey = None;
-    settings.quit_hotkey = None;
-    settings.debug_logging = true;
-    settings.log_file = Some(LogFile::Path(log_path.to_string_lossy().to_string()));
-    settings.follow_mouse = false;
-    settings.static_location_enabled = true;
-    settings.static_pos = Some((240, 180));
-    settings.static_size = Some((900, 650));
-    settings.window_size = Some((900, 650));
-    settings.radial.enabled = true;
-    settings.radial.shared_tap_hold = true;
+    let mut settings = Settings {
+        hotkey: Some(hotkey.as_str().to_string()),
+        help_hotkey: None,
+        quit_hotkey: None,
+        debug_logging: true,
+        log_file: Some(LogFile::Path(log_path.to_string_lossy().to_string())),
+        follow_mouse: false,
+        static_location_enabled: true,
+        static_pos: Some((240, 180)),
+        static_size: Some((900, 650)),
+        window_size: Some((900, 650)),
+        radial: multi_launcher::radial::model::RadialFeatureSettings {
+            enabled: true,
+            shared_tap_hold: true,
+            ..Default::default()
+        },
+        ..Settings::default()
+    };
     if mouse_gesture_mode == MouseGestureMode::DisabledDiagnostic {
         settings.plugin_settings.insert(
             "mouse_gestures".into(),
@@ -18067,32 +18064,30 @@ fn deterministic_query_fixture(
         },
     };
     pinned.after_action = AfterActionPolicy::CloseTree;
-    document
+    if let Some(cell) = document
         .menus
         .iter_mut()
         .find(|menu| menu.id == document.default_menu_id)
         .and_then(|menu| menu.rings.first_mut())
         .and_then(|ring| ring.cells.get_mut(1))
-        .map(|cell| {
-            if let CellContent::Action {
-                binding: ActionBinding::LauncherQuery { .. },
-            } = &cell.content
-            {
-                cell.alternate_clicks
-                    .push(multi_launcher::radial::model::ClickBinding {
-                        gesture: multi_launcher::radial::model::ClickGesture::ShiftPrimary,
-                        action: ActionBinding::Persisted {
-                            action: PersistedUniversalActionRef {
-                                target: Some(PersistableActionTargetRef::CustomAction {
-                                    action: marker_target.clone(),
-                                }),
-                                action_id: action_ids::RESULT_EXECUTE,
-                            },
-                        },
-                        after_action: AfterActionPolicy::CloseTree,
-                    });
-            }
-        });
+        && let CellContent::Action {
+            binding: ActionBinding::LauncherQuery { .. },
+        } = &cell.content
+    {
+        cell.alternate_clicks
+            .push(multi_launcher::radial::model::ClickBinding {
+                gesture: multi_launcher::radial::model::ClickGesture::ShiftPrimary,
+                action: ActionBinding::Persisted {
+                    action: PersistedUniversalActionRef {
+                        target: Some(PersistableActionTargetRef::CustomAction {
+                            action: marker_target.clone(),
+                        }),
+                        action_id: action_ids::RESULT_EXECUTE,
+                    },
+                },
+                after_action: AfterActionPolicy::CloseTree,
+            });
+    }
 
     let mut actions = (0..ACCEPTANCE_ACTION_COUNT)
         .map(|index| multi_launcher::actions::Action {
@@ -19294,7 +19289,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     fn h01_evidence_packet() -> HotkeyCaseEvidence {
-        let stream = HotkeyCandidateStream::MainCandidate;
+        let stream = HotkeyCandidateStream::Main;
         let group = 1;
         let invocation = Some(5);
         let revision = Some(7);
@@ -19525,7 +19520,7 @@ mod tests {
     }
 
     fn h16_legacy_fallback_group_packet(configured_hotkey: AcceptanceHotkey) -> HotkeyCaseEvidence {
-        let stream = HotkeyCandidateStream::LegacyFallbackCandidate;
+        let stream = HotkeyCandidateStream::Legacy;
         let group = 6;
         let purpose = HotkeyRunnerInputPurpose::LauncherChord;
         let runner_edges = configured_chord_edges(opposite_hotkey(configured_hotkey), 1)
@@ -19675,7 +19670,7 @@ mod tests {
             .map(|(index, (virtual_key, down))| HotkeyRunnerEdgeEvidence {
                 runner_relative_us: index as u64 * 100,
                 input_group_id: 1,
-                stream: HotkeyCandidateStream::MainCandidate,
+                stream: HotkeyCandidateStream::Main,
                 purpose: HotkeyRunnerInputPurpose::LauncherChord,
                 virtual_key,
                 transition: if down {
@@ -19870,7 +19865,7 @@ mod tests {
             }],
             candidate_events,
             restorations: vec![HotkeyFollowOnRestoreEvidence {
-                stream: HotkeyCandidateStream::MainCandidate,
+                stream: HotkeyCandidateStream::Main,
                 input_group_id: 1,
                 parent_visibility_revision: None,
                 visibility_revision: 6,
@@ -20615,7 +20610,7 @@ mod tests {
 
     fn h16_legacy_modifier_packet(configured_hotkey: AcceptanceHotkey) -> HotkeyCaseEvidence {
         let mut packet = h16_legacy_fallback_group_packet(configured_hotkey);
-        let stream = HotkeyCandidateStream::LegacyFallbackCandidate;
+        let stream = HotkeyCandidateStream::Legacy;
         let group = 6;
         let purpose = HotkeyRunnerInputPurpose::LauncherChord;
         let invocation = Some(17);
@@ -20773,7 +20768,7 @@ mod tests {
     }
 
     fn h04_matrix_evidence_packet() -> HotkeyCaseEvidence {
-        let stream = HotkeyCandidateStream::MainCandidate;
+        let stream = HotkeyCandidateStream::Main;
         let mut candidate_events = Vec::new();
         let mut gestures = Vec::new();
         let mut runner_edges = Vec::new();
@@ -21056,7 +21051,7 @@ mod tests {
                         HotkeyRunnerEdgeEvidence {
                             runner_relative_us: tap_index as u64 * (hold_us + gap_us) + offset_us,
                             input_group_id: 2,
-                            stream: HotkeyCandidateStream::MainCandidate,
+                            stream: HotkeyCandidateStream::Main,
                             purpose: HotkeyRunnerInputPurpose::MatrixBurst,
                             virtual_key,
                             transition: if down {
@@ -21151,7 +21146,7 @@ mod tests {
             packet.runner_edges.push(HotkeyRunnerEdgeEvidence {
                 runner_relative_us,
                 input_group_id: 2,
-                stream: HotkeyCandidateStream::MainCandidate,
+                stream: HotkeyCandidateStream::Main,
                 purpose: HotkeyRunnerInputPurpose::MatrixBurst,
                 virtual_key: 0xA4,
                 transition,
@@ -21219,7 +21214,7 @@ mod tests {
     }
 
     fn h07_superseded_evidence_packet() -> HotkeyCaseEvidence {
-        let stream = HotkeyCandidateStream::MainCandidate;
+        let stream = HotkeyCandidateStream::Main;
         let group = 1;
         let mut events = Vec::new();
         let mut gestures = Vec::new();
@@ -21497,7 +21492,7 @@ mod tests {
         invocation_id: Option<u64>,
         focus_intent: HotkeyRootFocusIntent,
     ) {
-        let stream = HotkeyCandidateStream::MainCandidate;
+        let stream = HotkeyCandidateStream::Main;
         let parent_revision = invocation_id.map(|_| 7);
         let restore_revision = 8;
         let request_id = 20;
@@ -22007,7 +22002,7 @@ mod tests {
         let mut packet = h04_matrix_evidence_packet();
         let template = packet.candidate_events[0].clone();
         let draw_focus = HotkeyCandidateEventEvidence {
-            stream: HotkeyCandidateStream::MainCandidate,
+            stream: HotkeyCandidateStream::Main,
             input_group_id: 90,
             input_purpose: HotkeyRunnerInputPurpose::LauncherChord,
             event_ordinal: 20_001,
@@ -22032,7 +22027,7 @@ mod tests {
             ..template.clone()
         };
         let native_activation = HotkeyCandidateEventEvidence {
-            stream: HotkeyCandidateStream::MainCandidate,
+            stream: HotkeyCandidateStream::Main,
             input_group_id: 91,
             input_purpose: HotkeyRunnerInputPurpose::LauncherChord,
             event_ordinal: 20_002,
@@ -22057,7 +22052,7 @@ mod tests {
             ..template.clone()
         };
         let radial_action = HotkeyCandidateEventEvidence {
-            stream: HotkeyCandidateStream::MainCandidate,
+            stream: HotkeyCandidateStream::Main,
             input_group_id: 92,
             input_purpose: HotkeyRunnerInputPurpose::LauncherChord,
             event_ordinal: 20_003,
@@ -22292,7 +22287,7 @@ mod tests {
         ));
 
         let mut wrong_stream = packet.clone();
-        wrong_stream.candidate_events[0].stream = HotkeyCandidateStream::MainCandidate;
+        wrong_stream.candidate_events[0].stream = HotkeyCandidateStream::Main;
         assert!(!h16_legacy_modifier_mismatch_is_valid(
             &wrong_stream,
             &wrong_stream.candidate_events[0]
@@ -22635,8 +22630,7 @@ mod tests {
                 p.follow_on_restorations[0].input_group_id = 2
             }),
             ("wrong typed stream", |p| {
-                p.follow_on_restorations[0].stream =
-                    HotkeyCandidateStream::AlternateProfileCandidate
+                p.follow_on_restorations[0].stream = HotkeyCandidateStream::Alternate
             }),
             ("missing raw restore", |p| {
                 p.candidate_events.retain(|e| {
@@ -22647,7 +22641,7 @@ mod tests {
                 p.candidate_events[6].visibility_source = Some(HotkeyVisibilitySource::Queued)
             }),
             ("wrong raw stream", |p| {
-                p.candidate_events[6].stream = HotkeyCandidateStream::AlternateProfileCandidate
+                p.candidate_events[6].stream = HotkeyCandidateStream::Alternate
             }),
             ("wrong child group", |p| {
                 p.follow_on_restorations[0].input_group_id = 2;
@@ -23085,7 +23079,7 @@ mod tests {
                             && event.kind == HotkeyTraceEventKind::VisibilityIntent
                     })
                     .unwrap()
-                    .stream = HotkeyCandidateStream::AlternateProfileCandidate
+                    .stream = HotkeyCandidateStream::Alternate
             },
             |packet| {
                 packet
@@ -23478,7 +23472,7 @@ mod tests {
         let output = tempfile::tempdir().unwrap();
         let artifact_name = "case-H04-attempt-1-contamination.json";
         let artifact_path = output.path().join(artifact_name);
-        let stream = HotkeyCandidateStream::MainCandidate;
+        let stream = HotkeyCandidateStream::Main;
         let chord_offsets = [0, 5_000, 10_000, 15_000, 40_000, 45_000, 50_000, 55_000];
         let owned_edges = configured_chord_edges(hotkey, 1)
             .into_iter()
@@ -40196,7 +40190,7 @@ mod tests {
                 .map(|index| HotkeyRunnerEdgeEvidence {
                     runner_relative_us: (index as u64).saturating_mul(50),
                     input_group_id: 1,
-                    stream: HotkeyCandidateStream::MainCandidate,
+                    stream: HotkeyCandidateStream::Main,
                     purpose: HotkeyRunnerInputPurpose::LauncherChord,
                     virtual_key: 0x7A,
                     transition: if index % 2 == 0 {

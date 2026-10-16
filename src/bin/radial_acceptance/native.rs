@@ -971,28 +971,29 @@ impl RunnerHookObserver {
 
     pub fn stop_and_report(&mut self) -> Result<(), String> {
         let mut errors = Vec::new();
-        if self.thread_id != 0 && self.join.is_some() {
-            if let Err(error) = unsafe {
+        if self.thread_id != 0
+            && self.join.is_some()
+            && let Err(error) = unsafe {
                 PostThreadMessageW(
                     self.thread_id,
                     WM_QUIT,
                     windows::Win32::Foundation::WPARAM(0),
                     windows::Win32::Foundation::LPARAM(0),
                 )
-            } {
-                errors.push(format!(
-                    "post WM_QUIT to acceptance observer thread {}: {error}",
-                    self.thread_id
-                ));
             }
+        {
+            errors.push(format!(
+                "post WM_QUIT to acceptance observer thread {}: {error}",
+                self.thread_id
+            ));
         }
-        if let Some(join) = self.join.take() {
-            if join.join().is_err() {
-                errors.push(format!(
-                    "acceptance observer thread {} panicked while stopping",
-                    self.thread_id
-                ));
-            }
+        if let Some(join) = self.join.take()
+            && join.join().is_err()
+        {
+            errors.push(format!(
+                "acceptance observer thread {} panicked while stopping",
+                self.thread_id
+            ));
         }
         match self.unhook_result.recv_timeout(Duration::from_secs(1)) {
             Ok(Ok(())) => {}
@@ -1329,13 +1330,11 @@ pub(super) fn attach_to_input_desktop() -> Result<(String, InputDesktopAttachmen
     }
 
     let changed = !current_name.eq_ignore_ascii_case(&input_name);
-    if changed {
-        if let Err(error) = unsafe { SetThreadDesktop(input) } {
-            let _ = unsafe { CloseDesktop(input) };
-            return Err(format!(
-                "attach runner thread to input desktop '{input_name}': {error}"
-            ));
-        }
+    if changed && let Err(error) = unsafe { SetThreadDesktop(input) } {
+        let _ = unsafe { CloseDesktop(input) };
+        return Err(format!(
+            "attach runner thread to input desktop '{input_name}': {error}"
+        ));
     }
     if !changed {
         unsafe { CloseDesktop(input) }
@@ -2351,11 +2350,10 @@ fn finish_focus_anchor_ui_thread(
     if let Some(error) = exit.teardown_error {
         errors.push(error);
     }
-    if let Some(handle) = exit.attached_desktop_handle {
-        if let Err(error) = close_input_desktop_after_thread_exit(handle, "focus anchor UI thread")
-        {
-            errors.push(error);
-        }
+    if let Some(handle) = exit.attached_desktop_handle
+        && let Err(error) = close_input_desktop_after_thread_exit(handle, "focus anchor UI thread")
+    {
+        errors.push(error);
     }
     if errors.is_empty() {
         Ok(())
@@ -3389,7 +3387,7 @@ fn create_acceptance_process(
             .map_err(|error| format!("make candidate stderr log inheritable: {error}"))?;
     }
 
-    let mut startup = STARTUPINFOW {
+    let startup = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
         lpDesktop: PWSTR(desktop.as_mut_ptr()),
         dwFlags: STARTF_USESTDHANDLES,
@@ -3409,7 +3407,7 @@ fn create_acceptance_process(
             CREATE_UNICODE_ENVIRONMENT,
             Some(environment.as_mut_ptr().cast()),
             PCWSTR(current_directory.as_ptr()),
-            &mut startup,
+            &startup,
             &mut process,
         )
     };
@@ -3430,16 +3428,16 @@ fn quoted_command_line_argument(value: &std::ffi::OsStr) -> Vec<u16> {
         if unit == b'\\' as u16 {
             backslashes += 1;
         } else if unit == b'"' as u16 {
-            command_line.extend(std::iter::repeat(b'\\' as u16).take(backslashes * 2 + 1));
+            command_line.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2 + 1));
             command_line.push(unit);
             backslashes = 0;
         } else {
-            command_line.extend(std::iter::repeat(b'\\' as u16).take(backslashes));
+            command_line.extend(std::iter::repeat_n(b'\\' as u16, backslashes));
             command_line.push(unit);
             backslashes = 0;
         }
     }
-    command_line.extend(std::iter::repeat(b'\\' as u16).take(backslashes * 2));
+    command_line.extend(std::iter::repeat_n(b'\\' as u16, backslashes * 2));
     command_line.push(b'"' as u16);
     command_line.push(0);
     command_line
@@ -4562,8 +4560,6 @@ pub(super) fn controlled_held_key_timeout(
     let timeout_at_unix_ms = unix_time_ms();
     let timeout_async_state = unsafe { GetAsyncKeyState(i32::from(VK_LSHIFT.0)) } as u16;
     let timeout_elapsed_ms = at.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
-    let primary: Result<(), &str> =
-        Err("controlled input acknowledgement deadline expired while owned LeftShift was held");
     // The error exists while the inserted key is held. Release is the existing
     // error-cleanup owner, and remains attempted even when observation fails.
     let release = guard.release();
@@ -4630,7 +4626,9 @@ pub(super) fn controlled_held_key_timeout(
         observed_edges,
         outstanding_keys: guard.owned.len() + keys_still_down(&[key]).len(),
         observer_stopped,
-        primary_error: primary.unwrap_err().into(),
+        primary_error:
+            "controlled input acknowledgement deadline expired while owned LeftShift was held"
+                .into(),
         release_error,
     })
 }
@@ -6344,7 +6342,7 @@ impl UiAutomation {
         .map_err(|error| classify_element_property_error(error, "edit value pattern"))?;
         let value = unsafe { pattern.CurrentValue() }
             .map_err(|error| classify_element_property_error(error, "edit value"))?;
-        Ok(value.to_string() == expected)
+        Ok(value == expected)
     }
 
     pub fn wait_edit_value(
@@ -8458,14 +8456,13 @@ fn wait_for_pointer_button_down_ack(
     loop {
         let trace = std::fs::read_to_string(acknowledgement.trace_path)
             .map_err(|error| format!("read production pointer-button trace: {error}"))?;
-        match pointer_button_down_acknowledged(pointer_button_ack_order_after(
+        if pointer_button_down_acknowledged(pointer_button_ack_order_after(
             &trace,
             cursor,
             acknowledgement.kind,
             screen_point,
         ))? {
-            true => return Ok(()),
-            false => {}
+            return Ok(());
         }
         if Instant::now() >= deadline {
             let surface = match acknowledgement.kind {
@@ -9943,21 +9940,17 @@ pub(super) fn fresh_canvas_cell_for_generation(
     ring_index: usize,
     slot_index: usize,
 ) -> Option<AuthoringControlSnapshot> {
-    controls
-        .iter()
-        .copied()
-        .filter(|control| {
-            control.target == AuthoringControlTarget::CanvasCell
-                && control.role == AuthoringControlRole::Region
-                && control.enabled
-                && control.session_id == session_id
-                && control.generation == generation
-                && control.index == Some(flat_index)
-                && control.menu_cell_ids_digest == Some(menu_cell_ids_digest)
-                && control.ring_index == Some(ring_index)
-                && control.slot_index == Some(slot_index)
-        })
-        .next()
+    controls.iter().copied().find(|control| {
+        control.target == AuthoringControlTarget::CanvasCell
+            && control.role == AuthoringControlRole::Region
+            && control.enabled
+            && control.session_id == session_id
+            && control.generation == generation
+            && control.index == Some(flat_index)
+            && control.menu_cell_ids_digest == Some(menu_cell_ids_digest)
+            && control.ring_index == Some(ring_index)
+            && control.slot_index == Some(slot_index)
+    })
 }
 
 pub(super) fn find_authoring_control_after(

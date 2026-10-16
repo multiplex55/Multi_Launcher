@@ -319,7 +319,7 @@ pub(super) fn stage_diagnostics(
         manifest.update([0]);
         manifest.update(bytes.to_le_bytes());
         manifest.update(digest.as_bytes());
-        manifest.update([b'\n']);
+        manifest.update(*b"\n");
     }
     let manifest_sha256 = hex::encode(manifest.finalize());
     let artifact_id = directory
@@ -421,7 +421,7 @@ pub(super) fn verify_retained_artifacts(
         manifest.update([0]);
         manifest.update(bytes.to_le_bytes());
         manifest.update(digest.as_bytes());
-        manifest.update([b'\n']);
+        manifest.update(*b"\n");
     }
     if Some(hex::encode(manifest.finalize())).as_deref() != expected.manifest_sha256.as_deref() {
         return Err("retained private artifact manifest changed after profile cleanup".into());

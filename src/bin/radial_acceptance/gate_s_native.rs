@@ -121,10 +121,9 @@ fn wait_appearance_after(
             })
             .filter_map(|line| parse_appearance(line))
             .find(|state| state.session_id == session)
+            && predicate(&state)
         {
-            if predicate(&state) {
-                return Ok(state);
-            }
+            return Ok(state);
         }
         if Instant::now() >= deadline {
             return Err(CaseFailure::new(

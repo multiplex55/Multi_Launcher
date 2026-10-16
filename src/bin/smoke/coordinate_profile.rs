@@ -94,8 +94,10 @@ pub(super) fn run() -> Result<(), String> {
     let profile_worker = profile_session.attach_worker()?;
     let mut controller =
         CoordinateToolController::new(Arc::new(CountingFactory(Arc::clone(&counts))));
-    let mut preferences = CoordinateToolPreferences::default();
-    preferences.hud_detail = HudDetail::Detailed;
+    let preferences = CoordinateToolPreferences {
+        hud_detail: HudDetail::Detailed,
+        ..CoordinateToolPreferences::default()
+    };
     controller.set_preferences(preferences)?;
 
     let idle_copy_rejected = controller.sample_for_copy().is_err();

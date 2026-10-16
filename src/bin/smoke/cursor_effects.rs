@@ -97,7 +97,7 @@ pub(super) fn run(auto: bool) -> Result<(), String> {
         auto_transition_at: None,
     }));
     register_scene_class()?;
-    let scene = create_scene_window(&app)?;
+    let scene = create_scene_window(app.as_ref())?;
     app.borrow_mut().scene = scene;
     unsafe {
         if SetTimer(scene, TIMER_ID, TIMER_MS, None) == 0 {
@@ -655,7 +655,7 @@ fn register_scene_class() -> Result<(), String> {
     Ok(())
 }
 
-fn create_scene_window(app: &Box<RefCell<App>>) -> Result<HWND, String> {
+fn create_scene_window(app: &RefCell<App>) -> Result<HWND, String> {
     let instance = HINSTANCE(
         unsafe { GetModuleHandleW(None) }
             .map_err(|e| e.to_string())?
@@ -678,7 +678,7 @@ fn create_scene_window(app: &Box<RefCell<App>>) -> Result<HWND, String> {
     let left = (cursor.x - width / 2).clamp(desktop_left, desktop_left + desktop_width - width);
     let top = (cursor.y - height / 2).clamp(desktop_top, desktop_top + desktop_height - height);
     let title = w!("Cursor effects production smoke — F1–F12 controls");
-    let pointer = (&**app as *const RefCell<App>).cast::<c_void>();
+    let pointer = (app as *const RefCell<App>).cast::<c_void>();
     unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -832,7 +832,7 @@ fn paint_scene(hwnd: HWND, marker: usize) {
         for column in 0..12 {
             let row_offset = row as i32 * 24;
             let column_offset = column as i32 * 24;
-            let color = if (row + column + marker / 5) % 2 == 0 {
+            let color = if (row + column + marker / 5).is_multiple_of(2) {
                 COLORREF(0x00ffffff)
             } else {
                 COLORREF(0x00202020)

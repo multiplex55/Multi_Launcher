@@ -2896,13 +2896,13 @@ fn run_subprocess_attempt(
                     },
                 )
             };
-            if let Ok(exit) = &runner_cleanup {
-                if let Err(error) = record_observed_exit(attempt, exit) {
-                    attempt.cleanup_errors.push(bounded_text(
-                        &format!("runner exit receipt: {error}"),
-                        MAX_RESULT_BYTES,
-                    ));
-                }
+            if let Ok(exit) = &runner_cleanup
+                && let Err(error) = record_observed_exit(attempt, exit)
+            {
+                attempt.cleanup_errors.push(bounded_text(
+                    &format!("runner exit receipt: {error}"),
+                    MAX_RESULT_BYTES,
+                ));
             }
             if let Err(error) = &runner_cleanup {
                 attempt.cleanup_errors.push(bounded_text(

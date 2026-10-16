@@ -383,9 +383,14 @@ fn complete_hotkey_capture_segment_in(
         .sum::<usize>();
     let mut remaining = MAX_HOTKEY_EVIDENCE_EVENTS.saturating_sub(already_materialized);
     let mut events = Vec::new();
-    for ordinal in bounded_start..bounded_end {
+    for (ordinal, line) in lines
+        .iter()
+        .enumerate()
+        .take(bounded_end)
+        .skip(bounded_start)
+    {
         if let Some(event) = parse_hotkey_candidate_event(
-            &lines[ordinal],
+            line,
             stream,
             input_group_id,
             purpose,
@@ -600,9 +605,14 @@ fn finish_hotkey_evidence_capture(case_id: &str) -> Option<HotkeyCaseEvidence> {
             candidate_trace_overflow = true;
             continue;
         }
-        for ordinal in segment.cursor..bounded_end {
+        for (ordinal, line) in lines
+            .iter()
+            .enumerate()
+            .take(bounded_end)
+            .skip(segment.cursor)
+        {
             if let Some(event) = parse_hotkey_candidate_event(
-                &lines[ordinal],
+                line,
                 segment.stream,
                 segment.input_group_id,
                 segment.purpose,
@@ -738,14 +748,14 @@ fn parse_hotkey_candidate_event(
     } else if parsed.kind == HotkeyTraceEventKind::NativeActivation {
         parsed.hwnd = Some(trace_field_value(line, "hwnd")?.parse().ok()?);
     }
-    parsed.command = trace_field_value(line, "command").and_then(|command| match command {
-        "position" | "Position" => Some(HotkeyRootCommand::Position),
-        "size" | "Size" => Some(HotkeyRootCommand::Size),
-        "Show" => Some(HotkeyRootCommand::Show),
-        "Minimize" => Some(HotkeyRootCommand::Minimize),
-        "Focus" => Some(HotkeyRootCommand::Focus),
-        "ParkingBoundary" => Some(HotkeyRootCommand::ParkingBoundary),
-        _ => Some(HotkeyRootCommand::Other),
+    parsed.command = trace_field_value(line, "command").map(|command| match command {
+        "position" | "Position" => HotkeyRootCommand::Position,
+        "size" | "Size" => HotkeyRootCommand::Size,
+        "Show" => HotkeyRootCommand::Show,
+        "Minimize" => HotkeyRootCommand::Minimize,
+        "Focus" => HotkeyRootCommand::Focus,
+        "ParkingBoundary" => HotkeyRootCommand::ParkingBoundary,
+        _ => HotkeyRootCommand::Other,
     });
     parsed.visibility_source = trace_field_value(line, "source").and_then(|source| match source {
         "ToggleBatch" => Some(HotkeyVisibilitySource::ToggleBatch),
@@ -5543,7 +5553,7 @@ fn gate_c_wait_repainted_action_control(
             Ok(())
         },
         || action_editor_controls_after(trace_path, cursor),
-        |duration| std::thread::sleep(duration),
+        std::thread::sleep,
         &mut matches,
     )
 }
@@ -5656,12 +5666,12 @@ fn gate_c_inspector_outer_scroll_anchor_is_valid(
         && super::super::gate_c_rect_is_visible(control.full_bounds, client_size)
 }
 
-fn gate_c_inspector_outer_scroll_anchor<'a>(
-    controls: &'a [ActionEditorControlSnapshot],
+fn gate_c_inspector_outer_scroll_anchor(
+    controls: &[ActionEditorControlSnapshot],
     identity: ActionEditorTraceIdentity,
     client_size: [i32; 2],
     after_sequence: Option<u64>,
-) -> Option<&'a ActionEditorControlSnapshot> {
+) -> Option<&ActionEditorControlSnapshot> {
     [
         &["query_tab", "advanced_tab"][..],
         &["query_field", "search", "query_mode", "mode"][..],
@@ -5772,7 +5782,6 @@ fn wait_gate_c_inspector_result_count_after_applied(
                         "Inspector outer scroll exhausted its bounded wheel attempts before an applied result row became fully visible".into(),
                     );
                 }
-                let anchor = anchor;
                 observation_cursor = trace_lines(trace_path).len();
                 child.validate_window(designer.hwnd)?;
                 scroll_designer_client_bounds(child, designer, anchor.bounds, -120)?;
@@ -6256,10 +6265,7 @@ fn gate_c_compact_insertion_controls(
                 && existing.document_digest_after == control.document_digest_after
                 && existing.binding_digest_after == control.binding_digest_after
         };
-        if let Some(existing_index) = compacted
-            .iter()
-            .position(|existing| same_semantic_state(existing))
-        {
+        if let Some(existing_index) = compacted.iter().position(same_semantic_state) {
             let existing_sequence = compacted[existing_index].trace_sequence;
             let existing_clicked = compacted[existing_index].clicked;
             let preserve_pre_click = !control.clicked
@@ -7964,7 +7970,7 @@ fn gate_c_wait_fresh_canvas_cell_after(
             }
             Ok(())
         },
-        |duration| std::thread::sleep(duration),
+        std::thread::sleep,
     )
 }
 
@@ -9201,8 +9207,7 @@ fn gate_c_run_binding_transaction(
             ActionBinding::Contextual { .. } => unreachable!(),
         };
 
-    let stage_control: ActionEditorControlSnapshot;
-    match kind {
+    let stage_control = match kind {
         GateCBindingKind::PersistedReference => {
             gate_c_ensure_action_tab(
                 child,
@@ -9245,7 +9250,7 @@ fn gate_c_run_binding_transaction(
                             .into(),
                     )
                 })?;
-            stage_control = pin_gate_c_result(
+            pin_gate_c_result(
                 packet,
                 child,
                 uia,
@@ -9253,7 +9258,7 @@ fn gate_c_run_binding_transaction(
                 trace_path,
                 &gate_c_note_edit_target("radial-acceptance-shared-a"),
                 &row,
-            )?;
+            )?
         }
         GateCBindingKind::LauncherQuery => {
             gate_c_ensure_action_tab(
@@ -9297,7 +9302,7 @@ fn gate_c_run_binding_transaction(
             } else {
                 gate_c_capture_action_control(packet, mode_control);
             }
-            stage_control = gate_c_click_action_control(
+            gate_c_click_action_control(
                 child,
                 &entry.window,
                 trace_path,
@@ -9306,7 +9311,7 @@ fn gate_c_run_binding_transaction(
                 surface,
                 "save_query",
                 None,
-            )?;
+            )?
         }
         GateCBindingKind::ExactCommand => {
             gate_c_ensure_action_tab(
@@ -9338,7 +9343,7 @@ fn gate_c_run_binding_transaction(
                 "exact_args_field",
                 EXACT_ARGUMENTS,
             )?;
-            stage_control = gate_c_click_action_control(
+            gate_c_click_action_control(
                 child,
                 &entry.window,
                 trace_path,
@@ -9347,16 +9352,16 @@ fn gate_c_run_binding_transaction(
                 surface,
                 "use_exact_command",
                 None,
-            )?;
+            )?
         }
-    }
+    };
     if stage_control.binding_digest != expected_binding_digest {
         return Err(CaseFailure::new(
             FailureStage::GestureDecision,
             "D04 staged action-editor binding digest differs from the exact typed candidate".into(),
         ));
     }
-    let stage_identity = gate_c_identity_from_native(stage_control.identity.clone());
+    let stage_identity = gate_c_identity_from_native(stage_control.identity);
     let stage_state = gate_c_authoring_baseline(child, entry.session_id)?;
     let document_staged_digest = stage_state.editor.document_digest;
     let history_staged_digest = gate_c_radial_history_digest(&stage_state)
@@ -9730,11 +9735,7 @@ fn gate_c_run_binding_transaction(
         reopened_state.editor.document_digest,
     ));
 
-    let gate_kind = match query_mode {
-        Some(GateCQueryMode::OpenLauncher) => Some(GateCQueryMode::OpenLauncher),
-        Some(GateCQueryMode::ExecuteFirst) => Some(GateCQueryMode::ExecuteFirst),
-        None => None,
-    };
+    let gate_kind = query_mode;
     let after_action_policy = match saved_cell.after_action {
         AfterActionPolicy::CloseTree => GateCAfterActionPolicy::CloseTree,
         AfterActionPolicy::KeepOpen | AfterActionPolicy::CloseCurrentMenu => {
@@ -15368,8 +15369,7 @@ fn run_gate_c_d09_case(
         reopened_receipt.trace_sequence,
         true,
     )?;
-    let reopened_owner_identity =
-        gate_c_identity_from_native(reopened_inspector_control.identity.clone());
+    let reopened_owner_identity = gate_c_identity_from_native(reopened_inspector_control.identity);
     if !gate_c_reopened_inspector_control_matches_owner(
         &reopened_inspector_control,
         &reopened_owner_identity,
@@ -15735,7 +15735,7 @@ fn gate_c_q14_enter_search_and_read_row(
             ),
         );
     }
-    let mut identity = entered.identity.clone();
+    let mut identity = entered.identity;
     identity.search_request_generation = identity.search_request_generation.wrapping_add(1).max(1);
     let deadline = Instant::now() + UIA_TIMEOUT;
     let matching = loop {
@@ -18155,10 +18155,9 @@ fn gate_d_wait_control_before_pointer_down_with(
             &after,
             client_size,
             client_point,
-        )? {
-            if Instant::now() < deadline {
-                return Ok(current);
-            }
+        )? && Instant::now() < deadline
+        {
+            return Ok(current);
         }
         pause(WINDOW_POLL.min(deadline.saturating_duration_since(Instant::now())));
     }
@@ -18407,23 +18406,25 @@ fn run_gate_d_policy_negative_case(
         .iter()
         .flat_map(|menu| {
             menu.rings.iter().flat_map(move |ring| {
-                ring.cells.iter().filter_map(move |cell| {
-                    (cell.id.as_str() == "qa-hidden-first"
-                        && matches!(
-                            &cell.content,
-                            CellContent::Action {
-                                binding: ActionBinding::LauncherQuery {
-                                    mode: QueryRunMode::ExecuteFirst,
-                                    ..
+                ring.cells
+                    .iter()
+                    .filter(move |cell| {
+                        cell.id.as_str() == "qa-hidden-first"
+                            && matches!(
+                                &cell.content,
+                                CellContent::Action {
+                                    binding: ActionBinding::LauncherQuery {
+                                        mode: QueryRunMode::ExecuteFirst,
+                                        ..
+                                    }
                                 }
-                            }
-                        ))
-                    .then(|| AuthoredCellTarget {
+                            )
+                    })
+                    .map(move |cell| AuthoredCellTarget {
                         menu_id: menu.id.clone(),
                         ring_id: ring.id.clone(),
                         cell_id: cell.id.clone(),
                     })
-                })
             })
         })
         .next()
@@ -19870,10 +19871,10 @@ fn wait_gate_d_visible_long_label(
                     && text.authored_target_digest == target_digest
                     && text.client_size == client_size
             });
-        if let Some(text) = found {
-            if super::super::gate_d_visible_label_is_valid(&text) {
-                return Ok(text);
-            }
+        if let Some(text) = found
+            && super::super::gate_d_visible_label_is_valid(&text)
+        {
+            return Ok(text);
         }
         if Instant::now() >= deadline {
             return Err(CaseFailure::new(
@@ -21178,7 +21179,7 @@ fn append_query_case_result_with_diagnostics(
     _hold_threshold_ms: u64,
     diagnostics: Option<QueryCaseDiagnostics>,
 ) {
-    if matches!(result, Ok(_)) && evidence.is_none() {
+    if result.is_ok() && evidence.is_none() {
         result = Err(CaseFailure::new(
             FailureStage::GestureDecision,
             "passed Query case has no typed evidence packet".into(),
@@ -23992,7 +23993,7 @@ fn run_hotkey_pending_open_case(
         let hold_observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(5));
         capture_hotkey_attempt_evidence(
             child,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             trace_path,
             hold_cursor,
             &hold_observation,
@@ -24102,7 +24103,7 @@ fn run_hotkey_pending_open_case(
         let tap_observation = tap_observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(2));
         capture_hotkey_attempt_evidence(
             child,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             trace_path,
             tap_cursor,
             &tap_observation,
@@ -24504,13 +24505,13 @@ fn run_hotkey_hold_attempt(
     observer
         .pump_roundtrip(probe, Duration::from_millis(500))
         .map_err(|error| CaseFailure::new(FailureStage::HookAdmission, error))?;
-    if let Some(known) = known_surfaces {
-        if !radial_surfaces_are_active(child, known) {
-            return Err(CaseFailure::new(
-                FailureStage::NativeRootState,
-                "radial surfaces closed during hold-close preflight".into(),
-            ));
-        }
+    if let Some(known) = known_surfaces
+        && !radial_surfaces_are_active(child, known)
+    {
+        return Err(CaseFailure::new(
+            FailureStage::NativeRootState,
+            "radial surfaces closed during hold-close preflight".into(),
+        ));
     }
     focus_is_validated(target.0, target.1)
         .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
@@ -24537,7 +24538,7 @@ fn run_hotkey_hold_attempt(
     let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(5));
     capture_hotkey_attempt_evidence(
         child,
-        HotkeyCandidateStream::MainCandidate,
+        HotkeyCandidateStream::Main,
         trace_path,
         trace_cursor,
         &observation,
@@ -26259,7 +26260,7 @@ fn run_hotkey_legacy_fallback_case(
         .tempdir_in(profile)
         .map_err(|error| CaseFailure::new(FailureStage::Environment, error.to_string()))?;
     let trace_path = legacy_fallback_trace_path(alternate_profile.path());
-    register_hotkey_candidate_stream(&trace_path, HotkeyCandidateStream::LegacyFallbackCandidate);
+    register_hotkey_candidate_stream(&trace_path, HotkeyCandidateStream::Legacy);
     let log_path = trace_path.clone();
     let fixture = super::super::deterministic_fixture_for_hotkey_with_direct_trigger_chord(
         &log_path,
@@ -26352,7 +26353,7 @@ fn run_hotkey_legacy_fallback_case(
         let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(3));
         capture_hotkey_attempt_evidence(
             &child,
-            HotkeyCandidateStream::LegacyFallbackCandidate,
+            HotkeyCandidateStream::Legacy,
             &trace_path,
             tap_cursor,
             &observation,
@@ -26417,10 +26418,10 @@ fn run_hotkey_legacy_fallback_case(
             error.message
         ));
     }
-    if let Ok(root) = child.refresh_root() {
-        if let Err(error) = request_window_close(&child, &root) {
-            cleanup_errors.push(format!("request legacy-route child close: {error}"));
-        }
+    if let Ok(root) = child.refresh_root()
+        && let Err(error) = request_window_close(&child, &root)
+    {
+        cleanup_errors.push(format!("request legacy-route child close: {error}"));
     }
     let mut status = wait_child(&mut child, Duration::from_secs(5));
     if status.is_none() {
@@ -26623,7 +26624,7 @@ fn run_acceptance_direct_trigger(
     let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(3));
     capture_hotkey_attempt_evidence(
         child,
-        HotkeyCandidateStream::MainCandidate,
+        HotkeyCandidateStream::Main,
         trace_path,
         cursor,
         &observation,
@@ -26897,10 +26898,7 @@ fn run_hotkey_dual_profile_case(
         // Keep launch, readiness, gesture validation, and saved artifacts on
         // that exact path so H17 observes this isolated profile's trace.
         let alternate_trace = log_path.clone();
-        register_hotkey_candidate_stream(
-            &alternate_trace,
-            HotkeyCandidateStream::AlternateProfileCandidate,
-        );
+        register_hotkey_candidate_stream(&alternate_trace, HotkeyCandidateStream::Alternate);
         let mut alternate_child = NativeChild::launch(
             Path::new(executable),
             profile_path,
@@ -26964,10 +26962,10 @@ fn run_hotkey_dual_profile_case(
             });
         }
         let mut close_errors = Vec::new();
-        if let Ok(root) = alternate_child.refresh_root() {
-            if let Err(error) = request_window_close(&alternate_child, &root) {
-                close_errors.push(error);
-            }
+        if let Ok(root) = alternate_child.refresh_root()
+            && let Err(error) = request_window_close(&alternate_child, &root)
+        {
+            close_errors.push(error);
         }
         let mut alternate_status = wait_child(&mut alternate_child, Duration::from_secs(5));
         if alternate_status.is_none() {
@@ -27150,7 +27148,11 @@ fn format_hotkey_burst_case_evidence(
     Ok(format!(
         "evidence:v1; hotkey={}; burst={taps}; parity={}; initial_visible={}; final_visible={}; hook_pairs={}; configured_pairs={}; short_taps={}; visibility_edges={}; uninterrupted=true; inter_tap_ui_poll=0; inter_tap_refocus=0; preflight=registered_unregistered; runner_observer=exact_injected_pairs; observer_order={observer_order}; observer_keys={observer_keys}; sendinput_down={}; sendinput_up={}; invocation_count={}; setup_tap={}; input_desktop=Default; unique_invocation_ids={}; hold_ms={}..{}; released_gap_ms={}..{}; trace_fence={}; observer=exact_injected_chord_edges; per_gesture_correlation=release_short_tap_visibility; key_cleanup=verified; native_input_desktop={}",
         hotkey.as_str(),
-        if taps % 2 == 0 { "even" } else { "odd" },
+        if taps.is_multiple_of(2) {
+            "even"
+        } else {
+            "odd"
+        },
         facts.initial_visible,
         evidence.final_visible,
         facts.hook_pairs,
@@ -27476,7 +27478,7 @@ where
     let observation = observer.wait_for_chord_burst(&observed_vks, taps, Duration::from_secs(10));
     let input_group_id = capture_hotkey_attempt_evidence(
         child,
-        HotkeyCandidateStream::MainCandidate,
+        HotkeyCandidateStream::Main,
         trace_path,
         trace_cursor,
         &observation,
@@ -28031,7 +28033,7 @@ fn run_readable_hotkey_transitions(
         let observation = observer.wait_for_chord_burst(&keys, 1, Duration::from_secs(2));
         capture_hotkey_attempt_evidence(
             child,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             trace_path,
             cursor,
             &observation,
@@ -28520,7 +28522,7 @@ fn run_tap_case(
             require_visible(&root)
                 .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
             child
-                .focus_window(&root)
+                .focus_window(root)
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         } else {
             require_hidden(&root)
@@ -29360,7 +29362,7 @@ fn run_second_hold_case(
             .map(|observation| {
                 let sentinel = sentinel_observation.as_ref().map_or_else(
                     || "runner F24 sentinel observer unavailable".to_string(),
-                    |sentinel| format!("{}", sentinel.describe()),
+                    |sentinel| sentinel.describe().to_string(),
                 );
                 format!(
                     "{}; after-hold sentinel input=[{}] observer=[{}] production_pair={}",
@@ -31089,7 +31091,7 @@ fn run_skins_command_case(
                     "ROOT did not publish its semantic Edit query control in UIA".into(),
                 )
             })?;
-        let (selected_all, typed) = replace_text(child, &root, &edit, &uia, "radial skins")
+        let (selected_all, typed) = replace_text(child, &root, &edit, uia, "radial skins")
             .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         if !uia
             .wait_edit_value(&edit, "radial skins", Duration::from_secs(2))
@@ -31711,13 +31713,12 @@ fn expose_skin_glow_with(
             ));
         }
         let (anchor, controls) = refresh()?;
-        if let Some(prior) = previous {
-            if anchor.trace_sequence <= prior.trace_sequence
+        if let Some(prior) = previous
+            && (anchor.trace_sequence <= prior.trace_sequence
                 || anchor.frame_nr <= prior.frame_nr
-                || anchor.bounds[1] >= prior.bounds[1]
-            {
-                return Err(CaseFailure::new(FailureStage::DesignerReadiness, "owned outer Resources scrolling did not move the selected skin toward its nested style".into()));
-            }
+                || anchor.bounds[1] >= prior.bounds[1])
+        {
+            return Err(CaseFailure::new(FailureStage::DesignerReadiness, "owned outer Resources scrolling did not move the selected skin toward its nested style".into()));
         }
         match skin_glow_resources_step(&anchor, &controls, boundary)
             .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))?
@@ -34224,7 +34225,7 @@ fn run_radial_action_authoring_cases(
         } else {
             "original_menus_preserved=true".to_string()
         };
-        verify_no_leaf_side_effects(profile, trace_path, &side_effect_baseline)
+        verify_no_leaf_side_effects(profile, trace_path, side_effect_baseline)
             .map_err(|error| authoring_case_failure(FailureStage::DesignerMutation, error))?;
         reopened_entry = Some(reopened);
         let _ = (
@@ -34238,7 +34239,6 @@ fn run_radial_action_authoring_cases(
             row,
             reloaded_cell_click,
         );
-        let saved_glow = saved_glow;
         Ok(format!(
             "evidence:v1; typed_radial=decoded; authored_geometry=[8,10]; action_binding=true; cell_index={cell_index}; cell_identity={cell_identity}; action_index={target_action_index}; after_action=close_tree; {root_summary}; glow={saved_glow}; reopened=true; save_generation={}; reopened_generation={}",
             saved_draft.generation, reloaded_cell.generation
@@ -37097,15 +37097,15 @@ fn stop_child(
             ));
         }
         let mut close_errors = Vec::new();
-        if let Ok(root) = child.refresh_root() {
-            if let Err(error) = request_window_close(child, &root) {
-                close_errors.push(error);
-            }
+        if let Ok(root) = child.refresh_root()
+            && let Err(error) = request_window_close(child, &root)
+        {
+            close_errors.push(error);
         }
-        if let Some(designer) = child.designer() {
-            if let Err(error) = request_window_close(child, &designer) {
-                close_errors.push(error);
-            }
+        if let Some(designer) = child.designer()
+            && let Err(error) = request_window_close(child, &designer)
+        {
+            close_errors.push(error);
         }
         if let Some(status) = wait_child(child, Duration::from_secs(5)) {
             report.cleanup.child_closed_normally = status.success();
@@ -37413,7 +37413,8 @@ impl FailedHotkeyCollectionCounts {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum FailedHotkeyQualification {
-    UNQUALIFIED,
+    #[serde(rename = "UNQUALIFIED")]
+    Unqualified,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -37785,7 +37786,7 @@ fn capture_l08_first_failure(
     let windows = child.windows();
     let state = L08PrecleanupState::from_context(context);
     let mut diagnostic = L08FirstFailureDiagnostic {
-        qualification: FailedHotkeyQualification::UNQUALIFIED,
+        qualification: FailedHotkeyQualification::Unqualified,
         state,
         status: state.status(),
         case_id: "L08",
@@ -37878,7 +37879,7 @@ fn l08_cleanup_diagnostic_bytes(
     let mut verdict = CaseOperationDiagnostic::from_result(case_result);
     verdict.detail = bounded_text(&verdict.detail, 512);
     let receipt = serde_json::json!({
-        "qualification": FailedHotkeyQualification::UNQUALIFIED,
+        "qualification": FailedHotkeyQualification::Unqualified,
         "status": CaseStatus::Failed,
         "case_id": "L08",
         "phase": "after-note-cleanup",
@@ -37997,7 +37998,7 @@ fn append_case_with_case_diagnostics(
     };
     if let Some(error) = evidence_error {
         let mut diagnostic = FailedHotkeyDiagnostic {
-            qualification: FailedHotkeyQualification::UNQUALIFIED,
+            qualification: FailedHotkeyQualification::Unqualified,
             status: CaseStatus::Failed,
             case_id: id.to_owned(),
             run_id: bounded_text(&report.run_id, 256),
@@ -40130,14 +40131,13 @@ fn wait_completed_designer_semantic_with(
                 "following completed Designer frames did not settle current native placement before input".into()));
         }
         if let Some(current) = refresh()? {
-            if let Some(prior) = previous {
-                if current.frame > prior.frame
-                    && current.state == prior.state
-                    && current.client == prior.client
-                    && current.client_screen == prior.client_screen
-                {
-                    return Ok(current);
-                }
+            if let Some(prior) = previous
+                && current.frame > prior.frame
+                && current.state == prior.state
+                && current.client == prior.client
+                && current.client_screen == prior.client_screen
+            {
+                return Ok(current);
             }
             previous = Some(current);
         }
@@ -40718,9 +40718,10 @@ where
     let deadline = Instant::now() + timeout;
     loop {
         let events = events_after_cursor();
-        match visible_burst_trace_settled(&events, 0, VisibleBurstSettlePolicy::ActivateRoot)? {
-            Some(request_id) => return Ok(request_id),
-            None => {}
+        if let Some(request_id) =
+            visible_burst_trace_settled(&events, 0, VisibleBurstSettlePolicy::ActivateRoot)?
+        {
+            return Ok(request_id);
         }
         if Instant::now() >= deadline {
             return Err(format!(
@@ -47241,7 +47242,7 @@ mod tests {
         let capture = ActiveHotkeyEvidenceCapture {
             case_id: "H01".into(),
             segments: vec![HotkeyCaptureSegment {
-                stream: HotkeyCandidateStream::MainCandidate,
+                stream: HotkeyCandidateStream::Main,
                 path: trace_path,
                 cursor: 0,
                 end: None,
@@ -47256,7 +47257,7 @@ mod tests {
                 HotkeyRunnerEdgeEvidence {
                     runner_relative_us: 100_000,
                     input_group_id: 1,
-                    stream: HotkeyCandidateStream::MainCandidate,
+                    stream: HotkeyCandidateStream::Main,
                     purpose: HotkeyRunnerInputPurpose::LauncherChord,
                     virtual_key: 0x7A,
                     transition: HotkeyEdgeTransition::Press,
@@ -47266,7 +47267,7 @@ mod tests {
                 HotkeyRunnerEdgeEvidence {
                     runner_relative_us: 125_000,
                     input_group_id: 1,
-                    stream: HotkeyCandidateStream::MainCandidate,
+                    stream: HotkeyCandidateStream::Main,
                     purpose: HotkeyRunnerInputPurpose::LauncherChord,
                     virtual_key: 0x7A,
                     transition: HotkeyEdgeTransition::Release,
@@ -47328,7 +47329,7 @@ mod tests {
         set_hotkey_capture_purpose(HotkeyRunnerInputPurpose::MatrixBurst);
         capture_hotkey_runner_edges(
             &observation,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             1,
             HotkeyRunnerInputPurpose::MatrixBurst,
         );
@@ -47351,7 +47352,7 @@ mod tests {
     fn snapshot_wait_context() -> HotkeySnapshotWaitContext {
         HotkeySnapshotWaitContext {
             cursor: 0,
-            stream: HotkeyCandidateStream::MainCandidate,
+            stream: HotkeyCandidateStream::Main,
             input_group_id: 3,
             purpose: HotkeyRunnerInputPurpose::MatrixBurst,
             root_hwnd: 1001,
@@ -47377,7 +47378,7 @@ mod tests {
             .filter_map(|(index, line)| {
                 parse_hotkey_candidate_event(
                     line,
-                    HotkeyCandidateStream::MainCandidate,
+                    HotkeyCandidateStream::Main,
                     3,
                     HotkeyRunnerInputPurpose::MatrixBurst,
                     index + 1,
@@ -47410,7 +47411,7 @@ mod tests {
             events.push(
                 parse_hotkey_candidate_event(
                     line,
-                    HotkeyCandidateStream::MainCandidate,
+                    HotkeyCandidateStream::Main,
                     3,
                     HotkeyRunnerInputPurpose::MatrixBurst,
                     index + 7,
@@ -47667,7 +47668,7 @@ mod tests {
                 }
             }),
             ("wrong restore stream", |events| {
-                events[6].stream = HotkeyCandidateStream::AlternateProfileCandidate
+                events[6].stream = HotkeyCandidateStream::Alternate
             }),
             ("orphaned invocation", |events| {
                 for e in &mut events[6..] {
@@ -47823,7 +47824,7 @@ mod tests {
                             && event.kind == HotkeyTraceEventKind::VisibilityIntent
                     })
                     .unwrap()
-                    .stream = HotkeyCandidateStream::AlternateProfileCandidate
+                    .stream = HotkeyCandidateStream::Alternate
             },
             |events| {
                 events
@@ -48430,7 +48431,7 @@ mod tests {
         };
         let (_, first_group, _) = open_hotkey_capture_segment(
             &mut capture,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             &trace_path,
             0,
             HotkeyRunnerInputPurpose::LauncherChord,
@@ -48451,7 +48452,7 @@ mod tests {
         let second_cursor = trace_lines.len();
         let (_, second_group, _) = open_hotkey_capture_segment(
             &mut capture,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             &trace_path,
             second_cursor,
             HotkeyRunnerInputPurpose::MatrixBurst,
@@ -48544,27 +48545,24 @@ mod tests {
         };
         let main = open_hotkey_capture_segment(
             &mut capture,
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             &main_trace_path,
             0,
             HotkeyRunnerInputPurpose::LauncherChord,
             1001,
             202,
         );
-        assert_eq!(main.0, HotkeyCandidateStream::MainCandidate);
+        assert_eq!(main.0, HotkeyCandidateStream::Main);
         ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| *slot.borrow_mut() = Some(capture));
 
         assert!(complete_open_hotkey_capture_at_current_trace(&main_trace_path).is_ok());
-        register_hotkey_candidate_stream(
-            &legacy_trace_path,
-            HotkeyCandidateStream::LegacyFallbackCandidate,
-        );
+        register_hotkey_candidate_stream(&legacy_trace_path, HotkeyCandidateStream::Legacy);
         let legacy = ACTIVE_HOTKEY_EVIDENCE_CAPTURE.with(|slot| {
             let mut capture = slot.borrow_mut();
             let capture = capture.as_mut().unwrap();
             open_hotkey_capture_segment(
                 capture,
-                HotkeyCandidateStream::MainCandidate,
+                HotkeyCandidateStream::Main,
                 &legacy_trace_path,
                 0,
                 HotkeyRunnerInputPurpose::LauncherChord,
@@ -48572,7 +48570,7 @@ mod tests {
                 303,
             )
         });
-        assert_eq!(legacy.0, HotkeyCandidateStream::LegacyFallbackCandidate);
+        assert_eq!(legacy.0, HotkeyCandidateStream::Legacy);
         assert!(complete_open_hotkey_capture_at_current_trace(&legacy_trace_path).is_ok());
         legacy_profile.close().unwrap();
 
@@ -48582,12 +48580,12 @@ mod tests {
             main_trace.len() + legacy_trace.len()
         );
         assert!(packet.candidate_events.iter().any(|event| {
-            event.stream == HotkeyCandidateStream::MainCandidate
+            event.stream == HotkeyCandidateStream::Main
                 && event.hwnd == Some(1001)
                 && event.process_id == Some(202)
         }));
         assert!(packet.candidate_events.iter().any(|event| {
-            event.stream == HotkeyCandidateStream::LegacyFallbackCandidate
+            event.stream == HotkeyCandidateStream::Legacy
                 && event.hwnd == Some(2002)
                 && event.process_id == Some(303)
         }));
@@ -48615,7 +48613,7 @@ mod tests {
                 *slot.borrow_mut() = Some(ActiveHotkeyEvidenceCapture {
                     case_id: "H01".into(),
                     segments: vec![HotkeyCaptureSegment {
-                        stream: HotkeyCandidateStream::MainCandidate,
+                        stream: HotkeyCandidateStream::Main,
                         path: trace_path,
                         cursor: 0,
                         end: None,
@@ -48630,7 +48628,7 @@ mod tests {
                         HotkeyRunnerEdgeEvidence {
                             runner_relative_us: 100_000,
                             input_group_id: 1,
-                            stream: HotkeyCandidateStream::MainCandidate,
+                            stream: HotkeyCandidateStream::Main,
                             purpose: HotkeyRunnerInputPurpose::LauncherChord,
                             virtual_key: 0x7A,
                             transition: HotkeyEdgeTransition::Press,
@@ -48640,7 +48638,7 @@ mod tests {
                         HotkeyRunnerEdgeEvidence {
                             runner_relative_us: 125_000,
                             input_group_id: 1,
-                            stream: HotkeyCandidateStream::MainCandidate,
+                            stream: HotkeyCandidateStream::Main,
                             purpose: HotkeyRunnerInputPurpose::LauncherChord,
                             virtual_key: 0x7A,
                             transition: HotkeyEdgeTransition::Release,
@@ -48693,7 +48691,7 @@ mod tests {
     fn hotkey_candidate_parser_keeps_invocation_revision_and_boundary_identity() {
         let intent = parse_hotkey_candidate_event(
             "WARN target trace_event=\"desired_visibility\" elapsed_ms=27 visible=true revision=7 source=ToggleBatch invocation_id=5",
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             3,
             HotkeyRunnerInputPurpose::MatrixBurst,
             10,
@@ -48711,7 +48709,7 @@ mod tests {
 
         let command = parse_hotkey_candidate_event(
             "WARN target trace_event=\"root_command\" elapsed_ms=31 command=Show request_id=99 request_kind=None session_id=0 generation=99 terminal=false visibility_revision=7 invocation_id=5",
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             4,
             HotkeyRunnerInputPurpose::MatrixBurst,
             11,
@@ -48745,7 +48743,7 @@ mod tests {
 
         let snapshot = parse_hotkey_candidate_event(
             "WARN target trace_event=\"native_window_snapshot\" elapsed_ms=39 hwnd=7 process_id=42 left=100 top=200 right=900 bottom=700 visible=true minimized=false request_id=99 request_kind=Snapshot session_id=0 generation=99 terminal=true visibility_revision=7 invocation_id=5",
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             5,
             HotkeyRunnerInputPurpose::MatrixBurst,
             12,
@@ -48781,7 +48779,7 @@ mod tests {
 
         let snapshot_false = parse_hotkey_candidate_event(
             "WARN target trace_event=\"native_window_snapshot\" elapsed_ms=40 hwnd=7 process_id=42 left=100 top=200 right=900 bottom=700 visible=true minimized=false request_id=100 request_kind=Snapshot session_id=0 generation=100 terminal=false visibility_revision=7 invocation_id=5",
-            HotkeyCandidateStream::MainCandidate,
+            HotkeyCandidateStream::Main,
             5,
             HotkeyRunnerInputPurpose::MatrixBurst,
             14,
@@ -48811,7 +48809,7 @@ mod tests {
 
         let legacy = parse_hotkey_candidate_event(
             "WARN target trace_event=\"desired_visibility\" elapsed_ms=42 visible=false revision=8 source=LegacyTrigger invocation_id=none",
-            HotkeyCandidateStream::LegacyFallbackCandidate,
+            HotkeyCandidateStream::Legacy,
             6,
             HotkeyRunnerInputPurpose::LauncherChord,
             13,
@@ -48827,7 +48825,7 @@ mod tests {
 
     #[test]
     fn legacy_trigger_intent_pairs_with_its_configured_no_tap_gesture() {
-        let stream = HotkeyCandidateStream::LegacyFallbackCandidate;
+        let stream = HotkeyCandidateStream::Legacy;
         let purpose = HotkeyRunnerInputPurpose::LauncherChord;
         let lines = [
             "WARN target trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=17 modifiers_match=true provenance=ExternalInjected",
@@ -48876,7 +48874,7 @@ mod tests {
 
     #[test]
     fn h16_complex_legacy_capture_allows_untracked_modifier_bit_only_for_exact_chord() {
-        let stream = HotkeyCandidateStream::LegacyFallbackCandidate;
+        let stream = HotkeyCandidateStream::Legacy;
         let purpose = HotkeyRunnerInputPurpose::LauncherChord;
         let lines = [
             "WARN target trace_event=\"configured_primary\" elapsed_ms=10 transition=Press invocation_id=17 modifiers_match=false provenance=ExternalInjected",
@@ -49019,7 +49017,7 @@ mod tests {
 
     #[test]
     fn screen_draw_trace_builds_linked_follow_on_root_and_native_spans() {
-        let stream = HotkeyCandidateStream::MainCandidate;
+        let stream = HotkeyCandidateStream::Main;
         let purpose = HotkeyRunnerInputPurpose::LauncherChord;
         let lines = [
             "WARN target trace_event=\"desired_visibility\" elapsed_ms=10 visible=true revision=7 source=ToggleBatch invocation_id=5",
@@ -49326,7 +49324,7 @@ mod tests {
                     .map(|edge| HotkeyRunnerEdgeEvidence {
                         runner_relative_us: edge.at.duration_since(start).as_micros() as u64,
                         input_group_id: 2,
-                        stream: HotkeyCandidateStream::MainCandidate,
+                        stream: HotkeyCandidateStream::Main,
                         purpose: HotkeyRunnerInputPurpose::MatrixBurst,
                         virtual_key: edge.vk,
                         transition: if edge.down {
@@ -49616,7 +49614,7 @@ mod tests {
     #[test]
     fn h04_retry_artifact_is_typed_bounded_and_linked_into_r0_input() {
         let output = tempfile::tempdir().unwrap();
-        let stream = HotkeyCandidateStream::MainCandidate;
+        let stream = HotkeyCandidateStream::Main;
         let purpose = HotkeyRunnerInputPurpose::MatrixBurst;
         let group = 7;
         let edge = |time, virtual_key, transition, owned| HotkeyRunnerEdgeEvidence {

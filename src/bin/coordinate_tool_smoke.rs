@@ -178,7 +178,14 @@ mod smoke {
             let reader = thread::Builder::new()
                 .name("coordinate-smoke-output".into())
                 .spawn(move || {
-                    for line in BufReader::new(stdout).lines().flatten() {
+                    for line in BufReader::new(stdout).lines() {
+                        let line = match line {
+                            Ok(line) => line,
+                            Err(error) => {
+                                let _ = tx.send(format!("ERROR reading receiver stdout: {error}"));
+                                break;
+                            }
+                        };
                         if tx.send(line).is_err() {
                             break;
                         }
@@ -801,10 +808,10 @@ mod smoke {
     ) -> Result<CoordinateSample, String> {
         let deadline = Instant::now() + TIMEOUT;
         loop {
-            if let Ok(sample) = controller.sample_for_copy() {
-                if sample.desktop_point == point {
-                    return Ok(sample);
-                }
+            if let Ok(sample) = controller.sample_for_copy()
+                && sample.desktop_point == point
+            {
+                return Ok(sample);
             }
             if Instant::now() >= deadline {
                 return Err("timed out waiting for passive sample".into());

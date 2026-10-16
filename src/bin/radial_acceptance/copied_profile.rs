@@ -161,7 +161,7 @@ impl ProfileInventory {
     pub(super) fn file_hash(&self, file_name: &str) -> Option<&str> {
         self.entries.iter().find_map(|entry| {
             (entry.relative == Path::new(file_name))
-                .then(|| match &entry.kind {
+                .then_some(match &entry.kind {
                     EntryKind::File { sha256, .. } => Some(sha256.as_str()),
                     EntryKind::Directory => None,
                 })
@@ -336,7 +336,7 @@ pub(super) fn resolve_future_path(path: &Path) -> Result<PathBuf, String> {
     for part in tail.into_iter().rev() {
         resolved.push(part);
     }
-    Ok(normalized_absolute(&resolved)?)
+    normalized_absolute(&resolved)
 }
 
 fn normalized_absolute(path: &Path) -> Result<PathBuf, String> {
@@ -394,9 +394,9 @@ fn hash_entries(entries: &[Entry]) -> String {
         digest.update((path.len() as u64).to_le_bytes());
         digest.update(path.as_bytes());
         match &entry.kind {
-            EntryKind::Directory => digest.update([b'D']),
+            EntryKind::Directory => digest.update(*b"D"),
             EntryKind::File { bytes, sha256 } => {
-                digest.update([b'F']);
+                digest.update(*b"F");
                 digest.update(bytes.to_le_bytes());
                 digest.update(sha256.as_bytes());
             }
@@ -440,7 +440,7 @@ pub(super) fn canonical_profile_root(path: &Path) -> Result<PathBuf, String> {
         }
         let final_path = final_path_for_handle(&directory)
             .map_err(|error| format!("resolve opened supplied profile directory: {error}"))?;
-        return Ok(final_path);
+        Ok(final_path)
     }
     #[cfg(not(windows))]
     {
@@ -539,7 +539,7 @@ fn open_profile_directory(path: &Path) -> std::io::Result<File> {
 
 #[cfg(windows)]
 fn final_path_for_handle(file: &File) -> std::io::Result<PathBuf> {
-    let handle = HANDLE(file.as_raw_handle() as *mut std::ffi::c_void);
+    let handle = HANDLE(file.as_raw_handle());
     let mut buffer = vec![0_u16; 512];
     loop {
         let length = unsafe { GetFinalPathNameByHandleW(handle, &mut buffer, VOLUME_NAME_DOS) };

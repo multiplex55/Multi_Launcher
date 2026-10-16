@@ -8,8 +8,9 @@
 - Pre-existing user work: untracked root `clippy_output.txt`,731200bytes, SHA256 `345b82956b6e7f7a1533eea0f937c901d3371edff5bfc5af5230a52a2877f6e9`. Preserve; never stage/edit/delete.
 - Supplied log is UTF16. Inventory records542 distinct located owned diagnostics, including170collapsible_if,97too_many_arguments and17large_enum_variant. Vendor image summary9 is excluded; no vendor primary diagnostic blocks are in the supplied log. Inventory: ignored `target/clippy-cleanup-20261016/input-inventory.json`.
 - Cargo metadata: sole workspace member is `multi_launcher`; vendor paths are patched dependencies, not workspace members. Features: `unstable_grab`, `qa-framebuffer-capture`.
+- Current user budget: finish all Clippy edits before explicit lint verification; no per-change Nextest/Clippy/build loops and no substantial lint-driven refactors. Original full Nextest request is one final run. Earlier handoffs below are historical where they conflict with this revision.
 - Required final gates: `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --all-features -- -D warnings`; `cargo nextest run` (full suite explicitly authorized for this task). Adjust only for demonstrated repository configuration constraints and document why.
-- No pushes, history rewrites, discarded user work, blanket lint suppressions, or unrelated changes. Narrow documented exemptions only if demonstrably necessary to preserve an established API/performance contract.
+- No pushes, history rewrites, discarded user work, blanket lint suppressions, or unrelated changes. Narrow documented exemptions only if demonstrably necessary to preserve an established API/performance/native-evidence contract under the user no-substantial-refactor constraint.
 - Existing Planner/Implementer/Reviewer reused; one source writer at a time. Root owns this ledger, Git checkpoints and final reporting. Earlier UI-polish original-recording blocker is separate and remains unresolved.
 
 ## Execution plan
@@ -29,7 +30,8 @@
 | CL3-C2 | implemented; final gates pending | Radial Designer/editor idioms: 45 sites / 6 files |
 | CL3-D1 | implemented; final gates pending | Remaining presentation/compiler idioms: 52 sites / 26 files |
 | CL3-D2 | implemented; final gates pending | Remaining routing/plugins/integration idioms: 29 sites / 11 files |
-| CL4 | pending | Acceptance/smoke idioms followed by argument ownership at existing native-click, trace-observation and suite-run boundaries |
+| CL4-A | implemented; final gates pending | Revised minimal binary local idioms: 83 sites; no context migration |
+| CL4-B | pending | Revised per-function argument exceptions + two small Pin layouts + semantic tuple alias/dead forwarding removal |
 | CL-QA | pending | Final formatting, strict all-workspace/all-target/all-feature Clippy, full Nextest, cumulative review and warning reconciliation |
 
 ### CL1-A handoff
@@ -147,3 +149,7 @@ CL3-D1 commit: `e5a3196b`. LastproductionpacketCL3-D2 11-file29-site routing/plu
 
 CL3-D2 source review: Root inspected main native-event/expression, plugin filter and default diffs/scope; Reviewer no concrete findings. Mutually exclusive platform tails preserve values, native calls retained in order, native timer mutex guard spans same state body, activation/visibility eligibility precedes same attach/show/reconcile side effects, ActionGroup default remains Other. Filter-map rewrite retains order and formats only unavailable entries. Final source formatting result pending; no Cargo check/lint/tests per user.
 CL3-D2 fmt/diff exit0; 11sourcefiles29sitesimplemented, timerhandlerindentationonlyfromcollapsedouterguards. Commit `refactor(runtime): [CL3-D2] simplify routing and plugin idioms`; allproductionpacketswritten, finalgatespending.
+
+CL3-D2 commit: `262542d2`. CL4-A83localbinarysites authorized; all97argexceptions/Pinlayouts/alias/deadforwardingheldforB. Currentminimalartifactoverrideshistorical5contextmigrations. NoCargo validation beforeallcleanup.
+
+CL4-A implemented/reviewed: 83 original local sites / 11 actual binary/shared-smoke source files. Root inspected scope/reader/serde/native userdata/profile diffs; Reviewer no substantive findings. Stream tags main/alternate/legacy and explicit UNQUALIFIED remain wire compatible. Reader intentionally emits one existing-protocol ERROR on first read failure then terminates; success, EOF/channel close/reader join/child ownership unchanged, no new subsystem. create_scene_window borrows same stable Box-allocated RefCell pointer; no moved/cloned App. Evidence ordering, clocks and precleanup semantics preserved. Actual shared paths are src/bin/smoke/*.rs. fmt/diff pass; no check/lint/test/build. Commit `refactor(tools): [CL4-A] simplify acceptance and smoke idioms`; final acceptance pending.
