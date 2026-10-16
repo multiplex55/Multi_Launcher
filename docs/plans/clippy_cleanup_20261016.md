@@ -22,17 +22,17 @@
 | CL2-A | complete | Preserve eight exported enum representations and exact authoring reply error contract with individually documented necessary exceptions; additive Default/is_empty |
 | CL2-B | complete | Private GUI intent/error payload ownership |
 | CL2-C1 | rolled_back | Native ownership migration canceled; only own uncommitted edits restored |
-| CL2-C | implemented; final gates pending | Minimal hot-path documented exceptions plus deferred coordinate render idiom; final gates deferred |
+| CL2-C | lint/review verified | Minimal hot-path documented exceptions plus deferred coordinate render idiom; final gates deferred |
 | CL2-C2 | superseded | Borrowed trace migration canceled by user no-substantial-refactor constraint |
-| CL3-A | implemented; final gates pending | MkMacro domain/runtime idioms: 29 sites / 14 files |
-| CL3-B | implemented; final gates pending | MkMacro GUI/editor/overlay idioms: 63 sites / 19 files |
-| CL3-C1 | implemented; final gates pending | Radial runtime/resources/evidence idioms: 49 sites / 12 files |
-| CL3-C2 | implemented; final gates pending | Radial Designer/editor idioms: 45 sites / 6 files |
-| CL3-D1 | implemented; final gates pending | Remaining presentation/compiler idioms: 52 sites / 26 files |
-| CL3-D2 | implemented; final gates pending | Remaining routing/plugins/integration idioms: 29 sites / 11 files |
-| CL4-A | implemented; final gates pending | Revised minimal binary local idioms: 83 sites; no context migration |
-| CL4-B | implemented; final gates pending | Revised per-function argument exceptions + two small Pin layouts + semantic tuple alias/dead forwarding removal |
-| CL-QA | in_progress | Final formatting, strict all-workspace/all-target/all-feature Clippy, full Nextest, cumulative review and warning reconciliation |
+| CL3-A | lint/review verified | MkMacro domain/runtime idioms: 29 sites / 14 files |
+| CL3-B | lint/review verified | MkMacro GUI/editor/overlay idioms: 63 sites / 19 files |
+| CL3-C1 | lint/review verified | Radial runtime/resources/evidence idioms: 49 sites / 12 files |
+| CL3-C2 | lint/review verified | Radial Designer/editor idioms: 45 sites / 6 files |
+| CL3-D1 | lint/review verified | Remaining presentation/compiler idioms: 52 sites / 26 files |
+| CL3-D2 | lint/review verified | Remaining routing/plugins/integration idioms: 29 sites / 11 files |
+| CL4-A | lint/review verified | Revised minimal binary local idioms: 83 sites; no context migration |
+| CL4-B | lint/review verified | Revised per-function argument exceptions + two small Pin layouts + semantic tuple alias/dead forwarding removal |
+| CL-QA | lint verified; existing test gate failure | Format and strict Clippy pass; full Nextest stopped on unchanged regex layout/assertion mismatch (details below) |
 
 ### CL1-A handoff
 
@@ -205,3 +205,48 @@ CL-QA-F7 frozen; Root full threefilediff accepted. Observer module moved byte-eq
 F7commit5109abf0. Strictpass8exited101 onlyfiveinduced E0433fixturepaths: mainbinary has no crate::radial, newtypes mustrefer exportedlibrary multi_launcher::radial::model::RadialFeatureSettings. Rootreviewmissedpath, F8exactfivepathcorrectionauthorized. Vendor11unchanged; no newotherdiagnostics. fmt/diffonly; strictpass9next.
 
 F8frozen; Rootexactfivepathdiffaccepted publicRadialFeatureSettingsexportverifiedmodel76. fmt/diffpass nootheredits. Strictpass9aftercommit.
+
+F8commit71f39e6c. FINAL STRICT CLIPPY pass9: exact cargo clippy --workspace --all-targets --all-features -- -D warnings EXIT0 (2.27s). Inventory0owned/11vendor (epaint1,egui1,image9), explicitlyexcludedunchanged. Root final cargo fmt --all -- --check EXIT0 evidencefinal-fmt-verified.txt. Single final cargo nextest run nowactive outputfinal-nextest.txt / exitfileoncompletion; no per-changeNextestresumed. Reviewer boundedactualF6/F7/F8finaldiffrequested, no additionalCargo.
+
+FinalReviewer actualF6/F7/F8diff: no substantive findings, sourceaccepted; noCargo byReviewer. Root cumulative sourceattributeaudit target/final-source.diff confirms105too_many_arguments+11large_enum_variant+1result_large_err=117 newexactitemexceptions, ZEROnewblanketallow. SettingsDefault radial owner verifiedsameRadialFeatureSettingsDefault(model1030). UserlogSHAunchanged; vendor/Cargo.toml/Cargo.lockdiffempty. FullNextestcompletionpending, nofurtherSourceeditsplanned.
+
+## Checkpoint commits
+
+| Commit | Checkpoint |
+|---|---|
+| 6e1224ee | refactor(core): [CL1-A] migrate deprecated atomic updates |
+| f94b5700 | refactor(core): [CL1-B] clean native and persistence idioms |
+| 3db4078b | refactor(api): [CL2-A] preserve exported payload contracts |
+| 49605306 | refactor(gui): [CL2-B] right-size private intent payloads |
+| 110072c4 | chore(clippy): [CL2-C] document hot inline payload constraints |
+| e2ba87da | refactor(mkmacro): [CL3-A] simplify domain and recorder idioms |
+| c605ffaa | refactor(mkmacro): [CL3-B] simplify editor and overlay idioms |
+| d124d7ef | refactor(radial): [CL3-C1] simplify runtime and resource idioms |
+| 621a1b48 | refactor(radial): [CL3-C2] simplify Designer editor idioms |
+| e5a3196b | refactor(gui): [CL3-D1] clean presentation and test receipt idioms |
+| 262542d2 | refactor(runtime): [CL3-D2] simplify routing and plugin idioms |
+| 24c62b8d | refactor(tools): [CL4-A] simplify acceptance and smoke idioms |
+| fa6878df | chore(acceptance): [CL4-B] document explicit tool contracts |
+| d5c96eee | fix(clippy): [CL-QA-F1] resolve final target diagnostics |
+| 5d46559d | refactor(clippy): [CL-QA-F2-A] simplify domain and fixture idioms |
+| b8ba2f6c | refactor(clippy): [CL-QA-F2-B] clean GUI target diagnostics |
+| 2835aded | refactor(clippy): [CL-QA-F2-C] simplify editor and render fixtures |
+| 547dd73b | fix(clippy): [CL-QA-F3] preserve target-specific borrowing |
+| ce3cda18 | fix(clippy): [CL-QA-F4] clean integration and binary targets |
+| c3ae0589 | fix(clippy): [CL-QA-F5] align fixture and benchmark idioms |
+| 29c67872 | refactor(clippy): [CL-QA-F6] simplify acceptance test fixtures |
+| 5109abf0 | refactor(clippy): [CL-QA-F7] clean main runtime test setup |
+| 71f39e6c | fix(tests): [CL-QA-F8] use library radial settings paths |
+
+## Final results and remaining validation blocker
+
+- Source cleanup is committed through `71f39e6c`; all owned Clippy diagnostics are resolved or covered by the 117 individually documented necessary structural exceptions. No substantial context migration, vendor change, blanket lint suppression, settings-format change, or push.
+- `cargo fmt --all -- --check`: PASS, exit 0 (`final-fmt-verified.txt`).
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: PASS, exit 0 (`final-clippy-9.txt`); parsed 0 owned diagnostics, 11 excluded vendor warnings (epaint 1, egui 1, image 9).
+- `cargo nextest run`: exit 100, run `1ad57387-c505-4018-a7a0-b135d10d09ea`; test build succeeded in 39m 25s. Execution 70.595s: 2,286 passed, 1 failed, 45 skipped; 4,318 of 6,605 tests not run due to default fail-fast. Evidence `target/clippy-cleanup-20261016/final-nextest.txt`.
+- Failing test: `gui::regex_tester_dialog::tests::regex_tester_inline_validation_clears_while_pending_and_after_fixing`, assertion `layout.editor.height() > 25.0`, `src/gui/regex_tester_dialog.rs:2747`.
+- Exact targeted failure investigation only: `cargo nextest run -p multi_launcher --lib -E 'test(=gui::regex_tester_dialog::tests::regex_tester_inline_validation_clears_while_pending_and_after_fixing)'`: exit 100, same assertion, run `30a776ba-bfc2-48f1-a190-6d65765f6dc2`; 1 failed / 5,371 skipped. Evidence `final-nextest-failure-targeted.txt`. This was diagnosis after the single full run, not per-change testing.
+- Reviewer compared the failing test, CoreLayout/header/body path and defaults against baseline `4b5f96b`: unchanged. At the default 360x240 panel, available height 224 minus header 100, validation 44.8, status 24 and gaps leaves editor about 22.512, below the existing >25 assertion. Cleanup changes in this owner only collapse selected-match scrolling (false in this test) and copy an unrelated test tuple. This is static baseline-causality evidence plus an exact current rerun, not a claim that an older checkout was executed.
+- Source review found no substantive regressions. The unrelated existing layout/assertion mismatch remains a full-suite validation blocker; no assertion was weakened and no unrelated layout fix was made. Next step for a fully green suite is a separately scoped resolution of that mismatch; the 4,318 unrun tests remain unverified.
+- Generated root clipboard_modifiers.json was baseline absent and matched the exact known test-fixture SHA256/3666 bytes. After all Cargo processes were terminal, backed up to ignored `target/clippy-cleanup-20261016/final-generated-clipboard_modifiers.json` and removed only that duplicate. Original user clippy_output.txt is retained byte-for-byte.
+- Earlier UI-polish recording blocker remains separate; this cleanup does not mark that goal complete.
