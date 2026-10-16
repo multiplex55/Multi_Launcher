@@ -109,8 +109,9 @@ pub struct ImageAuthoringCompletion {
     pub result: Result<ImageImportResult, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum ImageAuthoringJob {
+    #[default]
     Idle,
     Importing {
         token: DraftToken,
@@ -119,12 +120,6 @@ pub enum ImageAuthoringJob {
         source: PathBuf,
         completion: Receiver<ImageAuthoringCompletion>,
     },
-}
-
-impl Default for ImageAuthoringJob {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 impl ImageAuthoringJob {

@@ -704,26 +704,22 @@ impl RectangleOverlay for VisualOverlayRectangleAdapter {
             match event {
                 VisualOverlayEvent::RectangleConfirmed {
                     operation_id, rect, ..
-                } if operation_id == expected => {
-                    return SelectionEvent::Confirmed { operation_id, rect };
-                }
+                } if operation_id == expected => SelectionEvent::Confirmed { operation_id, rect },
                 VisualOverlayEvent::Cancelled { operation_id } if operation_id == expected => {
-                    return SelectionEvent::Cancelled { operation_id };
+                    SelectionEvent::Cancelled { operation_id }
                 }
                 VisualOverlayEvent::Error {
                     operation_id,
                     error,
-                } if operation_id == expected => {
-                    return SelectionEvent::Failed {
-                        operation_id,
-                        message: error.to_string(),
-                    };
-                }
+                } if operation_id == expected => SelectionEvent::Failed {
+                    operation_id,
+                    message: error.to_string(),
+                },
                 VisualOverlayEvent::Expired { operation_id } if operation_id == expected => {
-                    return SelectionEvent::Failed {
+                    SelectionEvent::Failed {
                         operation_id,
                         message: "interactive rectangle picker expired unexpectedly".into(),
-                    };
+                    }
                 }
                 _ => SelectionEvent::Pending,
             }

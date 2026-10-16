@@ -24,19 +24,14 @@ pub(crate) struct ImageSearchTestCompletion {
     pub result: Result<Option<ImageSearchMatch>, ExecutionDiagnostic>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) enum ImageSearchTestJob {
+    #[default]
     Idle,
     Testing {
         target: ImageSearchTestTarget,
         completion: Receiver<ImageSearchTestCompletion>,
     },
-}
-
-impl Default for ImageSearchTestJob {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 impl ImageSearchTestJob {

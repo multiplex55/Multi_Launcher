@@ -449,7 +449,7 @@ impl OverlayRenderer for ServiceTestRenderer {
 
 impl NativeVisualOverlayService {
     pub fn start() -> Result<Self, std::io::Error> {
-        Self::start_with(|| VisualOverlayController::default())
+        Self::start_with(VisualOverlayController::default)
     }
 
     pub(crate) fn start_with<F>(factory: F) -> Result<Self, std::io::Error>
@@ -622,13 +622,13 @@ impl NativeVisualOverlayService {
     /// harmless; a handle is recorded as joined exactly once.
     pub fn cleanup_finished(&mut self) -> Vec<VisualOverlayEvent> {
         let events: Vec<_> = self.events.try_iter().collect();
-        if self.is_finished() {
-            if let Some(worker) = self.worker.take() {
-                let _ = worker.join();
-                #[cfg(test)]
-                if let Some(observer) = &self.observer {
-                    observer.joins.fetch_add(1, Ordering::SeqCst);
-                }
+        if self.is_finished()
+            && let Some(worker) = self.worker.take()
+        {
+            let _ = worker.join();
+            #[cfg(test)]
+            if let Some(observer) = &self.observer {
+                observer.joins.fetch_add(1, Ordering::SeqCst);
             }
         }
         events
@@ -1512,15 +1512,13 @@ impl VisualOverlayController {
             }
             _ => false,
         };
-        if expired {
-            if let Some(id) = self.operation_id.take() {
-                tracing::debug!(operation_id = id, state = ?self.state, now = ?self.clock.now(),
-                    "passive visual overlay expired; closing operation");
-                self.renderer.close();
-                self.state = VisualOverlayState::Idle;
-                self.events
-                    .push_back(VisualOverlayEvent::Expired { operation_id: id });
-            }
+        if expired && let Some(id) = self.operation_id.take() {
+            tracing::debug!(operation_id = id, state = ?self.state, now = ?self.clock.now(),
+                "passive visual overlay expired; closing operation");
+            self.renderer.close();
+            self.state = VisualOverlayState::Idle;
+            self.events
+                .push_back(VisualOverlayEvent::Expired { operation_id: id });
         }
     }
     /// Drains semantic events without polling native resources.
@@ -1679,8 +1677,8 @@ impl VisualOverlayController {
             }
             _ => return,
         };
-        if let Some(id) = self.operation_id {
-            if let Err(error) = self.renderer.repaint(
+        if let Some(id) = self.operation_id
+            && let Err(error) = self.renderer.repaint(
                 id,
                 &OverlayVisual::RectanglePicker {
                     virtual_desktop,
@@ -1690,17 +1688,17 @@ impl VisualOverlayController {
                         pointer,
                     },
                 },
-            ) {
-                self.renderer.close();
-                self.operation_id = None;
-                self.state = VisualOverlayState::Idle;
-                self.virtual_desktop = None;
-                self.picker_pointer = None;
-                self.events.push_back(VisualOverlayEvent::Error {
-                    operation_id: id,
-                    error,
-                });
-            }
+            )
+        {
+            self.renderer.close();
+            self.operation_id = None;
+            self.state = VisualOverlayState::Idle;
+            self.virtual_desktop = None;
+            self.picker_pointer = None;
+            self.events.push_back(VisualOverlayEvent::Error {
+                operation_id: id,
+                error,
+            });
         }
     }
     fn confirm_picker(&mut self) {

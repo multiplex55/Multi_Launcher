@@ -276,7 +276,7 @@ fn inspect_cache(
     }
     let due = state
         .last_validation
-        .map_or(true, |last| now.duration_since(last) >= VALIDATE_INTERVAL);
+        .is_none_or(|last| now.duration_since(last) >= VALIDATE_INTERVAL);
     if !state.pending && due {
         state.pending = true;
         state.last_validation = Some(now);

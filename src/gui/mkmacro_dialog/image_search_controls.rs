@@ -471,16 +471,16 @@ pub fn payload_to_condition(p: &MkImagePayload) -> MkImageSearchCondition {
         image: p.image.clone(),
         region: p.region.clone(),
         tolerance: p.tolerance,
-        alpha: p.alpha.clone(),
-        return_point: p.return_point.clone(),
+        alpha: p.alpha,
+        return_point: p.return_point,
     }
 }
 pub fn apply_condition_to_payload(c: &MkImageSearchCondition, p: &mut MkImagePayload) {
     p.image = c.image.clone();
     p.region = c.region.clone();
     p.tolerance = c.tolerance;
-    p.alpha = c.alpha.clone();
-    p.return_point = c.return_point.clone();
+    p.alpha = c.alpha;
+    p.return_point = c.return_point;
 }
 
 #[cfg(test)]

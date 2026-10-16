@@ -1242,10 +1242,10 @@ pub(super) fn show_with_layout(
             }
         }
     }
-    if !matches!(command, Some(Command::ToggleBreakpoint(_))) {
-        if let Some((i, ctrl, shift)) = clicked {
-            d.selection.click(&rows, i, ctrl, shift);
-        }
+    if !matches!(command, Some(Command::ToggleBreakpoint(_)))
+        && let Some((i, ctrl, shift)) = clicked
+    {
+        d.selection.click(&rows, i, ctrl, shift);
     }
     if !breakpoint_toggles.is_empty() {
         let mut toggled = false;
@@ -1438,10 +1438,10 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
         }
         return;
     }
-    if let Command::DeleteBlock(id) | Command::DeleteRow(id) | Command::UnwrapBlock(id) = c {
-        if !d.selection.ids.contains(&id) {
-            d.selection.replace([id]);
-        }
+    if let Command::DeleteBlock(id) | Command::DeleteRow(id) | Command::UnwrapBlock(id) = c
+        && !d.selection.ids.contains(&id)
+    {
+        d.selection.replace([id]);
     }
     if let Command::Edit(id) = c {
         let edit_id = d.selected_macro().and_then(|m| {
@@ -1582,16 +1582,16 @@ fn apply_command(d: &mut MkMacroDialog, c: Command, breakpoint_locked: bool) {
         return;
     }
     crate::mkmacro::repair_ids(&mut d.draft);
-    if let Some(s) = new_selection {
-        if let Some(m) = d.selected_macro() {
-            let rows = m.steps.iter().map(|s| s.id).collect::<Vec<_>>();
-            if matches!(c, Command::Up | Command::Down) {
-                d.selection.ids = s;
-                d.selection.reconcile(&rows);
-            } else {
-                d.selection
-                    .replace(rows.into_iter().filter(|id| s.contains(id)));
-            }
+    if let Some(s) = new_selection
+        && let Some(m) = d.selected_macro()
+    {
+        let rows = m.steps.iter().map(|s| s.id).collect::<Vec<_>>();
+        if matches!(c, Command::Up | Command::Down) {
+            d.selection.ids = s;
+            d.selection.reconcile(&rows);
+        } else {
+            d.selection
+                .replace(rows.into_iter().filter(|id| s.contains(id)));
         }
     }
     if movement_before

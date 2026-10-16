@@ -1193,14 +1193,14 @@ impl ActionEditorState {
             );
         }
         self.pending_visual_region = None;
-        if let Some(workflow) = &mut self.visual_capture {
-            if workflow.active() {
-                workflow.cancel();
-                while workflow.active() {
-                    workflow.tick();
-                }
-                let _ = workflow.take_completed();
+        if let Some(workflow) = &mut self.visual_capture
+            && workflow.active()
+        {
+            workflow.cancel();
+            while workflow.active() {
+                workflow.tick();
             }
+            let _ = workflow.take_completed();
         }
         if self.image_authoring.is_importing() || self.position_capture.is_some() {
             anyhow::bail!("an authoring operation is already active");
@@ -2114,15 +2114,12 @@ impl ActionEditorState {
             self.capture_message = Some("The macro being edited no longer exists.".into());
             return None;
         }
-        let intent = self
-            .insertion
-            .clone()
-            .unwrap_or_else(|| match self.editing_id {
-                Some(step_id) => InsertionIntent::EditExisting { step_id },
-                None => InsertionIntent::Plain {
-                    after_step_id: None,
-                },
-            });
+        let intent = self.insertion.clone().unwrap_or(match self.editing_id {
+            Some(step_id) => InsertionIntent::EditExisting { step_id },
+            None => InsertionIntent::Plain {
+                after_step_id: None,
+            },
+        });
         if let InsertionIntent::EditExisting { step_id } = intent {
             let current = dialog
                 .draft
@@ -2165,16 +2162,14 @@ impl ActionEditorState {
         if matches!(
             self.draft.as_ref().map(|s| &s.action),
             Some(MkAction::CallMacro(_) | MkAction::Return(_))
+        ) && let Some(message) = reusable_apply_error(
+            &dialog.draft,
+            owner_id,
+            self.draft.as_ref().unwrap(),
+            &intent,
         ) {
-            if let Some(message) = reusable_apply_error(
-                &dialog.draft,
-                owner_id,
-                self.draft.as_ref().unwrap(),
-                &intent,
-            ) {
-                self.capture_message = Some(message);
-                return None;
-            }
+            self.capture_message = Some(message);
+            return None;
         }
         self.image_authoring = Default::default();
         self.pending_image_import = None;
@@ -2193,7 +2188,7 @@ impl ActionEditorState {
         let mut step = self.draft.take()?;
         normalize_optional_outputs(&mut step.action);
         let edit = self.editing_id.take();
-        let intent = self.insertion.take().unwrap_or_else(|| match edit {
+        let intent = self.insertion.take().unwrap_or(match edit {
             Some(step_id) => InsertionIntent::EditExisting { step_id },
             None => InsertionIntent::Plain {
                 after_step_id: None,
@@ -3091,7 +3086,7 @@ fn target_ui_with_variables(
             }
         });
     if next != kind {
-        change_target_kind_for_kind(target, next, &assets);
+        change_target_kind_for_kind(target, next, assets);
     }
     match target {
         MkCoordinateTarget::CurrentPosition => {}
@@ -3164,12 +3159,12 @@ fn target_ui_with_variables(
                 );
             } else {
                 egui::ComboBox::from_label("Result from")
-                    .selected_text(image_asset_label(image, &assets))
+                    .selected_text(image_asset_label(image, assets))
                     .show_ui(ui, |ui| {
                         for asset in assets {
-                            let label = image_asset_label(&asset, &[]);
+                            let label = image_asset_label(asset, &[]);
                             if ui.selectable_label(*image == *asset, label).clicked() {
-                                select_image_asset(image, &asset);
+                                select_image_asset(image, asset);
                             }
                         }
                     });
@@ -3970,14 +3965,12 @@ fn action_ui(
                 ui.text_edit_singleline(name);
             });
             value_ui(ui, value);
-            if matches!(value, MkValue::Point(_)) {
-                if ui
+            if matches!(value, MkValue::Point(_))
+                && ui
                     .add_enabled(!point_pick_active, egui::Button::new("Pick Position"))
                     .clicked()
-                {
-                    point_pick =
-                        Some(super::visual_overlay::VisualPointDestination::SetVariablePoint);
-                }
+            {
+                point_pick = Some(super::visual_overlay::VisualPointDestination::SetVariablePoint);
             }
         }
         MkAction::UnsetVariable { name } => {
@@ -4312,10 +4305,10 @@ fn action_ui(
             ui.horizontal(|ui| {
                 ui.label("Color");
                 let response = ui.text_edit_singleline(color);
-                if response.lost_focus() {
-                    if let Ok(rgb) = crate::mkmacro::screen::parse_rgb(color) {
-                        *color = crate::mkmacro::screen::format_rgb(rgb);
-                    }
+                if response.lost_focus()
+                    && let Ok(rgb) = crate::mkmacro::screen::parse_rgb(color)
+                {
+                    *color = crate::mkmacro::screen::format_rgb(rgb);
                 }
                 match crate::mkmacro::screen::parse_rgb(color) {
                     Ok(rgb) => {
@@ -5258,10 +5251,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                             Err(error) => state.capture_message = Some(error),
                         }
                     }
-                    if ui.button("Cancel").clicked() {
-                        if let Some(workflow) = state.visual_capture.as_mut() {
-                            workflow.cancel();
-                        }
+                    if ui.button("Cancel").clicked()
+                        && let Some(workflow) = state.visual_capture.as_mut()
+                    {
+                        workflow.cancel();
                     }
                 });
                 if let Some(message) = &state.capture_message {
@@ -5542,12 +5535,11 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                         );
                     }
                 });
-                if let Some(ocr_region) = direct_ocr_region(&step.action) {
-                    if activation_matcher(ocr_region).is_some()
-                        && ui.button("Add Activate Window Before").clicked()
-                    {
-                        state.add_activate_before = true;
-                    }
+                if let Some(ocr_region) = direct_ocr_region(&step.action)
+                    && activation_matcher(ocr_region).is_some()
+                    && ui.button("Add Activate Window Before").clicked()
+                {
+                    state.add_activate_before = true;
                 }
             }
             if ocr_editor_open {
@@ -5804,10 +5796,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         d.action_editor.request_ocr_languages();
         ctx.request_repaint();
     }
-    if let Some(request) = ocr_test_request {
-        if d.action_editor.start_ocr_test(request) {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
+    if let Some(request) = ocr_test_request
+        && d.action_editor.start_ocr_test(request)
+    {
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
     if show_ocr_debug_overlay {
         d.action_editor.preview_ocr_debug_overlay();
@@ -5831,10 +5823,9 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 if let Some(test) = d
                     .action_editor
                     .ocr_condition_test_request(macro_id, &request.path)
+                    && d.action_editor.start_ocr_test(test)
                 {
-                    if d.action_editor.start_ocr_test(test) {
-                        ctx.request_repaint_after(std::time::Duration::from_millis(50));
-                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(50));
                 }
             }
             ConditionOcrOperation::PreviewRegion => {
@@ -6116,10 +6107,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
             }
         }
     }
-    if let Some(slot) = pick_request {
-        if let Err(error) = d.action_editor.start_position_capture(slot) {
-            d.action_editor.capture_message = Some(error);
-        }
+    if let Some(slot) = pick_request
+        && let Err(error) = d.action_editor.start_position_capture(slot)
+    {
+        d.action_editor.capture_message = Some(error);
     }
     if let Some(keys) = captured {
         d.action_editor.set_captured_keys(keys);
@@ -6150,10 +6141,10 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         if state.review_editing_id().is_some() {
             match state.take_review_edited_step() {
                 Some((review_id, step)) => {
-                    if let Some(review) = &mut d.recording_review {
-                        if let Err(error) = review.replace_step(review_id, &step) {
-                            review.message = Some(error.to_string());
-                        }
+                    if let Some(review) = &mut d.recording_review
+                        && let Err(error) = review.replace_step(review_id, &step)
+                    {
+                        review.message = Some(error.to_string());
                     }
                 }
                 None => {
@@ -6187,10 +6178,8 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
         });
         let anchor = state.apply(d);
         if let Some(anchor) = anchor {
-            if activate {
-                if let Some(region) = activation_region.as_ref() {
-                    insert_activate_window_before_region(d, anchor, region);
-                }
+            if activate && let Some(region) = activation_region.as_ref() {
+                insert_activate_window_before_region(d, anchor, region);
             }
             if smooth && let Some(payload) = shortcut_payload.as_ref() {
                 insert_smooth_move_after(d, anchor, payload);

@@ -510,20 +510,20 @@ pub(super) fn show(ctx: &egui::Context, d: &mut MkMacroDialog) {
                 close = true;
             }
         });
-    if let Some(current) = apply {
-        if let Some(preview) = &state.preview {
-            match apply_preview(d, preview, current) {
-                Ok(()) => {
-                    if current {
-                        let edit = &preview.plan.edits[preview.current];
-                        target = Some((preview.plan.macro_id, edit.step_id));
-                    }
-                    state.preview = None;
-                    state.error = None;
-                    close = true;
+    if let Some(current) = apply
+        && let Some(preview) = &state.preview
+    {
+        match apply_preview(d, preview, current) {
+            Ok(()) => {
+                if current {
+                    let edit = &preview.plan.edits[preview.current];
+                    target = Some((preview.plan.macro_id, edit.step_id));
                 }
-                Err(error) => state.error = Some(error),
+                state.preview = None;
+                state.error = None;
+                close = true;
             }
+            Err(error) => state.error = Some(error),
         }
     }
     if close || !window_open {

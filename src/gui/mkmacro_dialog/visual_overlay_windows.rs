@@ -87,6 +87,7 @@ struct OverlayWindow {
     created_at: Instant,
 }
 
+#[derive(Default)]
 pub(super) struct NativeOverlayRenderer {
     // Full-monitor, layered picker surfaces only.
     windows: Vec<OverlayWindow>,
@@ -103,22 +104,6 @@ pub(super) struct NativeOverlayRenderer {
     return_down: bool,
 }
 unsafe impl Send for NativeOverlayRenderer {}
-impl Default for NativeOverlayRenderer {
-    fn default() -> Self {
-        Self {
-            windows: vec![],
-            input_shields: vec![],
-            passive_edges: vec![],
-            passive_badges: vec![],
-            tooltip: None,
-            operation_id: None,
-            visual: None,
-            left_down: false,
-            escape_down: false,
-            return_down: false,
-        }
-    }
-}
 
 fn platform(message: impl Into<String>) -> VisualOverlayError {
     VisualOverlayError {
@@ -854,10 +839,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 )
             }
             .map_err(|e| platform(format!("tooltip window creation failed: {e}")))
-            .map_err(|error| {
-                self.close();
-                error
-            })?;
+            .inspect_err(|_| self.close())?;
             self.tooltip = Some(OverlayWindow {
                 hwnd,
                 state,
@@ -865,10 +847,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
             });
             unsafe { SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY, 0, LWA_COLORKEY) }
                 .map_err(|e| platform(format!("tooltip layered configuration failed: {e}")))
-                .map_err(|error| {
-                    self.close();
-                    error
-                })?;
+                .inspect_err(|_| self.close())?;
             unsafe {
                 SetWindowPos(
                     hwnd,
@@ -881,10 +860,7 @@ impl OverlayRenderer for NativeOverlayRenderer {
                 )
             }
             .map_err(|e| platform(format!("tooltip positioning failed: {e}")))
-            .map_err(|error| {
-                self.close();
-                error
-            })?;
+            .inspect_err(|_| self.close())?;
             unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 let _ = InvalidateRect(hwnd, None, false);

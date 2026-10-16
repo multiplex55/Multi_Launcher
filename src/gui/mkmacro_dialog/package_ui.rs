@@ -352,8 +352,8 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
                     if ui.button("Cancel").clicked() { keep = false; }
                 }
                 PackageModal::ImportPreview { plan, .. } => {
-                    if ui.button("Apply Import").clicked() {
-                        if apply_plan(dialog, plan).is_ok() { keep = false; }
+                    if ui.button("Apply Import").clicked() && apply_plan(dialog, plan).is_ok() {
+                        keep = false;
                     }
                     if ui.button("Cancel").clicked() { keep = false; }
                 }
@@ -387,8 +387,10 @@ pub(super) fn show(ctx: &egui::Context, dialog: &mut MkMacroDialog) {
                                 Err(error) => dialog.command_error = Some(format!("Could not preview template: {error}")),
                             }
                         }
-                    } else if ui.button("Create Independent Copy").clicked() {
-                        if apply_plan(dialog, preview.as_ref().unwrap()).is_ok() { keep = false; }
+                    } else if ui.button("Create Independent Copy").clicked()
+                        && apply_plan(dialog, preview.as_ref().unwrap()).is_ok()
+                    {
+                        keep = false;
                     }
                     if ui.button("Cancel").clicked() { keep = false; }
                 }

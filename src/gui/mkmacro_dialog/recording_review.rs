@@ -471,7 +471,7 @@ impl RecordingReviewSession {
             .filter(|(_, step)| self.selection.contains(&step.review_id))
             .map(|(index, _)| index);
         let first = selected.next().ok_or(RecordingReviewError::NoSelection)?;
-        Ok((first, selected.last().unwrap_or(first)))
+        Ok((first, selected.next_back().unwrap_or(first)))
     }
 
     fn begin_edit_operation(&mut self) {
@@ -1195,12 +1195,11 @@ pub fn show(ctx: &eframe::egui::Context, dialog: &mut MkMacroDialog) {
     if preview_selected && let Err(error) = dialog.preview_recording_review(true) {
         dialog.recording_review.as_mut().unwrap().message = Some(error.to_string());
     }
-    if apply {
-        if let Err(error) = dialog.apply_recording_review() {
-            if let Some(review) = &mut dialog.recording_review {
-                review.message = Some(error);
-            }
-        }
+    if apply
+        && let Err(error) = dialog.apply_recording_review()
+        && let Some(review) = &mut dialog.recording_review
+    {
+        review.message = Some(error);
     }
     if cancel || (!open && !review_editor_open) {
         dialog.cancel_recording_review();

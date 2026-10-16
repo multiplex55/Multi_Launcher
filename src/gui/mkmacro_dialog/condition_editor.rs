@@ -313,7 +313,7 @@ pub(super) fn condition_ui_with_assets(
                     &mut search.tolerance,
                     &mut search.alpha,
                     &mut search.return_point,
-                    &assets,
+                    assets,
                     authoring_busy,
                     test_busy,
                 ) {
@@ -403,13 +403,13 @@ pub(super) fn condition_ui_with_assets(
                 }
                 if let Some(image) = image {
                     egui::ComboBox::from_label("Reference image")
-                        .selected_text(super::action_editor::image_asset_label(image, &assets))
+                        .selected_text(super::action_editor::image_asset_label(image, assets))
                         .show_ui(ui, |ui| {
                             for asset in assets {
                                 ui.selectable_value(
                                     image,
                                     asset.clone(),
-                                    super::action_editor::image_asset_label(&asset, &[]),
+                                    super::action_editor::image_asset_label(asset, &[]),
                                 );
                             }
                         });
@@ -622,7 +622,7 @@ fn condition_ui_context_at(
                 &mut search.tolerance,
                 &mut search.alpha,
                 &mut search.return_point,
-                &assets,
+                assets,
                 authoring_busy,
                 test_busy,
             ) {

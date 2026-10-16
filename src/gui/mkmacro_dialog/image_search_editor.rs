@@ -245,10 +245,8 @@ pub(super) fn show(
     if matches!(
         state.kind,
         SearchRegionKind::Window | SearchRegionKind::ClientArea
-    ) {
-        if ui.button("Add Activate Window Before").on_hover_text("On Apply, adds one independent activation row immediately before this search. Repeated requests are allowed and predictable.").clicked() {
-            out = Some(ImageEditorRequest::AddActivateWindowBefore);
-        }
+    ) && ui.button("Add Activate Window Before").on_hover_text("On Apply, adds one independent activation row immediately before this search. Repeated requests are allowed and predictable.").clicked() {
+        out = Some(ImageEditorRequest::AddActivateWindowBefore);
     }
     out
 }

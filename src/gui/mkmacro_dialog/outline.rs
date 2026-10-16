@@ -1,6 +1,7 @@
 use super::{MkMacroDialog, navigation};
 use std::sync::Arc;
 
+#[derive(Default)]
 pub(super) struct OutlineState {
     pub open: bool,
     show_all: bool,
@@ -31,20 +32,6 @@ pub(super) fn closed_rail_width(ui: &eframe::egui::Ui) -> f32 {
     };
 
     30.0_f32.max(text_width + frame_width)
-}
-
-impl Default for OutlineState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            show_all: false,
-            query: String::new(),
-            filter: Default::default(),
-            last_matches: None,
-            last_show_all: false,
-            visible: Arc::default(),
-        }
-    }
 }
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {

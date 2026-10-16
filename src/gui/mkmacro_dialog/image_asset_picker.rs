@@ -103,13 +103,13 @@ pub fn show_browser(
         .data_mut(|data| data.insert_temp(id, query.clone()));
 
     let assets = context.assets;
-    if !image.filename().is_empty() && selected_asset(&assets, image).is_none() {
+    if !image.filename().is_empty() && selected_asset(assets, image).is_none() {
         ui.colored_label(
             ui.visuals().warn_fg_color,
             format!("Missing reference image · {}", image.filename()),
         );
     }
-    let matches = browser_entries(&assets, &query, image);
+    let matches = browser_entries(assets, &query, image);
     let mut selection = None;
     egui::ScrollArea::vertical()
         .id_salt(id.with("scroll"))

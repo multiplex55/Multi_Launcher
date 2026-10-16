@@ -247,11 +247,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
             } else {
                 response
             };
-            if response.clicked() {
-                if let Some(id) = dialog.selection.ids.iter().next().copied() {
-                    let result = dialog.debug_from_step(id);
-                    report(dialog, result);
-                }
+            if response.clicked()
+                && let Some(id) = dialog.selection.ids.iter().next().copied()
+            {
+                let result = dialog.debug_from_step(id);
+                report(dialog, result);
             }
 
             let response = ui.add_enabled(
@@ -303,11 +303,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
         } else {
             response
         };
-        if response.clicked() {
-            if let Some(id) = dialog.selection.ids.iter().next().copied() {
-                let result = dialog.run_from_step(id);
-                report(dialog, result)
-            }
+        if response.clicked()
+            && let Some(id) = dialog.selection.ids.iter().next().copied()
+        {
+            let result = dialog.run_from_step(id);
+            report(dialog, result)
         }
         let response = ui.add_enabled(
             state.command_enabled(ToolbarCommand::RunSelected),
@@ -370,16 +370,15 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                 eframe::egui::Button::new("Record"),
             )
             .clicked()
+            && let Some(target) = dialog.recording_target()
         {
-            if let Some(target) = dialog.recording_target() {
-                report(
-                    dialog,
-                    crate::mkmacro::runtime::record_target(
-                        target,
-                        crate::mkmacro::NormalizationConfig::from(&dialog.draft.settings.recorder),
-                    ),
-                );
-            }
+            report(
+                dialog,
+                crate::mkmacro::runtime::record_target(
+                    target,
+                    crate::mkmacro::NormalizationConfig::from(&dialog.draft.settings.recorder),
+                ),
+            );
         }
         ui.menu_button("Record Options", |ui| {
             show_record_options(ui, dialog, recorder_active)
@@ -454,16 +453,15 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, dialog: &mut MkMacroDialog) {
                         report(dialog, crate::mkmacro::runtime::record_pause())
                     }
                 }
-                RecorderRuntimeState::Paused => {
+                RecorderRuntimeState::Paused
                     if ui
                         .add_enabled(
                             controls.resume,
                             eframe::egui::Button::new("Resume Recording"),
                         )
-                        .clicked()
-                    {
-                        report(dialog, crate::mkmacro::runtime::record_resume())
-                    }
+                        .clicked() =>
+                {
+                    report(dialog, crate::mkmacro::runtime::record_resume())
                 }
                 _ => {}
             }

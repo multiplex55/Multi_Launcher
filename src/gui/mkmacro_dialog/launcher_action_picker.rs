@@ -128,10 +128,9 @@ pub fn apply_chosen_program_path(payload: &mut MkProcessPayload, path: PathBuf) 
         .working_directory
         .as_deref()
         .is_none_or(|v| v.trim().is_empty())
+        && let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
     {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            payload.working_directory = Some(parent.to_string_lossy().into_owned());
-        }
+        payload.working_directory = Some(parent.to_string_lossy().into_owned());
     }
     payload.program = program;
 }
@@ -151,10 +150,9 @@ pub fn apply_program_action(payload: &mut MkProcessPayload, action: &Action) {
         .working_directory
         .as_deref()
         .is_none_or(|v| v.trim().is_empty())
+        && let Some(parent) = inferred_parent(&action.action)
     {
-        if let Some(parent) = inferred_parent(&action.action) {
-            payload.working_directory = Some(parent);
-        }
+        payload.working_directory = Some(parent);
     }
 }
 
@@ -325,7 +323,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
             .min_scrolled_height(0.0)
             .max_height(body_max_height)
             .show(ui, |ui| {
-                for (visible_index, &index) in visible.iter().enumerate() {
+                for (_visible_index, &index) in visible.iter().enumerate() {
                     let a = &actions[index];
                     let detail = match purpose {
                         Some(PickerPurpose::LauncherCommand) => launcher_query_suggestion(a)
@@ -347,7 +345,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
                     };
                     let text = format!("{}\n{}\n{}", a.label, a.desc, detail);
                     #[cfg(test)]
-                    let last_text = (visible_index + 1 == visible.len()).then(|| text.clone());
+                    let last_text = (_visible_index + 1 == visible.len()).then(|| text.clone());
                     let row = ui.selectable_label(state.selected == Some(index), text);
                     if row.clicked() {
                         state.selected = Some(index);
@@ -404,11 +402,11 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
         });
         if let Some(action) = state.conversion_confirmation.clone() {
             ui.separator();
-            let response = ui
+            let _response = ui
                 .label("This choice can be stored as a safe Launcher query instead of a program.");
             #[cfg(test)]
             {
-                confirmation_label = Some((response.id, response.rect));
+                confirmation_label = Some((_response.id, _response.rect));
             }
             ui.horizontal_wrapped(|ui| {
                 let response = ui.button("Use Launcher Query instead");
@@ -459,21 +457,21 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
     }
     if choose {
         let state = &mut dialog.launcher_action_picker;
-        if let (Some(index), Some(request)) = (state.selected, state.request.clone()) {
-            if let Some(action) = actions.get(index) {
-                if request.purpose == PickerPurpose::Process && !is_direct_program(&action.action) {
-                    if launcher_query_suggestion(action).is_some() {
-                        state.conversion_confirmation = Some(action.clone());
-                    }
-                } else {
-                    dialog.action_editor.apply_launcher_picker_action(
-                        &request,
-                        action,
-                        dialog.selected_macro_id,
-                        false,
-                    );
-                    state.cancel();
+        if let (Some(index), Some(request)) = (state.selected, state.request.clone())
+            && let Some(action) = actions.get(index)
+        {
+            if request.purpose == PickerPurpose::Process && !is_direct_program(&action.action) {
+                if launcher_query_suggestion(action).is_some() {
+                    state.conversion_confirmation = Some(action.clone());
                 }
+            } else {
+                dialog.action_editor.apply_launcher_picker_action(
+                    &request,
+                    action,
+                    dialog.selected_macro_id,
+                    false,
+                );
+                state.cancel();
             }
         }
     }

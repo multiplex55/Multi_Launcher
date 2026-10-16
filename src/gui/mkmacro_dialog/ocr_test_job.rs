@@ -138,13 +138,9 @@ impl OcrTestJob {
     }
 }
 
+#[derive(Default)]
 pub struct OcrLanguageJob {
     receiver: Option<mpsc::Receiver<ExecResult<Vec<OcrLanguageInfo>>>>,
-}
-impl Default for OcrLanguageJob {
-    fn default() -> Self {
-        Self { receiver: None }
-    }
 }
 impl OcrLanguageJob {
     pub fn request(&mut self, backend: Arc<dyn OcrBackend>) {
