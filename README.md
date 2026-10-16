@@ -583,6 +583,14 @@ Clipboard** to load clipboard text explicitly, then edit, **Format** or
 Invalid input remains editable and reports the parser's line and column.
 Formatting and minifying do not write the clipboard. Objects, arrays, and primitive
 JSON values are supported; comments and trailing commas are rejected.
+Switch to **Tree** for a collapsible read-only view with JSON Pointer paths,
+value/subtree/path copy actions, and virtualized rows. Tree search supports
+case-sensitive literal substrings across decoded object keys, decoded string
+values, and the JSON spellings of numbers, booleans, and null. Array indices
+are not keys, and object/array summaries are not searched as values. **Both**
+shows one result per matched node in document order; Previous/Next expands and
+scrolls to each result. Search results use the parsed snapshot and clear while
+the source is edited or invalid.
 `cm json-pretty` and `cm json-minify` continue using the same JSON transformation
 implementation, including in saved Clipboard Modify pipelines.
 

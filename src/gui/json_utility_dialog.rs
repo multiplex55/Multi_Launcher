@@ -1,11 +1,11 @@
 use crate::clipboard_modify::clipboard::{ArboardClipboardBackend, ClipboardBackend};
 use crate::commands::JsonUtilityIntent;
 use crate::json_transform::{
-    JsonDocument, JsonNodePath, JsonPathSegment, JsonTransformError, JsonTreeNodeId,
-    JsonTreeProjection, JsonValueRef,
+    JsonDocument, JsonNodePath, JsonPathSegment, JsonSearchFields, JsonSearchMatch,
+    JsonTransformError, JsonTreeNodeId, JsonTreeProjection, JsonValueRef,
 };
 use eframe::egui;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
@@ -48,6 +48,50 @@ impl JsonTreeSnapshot {
 }
 
 #[derive(Debug)]
+struct JsonSearchRequest {
+    generation: u64,
+    revision: u64,
+    query: String,
+    fields: JsonSearchFields,
+    snapshot: Arc<JsonTreeSnapshot>,
+}
+
+#[derive(Debug)]
+struct JsonSearchCompletion {
+    generation: u64,
+    revision: u64,
+    matches: Vec<JsonSearchMatch>,
+}
+
+#[derive(Debug)]
+enum JsonWorkerRequest {
+    Projection(ProjectionRequest),
+    Search(JsonSearchRequest),
+}
+
+#[derive(Debug)]
+enum JsonWorkerCompletion {
+    Projection(ProjectionCompletion),
+    Search(JsonSearchCompletion),
+}
+
+impl JsonWorkerRequest {
+    fn build(self) -> JsonWorkerCompletion {
+        match self {
+            Self::Projection(request) => JsonWorkerCompletion::Projection(request.build()),
+            Self::Search(request) => JsonWorkerCompletion::Search(JsonSearchCompletion {
+                generation: request.generation,
+                revision: request.revision,
+                matches: request
+                    .snapshot
+                    .document
+                    .search(&request.query, request.fields),
+            }),
+        }
+    }
+}
+
+#[derive(Debug)]
 enum ProjectionSource {
     EditedText(String),
     InitialClipboard(String),
@@ -64,19 +108,22 @@ struct ProjectionRequest {
 struct ProjectionCompletion {
     generation: u64,
     initial_clipboard_text: Option<String>,
-    result: Result<JsonTreeSnapshot, JsonTransformError>,
+    result: Result<Arc<JsonTreeSnapshot>, JsonTransformError>,
 }
 
 impl ProjectionRequest {
     fn build(self) -> ProjectionCompletion {
         let (result, initial_clipboard_text) = match self.source {
-            ProjectionSource::EditedText(text) => (JsonTreeSnapshot::parse(&text), None),
+            ProjectionSource::EditedText(text) => {
+                (JsonTreeSnapshot::parse(&text).map(Arc::new), None)
+            }
             ProjectionSource::InitialClipboard(text) => {
-                (JsonTreeSnapshot::parse(&text), Some(text))
+                (JsonTreeSnapshot::parse(&text).map(Arc::new), Some(text))
             }
-            ProjectionSource::ParsedDocument(document) => {
-                (Ok(JsonTreeSnapshot::from_document(document)), None)
-            }
+            ProjectionSource::ParsedDocument(document) => (
+                Ok(Arc::new(JsonTreeSnapshot::from_document(document))),
+                None,
+            ),
         };
         ProjectionCompletion {
             generation: self.generation,
@@ -89,29 +136,46 @@ impl ProjectionRequest {
 #[derive(Debug, Default)]
 struct TreeWorkerState {
     current_generation: u64,
-    pending: Option<ProjectionRequest>,
-    completed: Option<ProjectionCompletion>,
+    current_search_revision: Option<u64>,
+    pending: Option<JsonWorkerRequest>,
+    completed: Option<JsonWorkerCompletion>,
     shutdown: bool,
 }
 
 impl TreeWorkerState {
-    fn queue(&mut self, request: ProjectionRequest) {
-        self.current_generation = request.generation;
+    fn queue(&mut self, request: JsonWorkerRequest) {
+        match &request {
+            JsonWorkerRequest::Projection(request) => {
+                self.current_generation = request.generation;
+                self.current_search_revision = None;
+            }
+            JsonWorkerRequest::Search(request) => {
+                self.current_generation = request.generation;
+                self.current_search_revision = Some(request.revision);
+            }
+        }
         self.completed = None;
         self.pending = Some(request);
     }
 
     fn invalidate(&mut self, generation: u64) {
         self.current_generation = generation;
+        self.current_search_revision = None;
         self.pending = None;
         self.completed = None;
     }
 
-    fn publish_if_current(&mut self, completion: ProjectionCompletion) -> bool {
-        if self.shutdown
-            || self.current_generation != completion.generation
-            || self.pending.is_some()
-        {
+    fn publish_if_current(&mut self, completion: JsonWorkerCompletion) -> bool {
+        let is_current = match &completion {
+            JsonWorkerCompletion::Projection(completion) => {
+                self.current_generation == completion.generation
+            }
+            JsonWorkerCompletion::Search(completion) => {
+                self.current_generation == completion.generation
+                    && self.current_search_revision == Some(completion.revision)
+            }
+        };
+        if self.shutdown || !is_current || self.pending.is_some() {
             return false;
         }
         self.completed = Some(completion);
@@ -168,7 +232,7 @@ impl JsonTreeWorker {
         Ok(Self { state })
     }
 
-    fn submit(&self, request: ProjectionRequest) {
+    fn submit(&self, request: JsonWorkerRequest) {
         let (lock, wake) = &*self.state;
         let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
         state.queue(request);
@@ -182,7 +246,7 @@ impl JsonTreeWorker {
         wake.notify_one();
     }
 
-    fn poll(&self) -> Option<ProjectionCompletion> {
+    fn poll(&self) -> Option<JsonWorkerCompletion> {
         let (lock, _) = &*self.state;
         let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
         state.completed.take()
@@ -215,9 +279,73 @@ struct SelectedNodeDetails {
 }
 
 #[derive(Debug, Default)]
+struct JsonTreeSearchState {
+    query: String,
+    fields: JsonSearchFields,
+    matches: Vec<JsonSearchMatch>,
+    match_by_node: HashMap<JsonTreeNodeId, (usize, JsonSearchMatch)>,
+    active_match: Option<usize>,
+    revision: u64,
+    requested: Option<(u64, u64)>,
+    result_generation: Option<u64>,
+}
+
+impl JsonTreeSearchState {
+    fn invalidate_results(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.matches.clear();
+        self.match_by_node.clear();
+        self.active_match = None;
+        self.requested = None;
+        self.result_generation = None;
+    }
+
+    fn reset(&mut self) {
+        self.query.clear();
+        self.fields = JsonSearchFields::Both;
+        self.invalidate_results();
+    }
+
+    fn needs_search(&self, generation: u64) -> bool {
+        !self.query.is_empty()
+            && self.requested != Some((generation, self.revision))
+            && self.result_generation != Some(generation)
+    }
+
+    fn mark_requested(&mut self, generation: u64) {
+        self.requested = Some((generation, self.revision));
+    }
+
+    fn is_pending(&self, generation: u64) -> bool {
+        self.requested == Some((generation, self.revision))
+            && self.result_generation != Some(generation)
+    }
+
+    fn accept(&mut self, completion: JsonSearchCompletion) -> bool {
+        if completion.revision != self.revision
+            || self.requested != Some((completion.generation, completion.revision))
+        {
+            return false;
+        }
+        self.requested = None;
+        self.result_generation = Some(completion.generation);
+        self.matches = completion.matches;
+        self.match_by_node = self
+            .matches
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, matched)| (matched.node(), (index, matched)))
+            .collect();
+        self.active_match = (!self.matches.is_empty()).then_some(0);
+        true
+    }
+}
+
+#[derive(Debug, Default)]
 struct JsonTreeViewState {
     view: JsonUtilityView,
-    snapshot: Option<JsonTreeSnapshot>,
+    snapshot: Option<Arc<JsonTreeSnapshot>>,
     snapshot_generation: Option<u64>,
     selected: Option<JsonTreeNodeId>,
     selected_path: Option<JsonNodePath>,
@@ -226,6 +354,8 @@ struct JsonTreeViewState {
     expanded: HashSet<JsonTreeNodeId>,
     expanded_paths_restore: Option<HashSet<JsonNodePath>>,
     visible_rows: Vec<VisibleTreeRow>,
+    search: JsonTreeSearchState,
+    pending_scroll_to: Option<JsonTreeNodeId>,
     #[cfg(test)]
     visible_rows_rebuilds: usize,
 }
@@ -235,6 +365,14 @@ impl JsonTreeViewState {
         self.snapshot
             .as_ref()
             .filter(|_| self.snapshot_generation == Some(generation))
+            .map(Arc::as_ref)
+    }
+
+    fn current_snapshot_handle(&self, generation: u64) -> Option<Arc<JsonTreeSnapshot>> {
+        self.snapshot
+            .as_ref()
+            .filter(|_| self.snapshot_generation == Some(generation))
+            .cloned()
     }
 
     fn invalidate(&mut self, preserve_paths: bool) {
@@ -263,9 +401,12 @@ impl JsonTreeViewState {
         self.selected_details = None;
         self.expanded.clear();
         self.visible_rows.clear();
+        self.search.invalidate_results();
+        self.pending_scroll_to = None;
     }
 
-    fn install(&mut self, generation: u64, snapshot: JsonTreeSnapshot) {
+    fn install(&mut self, generation: u64, snapshot: impl Into<Arc<JsonTreeSnapshot>>) {
+        let snapshot = snapshot.into();
         let selection_restore = self.selected_path_restore.take();
         let expansion_restore = std::mem::take(&mut self.expanded_paths_restore);
         let root = snapshot.projection.root();
@@ -310,6 +451,33 @@ impl JsonTreeViewState {
         self.selected_details = selected_node_details(snapshot, id);
         self.selected = Some(id);
         self.selected_path = Some(path);
+    }
+
+    fn reveal_and_select(&mut self, id: JsonTreeNodeId) {
+        let mut ancestor = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.projection.node(id))
+            .and_then(|node| node.parent());
+        let mut expanded_changed = false;
+        while let Some(parent) = ancestor {
+            let Some(node) = self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.projection.node(parent))
+            else {
+                break;
+            };
+            if node.child_count() > 0 {
+                expanded_changed |= self.expanded.insert(parent);
+            }
+            ancestor = node.parent();
+        }
+        if expanded_changed {
+            self.rebuild_visible_rows();
+        }
+        self.select(id);
+        self.pending_scroll_to = Some(id);
     }
 
     fn toggle_expanded(&mut self, id: JsonTreeNodeId) {
@@ -457,6 +625,20 @@ fn tree_panel_heights(available_height: f32, spacing: f32) -> (f32, f32) {
     (tree_height, details_height)
 }
 
+fn tree_search_scroll_offset(
+    row: usize,
+    row_height: f32,
+    row_spacing: f32,
+    viewport_height: f32,
+    total_rows: usize,
+) -> f32 {
+    let stride = row_height + row_spacing;
+    let content_height = (stride * total_rows as f32 - row_spacing).max(0.0);
+    let max_scroll = (content_height - viewport_height).max(0.0);
+    let row_center = row as f32 * stride + row_height * 0.5;
+    (row_center - viewport_height * 0.5).clamp(0.0, max_scroll)
+}
+
 fn node_kind_label(kind: crate::json_transform::JsonNodeKind) -> &'static str {
     use crate::json_transform::JsonNodeKind;
     match kind {
@@ -500,6 +682,7 @@ impl JsonEditorState {
     fn initialize(&mut self, clipboard: &impl ClipboardBackend) {
         self.reset_feedback();
         self.text.clear();
+        self.tree.search.reset();
         self.invalidate_source(false);
         match clipboard.read_text() {
             Ok(text) if !text.trim().is_empty() => {
@@ -648,6 +831,30 @@ impl JsonEditorState {
         );
     }
 
+    fn move_search_match(&mut self, previous: bool) {
+        let count = self.tree.search.matches.len();
+        if count == 0 {
+            return;
+        }
+        let active = self.tree.search.active_match;
+        let next = match (active, previous) {
+            (Some(index), true) => (index + count - 1) % count,
+            (Some(index), false) => (index + 1) % count,
+            (None, true) => count - 1,
+            (None, false) => 0,
+        };
+        self.tree.search.active_match = Some(next);
+        if let Some(node) = self
+            .tree
+            .search
+            .matches
+            .get(next)
+            .map(JsonSearchMatch::node)
+        {
+            self.tree.reveal_and_select(node);
+        }
+    }
+
     fn queue_current_text_if_needed(&mut self) {
         if self.queued_projection.is_none()
             && self.requested_generation != Some(self.generation)
@@ -662,38 +869,88 @@ impl JsonEditorState {
 
     fn service_projection(&mut self, ctx: &egui::Context) {
         if let Some(completion) = self.worker.as_ref().and_then(JsonTreeWorker::poll) {
-            self.accept_completion(completion);
+            self.accept_worker_completion(completion);
         }
         self.queue_current_text_if_needed();
-        let Some(source) = self.queued_projection.take() else {
+        if let Some(source) = self.queued_projection.take() {
+            if self.worker.is_none() {
+                match JsonTreeWorker::new(ctx) {
+                    Ok(worker) => self.worker = Some(worker),
+                    Err(error) => {
+                        self.tree_worker_error =
+                            Some(format!("Could not start JSON tree worker: {error}"));
+                        self.requested_generation = Some(self.generation);
+                        self.clipboard_load_generation = None;
+                        return;
+                    }
+                }
+            }
+            let is_initial_clipboard = matches!(&source, ProjectionSource::InitialClipboard(_));
+            if is_initial_clipboard {
+                self.clipboard_load_generation = Some(self.generation);
+            }
+            self.requested_generation = Some(self.generation);
+            if let Some(worker) = &self.worker {
+                #[cfg(test)]
+                {
+                    self.projection_builds_started += 1;
+                }
+                worker.submit(JsonWorkerRequest::Projection(ProjectionRequest {
+                    generation: self.generation,
+                    source,
+                }));
+            }
+        }
+        self.queue_search_if_needed(ctx);
+    }
+
+    fn queue_search_if_needed(&mut self, ctx: &egui::Context) {
+        let generation = self.generation;
+        let Some(snapshot) = self.tree.current_snapshot_handle(generation) else {
             return;
         };
+        if !self.tree.search.needs_search(generation) {
+            return;
+        }
         if self.worker.is_none() {
             match JsonTreeWorker::new(ctx) {
                 Ok(worker) => self.worker = Some(worker),
                 Err(error) => {
                     self.tree_worker_error =
-                        Some(format!("Could not start JSON tree worker: {error}"));
-                    self.requested_generation = Some(self.generation);
-                    self.clipboard_load_generation = None;
+                        Some(format!("Could not start JSON search worker: {error}"));
                     return;
                 }
             }
         }
-        let is_initial_clipboard = matches!(&source, ProjectionSource::InitialClipboard(_));
-        if is_initial_clipboard {
-            self.clipboard_load_generation = Some(self.generation);
-        }
-        self.requested_generation = Some(self.generation);
+        let request = JsonSearchRequest {
+            generation,
+            revision: self.tree.search.revision,
+            query: self.tree.search.query.clone(),
+            fields: self.tree.search.fields,
+            snapshot,
+        };
+        self.tree.search.mark_requested(generation);
         if let Some(worker) = &self.worker {
-            #[cfg(test)]
-            {
-                self.projection_builds_started += 1;
+            worker.submit(JsonWorkerRequest::Search(request));
+        }
+    }
+
+    fn accept_worker_completion(&mut self, completion: JsonWorkerCompletion) {
+        match completion {
+            JsonWorkerCompletion::Projection(completion) => self.accept_completion(completion),
+            JsonWorkerCompletion::Search(completion) => {
+                if self.tree.search.accept(completion)
+                    && let Some(index) = self.tree.search.active_match
+                    && let Some(node) = self
+                        .tree
+                        .search
+                        .matches
+                        .get(index)
+                        .map(JsonSearchMatch::node)
+                {
+                    self.tree.reveal_and_select(node);
+                }
             }
-            worker.submit(ProjectionRequest {
-                generation: self.generation,
-                source,
-            });
         }
     }
 
@@ -742,6 +999,26 @@ impl JsonEditorState {
             .build();
             self.accept_completion(completion);
         }
+    }
+
+    #[cfg(test)]
+    fn complete_search_for_test(&mut self) {
+        let generation = self.generation;
+        let Some(snapshot) = self.tree.current_snapshot_handle(generation) else {
+            return;
+        };
+        if !self.tree.search.needs_search(generation) {
+            return;
+        }
+        let request = JsonWorkerRequest::Search(JsonSearchRequest {
+            generation,
+            revision: self.tree.search.revision,
+            query: self.tree.search.query.clone(),
+            fields: self.tree.search.fields,
+            snapshot,
+        });
+        self.tree.search.mark_requested(generation);
+        self.accept_worker_completion(request.build());
     }
 }
 
@@ -910,6 +1187,63 @@ impl JsonUtilityDialogState {
         }
         let generation = self.editor.generation;
         let ready = self.editor.tree.current_snapshot(generation).is_some();
+        let mut search_inputs_changed = false;
+        let mut previous_match = false;
+        let mut next_match = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Search");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.editor.tree.search.query)
+                    .desired_width(220.0)
+                    .hint_text("Keys or values"),
+            );
+            search_inputs_changed |= response.changed();
+            if ui.small_button("Clear search").clicked() {
+                self.editor.tree.search.query.clear();
+                search_inputs_changed = true;
+            }
+            let fields = &mut self.editor.tree.search.fields;
+            let previous_fields = *fields;
+            ui.selectable_value(fields, JsonSearchFields::Keys, "Keys");
+            ui.selectable_value(fields, JsonSearchFields::Values, "Values");
+            ui.selectable_value(fields, JsonSearchFields::Both, "Both");
+            search_inputs_changed |= *fields != previous_fields;
+
+            let search = &self.editor.tree.search;
+            let pending = search.is_pending(generation);
+            let has_matches = !search.matches.is_empty();
+            if ui
+                .add_enabled(
+                    ready && has_matches && !pending,
+                    egui::Button::new("Previous"),
+                )
+                .clicked()
+            {
+                previous_match = true;
+            }
+            if ui
+                .add_enabled(ready && has_matches && !pending, egui::Button::new("Next"))
+                .clicked()
+            {
+                next_match = true;
+            }
+            if pending {
+                ui.weak("Searching…");
+            } else if let Some(index) = search.active_match {
+                ui.label(format!("{} / {} matches", index + 1, search.matches.len()));
+            } else {
+                ui.label(format!("{} matches", search.matches.len()));
+            }
+        });
+        if search_inputs_changed {
+            self.editor.tree.search.invalidate_results();
+        } else if previous_match {
+            self.editor.move_search_match(true);
+        } else if next_match {
+            self.editor.move_search_match(false);
+        }
+        ui.weak("Literal and case-sensitive · keys are decoded object names · values are decoded strings and scalar JSON text");
+
         let selected = self.editor.tree.selected;
         let mut copy_action = None;
         let mut branch_action = None;
@@ -962,61 +1296,103 @@ impl JsonUtilityDialogState {
         let mut toggle_action = None;
         let (tree_height, details_height) =
             tree_panel_heights(ui.available_height(), ui.spacing().item_spacing.y);
+        let scroll_target = self.editor.tree.pending_scroll_to.take();
         let snapshot = self.editor.tree.current_snapshot(generation);
         if let Some(snapshot) = snapshot {
             let row_height = ui.spacing().interact_size.y.max(20.0);
-            egui::ScrollArea::both()
+            let row_spacing = ui.spacing().item_spacing.y;
+            let target_row = scroll_target.and_then(|target| {
+                self.editor
+                    .tree
+                    .visible_rows
+                    .iter()
+                    .position(|row| row.id == target)
+            });
+            let mut tree_scroll = egui::ScrollArea::both()
                 .id_salt("json_utility_tree_scroll")
                 .auto_shrink([false, false])
                 .min_scrolled_height(0.0)
-                .max_height(tree_height)
-                .show_rows(
-                    ui,
+                .max_height(tree_height);
+            if let Some(row) = target_row {
+                tree_scroll = tree_scroll.vertical_scroll_offset(tree_search_scroll_offset(
+                    row,
                     row_height,
+                    row_spacing,
+                    tree_height,
                     self.editor.tree.visible_rows.len(),
-                    |ui, range| {
-                        for index in range {
-                            let row = self.editor.tree.visible_rows[index];
-                            let Some(node) = snapshot.projection.node(row.id) else {
-                                continue;
+                ));
+            }
+            tree_scroll.show_rows(
+                ui,
+                row_height,
+                self.editor.tree.visible_rows.len(),
+                |ui, range| {
+                    for index in range {
+                        let row = self.editor.tree.visible_rows[index];
+                        let Some(node) = snapshot.projection.node(row.id) else {
+                            continue;
+                        };
+                        let preview = tree_row_preview(node.preview());
+                        let label = format!(
+                            "{}    {}    {}",
+                            node_segment_label(node.segment()),
+                            node_kind_label(node.kind()),
+                            preview
+                        );
+                        let has_children = node.child_count() > 0;
+                        let expanded = self.editor.tree.expanded.contains(&row.id);
+                        let hit = self.editor.tree.search.match_by_node.get(&row.id);
+                        let label = if let Some((index, _)) = hit {
+                            let background = if self.editor.tree.search.active_match == Some(*index)
+                            {
+                                ui.visuals().selection.bg_fill
+                            } else {
+                                ui.visuals().faint_bg_color
                             };
-                            let preview = tree_row_preview(node.preview());
-                            let label = format!(
-                                "{}    {}    {}",
-                                node_segment_label(node.segment()),
-                                node_kind_label(node.kind()),
-                                preview
-                            );
-                            let has_children = node.child_count() > 0;
-                            let expanded = self.editor.tree.expanded.contains(&row.id);
-                            ui.push_id(("json_tree_node", generation, row.id.index()), |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(row.depth as f32 * 12.0);
-                                    if has_children {
-                                        let toggle = if expanded { "▾" } else { "▸" };
-                                        if ui.small_button(toggle).clicked() {
-                                            toggle_action = Some(row.id);
-                                        }
-                                    } else {
-                                        ui.add_space(ui.spacing().interact_size.x);
+                            egui::RichText::new(label)
+                                .monospace()
+                                .background_color(background)
+                        } else {
+                            egui::RichText::new(label).monospace()
+                        };
+                        ui.push_id(("json_tree_node", generation, row.id.index()), |ui| {
+                            ui.horizontal(|ui| {
+                                ui.add_space(row.depth as f32 * 12.0);
+                                if has_children {
+                                    let toggle = if expanded { "▾" } else { "▸" };
+                                    if ui.small_button(toggle).clicked() {
+                                        toggle_action = Some(row.id);
                                     }
-                                    if ui
-                                        .selectable_label(
-                                            self.editor.tree.selected == Some(row.id),
-                                            label,
-                                        )
-                                        .clicked()
-                                    {
-                                        select_action = Some(row.id);
-                                    }
-                                });
+                                } else {
+                                    ui.add_space(ui.spacing().interact_size.x);
+                                }
+                                let response = ui.selectable_label(
+                                    self.editor.tree.selected == Some(row.id),
+                                    label,
+                                );
+                                let response = if let Some((_, matched)) = hit {
+                                    let fields =
+                                        match (matched.key_matched(), matched.value_matched()) {
+                                            (true, true) => "Matched key and scalar value",
+                                            (true, false) => "Matched object key",
+                                            (false, true) => "Matched scalar value",
+                                            (false, false) => "Matched JSON node",
+                                        };
+                                    response.on_hover_text(fields)
+                                } else {
+                                    response
+                                };
+                                if response.clicked() {
+                                    select_action = Some(row.id);
+                                }
                             });
-                        }
-                    },
-                );
+                        });
+                    }
+                },
+            );
         }
         ui.separator();
-        let details_scroll = egui::ScrollArea::vertical()
+        let _details_scroll = egui::ScrollArea::vertical()
             .id_salt("json_utility_tree_details_scroll")
             .auto_shrink([false, false])
             .min_scrolled_height(0.0)
@@ -1052,8 +1428,8 @@ impl JsonUtilityDialogState {
             self.tree_panel_layout = Some((
                 tree_height,
                 details_height,
-                details_scroll.inner_rect.height(),
-                details_scroll.content_size.y,
+                _details_scroll.inner_rect.height(),
+                _details_scroll.content_size.y,
             ));
         }
 
@@ -1267,6 +1643,155 @@ mod tests {
     }
 
     #[test]
+    fn tree_search_caches_matches_wraps_and_reveals_collapsed_results() {
+        let clipboard = FakeClipboard::new(
+            r#"{"first":"needle","outer":{"deep":{"target":"needle"}},"needle":{"found":"needle"}}"#,
+        );
+        let mut editor = JsonEditorState::default();
+        editor.initialize(&clipboard);
+        editor.complete_queued_projection_for_test();
+        editor.tree.search.query = "needle".to_owned();
+        editor.tree.search.fields = JsonSearchFields::Both;
+        editor.tree.search.invalidate_results();
+        assert!(editor.tree.search.needs_search(editor.generation));
+        editor.complete_search_for_test();
+
+        assert_eq!(editor.tree.search.matches.len(), 4);
+        assert!(!editor.tree.search.needs_search(editor.generation));
+        assert_eq!(
+            editor
+                .tree
+                .selected_path
+                .as_ref()
+                .unwrap()
+                .to_json_pointer(),
+            "/first"
+        );
+        assert_eq!(editor.tree.search.active_match, Some(0));
+
+        editor.move_search_match(false);
+        let target = editor.tree.selected.unwrap();
+        assert_eq!(
+            editor
+                .tree
+                .snapshot
+                .as_ref()
+                .unwrap()
+                .projection
+                .path(target)
+                .unwrap()
+                .to_json_pointer(),
+            "/outer/deep/target"
+        );
+        assert!(editor.tree.pending_scroll_to == Some(target));
+        assert!(editor.tree.visible_rows.iter().any(|row| row.id == target));
+        assert!(editor.tree.expanded.len() >= 3);
+
+        editor.move_search_match(true);
+        assert_eq!(
+            editor
+                .tree
+                .selected_path
+                .as_ref()
+                .unwrap()
+                .to_json_pointer(),
+            "/first"
+        );
+        editor.move_search_match(true);
+        assert_eq!(editor.tree.search.active_match, Some(3));
+        assert_eq!(
+            editor
+                .tree
+                .selected_path
+                .as_ref()
+                .unwrap()
+                .to_json_pointer(),
+            "/needle/found"
+        );
+        editor.move_search_match(false);
+        assert_eq!(editor.tree.search.active_match, Some(0));
+
+        let prior_selection = editor.tree.selected_path.clone();
+        editor.tree.search.query = "first".to_owned();
+        editor.tree.search.invalidate_results();
+        assert!(editor.tree.search.matches.is_empty());
+        assert!(editor.tree.search.match_by_node.is_empty());
+        assert_eq!(editor.tree.search.active_match, None);
+        assert_eq!(editor.tree.selected_path, prior_selection);
+        assert!(editor.tree.search.needs_search(editor.generation));
+        editor.complete_search_for_test();
+        assert_eq!(editor.tree.search.matches.len(), 1);
+        assert_eq!(
+            editor.tree.search.matches[0].node(),
+            editor.tree.selected.unwrap()
+        );
+    }
+
+    #[test]
+    fn source_edits_and_invalid_json_clear_search_state_immediately() {
+        let clipboard = FakeClipboard::new(r#"{"needle":"needle"}"#);
+        let mut editor = JsonEditorState::default();
+        editor.initialize(&clipboard);
+        editor.complete_queued_projection_for_test();
+        editor.tree.search.query = "needle".to_owned();
+        editor.tree.search.invalidate_results();
+        editor.complete_search_for_test();
+        assert_eq!(editor.tree.search.matches.len(), 1);
+
+        let old_generation = editor.generation;
+        editor.text = r#"{"broken": }"#.to_owned();
+        editor.source_edited();
+        assert!(editor.generation > old_generation);
+        assert!(editor.tree.search.matches.is_empty());
+        assert!(editor.tree.search.match_by_node.is_empty());
+        assert_eq!(editor.tree.search.active_match, None);
+        assert!(!editor.tree.search.is_pending(editor.generation));
+        editor.complete_queued_projection_for_test();
+        assert!(editor.parse_error.is_some());
+        assert!(editor.tree.current_snapshot(editor.generation).is_none());
+        assert!(editor.tree.search.matches.is_empty());
+        editor.move_search_match(false);
+        assert!(editor.tree.search.matches.is_empty());
+    }
+
+    #[test]
+    fn tree_search_uses_virtual_row_stride_and_reveals_the_selected_row() {
+        let context = egui::Context::default();
+        let mut rendered_rows = None;
+        let target_row = 150;
+        let total_rows = 200;
+        context
+            .run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let row_height = 20.0;
+                    let row_spacing = ui.spacing().item_spacing.y;
+                    let viewport_height = 100.0;
+                    let offset = tree_search_scroll_offset(
+                        target_row,
+                        row_height,
+                        row_spacing,
+                        viewport_height,
+                        total_rows,
+                    );
+                    let stride = row_height + row_spacing;
+                    let target_top = target_row as f32 * stride - offset;
+                    assert!(target_top >= 0.0);
+                    assert!(target_top + row_height <= viewport_height);
+
+                    egui::ScrollArea::vertical()
+                        .id_salt("json_search_virtual_row_test")
+                        .max_height(viewport_height)
+                        .vertical_scroll_offset(offset)
+                        .show_rows(ui, row_height, total_rows, |_, rows| {
+                            rendered_rows = Some(rows);
+                        });
+                });
+            })
+            .drop_without_applying_deltas();
+        assert!(rendered_rows.is_some_and(|rows| rows.contains(&target_row)));
+    }
+
+    #[test]
     fn pending_invalid_and_stale_snapshots_cannot_enable_tree_copy() {
         let clipboard = FakeClipboard::new(r#"{"value":1}"#);
         let mut editor = JsonEditorState::default();
@@ -1416,28 +1941,34 @@ mod tests {
     #[test]
     fn worker_discards_stale_results_and_coalesces_pending_source() {
         let mut state = TreeWorkerState::default();
-        state.queue(ProjectionRequest {
+        state.queue(JsonWorkerRequest::Projection(ProjectionRequest {
             generation: 1,
             source: ProjectionSource::EditedText("[]".to_owned()),
-        });
-        state.queue(ProjectionRequest {
+        }));
+        state.queue(JsonWorkerRequest::Projection(ProjectionRequest {
             generation: 2,
             source: ProjectionSource::EditedText("{}".to_owned()),
-        });
-        assert_eq!(state.pending.as_ref().unwrap().generation, 2);
-        let stale = ProjectionRequest {
+        }));
+        assert!(matches!(
+            state.pending.as_ref().unwrap(),
+            JsonWorkerRequest::Projection(ProjectionRequest { generation: 2, .. })
+        ));
+        let stale = JsonWorkerRequest::Projection(ProjectionRequest {
             generation: 1,
             source: ProjectionSource::EditedText("[]".to_owned()),
-        }
+        })
         .build();
         assert!(!state.publish_if_current(stale));
         assert!(state.completed.is_none());
-        assert_eq!(state.pending.as_ref().unwrap().generation, 2);
+        assert!(matches!(
+            state.pending.as_ref().unwrap(),
+            JsonWorkerRequest::Projection(ProjectionRequest { generation: 2, .. })
+        ));
         state.invalidate(3);
-        let stale_after_close = ProjectionRequest {
+        let stale_after_close = JsonWorkerRequest::Projection(ProjectionRequest {
             generation: 2,
             source: ProjectionSource::EditedText("{}".to_owned()),
-        }
+        })
         .build();
         assert!(!state.publish_if_current(stale_after_close));
         assert!(state.pending.is_none());

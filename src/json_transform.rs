@@ -83,6 +83,29 @@ impl JsonDocument {
         JsonTreeProjection { nodes }
     }
 
+    /// Searches decoded object keys and scalar values in deterministic
+    /// document preorder. Matching is a case-sensitive literal substring
+    /// search. Keys are object member names only; array indices and the root
+    /// have no key text. Values include complete decoded strings and the
+    /// serialized spelling of numbers, booleans, and null. Containers are not
+    /// searched as summaries or serialized subtrees.
+    pub fn search(&self, query: &str, fields: JsonSearchFields) -> Vec<JsonSearchMatch> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let mut matches = Vec::new();
+        let mut next_index = 0;
+        append_json_search_matches(
+            &self.value,
+            None,
+            query,
+            fields,
+            &mut next_index,
+            &mut matches,
+        );
+        matches
+    }
+
     /// Resolves a typed path against this parsed snapshot.
     pub fn resolve_path(&self, path: &JsonNodePath) -> Option<JsonValueRef<'_>> {
         value_at_path(&self.value, path).map(JsonValueRef::from)
@@ -251,6 +274,83 @@ impl JsonValueRef<'_> {
             Self::Array { .. } => JsonNodeKind::Array,
             Self::Object { .. } => JsonNodeKind::Object,
         }
+    }
+}
+
+/// Which JSON text fields participate in literal search.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum JsonSearchFields {
+    Keys,
+    Values,
+    #[default]
+    Both,
+}
+
+/// One matched projected node. A single node is emitted once when its key,
+/// scalar value, or both match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JsonSearchMatch {
+    node: JsonTreeNodeId,
+    key_matched: bool,
+    value_matched: bool,
+}
+
+impl JsonSearchMatch {
+    pub fn node(&self) -> JsonTreeNodeId {
+        self.node
+    }
+
+    pub fn key_matched(&self) -> bool {
+        self.key_matched
+    }
+
+    pub fn value_matched(&self) -> bool {
+        self.value_matched
+    }
+}
+
+fn append_json_search_matches(
+    value: &OrderedJsonValue,
+    object_key: Option<&str>,
+    query: &str,
+    fields: JsonSearchFields,
+    next_index: &mut usize,
+    matches: &mut Vec<JsonSearchMatch>,
+) {
+    let node = JsonTreeNodeId(*next_index);
+    *next_index += 1;
+
+    let key_matched = matches!(fields, JsonSearchFields::Keys | JsonSearchFields::Both)
+        && object_key.is_some_and(|key| key.contains(query));
+    let value_matched = matches!(fields, JsonSearchFields::Values | JsonSearchFields::Both)
+        && match value {
+            OrderedJsonValue::Null => "null".contains(query),
+            OrderedJsonValue::Bool(value) => value.to_string().contains(query),
+            OrderedJsonValue::Number(value) => value.to_string().contains(query),
+            OrderedJsonValue::String(value) => value.contains(query),
+            OrderedJsonValue::Array(_) | OrderedJsonValue::Object(_) => false,
+        };
+
+    if key_matched || value_matched {
+        matches.push(JsonSearchMatch {
+            node,
+            key_matched,
+            value_matched,
+        });
+    }
+
+    match value {
+        OrderedJsonValue::Array(values) => {
+            for child in values {
+                append_json_search_matches(child, None, query, fields, next_index, matches);
+            }
+        }
+        OrderedJsonValue::Object(members) => {
+            for (key, child) in members {
+                append_json_search_matches(child, Some(key), query, fields, next_index, matches);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -615,6 +715,116 @@ impl Serialize for OrderedJsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn search_paths(document: &JsonDocument, query: &str, fields: JsonSearchFields) -> Vec<String> {
+        let projection = document.tree_projection();
+        document
+            .search(query, fields)
+            .iter()
+            .map(|matched| projection.path(matched.node()).unwrap().to_json_pointer())
+            .collect()
+    }
+
+    #[test]
+    fn json_search_modes_are_case_sensitive_union_once_and_preorder() {
+        let document = JsonDocument::parse(
+            r#"{"hit":"hit","arr":[{"hit":"value"}],"nested":{"hit":{"deep":"hit"}}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            search_paths(&document, "hit", JsonSearchFields::Keys),
+            ["/hit", "/arr/0/hit", "/nested/hit"]
+        );
+        assert_eq!(
+            search_paths(&document, "hit", JsonSearchFields::Values),
+            ["/hit", "/nested/hit/deep"]
+        );
+        assert_eq!(
+            search_paths(&document, "hit", JsonSearchFields::Both),
+            ["/hit", "/arr/0/hit", "/nested/hit", "/nested/hit/deep"]
+        );
+
+        let projection = document.tree_projection();
+        let matches = document.search("hit", JsonSearchFields::Both);
+        let first = matches[0];
+        assert_eq!(
+            projection.path(first.node()).unwrap().to_json_pointer(),
+            "/hit"
+        );
+        assert!(first.key_matched());
+        assert!(first.value_matched());
+        assert!(!matches[2].value_matched(), "container values are excluded");
+        assert!(!matches[3].key_matched());
+        assert!(matches[3].value_matched());
+        assert!(document.search("HIT", JsonSearchFields::Both).is_empty());
+        assert!(document.search("", JsonSearchFields::Both).is_empty());
+    }
+
+    #[test]
+    fn json_search_uses_decoded_keys_and_full_unicode_scalar_values() {
+        let long_value = format!("{}tail😀", "prefix-".repeat(30));
+        let escaped_value = serde_json::to_string(&long_value).unwrap();
+        let document = JsonDocument::parse(&format!(
+            r#"{{"a\/b~x😀":{escaped_value},"array":["prefix-{}tail😀"]}}"#,
+            "prefix-".repeat(30)
+        ))
+        .unwrap();
+        let projection = document.tree_projection();
+
+        assert_eq!(
+            search_paths(&document, "b~x😀", JsonSearchFields::Keys),
+            ["/a~1b~0x😀"]
+        );
+        assert_eq!(
+            search_paths(&document, "tail😀", JsonSearchFields::Values),
+            ["/a~1b~0x😀", "/array/0"]
+        );
+        assert!(
+            projection
+                .node(document.search("tail😀", JsonSearchFields::Values)[0].node())
+                .unwrap()
+                .preview()
+                .len()
+                < long_value.len(),
+            "search must use full strings rather than bounded row previews"
+        );
+        assert!(
+            document
+                .search("TAIL😀", JsonSearchFields::Values)
+                .is_empty()
+        );
+        assert!(document.search("0", JsonSearchFields::Keys).is_empty());
+    }
+
+    #[test]
+    fn json_search_matches_canonical_primitive_spellings_but_not_containers() {
+        let document = JsonDocument::parse(
+            r#"{"number":-12.5,"truth":true,"falsehood":false,"nothing":null,"nested":{"needle":"hidden"}}"#,
+        )
+        .unwrap();
+
+        for (query, path) in [
+            ("-12.5", "/number"),
+            ("tru", "/truth"),
+            ("fals", "/falsehood"),
+            ("nul", "/nothing"),
+        ] {
+            assert_eq!(
+                search_paths(&document, query, JsonSearchFields::Values),
+                [path]
+            );
+        }
+        assert!(
+            document
+                .search("Object", JsonSearchFields::Values)
+                .is_empty()
+        );
+        assert_eq!(
+            search_paths(&document, "hidden", JsonSearchFields::Values),
+            ["/nested/needle"]
+        );
+    }
 
     #[test]
     fn pretty_formats_objects_arrays_and_nested_values_in_input_order() {
