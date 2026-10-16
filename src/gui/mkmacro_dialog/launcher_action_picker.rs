@@ -323,7 +323,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
             .min_scrolled_height(0.0)
             .max_height(body_max_height)
             .show(ui, |ui| {
-                for (_visible_index, &index) in visible.iter().enumerate() {
+                for &index in &visible {
                     let a = &actions[index];
                     let detail = match purpose {
                         Some(PickerPurpose::LauncherCommand) => launcher_query_suggestion(a)
@@ -345,7 +345,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut super::MkMacroDialog) {
                     };
                     let text = format!("{}\n{}\n{}", a.label, a.desc, detail);
                     #[cfg(test)]
-                    let last_text = (_visible_index + 1 == visible.len()).then(|| text.clone());
+                    let last_text = (visible.last() == Some(&index)).then(|| text.clone());
                     let row = ui.selectable_label(state.selected == Some(index), text);
                     if row.clicked() {
                         state.selected = Some(index);

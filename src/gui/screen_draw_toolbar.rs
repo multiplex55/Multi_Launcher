@@ -2459,7 +2459,7 @@ mod tests {
                 &state,
                 Some(observation_runtime(mode)),
                 true,
-                observation_owner(state),
+                observation_owner(&state),
                 now + Duration::from_millis(index),
                 |measured_generation| {
                     inspections += 1;
