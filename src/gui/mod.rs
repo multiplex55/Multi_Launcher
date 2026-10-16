@@ -3573,7 +3573,7 @@ impl LauncherApp {
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::JsonUtilityDialog => {
-                self.json_utility_dialog.open = false;
+                self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
             }
             Panel::ConvertPanel => {
@@ -3808,7 +3808,7 @@ impl LauncherApp {
                 self.panel_states.regex_tester_dialog = false;
             }
             Panel::JsonUtilityDialog => {
-                self.json_utility_dialog.open = false;
+                self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
             }
             Panel::ConvertPanel => {
@@ -3918,7 +3918,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self
                 .clipboard_modify_dialog
                 .open_section(ClipboardModifyDialogSection::Modify, &clipboard_service()),
-            Panel::JsonUtilityDialog => self.json_utility_dialog.open = true,
+            Panel::JsonUtilityDialog => self.json_utility_dialog.reopen_existing(),
             Panel::QrDialog => self.qr_dialog.open = true,
             Panel::RegexTesterDialog => {
                 if !self.regex_tester_dialog.open {
