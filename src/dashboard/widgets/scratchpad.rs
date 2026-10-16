@@ -546,7 +546,7 @@ mod tests {
         assert!(widget.reload_from_storage(&repaint));
         assert!(matches!(
             request_rx.recv().unwrap(),
-            ScratchpadRequest::Load { path, generation: 0 } if path == PathBuf::from("old.json")
+            ScratchpadRequest::Load { path, generation: 0 } if path == Path::new("old.json")
         ));
         widget.on_config_updated(
             &serde_json::to_value(ScratchpadConfig {

@@ -530,7 +530,7 @@ mod tests {
             assert!(
                 recognizer
                     .process(
-                        &[local.clone()],
+                        std::slice::from_ref(&local),
                         None,
                         event(vk, KeyTransition::Down, InputProvenance::Physical)
                     )
@@ -568,12 +568,12 @@ mod tests {
         };
         let mut recognizer = ItemInputRecognizer::default();
         recognizer.process(
-            &[local.clone()],
+            std::slice::from_ref(&local),
             Some(&MenuId::new("menu")),
             event(0x41, KeyTransition::Down, InputProvenance::Physical),
         );
         recognizer.process(
-            &[local.clone()],
+            std::slice::from_ref(&local),
             None,
             event(0x42, KeyTransition::Down, InputProvenance::Physical),
         );

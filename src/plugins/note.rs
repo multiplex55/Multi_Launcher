@@ -1527,7 +1527,7 @@ pub(crate) struct NoteAliasSnapshotTestStats {
 #[cfg(test)]
 thread_local! {
     static NOTE_ALIAS_SNAPSHOT_TEST_STATS: std::cell::RefCell<Option<NoteAliasSnapshotTestStats>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -4027,8 +4027,8 @@ mod tests {
         assert_eq!(observed.failures, 0);
         assert_eq!(observed.candidate_entries, 2 + 2 + 1 + 1);
         assert_eq!(observed.candidate_slugs_examined, 2 + 2 + 1 + 1);
-        assert_eq!(observed.notes_visited, 4 + 4 + 0 + 4);
-        assert_eq!(observed.labels_returned, 3 + 1 + 0 + 1);
+        assert_eq!(observed.notes_visited, 12);
+        assert_eq!(observed.labels_returned, 5);
         drop(observer);
     }
 

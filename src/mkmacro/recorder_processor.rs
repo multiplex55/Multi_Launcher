@@ -587,15 +587,14 @@ fn suppress_occurrence(session: &mut Session, keys: &[u32]) {
         let Some(key) = down_key_for(*requested, &session.pressed) else {
             continue;
         };
-        if let Some(run) = session.pressed.get(&key) {
-            if run
+        if let Some(run) = session.pressed.get(&key)
+            && run
                 .ordinary_key_downs
                 .iter()
                 .all(|index| Some(*index) == primary_down)
-            {
-                session.suppressed.insert(run.index);
-                session.suppressed_until_up.insert(key);
-            }
+        {
+            session.suppressed.insert(run.index);
+            session.suppressed_until_up.insert(key);
         }
     }
 }

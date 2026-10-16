@@ -248,10 +248,11 @@ mod tests {
             let output = ctx.run_ui(input(), |_| {
                 editor.ui(&ctx, &mut app);
             });
-            if let Some(layout) = editor.test_list_layout {
-                if layout.visible && !layout.sizing_pass {
-                    editor_layouts.push(layout);
-                }
+            if let Some(layout) = editor.test_list_layout
+                && layout.visible
+                && !layout.sizing_pass
+            {
+                editor_layouts.push(layout);
             }
             add_layout = editor
                 .dialog

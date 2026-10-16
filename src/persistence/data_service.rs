@@ -751,7 +751,7 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         release_tx.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
-        while service.state.lock().unwrap().results.len() < 1 {
+        while service.state.lock().unwrap().results.is_empty() {
             assert!(Instant::now() < deadline);
             thread::yield_now();
         }

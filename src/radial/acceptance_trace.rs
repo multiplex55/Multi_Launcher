@@ -2049,10 +2049,10 @@ pub(crate) fn take_designer_scroll_viewport_test_events() -> Vec<DesignerAuthori
 #[cfg(test)]
 pub(crate) fn reset_action_editor_scroll_test_state() {
     TEST_ACTION_EDITOR_SCROLL_EVENTS.with(|events| events.borrow_mut().clear());
-    if let Some(cache) = ACTION_EDITOR_SCROLLS.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.clear();
-        }
+    if let Some(cache) = ACTION_EDITOR_SCROLLS.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.clear();
     }
 }
 
@@ -2069,20 +2069,20 @@ pub(crate) fn take_radial_insertion_control_test_events() -> Vec<Event> {
 #[cfg(test)]
 pub(crate) fn reset_radial_insertion_control_test_state() {
     TEST_RADIAL_INSERTION_CONTROL_EVENTS.with(|events| events.borrow_mut().clear());
-    if let Some(cache) = RADIAL_INSERTION_CONTROLS.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.clear();
-        }
+    if let Some(cache) = RADIAL_INSERTION_CONTROLS.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.clear();
     }
 }
 
 #[cfg(test)]
 pub(crate) fn reset_inspector_text_edit_test_state() {
     TEST_INSPECTOR_TEXT_EDIT_EVENTS.with(|events| events.borrow_mut().clear());
-    if let Some(cache) = INSPECTOR_CELL_TEXT_EDITS.get() {
-        if let Ok(mut cache) = cache.lock() {
-            cache.clear();
-        }
+    if let Some(cache) = INSPECTOR_CELL_TEXT_EDITS.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache.clear();
     }
 }
 
@@ -2421,7 +2421,7 @@ pub(crate) fn emit_radial_insertion_control_with_widget(
             binding_digest_after,
         };
         #[cfg(test)]
-        TEST_RADIAL_INSERTION_CONTROL_EVENTS.with(|events| events.borrow_mut().push(event.clone()));
+        TEST_RADIAL_INSERTION_CONTROL_EVENTS.with(|events| events.borrow_mut().push(event));
         emit(event);
     }
 }
@@ -2463,7 +2463,7 @@ pub(crate) fn emit(event: Event) {
                     events.len() < 256,
                     "bounded ROOT activation test observation exhausted"
                 );
-                events.push(event.clone());
+                events.push(event);
             }
         });
     }
@@ -2479,7 +2479,7 @@ pub(crate) fn emit(event: Event) {
         TEST_SCREEN_DRAW_RESTORE.with(|events| {
             let mut events = events.borrow_mut();
             if events.len() < 128 {
-                events.push(event.clone());
+                events.push(event);
             }
         });
     }

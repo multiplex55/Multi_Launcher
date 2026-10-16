@@ -121,7 +121,7 @@ mod tests {
             other => panic!("unexpected import result: {other:?}"),
         };
         assert_eq!(image.filename(), "chosen.png");
-        assert_eq!(store.image_path(&image).unwrap().is_file(), true);
+        assert!(store.image_path(&image).unwrap().is_file());
         std::fs::remove_file(source).unwrap();
         assert_eq!(
             store.validate_image_ref(&image).unwrap().dimensions(),

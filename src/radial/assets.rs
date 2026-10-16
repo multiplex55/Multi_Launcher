@@ -1274,7 +1274,7 @@ mod tests {
             .prepare(
                 &reference,
                 MediaKind::Image,
-                &[record.clone()],
+                std::slice::from_ref(&record),
                 variant(1000),
             )
             .unwrap();

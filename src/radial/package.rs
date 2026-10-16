@@ -1380,7 +1380,7 @@ mod tests {
         let source = isolated_package_fixture();
         let export = plan_export(
             &source,
-            &[source.default_menu_id.clone()],
+            std::slice::from_ref(&source.default_menu_id),
             &BTreeMap::new(),
             Vec::new(),
         )
@@ -1545,7 +1545,7 @@ mod tests {
 
         let legacy = plan_export(
             &source,
-            &[source.default_menu_id.clone()],
+            std::slice::from_ref(&source.default_menu_id),
             &BTreeMap::from([(source.assets[0].id.clone(), bytes)]),
             Vec::new(),
         )
@@ -1860,7 +1860,7 @@ mod tests {
         assert_eq!(imported.document.menus.len(), 2);
         let second = plan_export(
             &imported.document,
-            &[imported.document.default_menu_id.clone()],
+            std::slice::from_ref(&imported.document.default_menu_id),
             &BTreeMap::new(),
             first.manifest.notices.clone(),
         )
@@ -1918,7 +1918,7 @@ mod tests {
         assert!(matches!(
             plan_export(
                 &external,
-                &[external.default_menu_id.clone()],
+                std::slice::from_ref(&external.default_menu_id),
                 &BTreeMap::new(),
                 vec![]
             ),
@@ -1928,7 +1928,7 @@ mod tests {
         let source = RadialDocument::starter();
         let mut export = plan_export(
             &source,
-            &[source.default_menu_id.clone()],
+            std::slice::from_ref(&source.default_menu_id),
             &BTreeMap::new(),
             vec![],
         )

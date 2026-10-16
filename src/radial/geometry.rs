@@ -1394,7 +1394,7 @@ mod tests {
         assert!(
             (candidates[0].x - parent.origin.x).abs()
                 < (parent.rim_extent.max.x - parent.rim_extent.min.x) as f64
-                    * parent.scale_factor.get() as f64
+                    * parent.scale_factor.get()
         );
     }
 

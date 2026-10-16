@@ -3196,7 +3196,7 @@ mod tests {
 
         let overflowed = ForegroundTransitionJournal::new();
         let old_cursor = overflowed.cursor().unwrap();
-        for hwnd in 100..(100 + MAX_ROOT_FOREGROUND_TRANSITIONS as usize + 1) {
+        for hwnd in 100..(100 + MAX_ROOT_FOREGROUND_TRANSITIONS + 1) {
             overflowed.record_test_foreground(hwnd, 99, 2);
         }
         assert_eq!(

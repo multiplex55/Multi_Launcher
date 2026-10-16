@@ -895,12 +895,11 @@ mod tests {
 
         release_tx.send(()).unwrap();
 
-        let completion = receive(&wake_rx);
+        receive(&wake_rx);
         let result = coordinator.wait_for_completion(third).unwrap();
         assert_eq!(result.generation(), third);
         assert_eq!(result.config(), &third_config);
         assert_eq!(result.outcome().as_ref().unwrap()[0], action("C"));
-        assert_eq!(completion, ());
         assert_eq!(
             *calls.lock().unwrap(),
             vec!["A".to_string(), "C".to_string()]

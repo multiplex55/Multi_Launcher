@@ -2086,8 +2086,8 @@ mod tests {
         let revision = VisibilityRevision::default();
         let visibility = AtomicBool::new(false);
         let mut batch = VisibilityToggleBatch::default();
-        assert_eq!(batch.record_toggle_ordered(&revision, &visibility).0, false);
-        assert_eq!(batch.record_toggle_ordered(&revision, &visibility).0, true);
+        assert!(!batch.record_toggle_ordered(&revision, &visibility).0);
+        assert!(batch.record_toggle_ordered(&revision, &visibility).0);
         let viewport = RecordingViewport::default();
         let ctx = Arc::new(Mutex::new(Some(viewport.clone())));
         let restore = Arc::new(AtomicBool::new(false));

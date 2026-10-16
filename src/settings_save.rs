@@ -2030,7 +2030,7 @@ mod tests {
         );
         assert!(!reconciliation_required);
         assert_eq!(Settings::load(&path).unwrap().hotkey.as_deref(), Some("F9"));
-        assert!(matches!(owner.try_recv().unwrap(), None));
+        assert!(owner.try_recv().unwrap().is_none());
     }
 
     #[test]

@@ -525,10 +525,7 @@ mod tests {
         assert_eq!(fading.visible_at(start).count(), 2);
         assert_eq!(fading.prune(Duration::from_millis(3_999)), 0);
         assert_eq!(fading.prune(Duration::from_secs(4)), 1);
-        assert_eq!(
-            fading.strokes().iter().any(|stroke| stroke.id == first),
-            false
-        );
+        assert!(!fading.strokes().iter().any(|stroke| stroke.id == first));
         assert_eq!(fading.next_deadline(), Some(Duration::from_secs(5)));
         assert_eq!(fading.prune(Duration::from_secs(5)), 1);
         assert!(fading.is_empty());

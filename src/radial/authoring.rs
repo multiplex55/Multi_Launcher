@@ -4362,7 +4362,7 @@ mod tests {
         let source = RadialDocument::starter();
         let export = super::super::package::plan_export(
             &source,
-            &[source.default_menu_id.clone()],
+            std::slice::from_ref(&source.default_menu_id),
             &Default::default(),
             Vec::new(),
         )

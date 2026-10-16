@@ -2760,8 +2760,12 @@ mod tests {
                     });
                 }
                 let before = serde_json::to_value(&document).unwrap();
-                let warnings =
-                    apply_import_mappings(&mut document, None, &[mapping.clone()], &media);
+                let warnings = apply_import_mappings(
+                    &mut document,
+                    None,
+                    std::slice::from_ref(&mapping),
+                    &media,
+                );
                 let changed = serde_json::to_value(&document).unwrap() != before;
                 let diagnosed = warnings
                     .iter()

@@ -2907,11 +2907,10 @@ mod tests {
         );
         assert_eq!(json["macros"][1]["steps"], serde_json::json!([]));
         assert!(
-            store
+            !store
                 .image_path(&MkImageRef::from_filename("missing_image_5_9.png"))
                 .unwrap()
                 .exists()
-                == false
         );
         assert!(
             store

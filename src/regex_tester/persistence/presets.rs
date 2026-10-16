@@ -451,7 +451,7 @@ mod tests {
             assert!(store.update(preset.id, input("New")).is_err());
             assert!(store.delete(preset.id).is_err());
             assert!(store.reload().is_err());
-            assert_eq!(store.entries(), &[preset.clone()]);
+            assert_eq!(store.entries(), std::slice::from_ref(&preset));
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             write_document(&path, &valid);
             assert!(matches!(

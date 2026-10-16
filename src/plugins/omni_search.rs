@@ -459,11 +459,15 @@ mod tests {
     /// catalog order, which differs from the sorted FST stream semantics.
     fn track_c_reference_linear_fallback(actions: &[Action], query: &str) -> Vec<Action> {
         let query = query.to_lowercase();
-        track_c_reference_deduplicate(actions.iter().filter_map(|action| {
-            (action.label.to_lowercase().contains(&query)
-                || action.desc.to_lowercase().contains(&query))
-            .then(|| action.clone())
-        }))
+        track_c_reference_deduplicate(
+            actions
+                .iter()
+                .filter(|action| {
+                    action.label.to_lowercase().contains(&query)
+                        || action.desc.to_lowercase().contains(&query)
+                })
+                .map(|action| action.clone()),
+        )
     }
 
     fn track_c_omni_actions() -> Vec<Action> {

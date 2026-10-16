@@ -825,7 +825,7 @@ mod tests {
                     .find(|entry| entry.pinned && entry.missing)
                     .expect("a missing pinned target is represented");
                 assert!(
-                    fixture.actions_by_id.get(&missing.action_id).is_none()
+                    !fixture.actions_by_id.contains_key(&missing.action_id)
                         && missing.action.action == missing.action_id
                 );
             }

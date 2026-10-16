@@ -2154,8 +2154,8 @@ mod tests {
         let hit_number = std::sync::atomic::AtomicUsize::new(0);
 
         Executor::new(fake.clone().backends(), control)
-            .execute(&plan, ExecutionOptions::debug(), &|event| match event {
-                ExecutionEvent::BreakpointHit { step_id, variables } => {
+            .execute(&plan, ExecutionOptions::debug(), &|event| {
+                if let ExecutionEvent::BreakpointHit { step_id, variables } = event {
                     assert_eq!(step_id, 1);
                     let number = hit_number.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     assert_eq!(
@@ -2182,7 +2182,6 @@ mod tests {
                     }
                     observer_control.resume();
                 }
-                _ => {}
             })
             .unwrap();
 
@@ -2239,8 +2238,8 @@ mod tests {
             let captured_breakpoint = breakpoint_seen.clone();
 
             Executor::new(fake.clone().backends(), control)
-                .execute(&plan, ExecutionOptions::debug(), &|event| match event {
-                    ExecutionEvent::BreakpointHit { step_id: 1, .. } => {
+                .execute(&plan, ExecutionOptions::debug(), &|event| {
+                    if let ExecutionEvent::BreakpointHit { step_id: 1, .. } = event {
                         assert!(
                             fake.window_calls.lock().unwrap().is_empty(),
                             "the If condition must not be queried before its breakpoint"
@@ -2248,7 +2247,6 @@ mod tests {
                         *captured_breakpoint.lock().unwrap() = true;
                         observer_control.resume();
                     }
-                    _ => {}
                 })
                 .unwrap();
 

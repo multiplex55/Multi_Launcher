@@ -514,12 +514,12 @@ mod tests {
     impl CoordinateSampler for FakeSampler {
         fn sample(&mut self) -> Result<CoordinateSample, String> {
             let call_number = self.calls.fetch_add(1, Ordering::AcqRel);
-            if call_number == 1 {
-                if let Some(gate) = self.sample_gate.as_ref() {
-                    let (release_sender, release_receiver) = mpsc::sync_channel(0);
-                    if gate.send(release_sender).is_ok() {
-                        let _ = release_receiver.recv_timeout(Duration::from_secs(3));
-                    }
+            if call_number == 1
+                && let Some(gate) = self.sample_gate.as_ref()
+            {
+                let (release_sender, release_receiver) = mpsc::sync_channel(0);
+                if gate.send(release_sender).is_ok() {
+                    let _ = release_receiver.recv_timeout(Duration::from_secs(3));
                 }
             }
             self.samples
