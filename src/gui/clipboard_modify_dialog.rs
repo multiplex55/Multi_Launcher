@@ -1954,7 +1954,7 @@ mod tests {
         let ctx = egui::Context::default();
         let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(640.0, 480.0));
         let mut reservations = None;
-        let mut output = ctx.run_ui(
+        let output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen_rect),
                 ..Default::default()

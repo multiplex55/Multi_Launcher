@@ -946,7 +946,7 @@ mod tests {
         let usage = HashMap::new();
 
         for count in workloads::selected_sizes(&[100, 1_000, 10_000]) {
-            let fixture = workloads::history_fixture(0x4849_5354_4f52_59, count);
+            let fixture = workloads::history_fixture(0x0048_4953_544f_5259, count);
             let _history_guard = crate::history::replace_history_for_test(fixture.entries.clone());
             let mut plugins = PluginManager::new_inert_for_test();
             plugins.register(Box::new(CatalogFixturePlugin(

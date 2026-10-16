@@ -1383,7 +1383,7 @@ mod tests {
         }
 
         let initial_layout = initial_layout.expect("settled crop frame captures its responses");
-        let source_rect = initial_layout
+        let _source_rect = initial_layout
             .source_label
             .map(|(_, rect)| rect)
             .expect("source response is captured");

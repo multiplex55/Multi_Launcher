@@ -4242,7 +4242,7 @@ pub(crate) fn desktop_geometry() -> (PhysicalPoint, PhysicalRect, ScaleFactor) {
                 },
             },
             scale,
-        );
+        )
     }
     #[cfg(not(windows))]
     {

@@ -1422,7 +1422,7 @@ impl EmbeddedPreview {
         generation: u64,
         editor_session: AuthoringSessionId,
         input: &PreparedFrameInput,
-        mut authoring_session: Option<&mut RadialAuthoringSession>,
+        authoring_session: Option<&mut RadialAuthoringSession>,
         projected_selection: &mut Option<ProjectedSelection>,
         drag_payload: &mut Option<DragPayload>,
         placement_draft: &mut Option<PlacementDraft>,
@@ -2137,7 +2137,7 @@ fn projected_provenance(
     if let Some(authored) = document
         .menus
         .iter()
-        .find(|menu| menu.id == menu_id)
+        .find(|menu| menu.id == *menu_id)
         .and_then(|menu| menu.rings.iter().find(|ring| ring.id == cell.ring_id))
         .and_then(|ring| {
             ring.cells

@@ -173,7 +173,7 @@ impl SystemDataRuntime {
             },
             publication,
             worker: Some(worker),
-        };
+        }
     }
 
     pub(crate) fn cache(&self) -> SystemDataCache {

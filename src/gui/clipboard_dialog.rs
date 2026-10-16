@@ -580,7 +580,7 @@ mod tests {
                 browse_window_rect = window_output.response.rect;
             }
         });
-        let browse_list_visible_clip = browse_content_rect
+        let _browse_list_visible_clip = browse_content_rect
             .intersect(browse_list_rect)
             .intersect(browse_list_clip_rect);
         let browse_footer_visible_clip = browse_content_rect

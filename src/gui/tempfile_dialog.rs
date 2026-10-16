@@ -51,9 +51,7 @@ impl TempfileDialog {
             .min_width(200.0)
             .min_height(150.0)
             .show(ctx, |ui| {
-                #[cfg(test)]
-                let mut alias_rect = egui::Rect::NOTHING;
-                let alias = ui.horizontal_wrapped(|ui| {
+                let _alias = ui.horizontal_wrapped(|ui| {
                     let label = ui.label("Alias");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.alias)
@@ -62,9 +60,7 @@ impl TempfileDialog {
                     .labelled_by(label.id)
                 });
                 #[cfg(test)]
-                {
-                    alias_rect = alias.inner.rect;
-                }
+                let alias_rect = _alias.inner.rect;
 
                 secondary_help(
                     ui,

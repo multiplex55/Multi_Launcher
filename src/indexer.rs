@@ -388,7 +388,7 @@ mod tests {
 
         for count in workloads::selected_sizes(&[16, 1_000, 10_000]) {
             let root = workspace.root().join(format!("index-root-{count}"));
-            let fixture = workloads::create_index_tree(&root, 0x494e_4445_585f_41, count);
+            let fixture = workloads::create_index_tree(&root, 0x0049_4e44_4558_5f41, count);
             let root_string = root.to_string_lossy().into_owned();
             let roots = vec![root_string.clone()];
             let options = IndexOptions::default();

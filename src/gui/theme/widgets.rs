@@ -330,7 +330,7 @@ mod tests {
         let mut second_ids = None;
         let mut expected_status_font = None;
         let mut status_fully_visible = false;
-        let mut output = render_showcase(
+        let output = render_showcase(
             &ctx,
             input(),
             None,
@@ -432,7 +432,7 @@ mod tests {
             ..Default::default()
         };
         let mut ids = None;
-        let mut output = render_showcase(
+        let output = render_showcase(
             &ctx,
             pointer_input(1.0, true),
             None,
@@ -444,7 +444,7 @@ mod tests {
             &mut status_fully_visible,
         );
         output.drop_without_applying_deltas();
-        let mut output = render_showcase(
+        let output = render_showcase(
             &ctx,
             pointer_input(1.02, false),
             None,

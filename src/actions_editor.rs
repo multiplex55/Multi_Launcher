@@ -245,7 +245,7 @@ mod tests {
         let mut editor_layouts = Vec::new();
         let mut add_layout = None;
         for _ in 0..4 {
-            let output = ctx.run_ui(input(), |ui| {
+            let output = ctx.run_ui(input(), |_| {
                 editor.ui(&ctx, &mut app);
             });
             if let Some(layout) = editor.test_list_layout {
