@@ -49,6 +49,7 @@ pub mod note_todo_sync;
 pub mod note_ui_state;
 pub mod notes_markdown;
 pub mod ocr;
+pub mod paste_sequence;
 pub mod performance;
 pub mod persistence;
 pub mod platform;

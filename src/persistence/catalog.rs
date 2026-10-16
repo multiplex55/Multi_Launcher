@@ -47,6 +47,7 @@ pub enum PersistentStoreId {
     Scratchpad,
     QueryHistory,
     ClipboardHistory,
+    PasteSequences,
     CalculatorHistory,
     Usage,
     CalendarState,
@@ -62,7 +63,7 @@ pub enum PersistentStoreId {
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -88,6 +89,7 @@ impl PersistentStoreId {
         Self::Scratchpad,
         Self::QueryHistory,
         Self::ClipboardHistory,
+        Self::PasteSequences,
         Self::CalculatorHistory,
         Self::Usage,
         Self::CalendarState,
@@ -587,6 +589,15 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             true,
             ProbeKind::Json(probe_json::<Vec<String>>),
         ),
+        Id::PasteSequences => s(
+            "Paste sequences",
+            File,
+            Critical,
+            Sensitive,
+            Moderate,
+            true,
+            ProbeKind::Json(probe_paste_sequences),
+        ),
         Id::CalculatorHistory => s(
             "Calculator history",
             File,
@@ -792,6 +803,7 @@ fn descriptor_for(
         ),
         Id::QueryHistory => cwd(current_dir, "history.json"),
         Id::ClipboardHistory => cwd(current_dir, crate::plugins::clipboard::CLIPBOARD_FILE),
+        Id::PasteSequences => cwd(current_dir, crate::paste_sequence::PASTE_SEQUENCES_FILE),
         Id::CalculatorHistory => cwd(current_dir, crate::plugins::calc_history::CALC_HISTORY_FILE),
         Id::Usage => cwd(current_dir, crate::usage::USAGE_FILE),
         Id::CalendarState => cwd(current_dir, crate::plugins::calendar::CALENDAR_STATE_FILE),
@@ -976,6 +988,20 @@ fn probe_json<T: DeserializeOwned>(_: &Path, bytes: &[u8]) -> ProbeResult {
         .unwrap_or(ProbeResult::Malformed)
 }
 
+fn probe_paste_sequences(_: &Path, bytes: &[u8]) -> ProbeResult {
+    let Ok(document) = serde_json::from_slice::<crate::paste_sequence::SequenceDocument>(bytes)
+    else {
+        return ProbeResult::Malformed;
+    };
+    if document.schema_version() != crate::paste_sequence::PASTE_SEQUENCE_SCHEMA_VERSION {
+        return ProbeResult::UnsupportedSchema(document.schema_version().to_string());
+    }
+    if document.validate().is_ok() {
+        ProbeResult::Healthy
+    } else {
+        ProbeResult::Malformed
+    }
+}
 fn probe_radial(_: &Path, bytes: &[u8]) -> ProbeResult {
     match crate::radial::migration::decode_document(bytes) {
         Ok(_) => ProbeResult::Healthy,

@@ -1236,6 +1236,7 @@ fn canonical_reset(id: PersistentStoreId, kind: StoreKind) -> Result<ResetCandid
         Id::Scratchpad => json!(serde_json::json!({ "content": "" })),
         Id::QueryHistory => json!(Vec::<HistoryEntry>::new()),
         Id::ClipboardHistory => json!(Vec::<String>::new()),
+        Id::PasteSequences => json!(crate::paste_sequence::SequenceDocument::default()),
         Id::CalculatorHistory => json!(Vec::<CalcHistoryEntry>::new()),
         Id::Usage => json!(Vec::<UsageEntry>::new()),
         Id::CalendarState => json!(CalendarState::default()),
