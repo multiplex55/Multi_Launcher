@@ -57,8 +57,8 @@ impl RegexFlags {
 /// Editable inputs for the tester's single text document and replacement.
 ///
 /// This draft intentionally does not implement serialization: history stores
-/// only a pattern and flags, while sample text is persisted only by an
-/// explicitly saved preset.
+/// only a pattern and flags, while sample text, replacement text, and
+/// authored test cases are stored only by an explicitly saved preset.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RegexDraft {
     pub pattern: String,

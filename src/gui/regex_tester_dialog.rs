@@ -940,7 +940,9 @@ impl RegexTesterDialogState {
     }
 
     fn load_example(&mut self, example: &crate::regex_tester::RegexExample) {
+        let test_cases = self.session.draft.test_cases.clone();
         self.session.draft = example.to_draft();
+        self.session.draft.test_cases = test_cases;
         self.mark_changed();
     }
 
@@ -978,6 +980,7 @@ impl RegexTesterDialogState {
             .is_some_and(|presets| presets.handle(action, &mut self.session.draft))
         {
             self.mark_changed();
+            self.session.mark_test_cases_changed(Instant::now());
         }
     }
 
@@ -2016,6 +2019,7 @@ mod tests {
                 },
                 sample_text: None,
                 replacement: None,
+                test_cases: crate::regex_tester::RegexTestCases::default(),
             })
             .unwrap();
         let backend = Arc::new(FakeClipboard::default());
@@ -2117,6 +2121,17 @@ mod tests {
         restarted.session.draft.pattern = "a".into();
         restarted.session.draft.test_text = "retained test text".into();
         restarted.session.draft.replacement = "retained replacement".into();
+        restarted
+            .session
+            .draft
+            .test_cases
+            .add(
+                Some("retained case".into()),
+                "authored input".into(),
+                crate::regex_tester::RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
+        let retained_cases = restarted.session.draft.test_cases.clone();
         restarted.session.mark_changed(now);
         restarted
             .session
@@ -2129,6 +2144,7 @@ mod tests {
         assert!(restarted.session.draft.flags.case_insensitive);
         assert_eq!(restarted.session.draft.test_text, "retained test text");
         assert_eq!(restarted.session.draft.replacement, "retained replacement");
+        assert_eq!(restarted.session.draft.test_cases, retained_cases);
         assert_eq!(restarted.session.revision(), revision + 1);
         assert!(restarted.session.result().is_none());
         assert!(restarted.session.explanation().is_none());
@@ -2159,7 +2175,7 @@ mod tests {
     }
 
     #[test]
-    fn regex_tester_examples_load_exact_editable_drafts_and_clear_stale_state_once() {
+    fn regex_tester_examples_load_editable_drafts_and_preserve_authored_cases() {
         let backend = Arc::new(FakeClipboard::default());
         let mut dialog = RegexTesterDialogState::with_clipboard(backend.clone());
         let now = Instant::now();
@@ -2167,6 +2183,17 @@ mod tests {
         dialog
             .session
             .tick(now + crate::regex_tester::session::EVALUATION_DEBOUNCE);
+        dialog
+            .session
+            .draft
+            .test_cases
+            .add(
+                Some("authored".into()),
+                "keep me".into(),
+                crate::regex_tester::RegexTestCaseExpectation::NoMatch,
+            )
+            .unwrap();
+        let authored_cases = dialog.session.draft.test_cases.clone();
         let unicode = crate::regex_tester::RegexExample {
             id: "test-unicode-replacement",
             name: "Unicode capture",
@@ -2195,7 +2222,9 @@ mod tests {
             dialog.copy_feedback = Some(Ok("Old feedback"));
             let revision = dialog.session.revision();
             dialog.load_example(example);
-            assert_eq!(dialog.session.draft, example.to_draft());
+            let mut expected = example.to_draft();
+            expected.test_cases = authored_cases.clone();
+            assert_eq!(dialog.session.draft, expected);
             assert_eq!(dialog.session.revision(), revision + 1);
             assert!(dialog.session.result().is_none());
             assert!(dialog.session.explanation().is_none());

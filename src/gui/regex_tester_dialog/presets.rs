@@ -1,6 +1,9 @@
 //! Explicit preset authoring; the domain store owns validation and atomic writes.
 
-use crate::regex_tester::{PresetContent, PresetId, PresetInput, PresetStore, RegexDraft};
+use crate::regex_tester::{
+    PresetContent, PresetId, PresetInput, PresetStore, RegexDraft, RegexTestCaseExpectation,
+    RegexTestCases,
+};
 use eframe::egui;
 
 pub(super) struct PresetState {
@@ -40,6 +43,16 @@ mod tests {
             ..Default::default()
         };
         dialog.session.draft.flags.case_insensitive = true;
+        dialog
+            .session
+            .draft
+            .test_cases
+            .add(
+                Some("étiquette".into()),
+                "private case input".into(),
+                RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
         let original = dialog.session.draft.clone();
         let now = Instant::now();
         dialog.session.mark_changed(now);
@@ -74,6 +87,7 @@ mod tests {
         assert_eq!(saved.flags, original.flags);
         assert_eq!(saved.sample_text, None);
         assert_eq!(saved.replacement, None);
+        assert_eq!(saved.test_cases, original.test_cases);
     }
 
     #[test]
@@ -86,6 +100,14 @@ mod tests {
             pattern: "a".into(),
             ..Default::default()
         };
+        draft
+            .test_cases
+            .add(
+                Some("source".into()),
+                "case source".into(),
+                RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
         state.handle(PresetAction::Save, &mut draft);
         let id = state.selected.unwrap();
         PresetStore::open(&path)
@@ -96,6 +118,10 @@ mod tests {
         state.include_sample = true;
         draft.pattern = "é".into();
         draft.test_text = "sample é".into();
+        let bytes_before_case_edit = std::fs::read(&path).unwrap();
+        let case_id = draft.test_cases.as_slice()[0].id;
+        draft.test_cases.get_mut(case_id).unwrap().input = "case edited locally".into();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes_before_case_edit);
         let original = draft.clone();
         assert!(!state.handle(PresetAction::Update(id), &mut draft));
         assert_eq!(draft, original);
@@ -103,8 +129,80 @@ mod tests {
         assert_eq!(saved.name, "External renamed preset");
         assert_eq!(saved.pattern, "é");
         assert_eq!(saved.sample_text.as_deref(), Some("sample é"));
+        assert_eq!(saved.test_cases, draft.test_cases);
         assert_eq!(saved.id, id);
         assert_eq!(PresetStore::open(&path).get(id), Some(saved));
+    }
+
+    #[test]
+    fn loading_same_pattern_and_flags_reschedules_changed_case_inputs() {
+        use crate::gui::regex_tester_dialog::RegexTesterDialogState;
+        use crate::regex_tester::RegexTestCaseStatus;
+        use crate::regex_tester::session::EVALUATION_DEBOUNCE;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let history_path = dir.path().join("history.json");
+        let preset_path = dir.path().join("presets.json");
+        let mut first_cases = RegexTestCases::default();
+        first_cases
+            .add(None, "x".into(), RegexTestCaseExpectation::Match)
+            .unwrap();
+        let mut second_cases = RegexTestCases::default();
+        second_cases
+            .add(None, "y".into(), RegexTestCaseExpectation::Match)
+            .unwrap();
+        let mut store = PresetStore::open(&preset_path);
+        let first = store
+            .create(PresetInput {
+                name: "First".into(),
+                pattern: "x".into(),
+                flags: Default::default(),
+                sample_text: None,
+                replacement: None,
+                test_cases: first_cases.clone(),
+            })
+            .unwrap();
+        let second = store
+            .create(PresetInput {
+                name: "Second".into(),
+                pattern: "x".into(),
+                flags: Default::default(),
+                sample_text: None,
+                replacement: None,
+                test_cases: second_cases.clone(),
+            })
+            .unwrap();
+
+        let mut dialog = RegexTesterDialogState::with_storage_paths(&history_path, &preset_path);
+        dialog.session.draft.pattern = "x".into();
+        dialog.session.draft.test_cases = first_cases.clone();
+        let now = Instant::now();
+        dialog.session.mark_changed(now);
+        assert!(dialog.session.tick_test_cases(now + EVALUATION_DEBOUNCE));
+        assert_eq!(
+            dialog.session.test_case_evaluation().unwrap().results[0].status,
+            RegexTestCaseStatus::Pass
+        );
+
+        dialog.preset_action(PresetAction::Load(second));
+        assert_eq!(dialog.session.draft.pattern, "x");
+        assert_eq!(dialog.session.draft.test_cases, second_cases);
+        assert_eq!(
+            dialog.session.test_case_evaluation().unwrap().results[0].status,
+            RegexTestCaseStatus::Pending
+        );
+        let loaded_at = Instant::now();
+        assert!(
+            dialog
+                .session
+                .tick_test_cases(loaded_at + EVALUATION_DEBOUNCE)
+        );
+        assert_eq!(
+            dialog.session.test_case_evaluation().unwrap().results[0].status,
+            RegexTestCaseStatus::Fail
+        );
+        assert_eq!(store.get(first).unwrap().test_cases, first_cases);
     }
 
     #[test]
@@ -120,6 +218,14 @@ mod tests {
             replacement: "private replacement".into(),
             ..Default::default()
         };
+        draft
+            .test_cases
+            .add(
+                Some("expected".into()),
+                "initial case".into(),
+                RegexTestCaseExpectation::NoMatch,
+            )
+            .unwrap();
         let original = draft.clone();
         assert!(!state.handle(PresetAction::Save, &mut draft));
         assert_eq!(draft, original);
@@ -128,6 +234,7 @@ mod tests {
         assert_eq!(saved.name, "Work in progress");
         assert_eq!(saved.sample_text, None);
         assert_eq!(saved.replacement, None);
+        assert_eq!(saved.test_cases, original.test_cases);
         assert!(!std::fs::read_to_string(&path).unwrap().contains("private"));
         let mut restarted = PresetState::open(&path);
         draft.pattern = "other".into();
@@ -151,9 +258,26 @@ mod tests {
         assert_eq!(saved.replacement.as_deref(), Some(""));
         draft.test_text = "should clear".into();
         draft.replacement = "should clear".into();
+        draft.test_cases = RegexTestCases::default();
         assert!(restarted.handle(PresetAction::Load(id), &mut draft));
         assert_eq!(draft, updated);
         assert_eq!(PresetStore::open(&path).get(id), restarted.store.get(id));
+
+        let legacy_path = dir.path().join("legacy-presets.json");
+        let legacy = br#"{"version":1,"next_id":2,"presets":[{"id":1,"name":"Legacy","pattern":"legacy","flags":{},"sample_text":null,"replacement":null}]}"#;
+        std::fs::write(&legacy_path, legacy).unwrap();
+        let mut legacy_state = PresetState::open(&legacy_path);
+        draft.pattern = "current".into();
+        draft.test_text = "keep sample".into();
+        draft.replacement = "keep replacement".into();
+        draft.test_cases = updated.test_cases.clone();
+        let legacy_id = legacy_state.store.entries()[0].id;
+        assert!(legacy_state.handle(PresetAction::Load(legacy_id), &mut draft));
+        assert_eq!(draft.pattern, "legacy");
+        assert_eq!(draft.test_text, "keep sample");
+        assert_eq!(draft.replacement, "keep replacement");
+        assert!(draft.test_cases.is_empty());
+        assert_eq!(std::fs::read(&legacy_path).unwrap(), legacy);
     }
 
     #[test]
@@ -271,6 +395,7 @@ impl PresetState {
             flags: draft.flags,
             sample_text: self.include_sample.then(|| draft.test_text.clone()),
             replacement: self.include_replacement.then(|| draft.replacement.clone()),
+            test_cases: draft.test_cases.clone(),
         }
     }
 
@@ -295,6 +420,11 @@ impl PresetState {
                     if let Some(replacement) = &preset.replacement {
                         draft.replacement.clone_from(replacement);
                     }
+                    // Cases belong to a preset independently of the optional
+                    // main example and replacement buffers. Loading a legacy
+                    // preset therefore intentionally replaces cases with an
+                    // empty collection.
+                    draft.test_cases.clone_from(&preset.test_cases);
                     self.select(id);
                     self.feedback = Some(Ok("Loaded preset"));
                     return true;
@@ -313,6 +443,7 @@ impl PresetState {
                     flags: draft.flags,
                     sample_text: self.include_sample.then(|| draft.test_text.clone()),
                     replacement: self.include_replacement.then(|| draft.replacement.clone()),
+                    test_cases: draft.test_cases.clone(),
                 };
                 self.store
                     .update_content(id, content)
