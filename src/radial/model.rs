@@ -149,18 +149,13 @@ pub enum RadialSafetyPolicy {
     AlwaysConfirmDestructive,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionMode {
+    #[default]
     StickyClick,
     ReleaseToSelect,
     HoldAndClick,
-}
-
-impl Default for InteractionMode {
-    fn default() -> Self {
-        Self::StickyClick
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,41 +165,32 @@ pub enum LayoutKind {
     Wedges,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubmenuPresentation {
+    #[default]
     Cascade,
     SameCenter,
-}
-
-impl Default for SubmenuPresentation {
-    fn default() -> Self {
-        Self::Cascade
-    }
 }
 
 fn legacy_submenu_presentation() -> SubmenuPresentation {
     SubmenuPresentation::Cascade
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AfterActionPolicy {
+    #[default]
     Inherit,
     KeepOpen,
     CloseCurrentMenu,
     CloseTree,
 }
 
-impl Default for AfterActionPolicy {
-    fn default() -> Self {
-        Self::Inherit
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Override<T> {
+    #[default]
     Inherit,
     Value(T),
     Clear,
@@ -493,12 +479,6 @@ pub struct ItemGeometryStyleOverrides {
 #[serde(default, deny_unknown_fields)]
 pub struct ItemSoundStyleOverrides {
     pub on_select: Override<MediaReference>,
-}
-
-impl<T> Default for Override<T> {
-    fn default() -> Self {
-        Self::Inherit
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

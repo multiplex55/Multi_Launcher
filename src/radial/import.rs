@@ -391,12 +391,11 @@ pub fn preview_rm4(
         if file_name(input.relative_path).eq_ignore_ascii_case("Skin definition.txt") {
             let parsed = parse_rm4_definition(input);
             for mapping in parsed.mappings {
-                if mapping.provenance.field == "SkinName" {
-                    if let ImportedValue::Text(name) = &mapping.value {
-                        if !name.trim().is_empty() {
-                            named_skins.insert(parent_key(input.relative_path));
-                        }
-                    }
+                if mapping.provenance.field == "SkinName"
+                    && let ImportedValue::Text(name) = &mapping.value
+                    && !name.trim().is_empty()
+                {
+                    named_skins.insert(parent_key(input.relative_path));
                 }
                 mappings.push(mapping);
             }

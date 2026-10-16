@@ -364,17 +364,15 @@ impl NativePreviewCoordinator {
             return Err("stale native preview request".into());
         }
         validate(&document).map_err(|error| error.to_string())?;
-        let (anchor, work, scale) = frozen_context.map_or_else(
-            || super::super::controller::desktop_geometry(),
-            |context| {
+        let (anchor, work, scale) =
+            frozen_context.map_or_else(super::super::controller::desktop_geometry, |context| {
                 projection.placement = PreviewPlacement::FixedCenter;
                 (
                     context.visible_center,
                     context.work_area,
                     context.scale_factor,
                 )
-            },
-        );
+            });
         let frame = build_preview_frame_input_projected(
             &mut self.preparer,
             &document,
@@ -619,10 +617,7 @@ impl NativePreviewCoordinator {
 
     pub fn poll(&mut self) -> Vec<NativePreviewNotice> {
         let mut notices = Vec::new();
-        loop {
-            let Some(event) = self.host.as_ref().and_then(|host| host.try_recv()) else {
-                break;
-            };
+        while let Some(event) = self.host.as_ref().and_then(|host| host.try_recv()) {
             let lease = self.active.as_ref().map(|active| active.lease.clone());
             let result = self.handle_event(event);
             if let Some(lease) = lease {
@@ -1305,10 +1300,10 @@ impl NativePreviewCoordinator {
             &projection,
         )?;
         ensure_preview_center_back(&mut frame.layout, &child_menu);
-        if effective_presentation == SubmenuPresentation::Cascade {
-            if frame.placement != PreparedPlacement::Cascade {
-                effective_presentation = SubmenuPresentation::SameCenter;
-            }
+        if effective_presentation == SubmenuPresentation::Cascade
+            && frame.placement != PreparedPlacement::Cascade
+        {
+            effective_presentation = SubmenuPresentation::SameCenter;
         }
         projection.placement = PreviewPlacement::FixedCenter;
         frame.scene =

@@ -394,20 +394,18 @@ impl SessionReducer {
                     self.state.dwell_candidate = None;
                 }
                 let mut begin_native_drag = false;
-                if let Some(press) = self.state.pending_press.as_mut() {
-                    if press.geometry_generation == geometry_generation
-                        && distance2(point, press.origin) >= DRAG_DISTANCE_SQUARED
-                    {
-                        press.dragged = true;
-                        begin_native_drag = press.native_drag;
-                    }
+                if let Some(press) = self.state.pending_press.as_mut()
+                    && press.geometry_generation == geometry_generation
+                    && distance2(point, press.origin) >= DRAG_DISTANCE_SQUARED
+                {
+                    press.dragged = true;
+                    begin_native_drag = press.native_drag;
                 }
-                if let Some(press) = self.state.pending_ancestor.as_mut() {
-                    if press.geometry_generation == geometry_generation
-                        && distance2(point, press.origin) >= DRAG_DISTANCE_SQUARED
-                    {
-                        press.dragged = true;
-                    }
+                if let Some(press) = self.state.pending_ancestor.as_mut()
+                    && press.geometry_generation == geometry_generation
+                    && distance2(point, press.origin) >= DRAG_DISTANCE_SQUARED
+                {
+                    press.dragged = true;
                 }
                 if begin_native_drag {
                     self.state.pending_press = None;

@@ -467,7 +467,7 @@ fn handle(
             if let Some(old) = active.take() {
                 let id = old.id.clone();
                 drop(old);
-                let _ = events.send(NativeEvent::Closed {
+                events.send(NativeEvent::Closed {
                     session_id: id,
                     reason: CloseReason::Dismissed,
                 });
@@ -491,14 +491,14 @@ fn handle(
                         surface,
                         _suppression: suppression,
                     });
-                    let _ = events.send(NativeEvent::Ready {
+                    events.send(NativeEvent::Ready {
                         session_id,
                         layout_generation: scene.generation,
                     });
                 }
                 Err(message) => {
                     drop(suppression);
-                    let _ = events.send(NativeEvent::Failed {
+                    events.send(NativeEvent::Failed {
                         session_id: Some(session_id),
                         message,
                     });
@@ -553,7 +553,7 @@ fn handle(
         NativeCommand::Close { session_id, reason } => {
             if active.as_ref().is_some_and(|a| a.id == session_id) {
                 drop(active.take());
-                let _ = events.send(NativeEvent::Closed { session_id, reason });
+                events.send(NativeEvent::Closed { session_id, reason });
             }
             true
         }
@@ -563,13 +563,12 @@ fn handle(
         } => {
             if let Some(current) = active.as_mut().filter(|current| {
                 current.id == session_id && current.layout_generation == layout_generation
-            }) {
-                if let Err(message) = current.surface.begin_system_drag(layout_generation) {
-                    events.send(NativeEvent::Failed {
-                        session_id: Some(session_id),
-                        message,
-                    });
-                }
+            }) && let Err(message) = current.surface.begin_system_drag(layout_generation)
+            {
+                events.send(NativeEvent::Failed {
+                    session_id: Some(session_id),
+                    message,
+                });
             }
             true
         }
@@ -577,7 +576,7 @@ fn handle(
             if let Some(old) = active.take() {
                 let id = old.id.clone();
                 drop(old);
-                let _ = events.send(NativeEvent::Closed {
+                events.send(NativeEvent::Closed {
                     session_id: id,
                     reason: CloseReason::Shutdown,
                 });
@@ -977,14 +976,13 @@ unsafe extern "system" fn wndproc(
                 if matches!(
                     owner,
                     InputOwner::Actionable(_) | InputOwner::NavigateToFrame(_)
-                ) {
-                    if !unsafe { (*ptr).capture.acquire(hwnd) } {
-                        state.events.send(NativeEvent::Failed {
-                            session_id: Some(state.session_id.clone()),
-                            message: "failed to acquire radial pointer capture".into(),
-                        });
-                        return windows::Win32::Foundation::LRESULT(0);
-                    }
+                ) && !unsafe { (*ptr).capture.acquire(hwnd) }
+                {
+                    state.events.send(NativeEvent::Failed {
+                        session_id: Some(state.session_id.clone()),
+                        message: "failed to acquire radial pointer capture".into(),
+                    });
+                    return windows::Win32::Foundation::LRESULT(0);
                 }
                 NativeEvent::PointerDown {
                     session_id: state.session_id.clone(),
@@ -1023,7 +1021,7 @@ unsafe extern "system" fn wndproc(
                     point,
                 }
             };
-            let _ = state.events.send(event);
+            state.events.send(event);
         }
         return windows::Win32::Foundation::LRESULT(0);
     }
@@ -1046,7 +1044,7 @@ unsafe extern "system" fn wndproc(
         {
             unsafe { (*ptr).capture.0 = false };
             let state = unsafe { &*ptr };
-            let _ = state.events.send(NativeEvent::CaptureLost {
+            state.events.send(NativeEvent::CaptureLost {
                 session_id: state.session_id.clone(),
                 layout_generation: state.scene.generation,
             });
@@ -1057,7 +1055,7 @@ unsafe extern "system" fn wndproc(
         if !ptr.is_null() {
             let state = unsafe { &*ptr };
             if hwnd == state.input_hwnd || hwnd == state.visual_hwnd {
-                let _ = state.events.send(NativeEvent::DisplayChanged {
+                state.events.send(NativeEvent::DisplayChanged {
                     session_id: state.session_id.clone(),
                 });
             }
@@ -1067,7 +1065,7 @@ unsafe extern "system" fn wndproc(
         let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState };
         if !ptr.is_null() && hwnd == unsafe { &*ptr }.input_hwnd {
             let state = unsafe { &*ptr };
-            let _ = state.events.send(NativeEvent::Escape {
+            state.events.send(NativeEvent::Escape {
                 session_id: state.session_id.clone(),
             });
         }
@@ -2169,7 +2167,7 @@ fn present_layered(
             SourceConstantAlpha: 255,
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
-        let updated = converted.map_err(str::to_string).and_then(|_| {
+        converted.map_err(str::to_string).and_then(|_| {
             UpdateLayeredWindow(
                 hwnd,
                 None,
@@ -2182,8 +2180,7 @@ fn present_layered(
                 ULW_ALPHA,
             )
             .map_err(|error| format!("UpdateLayeredWindow failed: {error}"))
-        });
-        updated
+        })
     }
 }
 #[cfg(windows)]

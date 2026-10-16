@@ -235,15 +235,16 @@ pub fn bound_diagnostics(
     if omission.total > 0 {
         // The disclosure occupies one bounded slot so the returned
         // collection itself never exceeds the configured limit.
-        if actionable.len() >= total_limit && total_limit > 0 {
-            if let Some(removed) = actionable.pop() {
-                if removed.is_expected_layout() {
-                    omission.expected_layout = omission.expected_layout.saturating_add(1);
-                } else {
-                    omission.actionable = omission.actionable.saturating_add(1);
-                }
-                omission.total = omission.actionable.saturating_add(omission.expected_layout);
+        if actionable.len() >= total_limit
+            && total_limit > 0
+            && let Some(removed) = actionable.pop()
+        {
+            if removed.is_expected_layout() {
+                omission.expected_layout = omission.expected_layout.saturating_add(1);
+            } else {
+                omission.actionable = omission.actionable.saturating_add(1);
             }
+            omission.total = omission.actionable.saturating_add(omission.expected_layout);
         }
         actionable.push(RadialDiagnostic::omitted_summary(omission));
     }

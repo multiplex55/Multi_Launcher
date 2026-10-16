@@ -236,10 +236,10 @@ impl<E: IconResourceExtractor> AssetService<E> {
             format!("unresolved:{overlay_version}"),
             variant,
         );
-        if let Some(CachedAsset::Ready(value)) = self.cache.get(&unresolved_key) {
-            if let PreparedOutcome::Unavailable(diagnostic) = &*value {
-                return Err(diagnostic.clone());
-            }
+        if let Some(CachedAsset::Ready(value)) = self.cache.get(&unresolved_key)
+            && let PreparedOutcome::Unavailable(diagnostic) = &*value
+        {
+            return Err(diagnostic.clone());
         }
         let resolved = match self.resolve(reference, expected, records, overlay) {
             Ok(resolved) => resolved,
@@ -400,13 +400,12 @@ impl<E: IconResourceExtractor> AssetService<E> {
                     expected,
                     file_name,
                     self.search_roots.search_windows_media_for_sounds,
-                ) {
-                    if let Some(root) = windows_media_directory() {
-                        root_available |= root.is_dir();
-                        let candidate = root.join(file_name);
-                        if candidate.is_file() {
-                            return Ok(ResolvedSource::file("windows-media", candidate, None));
-                        }
+                ) && let Some(root) = windows_media_directory()
+                {
+                    root_available |= root.is_dir();
+                    let candidate = root.join(file_name);
+                    if candidate.is_file() {
+                        return Ok(ResolvedSource::file("windows-media", candidate, None));
                     }
                 }
                 if root_available {
@@ -593,11 +592,10 @@ fn decode_gif(bytes: &[u8]) -> Result<PreparedImage, AssetDiagnostic> {
         }
         let frame = frame.map_err(|error| AssetDiagnostic::Corrupt(error.to_string()))?;
         let (numerator, denominator) = frame.delay().numer_denom_ms();
-        let delay = if denominator == 0 {
-            0
-        } else {
-            numerator.saturating_add(denominator - 1) / denominator
-        };
+        let delay = numerator
+            .saturating_add(denominator.saturating_sub(1))
+            .checked_div(denominator)
+            .unwrap_or(0);
         duration = duration.saturating_add(delay as u64);
         if duration > MAX_ANIMATION_DURATION_MS {
             return Err(AssetDiagnostic::DurationBudgetExceeded);
@@ -705,10 +703,10 @@ fn decode_wave(bytes: &[u8]) -> Result<PreparedSound, AssetDiagnostic> {
                 return Err(AssetDiagnostic::InvalidWave);
             }
             format = Some(byte_rate);
-        } else if id == b"data" {
-            if data_len.replace(length).is_some() || length > MAX_WAVE_DATA_BYTES {
-                return Err(AssetDiagnostic::DecodedBudgetExceeded);
-            }
+        } else if id == b"data"
+            && (data_len.replace(length).is_some() || length > MAX_WAVE_DATA_BYTES)
+        {
+            return Err(AssetDiagnostic::DecodedBudgetExceeded);
         }
         cursor = data_end
             .checked_add(length & 1)
@@ -904,7 +902,8 @@ fn extract_windows_icon(
             DI_NORMAL,
         );
         let mut rgba = slice::from_raw_parts(bits as *const u8, byte_len).to_vec();
-        for pixel in rgba.chunks_exact_mut(4) {
+        let (pixels, _) = rgba.as_chunks_mut::<4>();
+        for pixel in pixels {
             pixel.swap(0, 2);
         }
         let _ = SelectObject(dc, old);

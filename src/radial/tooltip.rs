@@ -242,10 +242,10 @@ impl TooltipDeadlineScheduler {
     }
 
     pub fn cancel(&self) {
-        if let Ok(mut armed_deadline) = self.armed_deadline.lock() {
-            if armed_deadline.take().is_none() {
-                return;
-            }
+        if let Ok(mut armed_deadline) = self.armed_deadline.lock()
+            && armed_deadline.take().is_none()
+        {
+            return;
         }
         let _ = self.tx.send(TooltipDeadlineCommand::Cancel);
     }

@@ -118,23 +118,22 @@ impl SystemFontCatalog {
     pub fn discover() -> Self {
         let mut families = BTreeSet::new();
         let mut files = BTreeMap::new();
-        if let Some(directory) = windows_fonts_directory() {
-            if let Ok(entries) = std::fs::read_dir(directory) {
-                for entry in entries.flatten().take(MAX_DISCOVERED_FONTS) {
-                    let path = entry.path();
-                    if path
-                        .extension()
-                        .and_then(|value| value.to_str())
-                        .is_some_and(|value| {
-                            matches!(value.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc")
-                        })
-                    {
-                        if let Some(stem) = path.file_stem().and_then(|value| value.to_str()) {
-                            register_font_path(&mut families, &mut files, stem, &path);
-                            for alias in aliases_for_font_file(&path) {
-                                register_font_path(&mut families, &mut files, alias, &path);
-                            }
-                        }
+        if let Some(directory) = windows_fonts_directory()
+            && let Ok(entries) = std::fs::read_dir(directory)
+        {
+            for entry in entries.flatten().take(MAX_DISCOVERED_FONTS) {
+                let path = entry.path();
+                if path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|value| {
+                        matches!(value.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc")
+                    })
+                    && let Some(stem) = path.file_stem().and_then(|value| value.to_str())
+                {
+                    register_font_path(&mut families, &mut files, stem, &path);
+                    for alias in aliases_for_font_file(&path) {
+                        register_font_path(&mut families, &mut files, alias, &path);
                     }
                 }
             }
@@ -316,12 +315,10 @@ fn prepare_layout(
     let dpi_milli = request.dpi_milli.max(1) as u64;
     let width_limit_physical =
         (request.max_width_milli.max(1) as u64).saturating_mul(dpi_milli) / 1_000;
-    let fit = if width_per_grapheme == 0 {
-        MAX_TOOLTIP_SOURCE_GRAPHEMES
-    } else {
-        (width_limit_physical / width_per_grapheme) as usize
-    }
-    .max(1);
+    let fit = width_limit_physical
+        .checked_div(width_per_grapheme)
+        .map_or(MAX_TOOLTIP_SOURCE_GRAPHEMES, |fit| fit as usize)
+        .max(1);
     let (display, line_count, widest_graphemes) = match request.wrap {
         FontWrapPolicy::Ellipsis => {
             let visible_count = graphemes.len().min(source_grapheme_limit);

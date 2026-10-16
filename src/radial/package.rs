@@ -1017,10 +1017,10 @@ fn reject_nonportable_media(value: &serde_json::Value) -> Result<(), PackageErro
 fn collect_managed_ids(value: &serde_json::Value, ids: &mut BTreeSet<String>) {
     match value {
         serde_json::Value::Object(object) => {
-            if object.get("kind").and_then(|value| value.as_str()) == Some("managed") {
-                if let Some(id) = object.get("asset_id").and_then(|value| value.as_str()) {
-                    ids.insert(id.to_string());
-                }
+            if object.get("kind").and_then(|value| value.as_str()) == Some("managed")
+                && let Some(id) = object.get("asset_id").and_then(|value| value.as_str())
+            {
+                ids.insert(id.to_string());
             }
             for value in object.values() {
                 collect_managed_ids(value, ids);
@@ -1206,12 +1206,11 @@ fn mapped(map: &BTreeMap<String, String>, original: &str) -> String {
 fn rewrite_managed_ids(value: &mut serde_json::Value, remap: &BTreeMap<String, String>) {
     match value {
         serde_json::Value::Object(object) => {
-            if object.get("kind").and_then(|value| value.as_str()) == Some("managed") {
-                if let Some(serde_json::Value::String(id)) = object.get_mut("asset_id") {
-                    if let Some(mapped) = remap.get(id.as_str()) {
-                        *id = mapped.clone();
-                    }
-                }
+            if object.get("kind").and_then(|value| value.as_str()) == Some("managed")
+                && let Some(serde_json::Value::String(id)) = object.get_mut("asset_id")
+                && let Some(mapped) = remap.get(id.as_str())
+            {
+                *id = mapped.clone();
             }
             for value in object.values_mut() {
                 rewrite_managed_ids(value, remap);

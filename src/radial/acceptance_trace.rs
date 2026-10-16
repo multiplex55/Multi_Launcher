@@ -3578,7 +3578,7 @@ fn emit_with_budget(event: Event, budget: &EventBudget) {
                         elapsed_ms,
                         phase,
                         request_id,
-                        baseline_request_id = baseline_request_id.map_or(0, |id| id),
+                        baseline_request_id = baseline_request_id.unwrap_or(0),
                         captured_trace_sequence,
                         trace_sequence,
                         "radial acceptance trace"
@@ -4233,7 +4233,7 @@ pub(crate) fn emit_authoring_observation_boundary(
                 elapsed_ms,
                 phase,
                 request_id,
-                baseline_request_id = baseline_request_id.map_or(0, |id| id),
+                baseline_request_id = baseline_request_id.unwrap_or(0),
                 captured_trace_sequence,
                 trace_sequence,
                 "radial acceptance trace"
@@ -5369,15 +5369,14 @@ fn insert_designer_authoring_control_snapshot(
         return true;
     }
 
-    if previous.len() >= MAX_SNAPSHOTS {
-        if let Some(oldest_index) = previous
+    if previous.len() >= MAX_SNAPSHOTS
+        && let Some(oldest_index) = previous
             .iter()
             .enumerate()
             .min_by_key(|(_, item)| item.last_emitted_ms)
             .map(|(index, _)| index)
-        {
-            previous.remove(oldest_index);
-        }
+    {
+        previous.remove(oldest_index);
     }
     snapshot.last_emitted_ms = now_ms;
     previous.push(snapshot);

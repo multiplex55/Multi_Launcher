@@ -863,10 +863,10 @@ impl RadialController {
                         .as_ref()
                         .is_some_and(|active| active.menu_id == menu_id);
                     if matches_active {
-                        if let Some(active) = self.active.as_mut() {
-                            if trigger_still_down {
-                                active.owned_item_input = Some(id);
-                            }
+                        if let Some(active) = self.active.as_mut()
+                            && trigger_still_down
+                        {
+                            active.owned_item_input = Some(id);
                         }
                         self.activate_item(&menu_id, &cell_id, gesture, source, &mut out);
                         if scope == TriggerScope::Global {
@@ -907,10 +907,9 @@ impl RadialController {
                         .as_ref()
                         .and_then(|bridge| bridge.waiting.as_ref())
                         .is_some_and(|waiting| waiting.invocation_id == id)
+                        && let Some(bridge) = &mut self.preparation
                     {
-                        if let Some(bridge) = &mut self.preparation {
-                            bridge.waiting = None;
-                        }
+                        bridge.waiting = None;
                     }
                     if self
                         .pending
@@ -977,7 +976,7 @@ impl RadialController {
             context: context.clone(),
             trigger_still_down,
             generation,
-            deadline_ms: monotonic_ms().checked_add(5_000).unwrap_or(u64::MAX),
+            deadline_ms: monotonic_ms().saturating_add(5_000),
             allow_context_rules,
         });
         out.push(ControllerEvent::PrepareRequested(RadialPrepareEnvelope {
@@ -1698,12 +1697,12 @@ impl RadialController {
                     .is_some_and(|active| active.session_id == session_id)
                 {
                     let mut a = self.active.take().expect("matching active session");
-                    if let Some(audio) = a.audio.take() {
-                        if !audio.finish_close(&session_id, a.audio_generation, monotonic_ms()) {
-                            out.push(ControllerEvent::Error(
-                                "radial close audio retirement queue is saturated".into(),
-                            ));
-                        }
+                    if let Some(audio) = a.audio.take()
+                        && !audio.finish_close(&session_id, a.audio_generation, monotonic_ms())
+                    {
+                        out.push(ControllerEvent::Error(
+                            "radial close audio retirement queue is saturated".into(),
+                        ));
                     }
                     self.record(Some(session_id.clone()), "native cleanup complete".into());
                     out.push(ControllerEvent::Closed {
@@ -1736,7 +1735,7 @@ impl RadialController {
                 let invocation_id = if matched_pending {
                     self.pending.take().map(|pending| pending.invocation_id)
                 } else if matched_active {
-                    self.active.take().and_then(|mut active| {
+                    self.active.take().map(|mut active| {
                         if let Some(audio) = active.audio.take()
                             && !audio.stop(&active.session_id, active.audio_generation)
                         {
@@ -1744,7 +1743,7 @@ impl RadialController {
                                 "radial audio stop retirement queue is saturated".into(),
                             ));
                         }
-                        Some(active.invocation_id)
+                        active.invocation_id
                     })
                 } else {
                     // An uncorrelated native failure means the shared host is
@@ -1875,17 +1874,17 @@ impl RadialController {
                     .and_then(|active| active.tooltip_hover.visible().cloned());
                 let tooltip_scene_changed = current_visible_tooltip != previous_visible_tooltip;
                 if current_selection != previous_selection {
-                    if let Some(cell) = current_selection.clone() {
-                        if acceptance_trace::enabled() {
-                            let role = self.cell_role_for_session(&session_id, &cell);
-                            acceptance_trace::emit(AcceptanceTraceEvent::RuntimeRadialHover {
-                                session_digest: acceptance_trace_id_digest(session_id.as_str()),
-                                cell_digest: acceptance_trace_id_digest(cell.as_str()),
-                                layout_generation,
-                                role: acceptance_trace_role_name(role),
-                                executable: role == CellRole::Action,
-                            });
-                        }
+                    if let Some(cell) = current_selection.clone()
+                        && acceptance_trace::enabled()
+                    {
+                        let role = self.cell_role_for_session(&session_id, &cell);
+                        acceptance_trace::emit(AcceptanceTraceEvent::RuntimeRadialHover {
+                            session_digest: acceptance_trace_id_digest(session_id.as_str()),
+                            cell_digest: acceptance_trace_id_digest(cell.as_str()),
+                            layout_generation,
+                            role: acceptance_trace_role_name(role),
+                            executable: role == CellRole::Action,
+                        });
                     }
                     if let Some(cell) = current_selection.clone()
                         && let Some(active) = self
@@ -1924,7 +1923,7 @@ impl RadialController {
                         SessionEvent::StartDwell {
                             cell,
                             role,
-                            deadline: monotonic_ms().checked_add(dwell_ms).unwrap_or(u64::MAX),
+                            deadline: monotonic_ms().saturating_add(dwell_ms),
                         },
                         out,
                     );
@@ -2248,7 +2247,6 @@ impl RadialController {
                         "failed to synchronize radial drag relocation".into(),
                     ));
                     self.retire_host();
-                    return;
                 }
             }
             NativeEvent::Stopped => self.retire_host(),
@@ -3327,10 +3325,10 @@ impl RadialController {
                 {
                     prepared.frame = saved;
                 }
-                if let Some(sounds) = active.navigation_sounds.get(&frame.frame_id).cloned() {
-                    if let Some(audio) = &mut active.audio {
-                        audio.replace_sounds(sounds);
-                    }
+                if let Some(sounds) = active.navigation_sounds.get(&frame.frame_id).cloned()
+                    && let Some(audio) = &mut active.audio
+                {
+                    audio.replace_sounds(sounds);
                 }
                 if let Some(audio) = &mut active.audio {
                     audio.cue(
@@ -4228,7 +4226,7 @@ pub(crate) fn desktop_geometry() -> (PhysicalPoint, PhysicalRect, ScaleFactor) {
         }
         let scale = ScaleFactor::new(dpi_x.max(96) as f64 / 96.0)
             .unwrap_or_else(|| ScaleFactor::new(1.0).unwrap());
-        return (
+        (
             PhysicalPoint {
                 x: p.x as f64,
                 y: p.y as f64,
