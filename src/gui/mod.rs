@@ -389,7 +389,7 @@ impl EventSinkRegistration {
     pub(crate) fn event_consumed(&self) {
         let _ = self
             .queued
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 Some(count.saturating_sub(1))
             });
     }
@@ -428,7 +428,7 @@ fn register_event_sink(
                 if sink.sender.send(event).is_err() {
                     let _ = sink
                         .queued
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                             Some(n.saturating_sub(1))
                         });
                     return registration;
@@ -481,7 +481,7 @@ pub fn send_event(ev: WatchEvent) {
                 if sink.sender.send(ev.clone()).is_err() {
                     let _ = sink
                         .queued
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                             Some(n.saturating_sub(1))
                         });
                     return false;

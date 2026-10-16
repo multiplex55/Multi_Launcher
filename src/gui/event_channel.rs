@@ -38,7 +38,7 @@ impl EventEnvelope {
         if self.pending {
             self.pending = false;
             if let Some(depth) = &self.depth {
-                let _ = depth.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                let _ = depth.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
                     Some(n.saturating_sub(1))
                 });
             }

@@ -342,7 +342,7 @@ struct Counters {
 
 impl Counters {
     fn add_saturating(counter: &AtomicU64, amount: u64) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
+        let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |old| {
             Some(old.saturating_add(amount))
         });
     }

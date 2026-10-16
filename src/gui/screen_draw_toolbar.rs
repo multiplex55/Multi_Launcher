@@ -219,7 +219,7 @@ impl ToolbarObservationPublisher {
         self.previous = None;
         self.lifetime = if enabled {
             NEXT_OBSERVATION_LIFETIME
-                .fetch_update(
+                .try_update(
                     std::sync::atomic::Ordering::Relaxed,
                     std::sync::atomic::Ordering::Relaxed,
                     |id| id.checked_add(1),

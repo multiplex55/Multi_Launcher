@@ -50,7 +50,7 @@ impl JoinReaper {
 
     fn reserve(self: &Arc<Self>) -> Option<ReapPermit> {
         self.outstanding
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
                 (current < REAPER_CAPACITY).then_some(current + 1)
             })
             .ok()
