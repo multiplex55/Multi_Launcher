@@ -13,6 +13,10 @@ pub enum ClipboardModifyGuiEvent {
 }
 
 #[derive(Clone)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "WatchEvent is exported and sent through public send_event; boxing payloads would change public constructors, patterns, and payload ownership for callers."
+)]
 pub enum WatchEvent {
     Actions,
     /// A payload-free wake for the app-owned indexed-action coordinator.
@@ -82,11 +86,14 @@ pub struct AuthoringProviderSearchRequest {
 #[derive(Clone, Debug)]
 pub(crate) enum AuthoringProviderSearchPurpose {
     Preview,
-    Test {
-        binding: crate::radial::model::ActionBinding,
-        invocation: crate::radial::context::InvocationContext,
-        history_query: String,
-    },
+    Test(Box<AuthoringProviderTestPayload>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AuthoringProviderTestPayload {
+    pub(crate) binding: crate::radial::model::ActionBinding,
+    pub(crate) invocation: crate::radial::context::InvocationContext,
+    pub(crate) history_query: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

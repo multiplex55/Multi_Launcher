@@ -703,9 +703,7 @@ pub(crate) enum DesignerUiIntent {
     },
     TestAction {
         identity: AuthoringBindingEditorIdentity,
-        binding: crate::radial::model::ActionBinding,
-        invocation: InvocationContext,
-        history_query: String,
+        payload: Box<crate::gui::AuthoringProviderTestPayload>,
     },
 }
 
@@ -720,9 +718,7 @@ fn provider_request_kind(
 ) -> AuthoringProviderRequestKind {
     match purpose {
         crate::gui::AuthoringProviderSearchPurpose::Preview => AuthoringProviderRequestKind::Search,
-        crate::gui::AuthoringProviderSearchPurpose::Test { .. } => {
-            AuthoringProviderRequestKind::Test
-        }
+        crate::gui::AuthoringProviderSearchPurpose::Test(_) => AuthoringProviderRequestKind::Test,
     }
 }
 
@@ -732,7 +728,9 @@ fn trace_authoring_provider_request_terminal(
 ) {
     let (kind, binding) = match &request.purpose {
         crate::gui::AuthoringProviderSearchPurpose::Preview => ("search", None),
-        crate::gui::AuthoringProviderSearchPurpose::Test { binding, .. } => ("test", Some(binding)),
+        crate::gui::AuthoringProviderSearchPurpose::Test(payload) => {
+            ("test", Some(&payload.binding))
+        }
     };
     acceptance_trace::emit_authoring_provider_search(
         &request.identity,
@@ -992,7 +990,7 @@ impl DesignerIntentBridge {
         &self,
         request: crate::gui::AuthoringProviderSearchRequest,
         delay: Duration,
-    ) -> Result<(), crate::gui::AuthoringProviderSearchRequest> {
+    ) -> Result<(), Box<crate::gui::AuthoringProviderSearchRequest>> {
         let kind = provider_request_kind(&request.purpose);
         let mut replaced = None;
         let result = match self.pending_authoring_searches.lock() {
@@ -1003,12 +1001,12 @@ impl DesignerIntentBridge {
                 }) {
                     replaced = pending.remove(index);
                 } else if pending.len() >= 8 {
-                    return Err(request);
+                    return Err(Box::new(request));
                 }
                 pending.push_back((request, Instant::now() + delay));
                 Ok(())
             }
-            Err(_) => Err(request),
+            Err(_) => Err(Box::new(request)),
         };
         if let Some((replaced, _)) = replaced {
             replaced.cancellation.store(true, Ordering::Release);
@@ -1260,7 +1258,7 @@ enum DeferredEditorOperation {
         submenu_presentation: crate::radial::model::SubmenuPresentation,
     },
     ApplyRingProposal {
-        proposal: menu::RingEditProposal,
+        proposal: Box<menu::RingEditProposal>,
         nonce: u64,
     },
     CopyCell {
@@ -3573,14 +3571,14 @@ impl RadialEditorState {
             DeferredEditorOperation::ApplyRingProposal { proposal, nonce } => {
                 let current_proposal = self.ring_proposal.as_ref();
                 if self.ring_proposal_nonce != Some(nonce)
-                    || current_proposal != Some(&proposal)
+                    || current_proposal != Some(proposal.as_ref())
                     || proposal.base_generation != session.generation
                 {
                     failure = Some("Ring proposal is stale; prepare it again".into());
                 } else {
                     self.ring_proposal = None;
                     self.ring_proposal_nonce = None;
-                    if let Err(error) = menu::apply_ring_proposal(session, proposal) {
+                    if let Err(error) = menu::apply_ring_proposal(session, *proposal) {
                         failure = Some(format!("Proposal apply failed: {error:?}"));
                     }
                 }
@@ -5115,9 +5113,11 @@ impl RadialEditorState {
                     history_query,
                 } => frame.intent_bridge.push(DesignerUiIntent::TestAction {
                     identity,
-                    binding,
-                    invocation: invocation_context.clone(),
-                    history_query,
+                    payload: Box::new(crate::gui::AuthoringProviderTestPayload {
+                        binding,
+                        invocation: invocation_context.clone(),
+                        history_query,
+                    }),
                 }),
             }
         }
@@ -6612,7 +6612,7 @@ impl RadialEditorState {
                 (self.ring_proposal.clone(), self.ring_proposal_nonce)
             {
                 self.queue_editor_operation(DeferredEditorOperation::ApplyRingProposal {
-                    proposal,
+                    proposal: Box::new(proposal),
                     nonce,
                 });
             }
@@ -8557,9 +8557,11 @@ impl RadialEditorState {
                     history_query,
                 } => frame.intent_bridge.push(DesignerUiIntent::TestAction {
                     identity,
-                    binding,
-                    invocation: invocation_context.clone(),
-                    history_query,
+                    payload: Box::new(crate::gui::AuthoringProviderTestPayload {
+                        binding,
+                        invocation: invocation_context.clone(),
+                        history_query,
+                    }),
                 }),
             }
         }
@@ -14619,6 +14621,62 @@ mod tests {
     }
 
     #[test]
+    fn full_authoring_search_queue_returns_rejected_request_without_mutating_pending_entries() {
+        let bridge = DesignerIntentBridge::default();
+        let mut pending_identities = Vec::new();
+        for index in 0..8 {
+            let mut identity = test_action_editor_identity(40 + index);
+            identity.scope.editor_session =
+                crate::radial::authoring::AuthoringSessionId(u64::from(index) + 1);
+            let cancellation = bridge.begin_action_search(identity.clone());
+            let request = test_provider_search_request(
+                identity.clone(),
+                &format!("pending {index}"),
+                Arc::clone(&cancellation),
+            );
+            bridge
+                .queue_authoring_search(request, Duration::from_secs(60))
+                .expect("bounded queue accepts its first eight requests");
+            pending_identities.push(identity);
+        }
+
+        let mut rejected_identity = test_action_editor_identity(99);
+        rejected_identity.scope.editor_session = crate::radial::authoring::AuthoringSessionId(99);
+        let rejected_cancellation = bridge.begin_action_search(rejected_identity.clone());
+        let rejected = test_provider_search_request(
+            rejected_identity.clone(),
+            "rejected ninth request",
+            Arc::clone(&rejected_cancellation),
+        );
+        let rejected = bridge
+            .queue_authoring_search(rejected, Duration::ZERO)
+            .expect_err("a ninth distinct request is rejected");
+
+        assert_eq!(rejected.identity, rejected_identity);
+        assert_eq!(rejected.query, "rejected ninth request");
+        assert!(Arc::ptr_eq(&rejected.cancellation, &rejected_cancellation));
+        assert!(!rejected.cancellation.load(Ordering::Acquire));
+
+        let pending = bridge
+            .pending_authoring_searches
+            .lock()
+            .expect("pending search lock");
+        assert_eq!(pending.len(), 8);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|(request, _)| request.identity.clone())
+                .collect::<Vec<_>>(),
+            pending_identities
+        );
+        assert!(
+            pending
+                .iter()
+                .all(|(request, _)| !request.cancellation.load(Ordering::Acquire))
+        );
+    }
+
+    #[test]
     fn cancelled_queued_authoring_requests_terminalize_on_take_and_clear() {
         let _ = acceptance_trace::take_authoring_provider_trace_test_events();
         let bridge = DesignerIntentBridge::default();
@@ -16522,12 +16580,14 @@ mod tests {
         };
         bridge.push(DesignerUiIntent::TestAction {
             identity,
-            binding: crate::radial::model::ActionBinding::Contextual {
-                selector: crate::radial::model::TargetSelector::CapturedForeground,
-                action_id: crate::universal_actions::ActionId::new("test"),
-            },
-            invocation: InvocationContext::empty(0),
-            history_query: String::new(),
+            payload: Box::new(crate::gui::AuthoringProviderTestPayload {
+                binding: crate::radial::model::ActionBinding::Contextual {
+                    selector: crate::radial::model::TargetSelector::CapturedForeground,
+                    action_id: crate::universal_actions::ActionId::new("test"),
+                },
+                invocation: InvocationContext::empty(0),
+                history_query: String::new(),
+            }),
         });
         assert_eq!(wake_count.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(bridge.drain().len(), 1);

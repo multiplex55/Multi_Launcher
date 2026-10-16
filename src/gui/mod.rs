@@ -84,8 +84,8 @@ pub(crate) use radial_editor::{
     AuthoringBindingEditorIdentity, BindingEditorScope, BindingEditorSlot, BindingEditorSurface,
 };
 pub(crate) use render::persist_launcher_close_preferences;
-pub(crate) use state::AuthoringProviderSearchPurpose;
 pub use state::AuthoringProviderSearchRequest;
+pub(crate) use state::{AuthoringProviderSearchPurpose, AuthoringProviderTestPayload};
 
 pub(crate) const RADIAL_DESIGNER_WINDOW_TITLE: &str = "Radial Designer";
 

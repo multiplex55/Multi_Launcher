@@ -184,7 +184,7 @@ impl EventSender {
         }
     }
 
-    pub(super) fn send(&self, event: WatchEvent) -> Result<(), SendError<WatchEvent>> {
+    pub(super) fn send(&self, event: WatchEvent) -> Result<(), Box<SendError<WatchEvent>>> {
         self.send_as(event, self.origin)
     }
 
@@ -192,7 +192,7 @@ impl EventSender {
         &self,
         event: WatchEvent,
         origin: EventOrigin,
-    ) -> Result<(), SendError<WatchEvent>> {
+    ) -> Result<(), Box<SendError<WatchEvent>>> {
         let observing = self.observe;
         let mut envelope = EventEnvelope::new(
             event,
@@ -224,9 +224,9 @@ impl EventSender {
                 if let Some((class, origin)) = envelope.metadata {
                     track_c::record_event_send_failure_if(observing, class, origin);
                 }
-                Err(SendError(
+                Err(Box::new(SendError(
                     envelope.event.take().expect("failed send retains event"),
-                ))
+                )))
             }
         }
     }
@@ -450,12 +450,18 @@ mod tests {
     fn track_c_event_send_failure_and_late_sender_keep_depth_zero() {
         let (tx, rx) = super::channel_with_observation(false);
         drop(rx);
-        assert!(tx.send(WatchEvent::Actions).is_err());
+        let error = tx
+            .send(WatchEvent::Actions)
+            .expect_err("closed receiver rejects the event");
+        assert!(matches!(&error.0, WatchEvent::Actions));
         assert_eq!(tx.depth(), None);
         let (tx, rx) = super::channel_with_observation(true);
         let late = tx.clone();
         drop(rx);
-        assert!(late.send(WatchEvent::Actions).is_err());
+        let error = late
+            .send(WatchEvent::Actions)
+            .expect_err("late sender also returns its unsent event");
+        assert!(matches!(&error.0, WatchEvent::Actions));
         assert_eq!(late.depth(), Some(0));
     }
 

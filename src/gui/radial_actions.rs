@@ -34,7 +34,9 @@ fn trace_authoring_provider_search(
 ) {
     let (kind, binding) = match &request.purpose {
         crate::gui::AuthoringProviderSearchPurpose::Preview => ("search", None),
-        crate::gui::AuthoringProviderSearchPurpose::Test { binding, .. } => ("test", Some(binding)),
+        crate::gui::AuthoringProviderSearchPurpose::Test(payload) => {
+            ("test", Some(&payload.binding))
+        }
     };
     crate::radial::acceptance_trace::emit_authoring_provider_search(
         &request.identity,
@@ -1029,38 +1031,29 @@ impl LauncherApp {
                         );
                     }
                 }
-                crate::gui::radial_editor::DesignerUiIntent::TestAction {
-                    identity,
-                    binding,
-                    invocation,
-                    history_query,
-                } => {
+                crate::gui::radial_editor::DesignerUiIntent::TestAction { identity, payload } => {
                     let current = self.radial_editor.lock().ok().is_some_and(|editor| {
-                        editor.action_test_request_is_current(&identity, &binding)
+                        editor.action_test_request_is_current(&identity, &payload.binding)
                     });
                     if !current {
                         continue;
                     }
                     if matches!(
-                        &binding,
+                        &payload.binding,
                         crate::radial::model::ActionBinding::LauncherQuery {
                             mode: crate::radial::model::QueryRunMode::ExecuteFirst,
                             ..
                         }
                     ) {
                         let crate::radial::model::ActionBinding::LauncherQuery { query, .. } =
-                            &binding
+                            &payload.binding
                         else {
                             continue;
                         };
                         self.start_authoring_provider_search(
                             identity,
                             query.clone(),
-                            crate::gui::AuthoringProviderSearchPurpose::Test {
-                                binding,
-                                invocation,
-                                history_query,
-                            },
+                            crate::gui::AuthoringProviderSearchPurpose::Test(payload),
                         );
                     } else {
                         if let Some(bridge) = self
@@ -1077,9 +1070,9 @@ impl LauncherApp {
                             );
                         }
                         let _ = self.test_radial_authoring_action_for_editor(
-                            &binding,
-                            &invocation,
-                            &history_query,
+                            &payload.binding,
+                            &payload.invocation,
+                            &payload.history_query,
                             &identity,
                             None,
                             None,
@@ -1111,7 +1104,7 @@ impl LauncherApp {
             AuthoringProviderSearchPurpose::Preview => {
                 crate::gui::radial_editor::AuthoringProviderRequestKind::Search
             }
-            AuthoringProviderSearchPurpose::Test { .. } => {
+            AuthoringProviderSearchPurpose::Test(_) => {
                 crate::gui::radial_editor::AuthoringProviderRequestKind::Test
             }
         };
@@ -1132,6 +1125,7 @@ impl LauncherApp {
         };
         trace_authoring_provider_search(&request, "queued", None);
         if let Err(request) = bridge.queue_authoring_search(request, Duration::ZERO) {
+            let request = *request;
             trace_authoring_provider_search(&request, "rejected", None);
             bridge.finish_action_search(&identity, kind, &cancellation);
             self.fail_authoring_provider_search(
@@ -1168,7 +1162,7 @@ impl LauncherApp {
             };
             let kind = match &request.purpose {
                 AuthoringProviderSearchPurpose::Preview => AuthoringProviderRequestKind::Search,
-                AuthoringProviderSearchPurpose::Test { .. } => AuthoringProviderRequestKind::Test,
+                AuthoringProviderSearchPurpose::Test(_) => AuthoringProviderRequestKind::Test,
             };
             let current =
                 self.radial_editor
@@ -1178,9 +1172,8 @@ impl LauncherApp {
                         AuthoringProviderSearchPurpose::Preview => {
                             editor.action_editor_search_request_is_current(&request.identity)
                         }
-                        AuthoringProviderSearchPurpose::Test { binding, .. } => {
-                            editor.action_test_request_is_current(&request.identity, binding)
-                        }
+                        AuthoringProviderSearchPurpose::Test(payload) => editor
+                            .action_test_request_is_current(&request.identity, &payload.binding),
                     });
             if request.cancellation.load(Ordering::Acquire) || !current {
                 trace_authoring_provider_search(&request, "rejected", None);
@@ -1223,7 +1216,7 @@ impl LauncherApp {
                     // whether the stale reply can be applied.
                     let hold_kind = match &request.purpose {
                         crate::gui::AuthoringProviderSearchPurpose::Preview => "search",
-                        crate::gui::AuthoringProviderSearchPurpose::Test { .. } => "test",
+                        crate::gui::AuthoringProviderSearchPurpose::Test(_) => "test",
                     };
                     let held_result = searched.is_some()
                         && hold_acceptance_authoring_provider_result(&request, hold_kind);
@@ -1298,7 +1291,7 @@ impl LauncherApp {
 
         let kind = match &request.purpose {
             AuthoringProviderSearchPurpose::Preview => AuthoringProviderRequestKind::Search,
-            AuthoringProviderSearchPurpose::Test { .. } => AuthoringProviderRequestKind::Test,
+            AuthoringProviderSearchPurpose::Test(_) => AuthoringProviderRequestKind::Test,
         };
         let current = self
             .radial_editor
@@ -1308,8 +1301,8 @@ impl LauncherApp {
                 AuthoringProviderSearchPurpose::Preview => {
                     editor.action_editor_search_request_is_current(&request.identity)
                 }
-                AuthoringProviderSearchPurpose::Test { binding, .. } => {
-                    editor.action_test_request_is_current(&request.identity, binding)
+                AuthoringProviderSearchPurpose::Test(payload) => {
+                    editor.action_test_request_is_current(&request.identity, &payload.binding)
                 }
             });
         if !current {
@@ -1340,6 +1333,7 @@ impl LauncherApp {
             Duration::from_millis(160u64.saturating_mul(multiplier)).min(Duration::from_secs(2));
         let retry_trace_request = request.clone();
         if let Err(request) = bridge.queue_authoring_search(request, delay) {
+            let request = *request;
             trace_authoring_provider_search(&request, "rejected", None);
             bridge.finish_action_search(&request.identity, kind, &cancellation);
             self.fail_authoring_provider_search(
@@ -1373,8 +1367,8 @@ impl LauncherApp {
                 AuthoringProviderSearchPurpose::Preview => {
                     editor.action_editor_search_request_is_current(&request.identity)
                 }
-                AuthoringProviderSearchPurpose::Test { binding, .. } => {
-                    editor.action_test_request_is_current(&request.identity, binding)
+                AuthoringProviderSearchPurpose::Test(payload) => {
+                    editor.action_test_request_is_current(&request.identity, &payload.binding)
                 }
             });
         if !current {
@@ -1393,12 +1387,7 @@ impl LauncherApp {
             && result_versions == crate::radial::dynamic::MutableResultCatalogVersions::current()
             && outcome.result_catalog_versions_stable;
 
-        if let crate::gui::AuthoringProviderSearchPurpose::Test {
-            binding,
-            invocation,
-            history_query,
-        } = &request.purpose
-        {
+        if let crate::gui::AuthoringProviderSearchPurpose::Test(payload) = &request.purpose {
             // A provider that is still refreshing, or any result whose
             // revision changed while it was being assembled, is not a stable
             // no-result outcome. Keep the explicit Test pending and retry
@@ -1417,9 +1406,9 @@ impl LauncherApp {
                     return;
                 }
                 self.test_radial_authoring_action_for_editor(
-                    binding,
-                    invocation,
-                    history_query,
+                    &payload.binding,
+                    &payload.invocation,
+                    &payload.history_query,
                     &request.identity,
                     Some(first),
                     Some(outcome.provider_revision),
@@ -1439,14 +1428,14 @@ impl LauncherApp {
             // retired authoring request.
             let reason = "The query has no first launcher result to test";
             let still_current = self.radial_editor.lock().ok().is_some_and(|editor| {
-                editor.action_test_request_is_current(&request.identity, binding)
+                editor.action_test_request_is_current(&request.identity, &payload.binding)
             });
             if still_current {
-                self.fallback_authoring_execute_first_query(binding, reason);
+                self.fallback_authoring_execute_first_query(&payload.binding, reason);
                 if let Ok(mut editor) = self.radial_editor.lock() {
                     let _ = editor.finish_action_editor_test(
                         &request.identity,
-                        binding,
+                        &payload.binding,
                         Err(reason.into()),
                     );
                 }
@@ -1528,7 +1517,7 @@ impl LauncherApp {
                     Some(outcome.provider_revision),
                 );
             }
-            AuthoringProviderSearchPurpose::Test { .. } => unreachable!("handled above"),
+            AuthoringProviderSearchPurpose::Test(_) => unreachable!("handled above"),
         }
         self.egui_ctx
             .request_repaint_of(crate::gui::radial_editor::radial_designer_viewport_id());
@@ -1583,20 +1572,23 @@ impl LauncherApp {
                     None,
                 );
             }
-            AuthoringProviderSearchPurpose::Test { binding, .. } => {
+            AuthoringProviderSearchPurpose::Test(payload) => {
                 let still_current = self.radial_editor.lock().ok().is_some_and(|editor| {
-                    editor.action_test_request_is_current(&request.identity, binding)
+                    editor.action_test_request_is_current(&request.identity, &payload.binding)
                 });
                 if !still_current {
                     trace_authoring_provider_search(&request, "rejected", None);
                     return;
                 }
                 if provider_failed {
-                    self.fallback_authoring_execute_first_query(binding, &reason);
+                    self.fallback_authoring_execute_first_query(&payload.binding, &reason);
                 }
                 if let Ok(mut editor) = self.radial_editor.lock() {
-                    let _ =
-                        editor.finish_action_editor_test(&request.identity, binding, Err(reason));
+                    let _ = editor.finish_action_editor_test(
+                        &request.identity,
+                        &payload.binding,
+                        Err(reason),
+                    );
                 }
                 trace_authoring_provider_search(&request, "applied", None);
             }

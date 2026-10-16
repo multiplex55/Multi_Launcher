@@ -1149,9 +1149,9 @@ struct DeferredUniversalAction {
 
 #[derive(Clone, Debug)]
 enum ContextMenuChoice {
-    Execute(crate::universal_actions::UniversalAction),
+    Execute(Box<crate::universal_actions::UniversalAction>),
     AddToRadial {
-        binding: crate::radial::model::ActionBinding,
+        binding: Box<crate::radial::model::ActionBinding>,
         label: String,
         source_query: String,
         trace_identity: acceptance_trace::RadialInsertionTraceIdentity,
@@ -1439,7 +1439,7 @@ fn render_universal_context_menu(
             None => response,
         };
         if response.clicked() {
-            selected = Some(ContextMenuChoice::Execute(action.clone()));
+            selected = Some(ContextMenuChoice::Execute(Box::new(action.clone())));
         }
     }
 
@@ -1537,7 +1537,7 @@ fn render_universal_context_menu(
                     trace_identity.source_binding_digest,
                 );
                 selected = Some(ContextMenuChoice::AddToRadial {
-                    binding,
+                    binding: Box::new(binding),
                     label: source_query.trim().to_owned(),
                     source_query: source_query.trim().to_owned(),
                     trace_identity,
@@ -1631,7 +1631,7 @@ fn radial_add_choice_for_row(
         row_identity.binding,
     );
     Some(ContextMenuChoice::AddToRadial {
-        binding,
+        binding: Box::new(binding),
         label: row.target_title.clone(),
         source_query: source_query.trim().to_owned(),
         trace_identity,
@@ -2058,7 +2058,7 @@ impl LauncherApp {
             {
                 match choice {
                     ContextMenuChoice::Execute(action) => {
-                        defer_universal_context_action(deferred, action);
+                        defer_universal_context_action(deferred, *action);
                         ui.close();
                     }
                     ContextMenuChoice::AddToRadial {
@@ -2068,7 +2068,7 @@ impl LauncherApp {
                         trace_identity,
                     } => {
                         *deferred_radial_add = Some(DeferredRadialAuthoringAdd {
-                            binding,
+                            binding: *binding,
                             label,
                             source_query,
                             trace_identity,
@@ -5790,7 +5790,7 @@ mod tests {
         assert!(matches!(
             choice,
             ContextMenuChoice::AddToRadial { binding, source_query, .. }
-                if binding == primary.assignment().unwrap() && source_query == query
+                if binding.as_ref() == &primary.assignment().unwrap() && source_query == query
         ));
 
         let mut disabled_primary = primary;
@@ -23717,7 +23717,7 @@ mod tests {
             panic!("live query alternative emitted {:?}", choices[0]);
         };
         assert_eq!(
-            binding,
+            binding.as_ref(),
             &crate::radial::model::ActionBinding::LauncherQuery {
                 query: query.into(),
                 mode: crate::radial::model::QueryRunMode::OpenLauncher

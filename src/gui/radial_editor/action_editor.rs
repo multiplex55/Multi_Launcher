@@ -3773,9 +3773,11 @@ mod tests {
             } => {
                 bridge.push(crate::gui::radial_editor::DesignerUiIntent::TestAction {
                     identity,
-                    binding,
-                    invocation: InvocationContext::empty(0),
-                    history_query,
+                    payload: Box::new(crate::gui::AuthoringProviderTestPayload {
+                        binding,
+                        invocation: InvocationContext::empty(0),
+                        history_query,
+                    }),
                 });
             }
             other => panic!("expected Search or Test intent, received {other:?}"),

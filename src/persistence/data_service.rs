@@ -55,7 +55,10 @@ pub struct StoreHealthReport {
 }
 
 #[derive(Clone, Debug)]
-#[allow(clippy::large_enum_variant, reason = "DataServiceResult::Snapshot carries the largest inline completion payload; boxing it would change the public result and completion patterns.")]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "DataServiceResult::Snapshot carries the largest inline completion payload; boxing it would change the public result and completion patterns."
+)]
 pub enum DataServiceResult {
     Health(Vec<StoreHealthReport>),
     Snapshot(SnapshotResult),
