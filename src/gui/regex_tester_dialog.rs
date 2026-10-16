@@ -21,6 +21,7 @@ mod presets;
 mod profiling;
 mod reference;
 mod substitution;
+mod test_cases;
 
 fn copy_text(
     clipboard: &dyn ClipboardBackend,
@@ -208,6 +209,7 @@ enum InformationSection {
     Presets,
     Substitution,
     Clipboard,
+    TestCases,
 }
 
 /// Session-owned inputs survive closing the utility; persistence is explicit.
@@ -219,6 +221,7 @@ pub struct RegexTesterDialogState {
     information_open: bool,
     scroll_to_selected: bool,
     information_section: InformationSection,
+    test_cases_expanded: bool,
     reference: reference::ReferenceState,
     examples: examples::ExamplesState,
     history: Option<history::HistoryState>,
@@ -254,6 +257,7 @@ impl RegexTesterDialogState {
             information_open: true,
             scroll_to_selected: false,
             information_section: InformationSection::default(),
+            test_cases_expanded: true,
             reference: reference::ReferenceState::default(),
             examples: examples::ExamplesState::default(),
             history: None,
@@ -310,6 +314,7 @@ impl RegexTesterDialogState {
             egui::ViewportId::from_hash_of("regex_tester_viewport"),
             viewport_builder(),
             |child, class| {
+                let process_case_actions = child.current_pass_index() == 0;
                 let independent = class == egui::ViewportClass::Immediate;
                 if independent && self.focus_viewport {
                     child.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -323,7 +328,9 @@ impl RegexTesterDialogState {
                 if close {
                     self.open = false;
                 } else if independent {
-                    egui::CentralPanel::default().show(child, |ui| self.body_in_viewport(ui, true));
+                    egui::CentralPanel::default().show(child, |ui| {
+                        self.body_in_viewport(ui, true, process_case_actions)
+                    });
                 } else {
                     // Standalone egui contexts embed viewports. Keep that fallback
                     // within its parent rather than changing root-window geometry.
@@ -338,7 +345,9 @@ impl RegexTesterDialogState {
                         .default_size(available.min(egui::vec2(960.0, 680.0)))
                         .min_size(available.min(egui::vec2(360.0, 240.0)))
                         .max_size(available)
-                        .show(child, |ui| self.body(ui));
+                        .show(child, |ui| {
+                            self.body_in_viewport(ui, false, process_case_actions)
+                        });
                     self.open = open;
                 }
                 if independent && !self.open {
@@ -349,10 +358,15 @@ impl RegexTesterDialogState {
     }
 
     fn body(&mut self, ui: &mut egui::Ui) -> CoreLayout {
-        self.body_in_viewport(ui, false)
+        self.body_in_viewport(ui, false, true)
     }
 
-    fn body_in_viewport(&mut self, ui: &mut egui::Ui, independent: bool) -> CoreLayout {
+    fn body_in_viewport(
+        &mut self,
+        ui: &mut egui::Ui,
+        independent: bool,
+        process_case_actions: bool,
+    ) -> CoreLayout {
         if let Some(forward) = keyboard::navigation(ui.ctx(), ui.layer_id(), independent) {
             let changed = if forward {
                 self.session.next_match()
@@ -394,6 +408,9 @@ impl RegexTesterDialogState {
             self.scroll_to_selected = false;
             ui.ctx().request_repaint();
         }
+        if self.session.tick_test_cases(now) {
+            ui.ctx().request_repaint();
+        }
         if let Some(validation) = layout.validation {
             bounded_area(ui, validation, "regex_tester_validation", |ui| {
                 self.validation_area(ui)
@@ -404,7 +421,7 @@ impl RegexTesterDialogState {
         }
         if let Some(information) = layout.information {
             bounded_area(ui, information, "regex_tester_information_area", |ui| {
-                self.information_area(ui)
+                self.information_area(ui, process_case_actions)
             });
         }
         bounded_area(ui, layout.status, "regex_tester_status", |ui| {
@@ -635,7 +652,7 @@ impl RegexTesterDialogState {
         ui.ctx().request_repaint();
     }
 
-    fn information_area(&mut self, ui: &mut egui::Ui) {
+    fn information_area(&mut self, ui: &mut egui::Ui, process_case_actions: bool) {
         egui::ComboBox::from_id_salt("regex_information_section")
             .width(ui.available_width().min(220.0))
             .selected_text(match self.information_section {
@@ -648,6 +665,7 @@ impl RegexTesterDialogState {
                 InformationSection::Presets => "Presets",
                 InformationSection::Substitution => "Substitution",
                 InformationSection::Clipboard => "Clipboard",
+                InformationSection::TestCases => "Test Cases",
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(
@@ -695,10 +713,17 @@ impl RegexTesterDialogState {
                     InformationSection::Clipboard,
                     "Clipboard",
                 );
+                ui.selectable_value(
+                    &mut self.information_section,
+                    InformationSection::TestCases,
+                    "Test Cases",
+                );
             })
             .response
             .on_hover_text("Choose what to inspect or edit");
-        if let Some(feedback) = &self.copy_feedback {
+        if self.information_section != InformationSection::TestCases
+            && let Some(feedback) = &self.copy_feedback
+        {
             match feedback {
                 Ok(message) => {
                     semantic_status(ui, StatusTone::Success, message, None);
@@ -768,6 +793,17 @@ impl RegexTesterDialogState {
             if let Some(action) = clipboard::show(ui, &self.session, self.selected_capture) {
                 self.clipboard_action(action);
             }
+            return;
+        }
+        if self.information_section == InformationSection::TestCases {
+            test_cases::show(
+                ui,
+                &mut self.session,
+                &mut self.test_cases_expanded,
+                self.clipboard.as_ref(),
+                &mut self.copy_feedback,
+                process_case_actions,
+            );
             return;
         }
 
