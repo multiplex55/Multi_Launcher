@@ -21,6 +21,7 @@ impl RegexExample {
             flags: self.flags,
             test_text: self.sample_text.to_owned(),
             replacement: self.replacement.unwrap_or_default().to_owned(),
+            test_cases: Default::default(),
         }
     }
 }

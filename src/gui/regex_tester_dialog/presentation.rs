@@ -10,6 +10,8 @@ pub(super) fn suspension(reason: &EvaluationSuspension) -> String {
     let (name, unit) = match reason.limit {
         EvaluationLimit::PatternBytes => ("pattern size", "bytes"),
         EvaluationLimit::TextBytes => ("input size", "bytes"),
+        EvaluationLimit::TestCaseCount => ("test case count", "cases"),
+        EvaluationLimit::AggregateTestCaseTextBytes => ("combined test input size", "bytes"),
         EvaluationLimit::CaptureGroups => ("capture group count", "groups"),
         EvaluationLimit::StoredMatches => ("stored match count", "matches"),
         EvaluationLimit::MaterializedBytes => ("result size", "bytes"),
@@ -40,6 +42,14 @@ mod tests {
             (
                 EvaluationLimit::CaptureGroups,
                 "capture group count exceeds 65536 groups (at least 65537 groups).",
+            ),
+            (
+                EvaluationLimit::TestCaseCount,
+                "test case count exceeds 65536 cases (at least 65537 cases).",
+            ),
+            (
+                EvaluationLimit::AggregateTestCaseTextBytes,
+                "combined test input size exceeds 65536 bytes (at least 65537 bytes).",
             ),
         ] {
             assert_eq!(

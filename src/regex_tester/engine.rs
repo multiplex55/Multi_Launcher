@@ -3,10 +3,13 @@ use std::collections::HashMap;
 
 use super::model::{
     ByteSpan, CaptureGroup, CaptureValue, EvaluationResult, MatchCompleteness, MatchId, RegexFlags,
-    RegexMatch, RegexValidationError, SourceIndex, SubstitutionEvaluationResult,
-    SubstitutionResult,
+    RegexMatch, RegexTestCaseEvaluation, RegexTestCaseExpectation, RegexTestCaseResult,
+    RegexTestCaseStatus, RegexTestCases, RegexValidationError, SourceIndex,
+    SubstitutionEvaluationResult, SubstitutionResult,
 };
-use super::policy::{EvaluationLimit, EvaluationPolicy, EvaluationSuspension, check_limit};
+use super::policy::{
+    EvaluationLimit, EvaluationPolicy, EvaluationSuspension, TestCaseEvaluationPolicy, check_limit,
+};
 
 /// Compiles a pattern with the tester's supported Rust-regex options.
 pub(crate) fn compile_regex(
@@ -132,6 +135,85 @@ pub fn evaluate_with_policy(
         matches,
         completeness,
     }
+}
+
+/// Evaluates ordered expected-match cases with one compilation and bounded
+/// substring scans. It shares the launcher's exact Rust regex flags and
+/// compiler, without materializing captures or match rows.
+pub fn evaluate_test_cases(
+    pattern: &str,
+    flags: &RegexFlags,
+    cases: &RegexTestCases,
+    policy: &EvaluationPolicy,
+    case_policy: &TestCaseEvaluationPolicy,
+) -> RegexTestCaseEvaluation {
+    let pattern_limit = check_limit(
+        EvaluationLimit::PatternBytes,
+        policy.pattern_bytes,
+        pattern.len(),
+    )
+    .err();
+    let compiled = pattern_limit
+        .is_none()
+        .then(|| compile_regex(pattern, flags));
+    let mut aggregate_bytes = 0usize;
+    let mut aggregate_exhausted = false;
+    let results = cases
+        .iter()
+        .enumerate()
+        .map(|(index, case)| {
+            let status = if index >= case_policy.maximum_cases {
+                RegexTestCaseStatus::Unevaluated(EvaluationSuspension {
+                    limit: EvaluationLimit::TestCaseCount,
+                    maximum: case_policy.maximum_cases,
+                    observed: index + 1,
+                })
+            } else if let Some(reason) = pattern_limit {
+                RegexTestCaseStatus::Unevaluated(reason)
+            } else if let Some(Err(error)) = compiled.as_ref() {
+                RegexTestCaseStatus::PatternError(error.clone())
+            } else if let Err(reason) = check_limit(
+                EvaluationLimit::TextBytes,
+                policy.text_bytes,
+                case.input.len(),
+            ) {
+                RegexTestCaseStatus::Unevaluated(reason)
+            } else if aggregate_exhausted {
+                RegexTestCaseStatus::Unevaluated(EvaluationSuspension {
+                    limit: EvaluationLimit::AggregateTestCaseTextBytes,
+                    maximum: case_policy.aggregate_text_bytes,
+                    observed: aggregate_bytes.saturating_add(case.input.len()),
+                })
+            } else {
+                let candidate_bytes = aggregate_bytes.saturating_add(case.input.len());
+                if let Err(reason) = check_limit(
+                    EvaluationLimit::AggregateTestCaseTextBytes,
+                    case_policy.aggregate_text_bytes,
+                    candidate_bytes,
+                ) {
+                    aggregate_exhausted = true;
+                    RegexTestCaseStatus::Unevaluated(reason)
+                } else {
+                    aggregate_bytes = candidate_bytes;
+                    let actual_match = compiled
+                        .as_ref()
+                        .and_then(|result| result.as_ref().ok())
+                        .expect("pattern was compiled after passing its size limit")
+                        .is_match(&case.input);
+                    if actual_match == (case.expected == RegexTestCaseExpectation::Match) {
+                        RegexTestCaseStatus::Pass
+                    } else {
+                        RegexTestCaseStatus::Fail
+                    }
+                }
+            };
+            RegexTestCaseResult {
+                case_id: case.id,
+                status,
+            }
+        })
+        .collect();
+    RegexTestCaseEvaluation::from_results(results)
 }
 
 /// Replaces all non-overlapping matches within the default interactive limits.
@@ -840,5 +922,205 @@ mod tests {
                 "{replacement}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod test_case_tests {
+    use super::*;
+    use crate::regex_tester::{RegexTestCaseStatus, RegexTestCaseSummary};
+
+    fn add_case(cases: &mut RegexTestCases, input: &str, expected: RegexTestCaseExpectation) {
+        cases.add(None, input.to_owned(), expected).unwrap();
+    }
+
+    #[test]
+    fn cases_use_any_substring_semantics_and_the_shared_flags() {
+        let mut cases = RegexTestCases::default();
+        add_case(
+            &mut cases,
+            "before cat after",
+            RegexTestCaseExpectation::Match,
+        );
+        add_case(&mut cases, "dog", RegexTestCaseExpectation::NoMatch);
+        add_case(&mut cases, "cat", RegexTestCaseExpectation::NoMatch);
+        let flags = RegexFlags {
+            case_insensitive: true,
+            ..RegexFlags::default()
+        };
+        let result = evaluate_test_cases(
+            "CAT",
+            &flags,
+            &cases,
+            &EvaluationPolicy::default(),
+            &TestCaseEvaluationPolicy::default(),
+        );
+        assert_eq!(
+            result
+                .results
+                .iter()
+                .map(|row| &row.status)
+                .collect::<Vec<_>>(),
+            [
+                &RegexTestCaseStatus::Pass,
+                &RegexTestCaseStatus::Pass,
+                &RegexTestCaseStatus::Fail
+            ]
+        );
+
+        let mut anchored = RegexTestCases::default();
+        add_case(
+            &mut anchored,
+            "before cat after",
+            RegexTestCaseExpectation::NoMatch,
+        );
+        add_case(&mut anchored, "cat", RegexTestCaseExpectation::Match);
+        let result = evaluate_test_cases(
+            r"^cat$",
+            &RegexFlags::default(),
+            &anchored,
+            &EvaluationPolicy::default(),
+            &TestCaseEvaluationPolicy::default(),
+        );
+        assert!(
+            result
+                .results
+                .iter()
+                .all(|row| row.status == RegexTestCaseStatus::Pass)
+        );
+    }
+
+    #[test]
+    fn cases_handle_empty_zero_width_unicode_multiline_and_expectation_summary() {
+        let mut cases = RegexTestCases::default();
+        add_case(&mut cases, "", RegexTestCaseExpectation::Match);
+        add_case(&mut cases, "", RegexTestCaseExpectation::NoMatch);
+        add_case(
+            &mut cases,
+            "first\nβeta\nlast",
+            RegexTestCaseExpectation::Match,
+        );
+        let flags = RegexFlags {
+            multi_line: true,
+            ..RegexFlags::default()
+        };
+        let zero_width = evaluate_test_cases(
+            "",
+            &RegexFlags::default(),
+            &cases,
+            &EvaluationPolicy::default(),
+            &TestCaseEvaluationPolicy::default(),
+        );
+        assert_eq!(zero_width.results[0].status, RegexTestCaseStatus::Pass);
+        assert_eq!(zero_width.results[1].status, RegexTestCaseStatus::Fail);
+
+        let multiline = evaluate_test_cases(
+            r"^βeta$",
+            &flags,
+            &cases,
+            &EvaluationPolicy::default(),
+            &TestCaseEvaluationPolicy::default(),
+        );
+        assert_eq!(multiline.results[2].status, RegexTestCaseStatus::Pass);
+        assert_eq!(
+            multiline.summary,
+            RegexTestCaseSummary {
+                total: 3,
+                pending: 0,
+                passed: 2,
+                failed: 1,
+                pattern_errors: 0,
+                unevaluated: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_patterns_and_evaluation_limits_have_distinct_states() {
+        let mut cases = RegexTestCases::default();
+        add_case(&mut cases, "a", RegexTestCaseExpectation::Match);
+        add_case(&mut cases, "b", RegexTestCaseExpectation::NoMatch);
+        add_case(&mut cases, "c", RegexTestCaseExpectation::NoMatch);
+        let invalid = evaluate_test_cases(
+            "[",
+            &RegexFlags::default(),
+            &cases,
+            &EvaluationPolicy::default(),
+            &TestCaseEvaluationPolicy::default(),
+        );
+        assert_eq!(invalid.summary.pattern_errors, 3);
+        assert!(
+            invalid
+                .results
+                .iter()
+                .all(|row| matches!(&row.status, RegexTestCaseStatus::PatternError(_)))
+        );
+
+        let limited = evaluate_test_cases(
+            "a",
+            &RegexFlags::default(),
+            &cases,
+            &EvaluationPolicy {
+                text_bytes: 1,
+                ..EvaluationPolicy::default()
+            },
+            &TestCaseEvaluationPolicy {
+                maximum_cases: 2,
+                aggregate_text_bytes: 1,
+            },
+        );
+        assert_eq!(limited.results[0].status, RegexTestCaseStatus::Pass);
+        assert!(matches!(
+            &limited.results[1].status,
+            RegexTestCaseStatus::Unevaluated(EvaluationSuspension {
+                limit: EvaluationLimit::AggregateTestCaseTextBytes,
+                ..
+            })
+        ));
+        assert!(matches!(
+            &limited.results[2].status,
+            RegexTestCaseStatus::Unevaluated(EvaluationSuspension {
+                limit: EvaluationLimit::TestCaseCount,
+                ..
+            })
+        ));
+        assert_eq!(limited.summary.passed, 1);
+        assert_eq!(limited.summary.unevaluated, 2);
+
+        let oversized = evaluate_test_cases(
+            "a",
+            &RegexFlags::default(),
+            &cases,
+            &EvaluationPolicy {
+                text_bytes: 0,
+                ..EvaluationPolicy::default()
+            },
+            &TestCaseEvaluationPolicy::default(),
+        );
+        assert!(oversized.results.iter().all(|row| matches!(
+            &row.status,
+            RegexTestCaseStatus::Unevaluated(EvaluationSuspension {
+                limit: EvaluationLimit::TextBytes,
+                ..
+            })
+        )));
+
+        let oversized_pattern = evaluate_test_cases(
+            "a",
+            &RegexFlags::default(),
+            &cases,
+            &EvaluationPolicy {
+                pattern_bytes: 0,
+                ..EvaluationPolicy::default()
+            },
+            &TestCaseEvaluationPolicy::default(),
+        );
+        assert!(oversized_pattern.results.iter().all(|row| matches!(
+            &row.status,
+            RegexTestCaseStatus::Unevaluated(EvaluationSuspension {
+                limit: EvaluationLimit::PatternBytes,
+                ..
+            })
+        )));
     }
 }

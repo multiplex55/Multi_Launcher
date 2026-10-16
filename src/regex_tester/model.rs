@@ -1,5 +1,7 @@
-use super::policy::{EvaluationLimit, EvaluationSuspension};
+use super::policy::{EvaluationLimit, EvaluationSuspension, MAX_TEST_CASES};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::num::NonZeroU64;
 use std::ops::Range;
 
 /// Options supported by the Rust `regex` engine.
@@ -63,6 +65,257 @@ pub struct RegexDraft {
     pub flags: RegexFlags,
     pub test_text: String,
     pub replacement: String,
+    pub test_cases: RegexTestCases,
+}
+
+/// Stable, nonzero identity for one authored regex test case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RegexTestCaseId(NonZeroU64);
+
+impl RegexTestCaseId {
+    pub const fn new(value: u64) -> Option<Self> {
+        match NonZeroU64::new(value) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+
+    pub const fn value(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Whether one case expects the pattern to match somewhere in its input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegexTestCaseExpectation {
+    Match,
+    NoMatch,
+}
+
+/// User-authored input and expectation. Evaluation results live separately in
+/// `RegexSession` and are never persisted as part of the authored case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegexTestCase {
+    pub id: RegexTestCaseId,
+    pub label: Option<String>,
+    pub input: String,
+    pub expected: RegexTestCaseExpectation,
+}
+
+/// Ordered authored cases with IDs allocated by this collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegexTestCases {
+    cases: Vec<RegexTestCase>,
+    next_id: Option<NonZeroU64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegexTestCaseCollectionError {
+    LimitReached,
+    IdentifierSpaceExhausted,
+    DuplicateIdentifier,
+    MissingCase,
+}
+
+impl Default for RegexTestCases {
+    fn default() -> Self {
+        Self {
+            cases: Vec::new(),
+            next_id: NonZeroU64::new(1),
+        }
+    }
+}
+
+impl RegexTestCases {
+    pub fn from_cases(cases: Vec<RegexTestCase>) -> Result<Self, RegexTestCaseCollectionError> {
+        if cases.len() > MAX_TEST_CASES {
+            return Err(RegexTestCaseCollectionError::LimitReached);
+        }
+        let mut identifiers = HashSet::with_capacity(cases.len());
+        let mut largest_identifier = 0u64;
+        for case in &cases {
+            if !identifiers.insert(case.id) {
+                return Err(RegexTestCaseCollectionError::DuplicateIdentifier);
+            }
+            largest_identifier = largest_identifier.max(case.id.value());
+        }
+        let next_id = largest_identifier.checked_add(1).and_then(NonZeroU64::new);
+        Ok(Self { cases, next_id })
+    }
+
+    pub fn as_slice(&self) -> &[RegexTestCase] {
+        &self.cases
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, RegexTestCase> {
+        self.cases.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.cases.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cases.is_empty()
+    }
+
+    pub fn get(&self, id: RegexTestCaseId) -> Option<&RegexTestCase> {
+        self.cases.iter().find(|case| case.id == id)
+    }
+
+    pub fn get_mut(&mut self, id: RegexTestCaseId) -> Option<&mut RegexTestCase> {
+        self.cases.iter_mut().find(|case| case.id == id)
+    }
+
+    pub fn add(
+        &mut self,
+        label: Option<String>,
+        input: String,
+        expected: RegexTestCaseExpectation,
+    ) -> Result<RegexTestCaseId, RegexTestCaseCollectionError> {
+        if self.cases.len() >= MAX_TEST_CASES {
+            return Err(RegexTestCaseCollectionError::LimitReached);
+        }
+        let Some(id_value) = self.next_id else {
+            return Err(RegexTestCaseCollectionError::IdentifierSpaceExhausted);
+        };
+        let id = RegexTestCaseId(id_value);
+        self.next_id = id_value.get().checked_add(1).and_then(NonZeroU64::new);
+        self.cases.push(RegexTestCase {
+            id,
+            label,
+            input,
+            expected,
+        });
+        Ok(id)
+    }
+
+    pub fn duplicate(
+        &mut self,
+        id: RegexTestCaseId,
+    ) -> Result<RegexTestCaseId, RegexTestCaseCollectionError> {
+        let case = self
+            .get(id)
+            .cloned()
+            .ok_or(RegexTestCaseCollectionError::MissingCase)?;
+        self.add(case.label, case.input, case.expected)
+    }
+
+    pub fn remove(&mut self, id: RegexTestCaseId) -> Option<RegexTestCase> {
+        let index = self.cases.iter().position(|case| case.id == id)?;
+        Some(self.cases.remove(index))
+    }
+
+    /// Moves a case to an existing zero-based position without changing its ID.
+    pub fn move_to(&mut self, id: RegexTestCaseId, index: usize) -> bool {
+        if index >= self.cases.len() {
+            return false;
+        }
+        let Some(current_index) = self.cases.iter().position(|case| case.id == id) else {
+            return false;
+        };
+        if current_index != index {
+            let case = self.cases.remove(current_index);
+            self.cases.insert(index, case);
+        }
+        true
+    }
+}
+
+impl Serialize for RegexTestCases {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.cases.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RegexTestCases {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let cases = Vec::<RegexTestCase>::deserialize(deserializer)?;
+        Self::from_cases(cases).map_err(|error| {
+            serde::de::Error::custom(format!("invalid regex test cases: {error:?}"))
+        })
+    }
+}
+
+/// The most recent result for one authored test case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegexTestCaseStatus {
+    Pending,
+    Pass,
+    Fail,
+    PatternError(RegexValidationError),
+    Unevaluated(EvaluationSuspension),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegexTestCaseResult {
+    pub case_id: RegexTestCaseId,
+    pub status: RegexTestCaseStatus,
+}
+
+/// Counts each result state so limits and pending evaluations cannot look like
+/// successful no-match cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RegexTestCaseSummary {
+    pub total: usize,
+    pub pending: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub pattern_errors: usize,
+    pub unevaluated: usize,
+}
+
+impl RegexTestCaseSummary {
+    pub(crate) fn from_results(results: &[RegexTestCaseResult]) -> Self {
+        let mut summary = Self {
+            total: results.len(),
+            ..Self::default()
+        };
+        for result in results {
+            match &result.status {
+                RegexTestCaseStatus::Pending => summary.pending += 1,
+                RegexTestCaseStatus::Pass => summary.passed += 1,
+                RegexTestCaseStatus::Fail => summary.failed += 1,
+                RegexTestCaseStatus::PatternError(_) => summary.pattern_errors += 1,
+                RegexTestCaseStatus::Unevaluated(_) => summary.unevaluated += 1,
+            }
+        }
+        summary
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RegexTestCaseEvaluation {
+    pub results: Vec<RegexTestCaseResult>,
+    pub summary: RegexTestCaseSummary,
+}
+
+impl RegexTestCaseEvaluation {
+    pub(crate) fn from_results(results: Vec<RegexTestCaseResult>) -> Self {
+        let summary = RegexTestCaseSummary::from_results(&results);
+        Self { results, summary }
+    }
+
+    pub(crate) fn pending(cases: &RegexTestCases) -> Self {
+        Self::from_results(
+            cases
+                .iter()
+                .map(|case| RegexTestCaseResult {
+                    case_id: case.id,
+                    status: RegexTestCaseStatus::Pending,
+                })
+                .collect(),
+        )
+    }
 }
 
 /// An end-exclusive UTF-8 byte span in the original test text.
@@ -405,5 +658,55 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(empty.len_bytes(), 0);
         assert_eq!(ByteSpan::new(6, 5), None);
+    }
+
+    #[test]
+    fn case_collection_duplicates_with_fresh_ids_and_reorders_without_reidentifying() {
+        let mut cases = RegexTestCases::default();
+        let first = cases
+            .add(
+                Some("first".into()),
+                "one".into(),
+                RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
+        let second = cases.duplicate(first).unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first.value(), 0);
+        assert_ne!(second.value(), 0);
+        assert_eq!(cases.get(first).unwrap().input, "one");
+        assert_eq!(cases.get(second).unwrap().label.as_deref(), Some("first"));
+
+        assert!(cases.move_to(second, 0));
+        assert_eq!(cases.as_slice()[0].id, second);
+        assert_eq!(cases.as_slice()[1].id, first);
+        assert!(cases.move_to(first, 0));
+        assert_eq!(cases.as_slice()[0].id, first);
+    }
+
+    #[test]
+    fn case_collection_rejects_duplicate_ids_and_caps_authored_rows() {
+        let case = RegexTestCase {
+            id: RegexTestCaseId::new(1).unwrap(),
+            label: None,
+            input: String::new(),
+            expected: RegexTestCaseExpectation::NoMatch,
+        };
+        assert_eq!(
+            RegexTestCases::from_cases(vec![case.clone(), case]),
+            Err(RegexTestCaseCollectionError::DuplicateIdentifier)
+        );
+
+        let mut cases = RegexTestCases::default();
+        for _ in 0..MAX_TEST_CASES {
+            cases
+                .add(None, String::new(), RegexTestCaseExpectation::NoMatch)
+                .unwrap();
+        }
+        assert_eq!(cases.len(), MAX_TEST_CASES);
+        assert_eq!(
+            cases.add(None, String::new(), RegexTestCaseExpectation::NoMatch),
+            Err(RegexTestCaseCollectionError::LimitReached)
+        );
     }
 }

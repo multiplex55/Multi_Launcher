@@ -7,6 +7,8 @@ pub const MAX_STORED_MATCHES: usize = 1000;
 pub const MAX_MATERIALIZED_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_REPLACEMENT_BYTES: usize = 4 * 1024;
 pub const MAX_REPLACEMENT_OUTPUT_BYTES: usize = 1024 * 1024;
+pub const MAX_TEST_CASES: usize = 100;
+pub const MAX_TEST_CASE_AGGREGATE_TEXT_BYTES: usize = 256 * 1024;
 
 /// Normal editing ranges; larger accepted inputs show a warning before the
 /// separate hard suspension limits are reached.
@@ -24,6 +26,22 @@ pub struct EvaluationPolicy {
     pub materialized_bytes: usize,
     pub replacement_bytes: usize,
     pub replacement_output_bytes: usize,
+}
+
+/// Bounds the total number of sample scans performed for one pattern revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TestCaseEvaluationPolicy {
+    pub maximum_cases: usize,
+    pub aggregate_text_bytes: usize,
+}
+
+impl Default for TestCaseEvaluationPolicy {
+    fn default() -> Self {
+        Self {
+            maximum_cases: MAX_TEST_CASES,
+            aggregate_text_bytes: MAX_TEST_CASE_AGGREGATE_TEXT_BYTES,
+        }
+    }
 }
 
 impl Default for EvaluationPolicy {
@@ -44,6 +62,8 @@ impl Default for EvaluationPolicy {
 pub enum EvaluationLimit {
     PatternBytes,
     TextBytes,
+    TestCaseCount,
+    AggregateTestCaseTextBytes,
     CaptureGroups,
     StoredMatches,
     MaterializedBytes,

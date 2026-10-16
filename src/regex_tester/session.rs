@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use super::{
     EvaluationPolicy, EvaluationResult, ExplanationResult, RegexDraft, RegexFlags, RegexMatch,
-    SubstitutionEvaluationResult, evaluate_substitution_with_policy, evaluate_with_policy, explain,
+    RegexTestCaseEvaluation, RegexTestCaseSummary, SubstitutionEvaluationResult,
+    TestCaseEvaluationPolicy, evaluate_substitution_with_policy, evaluate_test_cases,
+    evaluate_with_policy, explain,
 };
 
 pub const EVALUATION_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -14,6 +16,7 @@ pub const EVALUATION_DEBOUNCE: Duration = Duration::from_millis(150);
 pub struct RegexSession {
     pub draft: RegexDraft,
     policy: EvaluationPolicy,
+    test_case_policy: TestCaseEvaluationPolicy,
     revision: u64,
     evaluated_revision: Option<u64>,
     pending_deadline: Option<Instant>,
@@ -24,6 +27,27 @@ pub struct RegexSession {
     explanation_cache: Option<ExplanationCache>,
     substitution_enabled: bool,
     substitution_result: Option<SubstitutionEvaluationResult>,
+    test_case_revision: u64,
+    test_case_key: Option<TestCaseEvaluationKey>,
+    test_case_pending_deadline: Option<Instant>,
+    test_case_result: Option<RegexTestCaseEvaluation>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct TestCaseEvaluationKey {
+    pattern: String,
+    flags: RegexFlags,
+    case_revision: u64,
+}
+
+impl TestCaseEvaluationKey {
+    fn current(session: &RegexSession) -> Self {
+        Self {
+            pattern: session.draft.pattern.clone(),
+            flags: session.draft.flags,
+            case_revision: session.test_case_revision,
+        }
+    }
 }
 
 struct ExplanationCache {
@@ -63,6 +87,7 @@ impl RegexSession {
     /// Call only after a pattern, flag, or source-text edit. Stale results are
     /// unavailable immediately; successive edits replace the same deadline.
     pub fn mark_changed(&mut self, now: Instant) {
+        self.refresh_test_case_target(now);
         self.revision = self.revision.wrapping_add(1);
         self.evaluated_revision = None;
         self.evaluated_source = None;
@@ -201,8 +226,85 @@ impl RegexSession {
     }
 
     pub fn pending_delay(&self, now: Instant) -> Option<Duration> {
-        self.pending_deadline
+        [self.pending_deadline, self.test_case_pending_deadline]
+            .into_iter()
+            .flatten()
             .map(|deadline| deadline.saturating_duration_since(now))
+            .min()
+    }
+
+    /// Call after an authored case is added, removed, reordered, duplicated, or
+    /// edited. This schedules case work without invalidating the main document.
+    pub fn mark_test_cases_changed(&mut self, now: Instant) {
+        self.test_case_revision = self.test_case_revision.wrapping_add(1);
+        self.schedule_test_case_evaluation(now);
+    }
+
+    /// Completes only the separate case evaluation. Its return value is not
+    /// consumed by the dialog's main-result history path.
+    pub fn tick_test_cases(&mut self, now: Instant) -> bool {
+        if !self
+            .test_case_pending_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            return false;
+        }
+        self.test_case_pending_deadline = None;
+        let current_key = TestCaseEvaluationKey::current(self);
+        if self.test_case_key.as_ref() != Some(&current_key) {
+            self.test_case_result = None;
+            return false;
+        }
+        self.test_case_result = Some(evaluate_test_cases(
+            &self.draft.pattern,
+            &self.draft.flags,
+            &self.draft.test_cases,
+            &self.policy,
+            &self.test_case_policy,
+        ));
+        true
+    }
+
+    pub fn test_case_revision(&self) -> u64 {
+        self.test_case_revision
+    }
+
+    pub fn test_case_evaluation(&self) -> Option<&RegexTestCaseEvaluation> {
+        (self.test_case_key.as_ref() == Some(&TestCaseEvaluationKey::current(self)))
+            .then_some(self.test_case_result.as_ref())
+            .flatten()
+    }
+
+    pub fn test_case_summary(&self) -> Option<&RegexTestCaseSummary> {
+        self.test_case_evaluation().map(|result| &result.summary)
+    }
+
+    pub fn test_case_policy(&self) -> &TestCaseEvaluationPolicy {
+        &self.test_case_policy
+    }
+
+    pub fn test_case_pending_delay(&self, now: Instant) -> Option<Duration> {
+        self.test_case_pending_deadline
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
+    fn refresh_test_case_target(&mut self, now: Instant) {
+        let current_key = TestCaseEvaluationKey::current(self);
+        if self.test_case_key.as_ref() != Some(&current_key) {
+            self.schedule_test_case_evaluation(now);
+        }
+    }
+
+    fn schedule_test_case_evaluation(&mut self, now: Instant) {
+        let key = TestCaseEvaluationKey::current(self);
+        self.test_case_key = Some(key);
+        if self.draft.test_cases.is_empty() {
+            self.test_case_result = Some(RegexTestCaseEvaluation::default());
+            self.test_case_pending_deadline = None;
+        } else {
+            self.test_case_result = Some(RegexTestCaseEvaluation::pending(&self.draft.test_cases));
+            self.test_case_pending_deadline = Some(now + EVALUATION_DEBOUNCE);
+        }
     }
 
     pub fn revision(&self) -> u64 {
@@ -287,6 +389,118 @@ impl RegexSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::regex_tester::{RegexTestCaseExpectation, RegexTestCaseStatus};
+
+    #[test]
+    fn case_only_work_preserves_main_results_and_never_signals_main_completion() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "a".into();
+        session.draft.test_text = "aa".into();
+        session.draft.replacement = "X".into();
+        session.set_substitution_enabled(true, now);
+        assert!(session.tick(now + EVALUATION_DEBOUNCE));
+        session.select_match(1);
+
+        let evaluated_source = session.evaluated_source.as_ref().unwrap().clone();
+        let explanation = session.explanation_cache.as_ref().unwrap().result.clone();
+        let main_revision = session.revision();
+        let substitution = session.substitution_result().cloned();
+        let case_id = session
+            .draft
+            .test_cases
+            .add(None, "a".into(), RegexTestCaseExpectation::Match)
+            .unwrap();
+        session.mark_test_cases_changed(now);
+        assert_eq!(session.revision(), main_revision);
+        assert_eq!(session.selected_index(), Some(1));
+        assert_eq!(
+            session.test_case_summary().unwrap().pending,
+            1,
+            "an edit exposes Pending instead of retaining stale results"
+        );
+        assert!(!session.tick(now + EVALUATION_DEBOUNCE));
+        assert!(session.tick_test_cases(now + EVALUATION_DEBOUNCE));
+        assert_eq!(
+            session.test_case_evaluation().unwrap().results[0].status,
+            RegexTestCaseStatus::Pass
+        );
+
+        assert_eq!(session.revision(), main_revision);
+        assert_eq!(session.selected_index(), Some(1));
+        assert!(Arc::ptr_eq(
+            &evaluated_source,
+            session.evaluated_source.as_ref().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            &explanation,
+            &session.explanation_cache.as_ref().unwrap().result
+        ));
+        assert_eq!(session.substitution_result().cloned(), substitution);
+        assert_eq!(
+            session.test_case_evaluation().unwrap().results[0].case_id,
+            case_id
+        );
+
+        let evaluated_cases = session.test_case_evaluation().unwrap().clone();
+        session.draft.test_text = "new sample".into();
+        session.mark_changed(now + Duration::from_millis(10));
+        assert_eq!(session.test_case_evaluation(), Some(&evaluated_cases));
+        assert_eq!(session.test_case_revision(), 1);
+    }
+
+    #[test]
+    fn pattern_and_case_edits_invalidate_case_results_with_independent_debounce() {
+        let now = Instant::now();
+        let mut session = RegexSession::default();
+        session.draft.pattern = "a".into();
+        session
+            .draft
+            .test_cases
+            .add(None, "a".into(), RegexTestCaseExpectation::Match)
+            .unwrap();
+        session.mark_test_cases_changed(now);
+        assert!(!session.tick_test_cases(now + Duration::from_millis(100)));
+        assert!(session.tick_test_cases(now + EVALUATION_DEBOUNCE));
+        assert_eq!(session.test_case_summary().unwrap().passed, 1);
+
+        let case_id = session.draft.test_cases.as_slice()[0].id;
+        session.draft.test_cases.get_mut(case_id).unwrap().input = "b".into();
+        session.mark_test_cases_changed(now + Duration::from_millis(300));
+        assert_eq!(session.test_case_revision(), 2);
+        assert_eq!(session.test_case_summary().unwrap().pending, 1);
+        assert!(
+            session
+                .test_case_pending_delay(now + Duration::from_millis(300))
+                .is_some()
+        );
+
+        session.draft.test_text = "changed example".into();
+        session.mark_changed(now + Duration::from_millis(350));
+        assert_eq!(session.test_case_revision(), 2);
+        assert_eq!(session.test_case_summary().unwrap().pending, 1);
+        assert_eq!(
+            session.pending_delay(now + Duration::from_millis(350)),
+            Some(Duration::from_millis(100)),
+            "repaint follows the earlier main or case deadline"
+        );
+        assert!(session.tick_test_cases(now + Duration::from_millis(450)));
+        assert_eq!(session.test_case_summary().unwrap().failed, 1);
+
+        session.draft.pattern = "b".into();
+        session.mark_changed(now + Duration::from_millis(600));
+        assert_eq!(session.test_case_summary().unwrap().pending, 1);
+        assert_eq!(session.test_case_revision(), 2);
+        assert!(session.tick_test_cases(now + Duration::from_millis(750)));
+        assert_eq!(session.test_case_summary().unwrap().passed, 1);
+
+        session.draft.flags.case_insensitive = true;
+        session.mark_changed(now + Duration::from_millis(800));
+        assert_eq!(session.test_case_summary().unwrap().pending, 1);
+        assert_eq!(session.test_case_revision(), 2);
+        assert!(session.tick_test_cases(now + Duration::from_millis(950)));
+        assert_eq!(session.test_case_summary().unwrap().passed, 1);
+    }
 
     #[test]
     fn substitution_replacement_edits_coalesce_without_rerunning_accepted_matching() {
