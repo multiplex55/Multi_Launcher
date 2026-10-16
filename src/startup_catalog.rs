@@ -10,94 +10,6 @@ pub(super) struct StartupIndexingTransfer {
     pub(super) generation: u64,
 }
 
-#[cfg(test)]
-pub(crate) mod track_c_startup_phase_observer {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use std::time::Instant;
-
-    const PHASE_COUNT: usize = 7;
-
-    #[derive(Clone, Copy)]
-    pub(crate) enum Phase {
-        CoordinatorConstruct = 0,
-        Submit = 1,
-        Wait = 2,
-        TakeResult = 3,
-        ValidateTransfer = 4,
-        CloneIndexedActions = 5,
-        WrapCatalogArc = 6,
-    }
-
-    thread_local! {
-        static ACTIVE: RefCell<Option<Rc<RefCell<[u64; PHASE_COUNT]>>>> = const { RefCell::new(None) };
-    }
-
-    pub(crate) struct Observation {
-        values: Rc<RefCell<[u64; PHASE_COUNT]>>,
-    }
-
-    impl Observation {
-        pub(crate) fn begin() -> Self {
-            let values = Rc::new(RefCell::new([0; PHASE_COUNT]));
-            ACTIVE.with(|active| {
-                assert!(
-                    active.borrow().is_none(),
-                    "startup phase observers do not nest"
-                );
-                *active.borrow_mut() = Some(Rc::clone(&values));
-            });
-            Self { values }
-        }
-
-        pub(crate) fn finish(self) -> [u64; PHASE_COUNT] {
-            ACTIVE.with(|active| {
-                let current = active.borrow_mut().take();
-                assert!(current.is_some_and(|current| Rc::ptr_eq(&current, &self.values)));
-            });
-            *self.values.borrow()
-        }
-    }
-
-    impl Drop for Observation {
-        fn drop(&mut self) {
-            ACTIVE.with(|active| {
-                let mut active = active.borrow_mut();
-                if active
-                    .as_ref()
-                    .is_some_and(|current| Rc::ptr_eq(current, &self.values))
-                {
-                    *active = None;
-                }
-            });
-        }
-    }
-
-    pub(crate) struct PhaseTimer {
-        phase: Phase,
-        started: Instant,
-        values: Rc<RefCell<[u64; PHASE_COUNT]>>,
-    }
-
-    pub(crate) fn start(phase: Phase) -> Option<PhaseTimer> {
-        ACTIVE.with(|active| {
-            active.borrow().as_ref().map(|values| PhaseTimer {
-                phase,
-                started: Instant::now(),
-                values: Rc::clone(values),
-            })
-        })
-    }
-
-    impl Drop for PhaseTimer {
-        fn drop(&mut self) {
-            let elapsed = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-            let slot = &mut self.values.borrow_mut()[self.phase as usize];
-            *slot = slot.saturating_add(elapsed);
-        }
-    }
-}
-
 /// Complete the initial index on the main thread before plugin registration.
 /// The returned coordinator has acknowledged its startup result and is ready
 /// to own later configuration changes after transfer to the GUI app.
@@ -211,4 +123,92 @@ pub(super) fn startup_action_catalog(
     timer.set_work_units(work_units);
     timer.finish(runtime::performance::track_c::Outcome::Completed);
     Ok((catalog, custom_len, transfer))
+}
+
+#[cfg(test)]
+pub(crate) mod track_c_startup_phase_observer {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    const PHASE_COUNT: usize = 7;
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Phase {
+        CoordinatorConstruct = 0,
+        Submit = 1,
+        Wait = 2,
+        TakeResult = 3,
+        ValidateTransfer = 4,
+        CloneIndexedActions = 5,
+        WrapCatalogArc = 6,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Rc<RefCell<[u64; PHASE_COUNT]>>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct Observation {
+        values: Rc<RefCell<[u64; PHASE_COUNT]>>,
+    }
+
+    impl Observation {
+        pub(crate) fn begin() -> Self {
+            let values = Rc::new(RefCell::new([0; PHASE_COUNT]));
+            ACTIVE.with(|active| {
+                assert!(
+                    active.borrow().is_none(),
+                    "startup phase observers do not nest"
+                );
+                *active.borrow_mut() = Some(Rc::clone(&values));
+            });
+            Self { values }
+        }
+
+        pub(crate) fn finish(self) -> [u64; PHASE_COUNT] {
+            ACTIVE.with(|active| {
+                let current = active.borrow_mut().take();
+                assert!(current.is_some_and(|current| Rc::ptr_eq(&current, &self.values)));
+            });
+            *self.values.borrow()
+        }
+    }
+
+    impl Drop for Observation {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| {
+                let mut active = active.borrow_mut();
+                if active
+                    .as_ref()
+                    .is_some_and(|current| Rc::ptr_eq(current, &self.values))
+                {
+                    *active = None;
+                }
+            });
+        }
+    }
+
+    pub(crate) struct PhaseTimer {
+        phase: Phase,
+        started: Instant,
+        values: Rc<RefCell<[u64; PHASE_COUNT]>>,
+    }
+
+    pub(crate) fn start(phase: Phase) -> Option<PhaseTimer> {
+        ACTIVE.with(|active| {
+            active.borrow().as_ref().map(|values| PhaseTimer {
+                phase,
+                started: Instant::now(),
+                values: Rc::clone(values),
+            })
+        })
+    }
+
+    impl Drop for PhaseTimer {
+        fn drop(&mut self) {
+            let elapsed = self.started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+            let slot = &mut self.values.borrow_mut()[self.phase as usize];
+            *slot = slot.saturating_add(elapsed);
+        }
+    }
 }

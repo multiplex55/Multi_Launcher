@@ -5699,9 +5699,14 @@ mod tests {
         let (wake_tx, wake_rx) = channel();
         let receiver =
             multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
-        let mut settings = Settings::default();
-        settings.hotkey = Some("Ctrl+F2".into());
-        settings.radial.enabled = false;
+        let mut settings = Settings {
+            hotkey: Some("Ctrl+F2".into()),
+            radial: crate::radial::model::RadialFeatureSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut candidate = settings.clone();
         candidate.hotkey = Some("Ctrl+F3".into());
         settings.radial.shared_tap_hold = false;
@@ -5843,10 +5848,15 @@ mod tests {
         let (wake_tx, wake_rx) = channel();
         let receiver =
             multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
-        let mut old_settings = Settings::default();
-        old_settings.hotkey = Some("Ctrl+F2".into());
-        old_settings.radial.enabled = false;
-        old_settings.radial.shared_tap_hold = false;
+        let old_settings = Settings {
+            hotkey: Some("Ctrl+F2".into()),
+            radial: crate::radial::model::RadialFeatureSettings {
+                enabled: false,
+                shared_tap_hold: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut candidate = old_settings.clone();
         candidate.hotkey = Some("Ctrl+F3".into());
         let radial_document = Arc::new(RadialDocument::starter());
@@ -6082,10 +6092,17 @@ mod tests {
         let (wake_tx, wake_rx) = channel();
         let receiver =
             multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
-        let mut old_settings = Settings::default();
-        old_settings.hotkey = Some("Ctrl+F2".into());
-        old_settings.quit_hotkey = Some("Ctrl+Q".into());
-        old_settings.help_hotkey = Some("Ctrl+H".into());
+        let mut old_settings = Settings {
+            hotkey: Some("Ctrl+F2".into()),
+            quit_hotkey: Some("Ctrl+Q".into()),
+            help_hotkey: Some("Ctrl+H".into()),
+            radial: crate::radial::model::RadialFeatureSettings {
+                enabled: true,
+                shared_tap_hold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut screen_draw = multi_launcher::screen_draw::settings::ScreenDrawSettings::default();
         screen_draw.launch_hotkey = Some(
             multi_launcher::screen_draw::settings::HotkeyChord::from_unchecked("Ctrl+Shift+S"),
@@ -6096,8 +6113,6 @@ mod tests {
             "screen_draw".into(),
             serde_json::to_value(screen_draw).unwrap(),
         );
-        old_settings.radial.enabled = true;
-        old_settings.radial.shared_tap_hold = true;
         let mut candidate = old_settings.clone();
         candidate.hotkey = Some("Ctrl+F3".into());
         let radial_document = Arc::new(RadialDocument::starter());
@@ -6186,14 +6201,15 @@ mod tests {
         else {
             panic!("expected settings route completion")
         };
-        let mut context = fixture.context();
-        assert!(!complete_hotkey_route_step(
-            *application,
-            drain_result,
-            &mut context,
-            &mut issuer,
-        ));
-        drop(context);
+        {
+            let mut context = fixture.context();
+            assert!(!complete_hotkey_route_step(
+                *application,
+                drain_result,
+                &mut context,
+                &mut issuer,
+            ));
+        }
 
         assert_eq!(issuer.issued, 1);
         assert_eq!(
@@ -6216,14 +6232,15 @@ mod tests {
         else {
             panic!("expected candidate activation completion")
         };
-        let mut context = fixture.context();
-        assert!(!complete_hotkey_route_step(
-            *application,
-            candidate_result,
-            &mut context,
-            &mut issuer,
-        ));
-        drop(context);
+        {
+            let mut context = fixture.context();
+            assert!(!complete_hotkey_route_step(
+                *application,
+                candidate_result,
+                &mut context,
+                &mut issuer,
+            ));
+        }
 
         assert_eq!(issuer.issued, 2);
         assert_eq!(issuer.policies.len(), 2);
@@ -6267,14 +6284,15 @@ mod tests {
         else {
             panic!("expected restore completion")
         };
-        let mut context = fixture.context();
-        assert!(complete_hotkey_route_step(
-            *application,
-            restore_result,
-            &mut context,
-            &mut issuer,
-        ));
-        drop(context);
+        {
+            let mut context = fixture.context();
+            assert!(complete_hotkey_route_step(
+                *application,
+                restore_result,
+                &mut context,
+                &mut issuer,
+            ));
+        }
 
         assert_eq!(
             serde_json::to_value(&fixture.settings).unwrap(),
@@ -6331,12 +6349,17 @@ mod tests {
         let (wake_tx, wake_rx) = channel();
         let receiver =
             multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
-        let mut old_settings = Settings::default();
-        old_settings.hotkey = Some("Ctrl+F2".into());
-        old_settings.quit_hotkey = Some("Ctrl+Q".into());
-        old_settings.help_hotkey = Some("Ctrl+H".into());
-        old_settings.radial.enabled = true;
-        old_settings.radial.shared_tap_hold = true;
+        let old_settings = Settings {
+            hotkey: Some("Ctrl+F2".into()),
+            quit_hotkey: Some("Ctrl+Q".into()),
+            help_hotkey: Some("Ctrl+H".into()),
+            radial: crate::radial::model::RadialFeatureSettings {
+                enabled: true,
+                shared_tap_hold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut candidate = old_settings.clone();
         candidate.hotkey = Some("Ctrl+F3".into());
         let radial_document = Arc::new(RadialDocument::starter());
@@ -6433,11 +6456,16 @@ mod tests {
 
     #[test]
     fn unsupported_legacy_control_does_not_reject_a_shared_route() {
-        let mut settings = Settings::default();
-        settings.hotkey = Some("Ctrl+F2".into());
-        settings.quit_hotkey = Some("F13".into());
-        settings.radial.enabled = true;
-        settings.radial.shared_tap_hold = true;
+        let settings = Settings {
+            hotkey: Some("Ctrl+F2".into()),
+            quit_hotkey: Some("F13".into()),
+            radial: crate::radial::model::RadialFeatureSettings {
+                enabled: true,
+                shared_tap_hold: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let document = RadialDocument::starter();
 
         let routes = validate_hotkey_route_candidate(&settings, &document)
