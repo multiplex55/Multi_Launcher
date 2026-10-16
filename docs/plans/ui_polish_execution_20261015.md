@@ -16,8 +16,8 @@ Approved contract: `multi_launcher_ui_polish_codex_plan_20261015.md`.
 | UP-HK | complete | A `474e6377`, B1 `17ad560c`, B2 `4ff437eb`; targeted source gates and user-confirmed native acceptance passed |
 | UP-MK | complete | `4423b47c5bdc3942a3d74b3d854844102a21bb58`; reviewed source, 32 targeted cases, lint/build/native checks and user-confirmed visual smoke passed |
 | UP-BR | complete | `b5c43f18d02adcc9e15f79298c1772b56669148a`; 8 targeted cases plus strengthened rerun, scoped lint/fmt/build, review and four native PNGs passed |
-| UP-PA | complete | Reviewed 54-palette catalog; 21 targeted cases plus layout follow-up; fmt/lint/build passed; six inspected native PNGs |
-| UP-TX | pending | |
+| UP-PA | complete | `7458f81b294d5d6f600028375442f9e6b048ed9d`; 21 targeted cases plus layout follow-up, fmt/lint/build/review and six native PNGs passed |
+| UP-TX | in_progress | A: typography sidecar/editor actions in progress; B: standard text consumers held until A checkpoint |
 | UP-FL | pending | Reference videos not located; diagnosis must precede fix |
 | UP-QA | pending | |
 
@@ -289,3 +289,50 @@ cargo build -p multi_launcher --bin multi_launcher --features qa-framebuffer-cap
 - Six final native PNGs saved/receipt-hash verified/inspected: corrected wide browser, OLED lime, OLED amber, Forest Terminal tinted, Graphite Light and 640x600 narrow browser. Index: `target/ui-polish-evidence/native-pa-20261015/screenshot-index.json`. Corrected wide view exposes several rows with sticky footer; narrow view fits its browser/footer (native hover tooltip is visible). Prior short-height diagnostic remains preserved separately.
 - Native keyboard family browsing verified Charcoal, Tinted and Light; browsing keeps Apply/Save disabled. Explicit selection activates coherent live colors. Lime collision chooses `curated.obsidian-lime.2`, preserving old saved colors. Cancel/reopen restores System selection and disabled Apply/Save. Parsed persisted themes remained equal to fixture baselines through all previews (checks recorded below); normal user profile untouched.
 - Source search confirms the old dialog catalog/dispatcher is removed: single production `CURATED_PRESETS` owner in theme/presets.rs. No duplicate normal execution path, new dependencies or lint suppressions. No remaining PA blocker. Human review remains deferred until full goal completion.
+
+
+### UP-TX — in progress
+
+- UP-PA committed `7458f81b294d5d6f600028375442f9e6b048ed9d`; final screenshot fixture closed only after exact process identity verification. Six final PA profiles preserved all saved theme values and macro bytes (parsed JSON/hash comparisons passed).
+- Implementer owns ONLY UP-TX-A: serde-default per-palette scale sidecar, legacy inherited-scale draft initialization, Overall Text Size controls, explicit Save As/Update and existing transaction/preview integration. Raw persisted baseline remains conflict authority; mere load/browse must not dirty/write disk. New curated palettes default 100%; existing legacy sizes survive switching/save/restart.
+- UP-TX-B is held until A review/verification/native evidence/checkpoint: Notes/Regex/Diff absolute-size consumers and combined Query/List geometry. No consumer implementation during A.
+- Planner final PA API refresh accepted. Isolated legacy fixture `native-tx-20261015` has global 140% and intentionally absent per-palette sidecar; normal user data excluded. Human review remains after full goal completion.
+
+- Legacy native seed verified independently: global scale 140%, exactly historical ThemeSettings fields (no sidecar), unchanged settings bytes SHA-256 `077fbeaf6e4534398968588b7e0678362e85886c2879ec4ccb0a7bbe110a4109`. Fixture provenance now records seed base separately from PA checkpoint base.
+- Codex attached-artifact inventory is empty; reference flicker MP4s remain unavailable/unviewed. Planner read-only diagnostic note confirms current framebuffer capture is single-use per process and cannot prove same-process temporal stability. If UP-FL needs repeated samples, use a bounded ROOT/F11 extension at the existing capture owner with default1 compatibility, unique tokens/receipts, sequential explicit triggers and existing timeouts/failure handling. No timer/permanent repaint loop or general QA framework. Geometry evidence must be opt-in at the retained UI boundary; actual framebuffer pixels are distinct from compositor/GPU presentation and natural idle cadence. This is held diagnostic preparation, not FL source work or a preselected cause/fix.
+
+- UP-TX-A targeted Nextest union (13 selected behavior names, including legacy draft migration, independent sizes, explicit Save As/Update, stale fixed-mode target, reset/Cancel/conflict and existing font/geometry invariants) is compiling/running under Implementer session 19768; no overlapping Cargo invocation. Source now restricts initial Update target to Custom saved selection, preserving legacy fixed/System modes with stale active_preset safely. Result pending, not claimed passed.
+
+- First UP-TX-A scoped Nextest run PASS: 13/13, 5,351 skipped, run `8a82ab57-6af9-4e4b-ac38-11a24b7dce00`. Implementer is running a cached narrow follow-up for existing Theme Settings Save success/failure and model compatibility/invalid-runtime guards before freeze. Independent review, lint and native evidence remain pending; A is not marked complete.
+
+- UP-TX-A follow-up PASS: 4/4 (`063a1811-1b39-4268-903f-5cf27b9dfa0d`) for successful/failed Save publication, historical model compatibility and invalid runtime scale. Full fmt and diff checks pass. Source freeze receipt: `native-tx-20261015/source-frozen-a.json`.
+- Scoped Clippy exit 0; log `target/ui-polish-evidence/tx-a-clippy.json`. Root independent audit: 371 inherited warnings, 1 touched-file primary span, zero changed-line hits; not a strict-clean claim. Initial feature build is running.
+- Reviewer found concrete P2 at new Overall Text Size row: single horizontal label/slider/percentage/Reset can exceed primary column at 200% or narrow width. Implementer owns responsive correction plus direct control containment regression. Original freeze retained; initial feature build cannot be labeled final native candidate. Persistence/editor ownership review otherwise appears sound; final review pending. No manual feedback requested.
+
+- Reviewer accepted bounded responsive typography-control correction and actual 200% control containment/non-overlap assertions at 386pt and 450pt. No remaining TX-A source findings. Final source fingerprint saved in `native-tx-20261015/source-final-a.json`; the original pre-correction freeze is retained. Targeted correction rerun, final scoped lint and native feature build remain pending.
+
+UP-TX-A executed initial verification commands:
+
+```text
+cargo nextest run -p multi_launcher --lib -E 'test(legacy_palette_typography_migrates_only_in_draft_and_survives_curated_save) | test(invalid_palette_scales_are_normalized_only_at_effective_and_save_boundaries) | test(saved_palette_typography_scales_restore_independently_after_reload) | test(fixed_base_mode_does_not_expose_a_stale_saved_palette_update_target) | test(save_as_and_update_palette_are_explicit_and_preserve_target_through_edits) | test(full_theme_reset_preserves_saved_palette_colors_and_typography_scales) | test(curated_selection_reuses_equal_saved_scheme_without_adding_a_copy) | test(curated_presets_are_collision_safe_and_manual_edits_copy_the_selected_scheme) | test(committed_updates_under_preview_restore_system_or_custom_appearance_on_cancel) | test(theme_conflicts_retain_draft_reload_explicitly_and_preserve_unrelated_settings) | test(legacy_palette_scales_inherit_only_on_editable_draft_and_normalize_on_save) | test(semantic_text_roles_reuse_existing_styles_without_reinstalling_fonts_or_compounding) | test(root_list_and_grid_geometry_follow_consumer_font_activation)'
+cargo nextest run -p multi_launcher --lib -E 'test(successful_theme_save_publishes_the_committed_settings) | test(failed_theme_save_preserves_draft_baseline_and_preview) | test(theme_preferences_preserve_legacy_defaults_maps_and_color_alpha) | test(invalid_metric_scale_uses_compact_default_without_rewriting_preferences)'
+cargo fmt --all -- --check
+cargo clippy -p multi_launcher --lib --bin multi_launcher --message-format=json
+cargo build -p multi_launcher --bin multi_launcher --features qa-framebuffer-capture
+```
+
+- First feature build PASS (1m39s), but predates responsive control correction and is diagnostic-only. A replacement native candidate is required; no final native screenshots claimed yet.
+
+- First actual 200% containment test exposed remaining overflow in the initial wrapped helper. This supersedes its source-only acceptance and `source-final-a.json` for final capture. Implementer split slider onto its own full-width labeled row, with percentage/Reset in a separate row; focused test/reflow rerun session 76867 is pending. Reviewer notified; final passing correction will receive distinct source receipt and refreshed review. No failed evidence hidden and no native pass claimed.
+
+- Final split-row typography control correction passed focused Nextest 2/2, run `81bdfc48-beda-4d22-9673-621da16f88ac`: `overall_text_size_controls_wrap_inside_narrow_and_two_column_widths_at_200_percent` and `theme_editor_reflows_without_mutating_the_draft_and_keeps_actions_visible`. Reviewer refreshed final code/test and resolved P2; previous migration/action review stands. Final source receipt `native-tx-20261015/source-final-a-v2.json` supersedes earlier wrapped-helper receipt.
+- Final scoped Clippy exit 0: `cargo clippy -p multi_launcher --lib --bin multi_launcher --message-format=json`, log `tx-a-clippy-final-v2.json`. Root independent audit again confirms 371 inherited diagnostics, 1 touched-file primary span, zero changed-line hits. Replacement feature build follows sequentially; no broader suite run.
+
+
+#### UP-TX-A — complete
+
+- Final feature build PASS, executable 118,798,336 bytes / SHA-256 `1e13fd1c3711efc135ad5627b77d61b2a4b79c30e72e7651fefc2000ed80c395`; final reviewed source fingerprint `native-tx-20261015/source-final-a-v2.json`.
+- Final layout command: `cargo nextest run -p multi_launcher --lib -E 'test(overall_text_size_controls_wrap_inside_narrow_and_two_column_widths_at_200_percent) | test(theme_editor_reflows_without_mutating_the_draft_and_keeps_actions_visible)'` PASS 2/2. Together with earlier 13/13 + 4/4 distinct scoped cases, required A behavior is covered; no full suite run.
+- Four actual native PNGs saved/receipt+manifest+fixture+executable+PNG hashes verified and inspected: legacy140 load, savedA85, restartedB140, preview200. Index `target/ui-polish-evidence/native-tx-20261015/screenshot-index-a.json`. Gallery screenshots show actual overall text scale, palette selection/target and reachable footer; typography controls are below the fold in these views, so their direct containment evidence is the focused render test, not a false screenshot claim.
+- Native UIA size values observed: legacy140, draft85, savedA85, changedCustom140 retaining targetA, explicitSaveAsB140, restartedB140, selectingA restores85, Cancel/reopenB140, preview200, Cancel/reopenB140 with disabledApplySave. Disk inspection confirms A85/B140 independently and inherited legacy entries140. Mere-load legacy settings bytes unchanged. All three existing named palette colors and both profiles' macro bytes unchanged. Human review deferred until full goal completion.
+- Reviewer migration/action/rawbaseline review and final sizing refresh accepted without remaining findings. No new dependencies/blanket lint suppressions; final fmt/diff checks pass. UP-TX-B remains pending until this coherent checkpoint commits.

@@ -381,6 +381,8 @@ pub struct ThemeSettings {
     pub mode: ThemeMode,
     #[serde(default)]
     pub named_presets: std::collections::HashMap<String, ColorScheme>,
+    #[serde(default)]
+    pub named_preset_typography_scales: std::collections::HashMap<String, f32>,
     #[serde(default = "ThemeSettings::default_custom_scheme")]
     pub custom_scheme: ColorScheme,
     #[serde(default)]
@@ -394,6 +396,10 @@ impl ThemeSettings {
                 ("dark".to_string(), ColorScheme::dark()),
                 ("light".to_string(), ColorScheme::light()),
             ]),
+            named_preset_typography_scales: std::collections::HashMap::from([
+                ("dark".to_string(), 1.0),
+                ("light".to_string(), 1.0),
+            ]),
             custom_scheme: ColorScheme::dark(),
             preferences: ThemePreferences::default(),
         }
@@ -405,12 +411,45 @@ impl ThemeSettings {
                 ("dark".to_string(), ColorScheme::dark()),
                 ("light".to_string(), ColorScheme::light()),
             ]),
+            named_preset_typography_scales: std::collections::HashMap::from([
+                ("dark".to_string(), 1.0),
+                ("light".to_string(), 1.0),
+            ]),
             custom_scheme: ColorScheme::light(),
             preferences: ThemePreferences::default(),
         }
     }
     fn default_custom_scheme() -> ColorScheme {
         ColorScheme::dark()
+    }
+
+    /// Preserve the legacy global size for saved palettes that predate the scale sidecar.
+    /// Call this only on an editable draft; raw persisted settings remain the conflict baseline.
+    pub fn inherit_missing_named_preset_typography_scales(&mut self) {
+        let inherited_scale = self.preferences.normalized().typography_scale;
+        for name in self.named_presets.keys() {
+            self.named_preset_typography_scales
+                .entry(name.clone())
+                .or_insert(inherited_scale);
+        }
+    }
+
+    /// Return a safe scale for a palette, falling back to the current legacy global scale.
+    pub fn named_preset_typography_scale(&self, name: &str) -> f32 {
+        self.named_preset_typography_scales
+            .get(name)
+            .copied()
+            .map(ThemePreferences::normalize_typography_scale)
+            .unwrap_or_else(|| self.preferences.normalized().typography_scale)
+    }
+
+    /// Normalize values at an explicit persistence boundary, never during deserialization.
+    pub fn normalize_typography_scales_for_save(&mut self) {
+        self.preferences.typography_scale =
+            ThemePreferences::normalize_typography_scale(self.preferences.typography_scale);
+        for scale in self.named_preset_typography_scales.values_mut() {
+            *scale = ThemePreferences::normalize_typography_scale(*scale);
+        }
     }
 }
 impl Default for ThemeSettings {
@@ -455,17 +494,19 @@ impl ThemePreferences {
     pub const MAX_TYPOGRAPHY_SCALE: f32 = 2.0;
 
     pub fn normalized(&self) -> Self {
-        let typography_scale = if self.typography_scale.is_finite() {
-            self.typography_scale
-                .clamp(Self::MIN_TYPOGRAPHY_SCALE, Self::MAX_TYPOGRAPHY_SCALE)
-        } else {
-            1.0
-        };
         Self {
             active_preset: self.active_preset.clone(),
             accent: self.accent,
             density: self.density,
-            typography_scale,
+            typography_scale: Self::normalize_typography_scale(self.typography_scale),
+        }
+    }
+
+    pub fn normalize_typography_scale(scale: f32) -> f32 {
+        if scale.is_finite() {
+            scale.clamp(Self::MIN_TYPOGRAPHY_SCALE, Self::MAX_TYPOGRAPHY_SCALE)
+        } else {
+            1.0
         }
     }
 }
@@ -1130,6 +1171,8 @@ mod tests {
         assert_eq!(default.preferences, ThemePreferences::default());
         assert!(default.named_presets.contains_key("dark"));
         assert!(default.named_presets.contains_key("light"));
+        assert_eq!(default.named_preset_typography_scales["dark"], 1.0);
+        assert_eq!(default.named_preset_typography_scales["light"], 1.0);
 
         let missing_presets: ThemeSettings = serde_json::from_str(
             r#"{
@@ -1141,6 +1184,7 @@ mod tests {
         assert!(missing_presets.named_presets.is_empty());
         assert_eq!(missing_presets.preferences, ThemePreferences::default());
         assert_eq!(missing_presets.custom_scheme.selection_bg.a, 73);
+        assert!(missing_presets.named_preset_typography_scales.is_empty());
 
         let explicitly_empty: ThemeSettings =
             serde_json::from_str(r#"{"mode":"custom","named_presets":{},"custom_scheme":{}}"#)
@@ -1171,6 +1215,40 @@ mod tests {
             restored.preferences.active_preset.as_deref(),
             Some("not-yet-installed")
         );
+        assert_eq!(
+            restored.named_preset_typography_scales,
+            round_trip.named_preset_typography_scales
+        );
+    }
+
+    #[test]
+    fn legacy_palette_scales_inherit_only_on_editable_draft_and_normalize_on_save() {
+        let raw: ThemeSettings = serde_json::from_str(
+            r#"{
+                "mode":"custom",
+                "named_presets":{"legacy":{}},
+                "preferences":{"typography_scale":1.4}
+            }"#,
+        )
+        .expect("settings without the new scale sidecar remain readable");
+        assert!(raw.named_preset_typography_scales.is_empty());
+        assert_eq!(raw.preferences.typography_scale, 1.4);
+
+        let mut draft = raw.clone();
+        draft.inherit_missing_named_preset_typography_scales();
+        assert_eq!(draft.named_preset_typography_scale("legacy"), 1.4);
+        assert!(
+            raw.named_preset_typography_scales.is_empty(),
+            "legacy migration is explicit and does not rewrite the loaded baseline"
+        );
+
+        draft.preferences.typography_scale = f32::INFINITY;
+        draft
+            .named_preset_typography_scales
+            .insert("legacy".into(), f32::NAN);
+        draft.normalize_typography_scales_for_save();
+        assert_eq!(draft.preferences.typography_scale, 1.0);
+        assert_eq!(draft.named_preset_typography_scales["legacy"], 1.0);
     }
 
     #[test]

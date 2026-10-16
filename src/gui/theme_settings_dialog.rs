@@ -4,7 +4,9 @@ use crate::gui::theme::{
     ChromeIcon, ResolvedTheme, SystemAppearance, TextRole, chrome_icon_button,
     chrome_small_icon_button, effective_color_scheme, resolve_theme, text_style_for_role,
 };
-use crate::settings::{ColorScheme, Settings, ThemeColor, ThemeMode, ThemeSettings};
+use crate::settings::{
+    ColorScheme, Settings, ThemeColor, ThemeMode, ThemePreferences, ThemeSettings,
+};
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
 
@@ -16,6 +18,8 @@ pub struct ThemeSettingsDialogState {
     persisted_baseline: Option<ThemeSettings>,
     conflicted: bool,
     curated_family: PaletteFamily,
+    palette_update_target: Option<String>,
+    save_palette_name: String,
     #[cfg(test)]
     palette_card_rects: Vec<egui::Rect>,
 }
@@ -29,6 +33,8 @@ impl Default for ThemeSettingsDialogState {
             persisted_baseline: None,
             conflicted: false,
             curated_family: PaletteFamily::Oled,
+            palette_update_target: None,
+            save_palette_name: String::new(),
             #[cfg(test)]
             palette_card_rects: Vec::new(),
         }
@@ -41,6 +47,8 @@ impl ThemeSettingsDialogState {
         self.conflicted = false;
         self.dirty = false;
         self.last_error = None;
+        self.palette_update_target = None;
+        self.save_palette_name.clear();
         self.reload_from_path(ctx, settings_path);
     }
 
@@ -50,14 +58,22 @@ impl ThemeSettingsDialogState {
             Ok(settings) => {
                 crate::gui::theme::publish_committed(ctx, &settings.theme);
                 crate::gui::theme::clear_preview(ctx);
-                self.persisted_baseline = Some(settings.theme.clone());
-                self.draft = settings.theme;
+                let persisted_theme = settings.theme;
+                let mut draft = persisted_theme.clone();
+                draft.inherit_missing_named_preset_typography_scales();
+                self.palette_update_target = (draft.mode == ThemeMode::Custom)
+                    .then(|| draft.preferences.active_preset.clone())
+                    .flatten()
+                    .filter(|name| draft.named_presets.contains_key(name));
+                self.persisted_baseline = Some(persisted_theme);
+                self.draft = draft;
                 self.dirty = false;
                 self.conflicted = false;
             }
             Err(err) => {
                 self.persisted_baseline = None;
                 self.conflicted = false;
+                self.palette_update_target = None;
                 self.last_error = Some(format!("Failed to load settings: {err}"));
             }
         }
@@ -69,6 +85,8 @@ impl ThemeSettingsDialogState {
         self.conflicted = false;
         self.dirty = false;
         self.last_error = None;
+        self.palette_update_target = None;
+        self.save_palette_name.clear();
     }
 
     pub fn can_edit(&self) -> bool {
@@ -98,16 +116,20 @@ impl ThemeSettingsDialogState {
         }
         self.draft.mode = ThemeMode::Custom;
         self.draft.preferences.active_preset = Some(name.to_owned());
+        self.palette_update_target = Some(name.to_owned());
+        self.draft.preferences.typography_scale = self.draft.named_preset_typography_scale(name);
         self.dirty = true;
         true
     }
 
     fn select_custom_scheme(&mut self) -> bool {
         if self.draft.mode == ThemeMode::Custom && self.draft.preferences.active_preset.is_none() {
+            self.palette_update_target = None;
             return false;
         }
         self.draft.mode = ThemeMode::Custom;
         self.draft.preferences.active_preset = None;
+        self.palette_update_target = None;
         self.dirty = true;
         true
     }
@@ -141,10 +163,25 @@ impl ThemeSettingsDialogState {
                 candidate
             });
         let inserted = !self.draft.named_presets.contains_key(&name);
+        let associated_scale = if inserted {
+            1.0
+        } else {
+            self.draft.named_preset_typography_scale(&name)
+        };
         self.draft
             .named_presets
             .entry(name.clone())
             .or_insert(scheme);
+        if inserted {
+            self.draft
+                .named_preset_typography_scales
+                .insert(name.clone(), associated_scale);
+        } else {
+            self.draft
+                .named_preset_typography_scales
+                .entry(name.clone())
+                .or_insert(associated_scale);
+        }
         if !inserted
             && self.draft.mode == ThemeMode::Custom
             && self.draft.preferences.active_preset.as_deref() == Some(&name)
@@ -153,6 +190,8 @@ impl ThemeSettingsDialogState {
         }
         self.draft.mode = ThemeMode::Custom;
         self.draft.preferences.active_preset = Some(name);
+        self.palette_update_target = self.draft.preferences.active_preset.clone();
+        self.draft.preferences.typography_scale = associated_scale;
         self.dirty = true;
         true
     }
@@ -165,11 +204,122 @@ impl ThemeSettingsDialogState {
         true
     }
 
+    fn base_mode_changed(&mut self, previous_mode: ThemeMode) {
+        if previous_mode == self.draft.mode {
+            return;
+        }
+        if self.draft.mode != ThemeMode::Custom {
+            self.palette_update_target = None;
+            return;
+        }
+
+        let active_name = self
+            .draft
+            .preferences
+            .active_preset
+            .clone()
+            .filter(|name| self.draft.named_presets.contains_key(name));
+        self.draft.preferences.active_preset = active_name.clone();
+        self.palette_update_target = active_name.clone();
+        if let Some(name) = active_name {
+            self.draft.preferences.typography_scale =
+                self.draft.named_preset_typography_scale(&name);
+        }
+    }
+
     fn apply_manual_scheme(&mut self, scheme: ColorScheme) {
         self.draft.mode = ThemeMode::Custom;
         self.draft.preferences.active_preset = None;
         self.draft.custom_scheme = scheme;
         self.dirty = true;
+    }
+
+    fn set_typography_scale(&mut self, scale: f32, appearance: SystemAppearance) -> bool {
+        let scale = ThemePreferences::normalize_typography_scale(scale);
+        let current_scale = self.draft.preferences.normalized().typography_scale;
+        if scale == current_scale && self.draft.preferences.typography_scale == scale {
+            return false;
+        }
+
+        let was_saved_palette =
+            self.draft.mode == ThemeMode::Custom && self.draft.preferences.active_preset.is_some();
+        let scheme = self.effective_scheme(appearance);
+        self.draft.preferences.typography_scale = scale;
+        if was_saved_palette {
+            self.draft.preferences.active_preset = None;
+            self.draft.custom_scheme = scheme;
+        }
+        self.dirty = true;
+        true
+    }
+
+    fn save_as_palette(
+        &mut self,
+        requested_name: &str,
+        appearance: SystemAppearance,
+    ) -> Result<(), String> {
+        let name = requested_name.trim();
+        if name.is_empty() {
+            return Err("Enter a name for the new palette.".to_owned());
+        }
+        if self.draft.named_presets.contains_key(name) {
+            return Err(format!("A saved palette named '{name}' already exists."));
+        }
+
+        let scheme = self.effective_scheme(appearance);
+        let scale = self.draft.preferences.normalized().typography_scale;
+        self.draft
+            .named_presets
+            .insert(name.to_owned(), scheme.clone());
+        self.draft
+            .named_preset_typography_scales
+            .insert(name.to_owned(), scale);
+        self.draft.mode = ThemeMode::Custom;
+        self.draft.custom_scheme = scheme;
+        self.draft.preferences.active_preset = Some(name.to_owned());
+        self.draft.preferences.typography_scale = scale;
+        self.palette_update_target = Some(name.to_owned());
+        self.save_palette_name = name.to_owned();
+        self.dirty = true;
+        self.last_error = None;
+        Ok(())
+    }
+
+    fn update_palette(&mut self, appearance: SystemAppearance) -> Result<bool, String> {
+        let Some(name) = self.palette_update_target.clone() else {
+            return Err("Select a saved palette before updating it.".to_owned());
+        };
+        if !self.draft.named_presets.contains_key(&name) {
+            return Err(format!("The saved palette '{name}' no longer exists."));
+        }
+
+        let scheme = self.effective_scheme(appearance);
+        let scale = self.draft.preferences.normalized().typography_scale;
+        let unchanged = self.draft.named_presets.get(&name) == Some(&scheme)
+            && self
+                .draft
+                .named_preset_typography_scales
+                .get(&name)
+                .is_some_and(|existing| {
+                    ThemePreferences::normalize_typography_scale(*existing) == scale
+                });
+        if unchanged {
+            return Ok(false);
+        }
+
+        self.draft
+            .named_presets
+            .insert(name.clone(), scheme.clone());
+        self.draft
+            .named_preset_typography_scales
+            .insert(name.clone(), scale);
+        self.draft.mode = ThemeMode::Custom;
+        self.draft.custom_scheme = scheme;
+        self.draft.preferences.active_preset = Some(name);
+        self.draft.preferences.typography_scale = scale;
+        self.dirty = true;
+        self.last_error = None;
+        Ok(true)
     }
 
     pub fn save_to_path(&mut self, ctx: &egui::Context, settings_path: &str) -> Result<(), String> {
@@ -185,7 +335,8 @@ impl ThemeSettingsDialogState {
             self.last_error = Some(message.clone());
             return Err(message);
         }
-        let draft = self.draft.clone();
+        let mut draft = self.draft.clone();
+        draft.normalize_typography_scales_for_save();
         let mut conflict = false;
         let result = Settings::update(settings_path, |settings| {
             if settings.theme != baseline {
@@ -294,10 +445,7 @@ pub fn ui(
 
             let (footer_action, _) = render_theme_footer(ui, state, &footer_layout);
             if footer_action == Some(ThemeFooterAction::Reset) {
-                let presets = state.draft.named_presets.clone();
-                state.draft = ThemeSettings::default();
-                state.draft.named_presets = presets;
-                state.dirty = true;
+                reset_draft_preserving_saved_palettes(state);
                 draft_changed = true;
             }
             if footer_action == Some(ThemeFooterAction::Cancel) {
@@ -628,7 +776,11 @@ fn render_theme_primary_sections(
     state: &mut ThemeSettingsDialogState,
     appearance: SystemAppearance,
 ) -> (bool, ColorScheme, ThemeMode, bool) {
+    let previous_mode = state.draft.mode;
     let mut changed = section_base_mode(ui, &mut state.draft.mode);
+    if changed {
+        state.base_mode_changed(previous_mode);
+    }
     ui.separator();
     changed |= section_presets(ui, state);
 
@@ -636,7 +788,14 @@ fn render_theme_primary_sections(
     let mode = state.draft.mode;
     let mut scheme_changed = section_core_surfaces(ui, &mut scheme, mode);
     ui.separator();
-    scheme_changed |= section_text_and_links(ui, &mut scheme, mode);
+    let mut typography_scale =
+        ThemePreferences::normalize_typography_scale(state.draft.preferences.typography_scale);
+    let (text_scheme_changed, typography_scale_changed) =
+        section_text_and_links(ui, &mut scheme, mode, &mut typography_scale);
+    scheme_changed |= text_scheme_changed;
+    if typography_scale_changed {
+        changed |= state.set_typography_scale(typography_scale, appearance);
+    }
     changed |= scheme_changed;
     (changed, scheme, mode, scheme_changed)
 }
@@ -757,6 +916,34 @@ fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> b
                 changed |= state.select_saved_preset(&name);
             }
         });
+
+    if let Some(target) = state.palette_update_target.clone() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Update target: {target}"));
+            if ui.button("Update Palette").clicked() {
+                match state.update_palette(system_appearance(ui.ctx())) {
+                    Ok(updated) => changed |= updated,
+                    Err(err) => state.last_error = Some(err),
+                }
+            }
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Save As Palette");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.save_palette_name)
+                .id_salt("theme.save-as-palette.name")
+                .desired_width(150.0)
+                .hint_text("Palette name"),
+        );
+        if ui.button("Save As").clicked() {
+            let name = state.save_palette_name.clone();
+            match state.save_as_palette(&name, system_appearance(ui.ctx())) {
+                Ok(()) => changed = true,
+                Err(err) => state.last_error = Some(err),
+            }
+        }
+    });
 
     let mut selected_family = state.curated_family;
     egui::ComboBox::from_label("Curated group")
@@ -879,11 +1066,17 @@ fn section_core_surfaces(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: Them
     changed
 }
 
-fn section_text_and_links(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
-    let mut changed = false;
+fn section_text_and_links(
+    ui: &mut egui::Ui,
+    scheme: &mut ColorScheme,
+    mode: ThemeMode,
+    typography_scale: &mut f32,
+) -> (bool, bool) {
+    let mut scheme_changed = false;
     section_heading(ui, "Text and links", None);
-    changed |= color_row(ui, "Text", &mut scheme.text);
-    changed |= color_row(ui, "Hyperlink", &mut scheme.hyperlink);
+    scheme_changed |= color_row(ui, "Text", &mut scheme.text);
+    scheme_changed |= color_row(ui, "Hyperlink", &mut scheme.hyperlink);
+    let mut scale_changed = typography_scale_controls(ui, typography_scale).0;
     if chrome_small_icon_button(
         ui,
         ChromeIcon::Reset,
@@ -893,9 +1086,57 @@ fn section_text_and_links(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: The
     .clicked()
     {
         reset_text_and_links_to_mode_defaults(scheme, mode);
-        changed = true;
+        *typography_scale = 1.0;
+        scheme_changed = true;
+        scale_changed = true;
     }
-    changed
+    (scheme_changed, scale_changed)
+}
+
+fn typography_scale_controls(
+    ui: &mut egui::Ui,
+    typography_scale: &mut f32,
+) -> (bool, [egui::Rect; 3]) {
+    let mut changed = false;
+    let mut rects = [egui::Rect::NOTHING; 3];
+    let slider_height = ui
+        .spacing()
+        .interact_size
+        .y
+        .max(text_style_for_role(TextRole::Body).resolve(ui.style()).size + 8.0);
+    let slider = ui.add_sized(
+        [ui.available_width(), slider_height],
+        egui::Slider::new(
+            typography_scale,
+            ThemePreferences::MIN_TYPOGRAPHY_SCALE..=ThemePreferences::MAX_TYPOGRAPHY_SCALE,
+        )
+        .text("Overall Text Size")
+        .step_by(0.05)
+        .show_value(false),
+    );
+    rects[0] = slider.rect;
+    changed |= slider.changed();
+    ui.horizontal_wrapped(|ui| {
+        rects[1] = ui.label(format!("{:.0}%", *typography_scale * 100.0)).rect;
+        let reset = ui.button("Reset to 100%");
+        rects[2] = reset.rect;
+        if reset.clicked() {
+            *typography_scale = 1.0;
+            changed = true;
+        }
+    });
+    (changed, rects)
+}
+
+fn reset_draft_preserving_saved_palettes(state: &mut ThemeSettingsDialogState) {
+    let presets = state.draft.named_presets.clone();
+    let preset_scales = state.draft.named_preset_typography_scales.clone();
+    state.draft = ThemeSettings::default();
+    state.draft.named_presets = presets;
+    state.draft.named_preset_typography_scales = preset_scales;
+    state.palette_update_target = None;
+    state.save_palette_name.clear();
+    state.dirty = true;
 }
 
 fn section_widgets(ui: &mut egui::Ui, scheme: &mut ColorScheme, mode: ThemeMode) -> bool {
@@ -1279,6 +1520,50 @@ mod tests {
     }
 
     #[test]
+    fn overall_text_size_controls_wrap_inside_narrow_and_two_column_widths_at_200_percent() {
+        for width in [386.0, 450.0] {
+            let ctx = egui::Context::default();
+            let scaled = ThemeSettings {
+                mode: ThemeMode::Dark,
+                preferences: ThemePreferences {
+                    typography_scale: 2.0,
+                    ..ThemePreferences::default()
+                },
+                ..ThemeSettings::default()
+            };
+            crate::gui::theme::initialize_runtime(&ctx, &scaled);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 240.0));
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.set_width(width);
+                    let bounds = ui.clip_rect();
+                    let mut scale = 2.0;
+                    let (changed, rects) = typography_scale_controls(ui, &mut scale);
+                    assert!(!changed);
+                    assert_eq!(scale, 2.0);
+                    assert!(
+                        rects.iter().all(|rect| rect.is_positive() && bounds.contains_rect(*rect)),
+                        "all text-size controls fit at {width} points and 200%; controls={rects:?}, bounds={bounds:?}"
+                    );
+                    for first in 0..rects.len() {
+                        for second in first + 1..rects.len() {
+                            assert!(
+                                !rects[first].intersects(rects[second]),
+                                "text-size controls do not overlap; controls={rects:?}"
+                            );
+                        }
+                    }
+                },
+            );
+            output.drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
     fn defaults_for_mode_returns_expected_scheme() {
         assert_eq!(defaults_for_mode(ThemeMode::System), ColorScheme::dark());
         assert_eq!(defaults_for_mode(ThemeMode::Dark), ColorScheme::dark());
@@ -1411,6 +1696,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut stored = Settings::default();
         stored.theme.mode = ThemeMode::System;
+        stored.theme.preferences.typography_scale = 1.25;
         let path = settings_path(&directory, &stored);
         let ctx = egui::Context::default();
         crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
@@ -1427,9 +1713,18 @@ mod tests {
         let mut state = ThemeSettingsDialogState::default();
         state.begin_session(&ctx, &path);
         state.draft.preferences.density = crate::settings::ThemeDensity::Comfortable;
+        state.draft.preferences.typography_scale = 1.5;
         state.dirty = true;
         crate::gui::theme::publish_preview(&ctx, &state.draft);
         assert_eq!(ctx.theme(), egui::Theme::Light);
+
+        state.draft.preferences.typography_scale = 0.85;
+        crate::gui::theme::publish_preview(&ctx, &state.draft);
+        assert_eq!(
+            ctx.style_of(egui::Theme::Light).text_styles[&egui::TextStyle::Body].size,
+            14.0 * 0.85,
+            "each preview replaces metrics from the installed baseline"
+        );
 
         let output = ctx.run_ui(
             egui::RawInput {
@@ -1457,6 +1752,11 @@ mod tests {
             ctx.style_of(egui::Theme::Light).visuals.window_fill,
             to_egui(external.custom_scheme.window_fill),
             "the latest committed palette is revealed after cancelling the preview"
+        );
+        assert_eq!(
+            ctx.style_of(egui::Theme::Light).text_styles[&egui::TextStyle::Body].size,
+            14.0 * 1.25,
+            "cancelling restores the latest committed typography metrics"
         );
         state.end_session(&ctx);
         assert_eq!(
@@ -1518,6 +1818,7 @@ mod tests {
         crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
         let mut state = ThemeSettingsDialogState::default();
         state.begin_session(&ctx, &path);
+        state.draft.preferences.typography_scale = 1.6;
 
         assert!(state.select_curated_preset("graphite-dark"));
         let active = state.draft.preferences.active_preset.as_deref().unwrap();
@@ -1532,6 +1833,7 @@ mod tests {
         );
         let selected = find_curated_preset("graphite-dark").unwrap().scheme();
         assert_eq!(state.effective_scheme(SystemAppearance::Dark), selected);
+        assert_eq!(state.draft.preferences.typography_scale, 1.0);
         let palette_count = state.draft.named_presets.len();
         assert!(!state.select_curated_preset("graphite-dark"));
         assert_eq!(state.draft.named_presets.len(), palette_count);
@@ -1640,6 +1942,14 @@ mod tests {
             .theme
             .named_presets
             .insert("Amber alternate".into(), scheme.clone());
+        stored
+            .theme
+            .named_preset_typography_scales
+            .insert("Amber user copy".into(), 0.85);
+        stored
+            .theme
+            .named_preset_typography_scales
+            .insert("Amber alternate".into(), 1.4);
         let path = settings_path(&directory, &stored);
         let ctx = egui::Context::default();
         crate::gui::theme::initialize_runtime(&ctx, &stored.theme);
@@ -1654,7 +1964,237 @@ mod tests {
             Some("Amber alternate"),
             "equal saved schemes reuse the lexicographically first matching entry"
         );
+        assert_eq!(state.draft.preferences.typography_scale, 1.4);
         assert_eq!(state.effective_scheme(SystemAppearance::Dark), scheme);
+    }
+
+    #[test]
+    fn legacy_palette_typography_migrates_only_in_draft_and_survives_curated_save() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = Settings::default();
+        stored.theme.mode = ThemeMode::Custom;
+        stored.theme.preferences.active_preset = Some("Legacy A".into());
+        stored.theme.preferences.typography_scale = 1.4;
+        stored.theme.named_presets.insert(
+            "Legacy A".into(),
+            ColorScheme {
+                window_fill: rgba(31, 79, 127, 255),
+                ..ColorScheme::dark()
+            },
+        );
+        let path = directory.path().join("settings.json");
+        let mut legacy = serde_json::to_value(&stored).unwrap();
+        legacy["theme"]
+            .as_object_mut()
+            .unwrap()
+            .remove("named_preset_typography_scales");
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+        std::fs::write(&path, &legacy_bytes).unwrap();
+        let path = path.to_str().unwrap().to_owned();
+
+        let ctx = egui::Context::default();
+        let mut state = ThemeSettingsDialogState::default();
+        state.begin_session(&ctx, &path);
+        assert!(
+            state
+                .persisted_baseline
+                .as_ref()
+                .unwrap()
+                .named_preset_typography_scales
+                .is_empty(),
+            "the raw loaded theme remains the exact conflict baseline"
+        );
+        assert_eq!(state.draft.named_preset_typography_scale("Legacy A"), 1.4);
+        assert_eq!(std::fs::read(&path).unwrap(), legacy_bytes);
+
+        assert!(state.select_curated_preset("obsidian-lime"));
+        assert_eq!(state.draft.preferences.typography_scale, 1.0);
+        state.save_to_path(&ctx, &path).unwrap();
+        let saved = Settings::load(&path).unwrap();
+        assert_eq!(saved.theme.named_preset_typography_scales["Legacy A"], 1.4);
+        assert_eq!(
+            saved.theme.named_preset_typography_scales
+                [saved.theme.preferences.active_preset.as_deref().unwrap()],
+            1.0
+        );
+
+        let mut reopened = ThemeSettingsDialogState::default();
+        reopened.begin_session(&ctx, &path);
+        assert!(reopened.select_saved_preset("Legacy A"));
+        assert_eq!(reopened.draft.preferences.typography_scale, 1.4);
+    }
+
+    #[test]
+    fn invalid_palette_scales_are_normalized_only_at_effective_and_save_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = Settings::default();
+        stored.theme.preferences.typography_scale = 2.4;
+        stored
+            .theme
+            .named_preset_typography_scales
+            .insert("dark".into(), 0.4);
+        let path = settings_path(&directory, &stored);
+        let original_bytes = std::fs::read(&path).unwrap();
+
+        let ctx = egui::Context::default();
+        let mut state = ThemeSettingsDialogState::default();
+        state.begin_session(&ctx, &path);
+
+        assert_eq!(state.draft.preferences.typography_scale, 2.4);
+        assert_eq!(state.draft.named_preset_typography_scales["dark"], 0.4);
+        assert_eq!(state.draft.preferences.normalized().typography_scale, 2.0);
+        assert_eq!(state.draft.named_preset_typography_scale("dark"), 0.75);
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+
+        state.dirty = true;
+        state.save_to_path(&ctx, &path).unwrap();
+        let saved = Settings::load(&path).unwrap();
+        assert_eq!(saved.theme.preferences.typography_scale, 2.0);
+        assert_eq!(saved.theme.named_preset_typography_scales["dark"], 0.75);
+    }
+
+    #[test]
+    fn saved_palette_typography_scales_restore_independently_after_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let stored = Settings::default();
+        let path = settings_path(&directory, &stored);
+        let ctx = egui::Context::default();
+        let mut state = ThemeSettingsDialogState::default();
+        state.begin_session(&ctx, &path);
+        state.draft.named_presets.insert(
+            "Palette A".into(),
+            ColorScheme {
+                window_fill: rgba(18, 29, 40, 255),
+                ..ColorScheme::dark()
+            },
+        );
+        state
+            .draft
+            .named_preset_typography_scales
+            .insert("Palette A".into(), 0.85);
+        state.draft.named_presets.insert(
+            "Palette B".into(),
+            ColorScheme {
+                window_fill: rgba(61, 72, 83, 255),
+                ..ColorScheme::dark()
+            },
+        );
+        state
+            .draft
+            .named_preset_typography_scales
+            .insert("Palette B".into(), 1.4);
+        state.dirty = true;
+        state.save_to_path(&ctx, &path).unwrap();
+
+        let mut reopened = ThemeSettingsDialogState::default();
+        reopened.begin_session(&ctx, &path);
+        assert!(reopened.select_saved_preset("Palette A"));
+        assert_eq!(reopened.draft.preferences.typography_scale, 0.85);
+        assert!(reopened.select_saved_preset("Palette B"));
+        assert_eq!(reopened.draft.preferences.typography_scale, 1.4);
+        assert!(reopened.select_saved_preset("Palette A"));
+        assert_eq!(reopened.draft.preferences.typography_scale, 0.85);
+    }
+
+    #[test]
+    fn fixed_base_mode_does_not_expose_a_stale_saved_palette_update_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut stored = Settings::default();
+        stored.theme.mode = ThemeMode::Dark;
+        stored.theme.preferences.active_preset = Some("dark".into());
+        stored
+            .theme
+            .named_preset_typography_scales
+            .insert("dark".into(), 1.4);
+        let path = settings_path(&directory, &stored);
+        let ctx = egui::Context::default();
+        let mut state = ThemeSettingsDialogState::default();
+
+        state.begin_session(&ctx, &path);
+        assert_eq!(state.palette_update_target, None);
+        assert_eq!(state.draft.mode, ThemeMode::Dark);
+
+        state.draft.mode = ThemeMode::Custom;
+        state.base_mode_changed(ThemeMode::Dark);
+        assert_eq!(state.palette_update_target.as_deref(), Some("dark"));
+        assert_eq!(state.draft.preferences.typography_scale, 1.4);
+    }
+
+    #[test]
+    fn save_as_and_update_palette_are_explicit_and_preserve_target_through_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let stored = Settings::default();
+        let path = settings_path(&directory, &stored);
+        let ctx = egui::Context::default();
+        let mut state = ThemeSettingsDialogState::default();
+        state.begin_session(&ctx, &path);
+
+        assert!(state.save_as_palette("  ", SystemAppearance::Dark).is_err());
+        assert!(state.draft.named_presets.contains_key("dark"));
+        assert!(
+            state
+                .save_as_palette("  Studio  ", SystemAppearance::Dark)
+                .is_ok()
+        );
+        assert_eq!(state.palette_update_target.as_deref(), Some("Studio"));
+        assert_eq!(state.draft.named_preset_typography_scales["Studio"], 1.0);
+        assert!(
+            state
+                .save_as_palette("Studio", SystemAppearance::Dark)
+                .is_err()
+        );
+
+        state.save_to_path(&ctx, &path).unwrap();
+        let original_scheme = state.draft.named_presets["Studio"].clone();
+        assert!(state.set_typography_scale(1.4, SystemAppearance::Dark));
+        assert_eq!(state.draft.preferences.active_preset, None);
+        assert_eq!(state.palette_update_target.as_deref(), Some("Studio"));
+        let mut edited = state.effective_scheme(SystemAppearance::Dark);
+        edited.window_fill = rgba(194, 103, 42, 255);
+        state.apply_manual_scheme(edited.clone());
+        assert_eq!(state.palette_update_target.as_deref(), Some("Studio"));
+        state.save_to_path(&ctx, &path).unwrap();
+        let ordinarily_saved = Settings::load(&path).unwrap().theme;
+        assert_eq!(ordinarily_saved.named_presets["Studio"], original_scheme);
+        assert_eq!(
+            ordinarily_saved.named_preset_typography_scales["Studio"],
+            1.0
+        );
+        assert_eq!(ordinarily_saved.custom_scheme, edited);
+        assert_eq!(ordinarily_saved.preferences.typography_scale, 1.4);
+
+        assert!(state.update_palette(SystemAppearance::Dark).unwrap());
+        assert_eq!(state.draft.named_presets["Studio"], edited);
+        assert_eq!(state.draft.named_preset_typography_scales["Studio"], 1.4);
+        assert_eq!(
+            state.draft.preferences.active_preset.as_deref(),
+            Some("Studio")
+        );
+    }
+
+    #[test]
+    fn full_theme_reset_preserves_saved_palette_colors_and_typography_scales() {
+        let mut state = ThemeSettingsDialogState::default();
+        state.draft.named_presets.insert(
+            "Studio".into(),
+            ColorScheme {
+                window_fill: rgba(100, 110, 120, 255),
+                ..ColorScheme::dark()
+            },
+        );
+        state
+            .draft
+            .named_preset_typography_scales
+            .insert("Studio".into(), 1.65);
+        let scheme = state.draft.named_presets["Studio"].clone();
+
+        reset_draft_preserving_saved_palettes(&mut state);
+
+        assert_eq!(state.draft.named_presets["Studio"], scheme);
+        assert_eq!(state.draft.named_preset_typography_scales["Studio"], 1.65);
+        assert_eq!(state.draft.preferences.typography_scale, 1.0);
+        assert_eq!(state.palette_update_target, None);
+        assert!(state.dirty);
     }
 
     #[test]
