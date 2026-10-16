@@ -53,6 +53,7 @@ pub mod settings;
 pub mod shell;
 pub(crate) mod snippet_template;
 pub mod snippets;
+pub use snippet_template::SnippetInvocationContext;
 pub mod stopwatch;
 pub mod sysinfo;
 pub mod system;

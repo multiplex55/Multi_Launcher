@@ -1666,6 +1666,13 @@ impl LauncherApp {
         !was_visible && should_be_visible && focus_intent == RootFocusIntent::ActivateRoot
     }
 
+    fn should_capture_snippet_origin_before_root_activation(
+        should_be_visible: bool,
+        focus_intent: RootFocusIntent,
+    ) -> bool {
+        should_be_visible && focus_intent == RootFocusIntent::ActivateRoot
+    }
+
     pub(crate) fn launcher_query_keyboard_enabled(query_has_focus: bool) -> bool {
         query_has_focus
     }
@@ -2741,12 +2748,13 @@ impl LauncherApp {
                     return;
                 }
                 just_became_visible = !self.last_visible && should_be_visible;
-                reset_search_scope_for_new_session =
-                    Self::should_reset_search_scope_for_new_session(
-                        self.last_visible,
-                        should_be_visible,
-                        focus_intent,
-                    ) && self.search_scope != crate::search_scope::SearchScope::All;
+                let new_launcher_session = Self::should_reset_search_scope_for_new_session(
+                    self.last_visible,
+                    should_be_visible,
+                    focus_intent,
+                );
+                reset_search_scope_for_new_session = new_launcher_session
+                    && self.search_scope != crate::search_scope::SearchScope::All;
                 if reset_search_scope_for_new_session {
                     self.search_scope = crate::search_scope::SearchScope::All;
                     self.last_results_valid = false;
@@ -2785,6 +2793,16 @@ impl LauncherApp {
                         } else {
                             VisiblePlacementPolicy::PreserveCurrentGeometry
                         };
+                        if Self::should_capture_snippet_origin_before_root_activation(
+                            should_be_visible,
+                            focus_intent,
+                        ) {
+                            #[cfg(not(test))]
+                            {
+                                self.snippet_origin_window =
+                                    crate::active_window::capture_external_foreground_window();
+                            }
+                        }
                         native_activation_requested = acceptance_trace::with_visibility_trace_link(
                             visibility_request,
                             visibility_invocation_id,
@@ -21768,6 +21786,49 @@ mod tests {
     }
 
     #[test]
+    fn snippet_origin_capture_follows_activation_even_without_new_session() {
+        use crate::visibility::RootFocusIntent;
+
+        assert!(LauncherApp::should_reset_search_scope_for_new_session(
+            false,
+            true,
+            RootFocusIntent::ActivateRoot,
+        ));
+        assert!(
+            LauncherApp::should_capture_snippet_origin_before_root_activation(
+                true,
+                RootFocusIntent::ActivateRoot,
+            )
+        );
+
+        // An already-visible ROOT can be backgrounded. Its explicit restore is
+        // still an activation boundary even though the search session continues.
+        assert!(!LauncherApp::should_reset_search_scope_for_new_session(
+            true,
+            true,
+            RootFocusIntent::ActivateRoot,
+        ));
+        assert!(
+            LauncherApp::should_capture_snippet_origin_before_root_activation(
+                true,
+                RootFocusIntent::ActivateRoot,
+            )
+        );
+        assert!(
+            !LauncherApp::should_capture_snippet_origin_before_root_activation(
+                true,
+                RootFocusIntent::PreserveForeground,
+            )
+        );
+        assert!(
+            !LauncherApp::should_capture_snippet_origin_before_root_activation(
+                false,
+                RootFocusIntent::ActivateRoot,
+            )
+        );
+    }
+
+    #[test]
     fn launcher_scope_empty_message_names_scoped_browse_and_preserves_all_dashboard() {
         assert_eq!(
             launcher_search_scope_empty_message(crate::search_scope::SearchScope::All, false),
@@ -21802,7 +21863,8 @@ mod tests {
     fn request_test_prompt(app: &mut LauncherApp, entry: crate::plugins::snippets::SnippetEntry) {
         let prepared = match crate::plugins::snippets::prepare_snippet_run(&entry).unwrap() {
             crate::plugins::snippets::SnippetRunMode::Prompted(prepared) => prepared,
-            crate::plugins::snippets::SnippetRunMode::Plain => unreachable!(),
+            crate::plugins::snippets::SnippetRunMode::Plain
+            | crate::plugins::snippets::SnippetRunMode::SystemOnly(_) => unreachable!(),
         };
         crate::commands::HeadlessCommandHost::request_snippet_prompt(
             app,
@@ -21819,6 +21881,7 @@ mod tests {
                 source: ActivationSource::Dashboard,
                 history_query: "cs reply".into(),
                 root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+                context: None,
             },
         )
         .unwrap();

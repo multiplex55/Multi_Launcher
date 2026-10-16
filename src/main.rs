@@ -2082,6 +2082,9 @@ fn spawn_gui(
             })),
             ..Default::default()
         };
+        // Snapshot the real external foreground before eframe creates and focuses ROOT.
+        let initial_snippet_origin =
+            multi_launcher::active_window::capture_external_foreground_window();
 
         let _ = eframe::run_native(
             "Multi Lnchr",
@@ -2113,6 +2116,7 @@ fn spawn_gui(
                     restore_clone,
                     help_clone,
                 );
+                app.set_initial_snippet_origin_window(initial_snippet_origin);
                 app.install_settings_save_worker_registry(settings_save_workers_for_window);
                 #[cfg(feature = "qa-framebuffer-capture")]
                 if let Some(request) = qa_framebuffer_request_for_window

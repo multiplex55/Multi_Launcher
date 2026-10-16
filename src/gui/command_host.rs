@@ -841,6 +841,40 @@ impl HeadlessCommandHost for LauncherApp {
         crate::actions::clipboard::set_text(text)
     }
 
+    fn capture_snippet_invocation_context(
+        &mut self,
+        source: crate::commands::ActivationSource,
+        needs_clipboard: bool,
+        needs_window_title: bool,
+    ) -> crate::plugins::SnippetInvocationContext {
+        let timestamp = chrono::Local::now().fixed_offset();
+        let origin = if needs_window_title {
+            select_snippet_origin_window(
+                source,
+                self.visible_flag.load(Ordering::SeqCst),
+                crate::active_window::observe_foreground_window(),
+                self.snippet_origin_window.clone(),
+            )
+        } else {
+            None
+        };
+        let clipboard_text = needs_clipboard
+            .then(|| crate::actions::clipboard::get_text().ok())
+            .flatten();
+        let (foreground_hwnd, foreground_title) = if needs_window_title {
+            origin.map_or((None, None), |origin| (Some(origin.hwnd), origin.title))
+        } else {
+            (None, None)
+        };
+
+        crate::plugins::SnippetInvocationContext::new(
+            timestamp,
+            clipboard_text,
+            foreground_hwnd,
+            foreground_title,
+        )
+    }
+
     fn request_snippet_prompt(
         &mut self,
         intent: crate::commands::SnippetPromptIntent,
@@ -853,6 +887,34 @@ impl HeadlessCommandHost for LauncherApp {
 
     fn snippet_root_policy(&self) -> crate::universal_actions::RootLauncherPolicy {
         self.command_root_policy
+    }
+}
+
+fn select_snippet_origin_window(
+    source: crate::commands::ActivationSource,
+    root_visible: bool,
+    observed: crate::active_window::ForegroundWindowObservation,
+    cached: Option<crate::active_window::ExternalForegroundWindow>,
+) -> Option<crate::active_window::ExternalForegroundWindow> {
+    let radial_source = matches!(
+        source,
+        crate::commands::ActivationSource::RadialRelease
+            | crate::commands::ActivationSource::RadialShortcut
+            | crate::commands::ActivationSource::RadialHotstring
+    );
+    if radial_source {
+        return match observed {
+            crate::active_window::ForegroundWindowObservation::External(window) => Some(window),
+            crate::active_window::ForegroundWindowObservation::Launcher
+            | crate::active_window::ForegroundWindowObservation::Unavailable => None,
+        };
+    }
+
+    match observed {
+        crate::active_window::ForegroundWindowObservation::External(window) => Some(window),
+        crate::active_window::ForegroundWindowObservation::Launcher if root_visible => cached,
+        crate::active_window::ForegroundWindowObservation::Launcher
+        | crate::active_window::ForegroundWindowObservation::Unavailable => None,
     }
 }
 
@@ -877,8 +939,29 @@ impl LauncherApp {
         &mut self,
         draft: crate::plugins::snippets::SnippetEntry,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
-        self.snippet_prompt_dialog
-            .begin_preview(&self.egui_ctx, draft)?;
+        let prepared = match crate::plugins::snippets::prepare_snippet_run(&draft) {
+            Ok(
+                crate::plugins::snippets::SnippetRunMode::SystemOnly(prepared)
+                | crate::plugins::snippets::SnippetRunMode::Prompted(prepared),
+            ) => prepared,
+            Ok(crate::plugins::snippets::SnippetRunMode::Plain) | Err(_) => {
+                return Err(super::snippet_prompt_dialog::SnippetPromptError::InvalidConfiguration);
+            }
+        };
+        let context = prepared.parsed.has_system_variables().then(|| {
+            crate::commands::HeadlessCommandHost::capture_snippet_invocation_context(
+                self,
+                crate::commands::ActivationSource::Click,
+                prepared.parsed.uses_clipboard(),
+                prepared.parsed.uses_window_title(),
+            )
+        });
+        self.snippet_prompt_dialog.begin_preview_prepared(
+            &self.egui_ctx,
+            draft,
+            prepared,
+            context,
+        )?;
         self.focus_panel(super::Panel::SnippetPromptDialog);
         Ok(())
     }
@@ -1303,7 +1386,8 @@ mod tests {
     ) -> crate::commands::SnippetPromptIntent {
         let prepared = match crate::plugins::snippets::prepare_snippet_run(&entry).unwrap() {
             crate::plugins::snippets::SnippetRunMode::Prompted(prepared) => prepared,
-            crate::plugins::snippets::SnippetRunMode::Plain => unreachable!(),
+            crate::plugins::snippets::SnippetRunMode::Plain
+            | crate::plugins::snippets::SnippetRunMode::SystemOnly(_) => unreachable!(),
         };
         crate::commands::SnippetPromptIntent {
             alias: entry.alias.clone(),
@@ -1318,6 +1402,103 @@ mod tests {
             source: crate::commands::ActivationSource::Dashboard,
             history_query: "captured snippet query".into(),
             root_policy: crate::universal_actions::RootLauncherPolicy::PreserveOrdinaryState,
+            context: None,
+        }
+    }
+
+    fn external_window(hwnd: isize, title: &str) -> crate::active_window::ExternalForegroundWindow {
+        crate::active_window::ExternalForegroundWindow {
+            hwnd,
+            title: Some(title.into()),
+        }
+    }
+
+    #[test]
+    fn snippet_origin_prefers_a_fresh_external_foreground_for_direct_invocations() {
+        let cached = external_window(10, "old window");
+        for source in [
+            crate::commands::ActivationSource::Macro,
+            crate::commands::ActivationSource::Gesture,
+            crate::commands::ActivationSource::Dashboard,
+        ] {
+            let selected = select_snippet_origin_window(
+                source,
+                true,
+                crate::active_window::ForegroundWindowObservation::External(external_window(
+                    20,
+                    "current window",
+                )),
+                Some(cached.clone()),
+            );
+            assert_eq!(selected.map(|window| window.hwnd), Some(20));
+        }
+    }
+
+    #[test]
+    fn snippet_origin_uses_cached_window_only_while_visible_launcher_owns_foreground() {
+        let cached = external_window(10, "session origin");
+        for source in [
+            crate::commands::ActivationSource::Click,
+            crate::commands::ActivationSource::Enter,
+        ] {
+            let selected = select_snippet_origin_window(
+                source,
+                true,
+                crate::active_window::ForegroundWindowObservation::Launcher,
+                Some(cached.clone()),
+            );
+            assert_eq!(selected.map(|window| window.hwnd), Some(10));
+
+            assert!(
+                select_snippet_origin_window(
+                    source,
+                    false,
+                    crate::active_window::ForegroundWindowObservation::Launcher,
+                    Some(cached.clone()),
+                )
+                .is_none()
+            );
+        }
+
+        assert!(
+            select_snippet_origin_window(
+                crate::commands::ActivationSource::Macro,
+                true,
+                crate::active_window::ForegroundWindowObservation::Unavailable,
+                Some(cached.clone()),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn radial_snippet_invocations_never_fall_back_to_cached_origin() {
+        let cached = external_window(10, "session origin");
+        for source in [
+            crate::commands::ActivationSource::RadialRelease,
+            crate::commands::ActivationSource::RadialShortcut,
+            crate::commands::ActivationSource::RadialHotstring,
+        ] {
+            assert!(
+                select_snippet_origin_window(
+                    source,
+                    true,
+                    crate::active_window::ForegroundWindowObservation::Launcher,
+                    Some(cached.clone()),
+                )
+                .is_none()
+            );
+
+            let selected = select_snippet_origin_window(
+                source,
+                true,
+                crate::active_window::ForegroundWindowObservation::External(external_window(
+                    20,
+                    "radial caller",
+                )),
+                Some(cached.clone()),
+            );
+            assert_eq!(selected.map(|window| window.hwnd), Some(20));
         }
     }
 

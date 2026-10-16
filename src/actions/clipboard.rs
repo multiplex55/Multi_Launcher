@@ -24,6 +24,11 @@ pub fn set_text(text: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub fn get_text() -> anyhow::Result<String> {
+    let mut cb = Clipboard::new()?;
+    Ok(cb.get_text()?)
+}
+
 pub fn calc_to_clipboard(val: &str) -> anyhow::Result<()> {
     let mut cb = Clipboard::new()?;
     cb.set_text(val.to_string())?;

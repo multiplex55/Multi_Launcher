@@ -1,4 +1,6 @@
-use super::snippet_template::{ParsedTemplate, TemplateError, parse_template};
+use super::snippet_template::{
+    ParsedTemplate, TemplateError, parse_plain_system_template, parse_template,
+};
 use crate::actions::Action;
 use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
@@ -110,6 +112,7 @@ pub(crate) struct PreparedSnippetTemplate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SnippetRunMode {
     Plain,
+    SystemOnly(PreparedSnippetTemplate),
     Prompted(PreparedSnippetTemplate),
 }
 
@@ -136,7 +139,7 @@ pub(crate) fn prepare_prompted_template(
     configured_fields: &[SnippetFieldDefinition],
 ) -> Result<PreparedSnippetTemplate, SnippetPreparationError> {
     let parsed = parse_template(text).map_err(SnippetPreparationError::InvalidTemplate)?;
-    if parsed.field_keys.is_empty() {
+    if parsed.field_keys.is_empty() && !parsed.has_system_variables() {
         return Err(SnippetPreparationError::NoFields);
     }
 
@@ -153,15 +156,28 @@ pub(crate) fn prepare_prompted_template(
 }
 
 /// Make the single domain-level decision about how a resolved snippet runs.
-/// Plain text bypasses template parsing; prompted text is fully prepared before
-/// either the GUI or headless adapter chooses its execution behavior.
+/// Legacy plain text is only scanned for reserved automatic variables; all other
+/// brace content remains literal. Prompted text is fully prepared before the UI.
 pub(crate) fn prepare_snippet_run(
     entry: &SnippetEntry,
 ) -> Result<SnippetRunMode, SnippetPreparationError> {
     if !entry.prompt_for_fields {
-        return Ok(SnippetRunMode::Plain);
+        let parsed = parse_plain_system_template(&entry.text)
+            .map_err(SnippetPreparationError::InvalidTemplate)?;
+        if !parsed.has_system_variables() {
+            return Ok(SnippetRunMode::Plain);
+        }
+        return Ok(SnippetRunMode::SystemOnly(PreparedSnippetTemplate {
+            parsed,
+            fields: Vec::new(),
+        }));
     }
-    prepare_prompted_template(&entry.text, &entry.fields).map(SnippetRunMode::Prompted)
+    let prepared = prepare_prompted_template(&entry.text, &entry.fields)?;
+    if prepared.parsed.field_keys.is_empty() {
+        Ok(SnippetRunMode::SystemOnly(prepared))
+    } else {
+        Ok(SnippetRunMode::Prompted(prepared))
+    }
 }
 
 /// Build a text-edit candidate, parsing and reconciling only opted-in snippets.
@@ -173,6 +189,8 @@ pub(crate) fn prepare_snippet_text(
     let mut candidate = entry.clone();
     candidate.text = text.to_owned();
     if !entry.prompt_for_fields {
+        // Text editing keeps the historic permissive behavior. Execution validates
+        // reserved system tokens through prepare_snippet_run before any copy.
         return Ok(candidate);
     }
 
@@ -1191,8 +1209,14 @@ mod persistence_tests {
     }
 
     #[test]
-    fn plain_snippet_template_bypasses_system_parsing_and_preserves_legacy_braces() {
-        for text in ["{{sys.date}}", "{{sys.future}}", "{{date}}", "{{"] {
+    fn plain_system_mode_preserves_ordinary_and_malformed_braces() {
+        for text in [
+            "{{date}}",
+            "{{not-parsed}}",
+            "\\{{sys.date}}",
+            "{{",
+            "tail }}",
+        ] {
             let entry = snippet("legacy", text);
             assert!(matches!(
                 prepare_snippet_run(&entry),
@@ -1206,6 +1230,33 @@ mod persistence_tests {
                 Ok(SnippetRunMode::Plain)
             ));
         }
+
+        let automatic = snippet("automatic", "before {{sys.date}} after");
+        assert!(matches!(
+            prepare_snippet_run(&automatic),
+            Ok(SnippetRunMode::SystemOnly(_))
+        ));
+        assert!(matches!(
+            prepare_snippet_run(&snippet("bad", "{{sys.future}}")),
+            Err(SnippetPreparationError::InvalidTemplate(_))
+        ));
+    }
+
+    #[test]
+    fn prompted_system_only_runs_without_fields_but_literal_only_stays_invalid() {
+        let mut system_only = snippet("automatic", "{{sys.date}}");
+        system_only.prompt_for_fields = true;
+        assert!(matches!(
+            prepare_snippet_run(&system_only),
+            Ok(SnippetRunMode::SystemOnly(prepared)) if prepared.fields.is_empty()
+        ));
+
+        let mut literal_only = snippet("literal", "literal");
+        literal_only.prompt_for_fields = true;
+        assert!(matches!(
+            prepare_snippet_run(&literal_only),
+            Err(SnippetPreparationError::NoFields)
+        ));
     }
 
     #[test]

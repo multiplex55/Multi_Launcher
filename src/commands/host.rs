@@ -20,6 +20,7 @@ pub struct SnippetPromptIntent {
     pub(crate) source: super::ActivationSource,
     pub(crate) history_query: String,
     pub(crate) root_policy: crate::universal_actions::RootLauncherPolicy,
+    pub(crate) context: Option<crate::plugins::SnippetInvocationContext>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +231,22 @@ pub trait HeadlessCommandHost {
 
     fn copy_snippet_text(&mut self, text: &str) -> anyhow::Result<()> {
         crate::actions::clipboard::set_text(text)
+    }
+
+    /// Capture one invocation snapshot before a prompt takes focus. Non-GUI hosts
+    /// can safely resolve date/time while treating unavailable OS values as empty.
+    fn capture_snippet_invocation_context(
+        &mut self,
+        _source: super::ActivationSource,
+        _needs_clipboard: bool,
+        _needs_window_title: bool,
+    ) -> crate::plugins::SnippetInvocationContext {
+        crate::plugins::SnippetInvocationContext::new(
+            chrono::Local::now().fixed_offset(),
+            None,
+            None,
+            None,
+        )
     }
 
     fn request_snippet_prompt(&mut self, _intent: SnippetPromptIntent) -> Result<(), String> {

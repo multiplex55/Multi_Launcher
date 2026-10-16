@@ -461,7 +461,8 @@ the match count shows how many entries are visible.
 Common commands:
 
 - `cs <query>` searches aliases and bodies. Activating a plain snippet copies its
-  exact saved text; activating a prompted snippet opens its fill form.
+  saved text with supported automatic values resolved; activating a prompted
+  snippet opens its fill form.
 - `cs list [query]` lists matching snippets with the same plain or prompted
   activation behavior.
 - `cs add <alias> <text>` creates a snippet or updates the existing exact alias.
@@ -475,9 +476,14 @@ Prompting is opt-in for each snippet and starts off. In the editor, enable
 **Prompt for fields**, configure the discovered fields, and save. A template such
 as `Hello {{name}}` asks for `name`; keys are case-sensitive ASCII identifiers
 starting with a letter or `_`, followed by letters, digits, or `_`. Each distinct
-key appears once in first-use order, and repeated occurrences use the same value.
-`{{date}}` is an ordinary field; placeholders do not evaluate dates or other
-variables.
+  key appears once in first-use order, and repeated occurrences use the same value.
+  `{{date}}` is an ordinary field. Automatic values use the namespaced tokens
+  `{{sys.date}}`, `{{sys.time}}`, `{{sys.clipboard}}`, and
+  `{{sys.window_title}}`; date and time default to `%Y-%m-%d` and `%H:%M:%S`,
+  and may use a validated chrono format after `:`. Values are captured once per
+  run before a prompted form takes focus. If clipboard text or the foreground
+  title is unavailable, its token resolves to empty text. Plain snippets preserve
+  all non-system brace text literally.
 
 The editor lets you set a field's display label, default, required status, and
 single-line or multiline input. Defaults populate a fresh form but are not

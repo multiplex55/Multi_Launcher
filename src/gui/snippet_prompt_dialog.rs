@@ -7,8 +7,9 @@ use crate::gui::theme::widgets::{
 };
 use crate::gui::theme::{TextRole, text_style_for_role};
 use crate::plugins::snippet_template::{
-    RenderErrorKind, RenderIssueKind, RenderedPreview, TemplateRenderError, render_for_copy,
-    render_preview,
+    RenderErrorKind, RenderIssue, RenderIssueKind, RenderedPreview, SnippetInvocationContext,
+    TemplateRenderError, render_for_copy, render_for_copy_with_context, render_preview,
+    render_preview_with_context,
 };
 use crate::plugins::snippets::{
     PreparedSnippetTemplate, SnippetEntry, SnippetInputKind, SnippetRunMode,
@@ -69,6 +70,7 @@ pub(crate) struct SnippetPromptSession {
     pub(crate) prepared: PreparedSnippetTemplate,
     pub(crate) values: HashMap<String, String>,
     pub(crate) initial_focus: Option<String>,
+    context: Option<SnippetInvocationContext>,
     mode: SnippetPromptMode,
 }
 
@@ -106,9 +108,7 @@ impl SnippetPromptError {
             Self::InvalidConfiguration => "The snippet field configuration is invalid.",
             Self::MissingValue => "A snippet field value is missing.",
             Self::RequiredValueEmpty => "Fill in the required snippet fields before copying.",
-            Self::SystemVariableFormatting => {
-                "An automatic snippet value could not be formatted."
-            }
+            Self::SystemVariableFormatting => "An automatic snippet value could not be formatted.",
             Self::StaleTemplate => {
                 "This snippet changed while the prompt was open. Reopen it before copying."
             }
@@ -157,6 +157,7 @@ impl SnippetPromptDialog {
         let session = SnippetPromptSession::new(
             intent.alias,
             intent.prepared,
+            intent.context,
             SnippetPromptMode::Execute {
                 entry_snapshot: intent.entry_snapshot,
                 safe_action: intent.safe_action,
@@ -174,15 +175,32 @@ impl SnippetPromptDialog {
         draft: SnippetEntry,
     ) -> Result<u64, SnippetPromptError> {
         let prepared = match crate::plugins::snippets::prepare_snippet_run(&draft) {
-            Ok(SnippetRunMode::Prompted(prepared)) => prepared,
+            Ok(SnippetRunMode::SystemOnly(prepared) | SnippetRunMode::Prompted(prepared)) => {
+                prepared
+            }
             Ok(SnippetRunMode::Plain) | Err(_) => {
                 self.feedback = Some(SnippetPromptError::InvalidConfiguration);
                 return Err(SnippetPromptError::InvalidConfiguration);
             }
         };
+        self.begin_preview_prepared(ctx, draft, prepared, None)
+    }
+
+    pub(crate) fn begin_preview_prepared(
+        &mut self,
+        ctx: &egui::Context,
+        draft: SnippetEntry,
+        prepared: PreparedSnippetTemplate,
+        context: Option<SnippetInvocationContext>,
+    ) -> Result<u64, SnippetPromptError> {
+        if prepared.parsed.has_system_variables() && context.is_none() {
+            self.feedback = Some(SnippetPromptError::InvalidConfiguration);
+            return Err(SnippetPromptError::InvalidConfiguration);
+        }
         let session = SnippetPromptSession::new(
             draft.alias.clone(),
             prepared,
+            context,
             SnippetPromptMode::PreviewOnly { draft },
         );
         Ok(self.replace_session(ctx, session))
@@ -327,6 +345,11 @@ impl SnippetPromptDialog {
                         Some("Copying is disabled."),
                     );
                 }
+                if session.prepared.parsed.has_system_variables() {
+                    ui.weak(
+                        "Automatic values are captured once per run; unavailable clipboard or window-title values are empty.",
+                    );
+                }
 
                 let footer_height = prompt_button_height(ui);
                 let feedback_height = feedback.map_or(0.0, |error| {
@@ -380,11 +403,7 @@ impl SnippetPromptDialog {
 
                         ui.separator();
                         compact_section_heading(ui, "Preview", None);
-                        match render_preview(
-                            &session.prepared.parsed,
-                            &session.prepared.fields,
-                            &session.values,
-                        ) {
+                        match render_session_preview(session) {
                             Ok(preview) => {
                                 for issue in &preview.validation_errors {
                                     if issue.kind == RenderIssueKind::RequiredValueEmpty
@@ -564,11 +583,7 @@ impl SnippetPromptDialog {
                 issues: Vec::new(),
             });
         };
-        render_preview(
-            &session.prepared.parsed,
-            &session.prepared.fields,
-            &session.values,
-        )
+        render_session_preview(session)
     }
 
     /// Try a final copy using injected resolution and clipboard operations. Both
@@ -596,12 +611,7 @@ impl SnippetPromptDialog {
                 return Err(SnippetPromptError::PreviewOnly);
             };
 
-            let rendered = render_for_copy(
-                &session.prepared.parsed,
-                &session.prepared.fields,
-                &session.values,
-            )
-            .map_err(map_render_error)?;
+            let rendered = render_session_for_copy(session).map_err(map_render_error)?;
             let current =
                 resolve_current(&session.alias).map_err(|()| SnippetPromptError::StaleTemplate)?;
             if current != *entry_snapshot {
@@ -754,7 +764,12 @@ fn prompt_status_height(ui: &mut egui::Ui, label: &str, details: &str) -> f32 {
 }
 
 impl SnippetPromptSession {
-    fn new(alias: String, prepared: PreparedSnippetTemplate, mode: SnippetPromptMode) -> Self {
+    fn new(
+        alias: String,
+        prepared: PreparedSnippetTemplate,
+        context: Option<SnippetInvocationContext>,
+        mode: SnippetPromptMode,
+    ) -> Self {
         let values = prepared
             .fields
             .iter()
@@ -772,8 +787,59 @@ impl SnippetPromptSession {
             prepared,
             values,
             initial_focus,
+            context,
             mode,
         }
+    }
+}
+
+fn render_session_preview(
+    session: &SnippetPromptSession,
+) -> Result<RenderedPreview, TemplateRenderError> {
+    match session.context.as_ref() {
+        Some(context) => render_preview_with_context(
+            &session.prepared.parsed,
+            &session.prepared.fields,
+            &session.values,
+            context,
+        ),
+        None if session.prepared.parsed.has_system_variables() => {
+            Err(missing_system_context_error())
+        }
+        None => render_preview(
+            &session.prepared.parsed,
+            &session.prepared.fields,
+            &session.values,
+        ),
+    }
+}
+
+fn render_session_for_copy(session: &SnippetPromptSession) -> Result<String, TemplateRenderError> {
+    match session.context.as_ref() {
+        Some(context) => render_for_copy_with_context(
+            &session.prepared.parsed,
+            &session.prepared.fields,
+            &session.values,
+            context,
+        ),
+        None if session.prepared.parsed.has_system_variables() => {
+            Err(missing_system_context_error())
+        }
+        None => render_for_copy(
+            &session.prepared.parsed,
+            &session.prepared.fields,
+            &session.values,
+        ),
+    }
+}
+
+fn missing_system_context_error() -> TemplateRenderError {
+    TemplateRenderError {
+        kind: RenderErrorKind::SystemVariableResolution,
+        issues: vec![RenderIssue {
+            key: "system variable".into(),
+            kind: RenderIssueKind::SystemVariableFormatting,
+        }],
     }
 }
 
@@ -782,15 +848,14 @@ fn map_render_error(error: TemplateRenderError) -> SnippetPromptError {
         RenderErrorKind::InvalidConfiguration => SnippetPromptError::InvalidConfiguration,
         RenderErrorKind::MissingValues => SnippetPromptError::MissingValue,
         RenderErrorKind::RequiredValues => SnippetPromptError::RequiredValueEmpty,
-        RenderErrorKind::SystemVariableResolution => {
-            SnippetPromptError::SystemVariableFormatting
-        }
+        RenderErrorKind::SystemVariableResolution => SnippetPromptError::SystemVariableFormatting,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::snippet_template::SnippetInvocationContext;
     use crate::plugins::snippets::{SnippetFieldDefinition, SnippetInputKind};
 
     fn entry() -> SnippetEntry {
@@ -821,7 +886,7 @@ mod tests {
     fn intent(entry: SnippetEntry) -> SnippetPromptIntent {
         let prepared = match crate::plugins::snippets::prepare_snippet_run(&entry).unwrap() {
             SnippetRunMode::Prompted(prepared) => prepared,
-            SnippetRunMode::Plain => unreachable!(),
+            SnippetRunMode::Plain | SnippetRunMode::SystemOnly(_) => unreachable!(),
         };
         SnippetPromptIntent {
             alias: entry.alias.clone(),
@@ -836,7 +901,20 @@ mod tests {
             source: ActivationSource::Dashboard,
             history_query: "cs ticketreply".into(),
             root_policy: RootLauncherPolicy::PreserveOrdinaryState,
+            context: None,
         }
+    }
+
+    fn invocation_context(
+        clipboard: Option<&str>,
+        title: Option<&str>,
+    ) -> SnippetInvocationContext {
+        SnippetInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+02:00").unwrap(),
+            clipboard.map(str::to_owned),
+            title.map(|_| 99),
+            title.map(str::to_owned),
+        )
     }
 
     fn render_frame(
@@ -1191,6 +1269,89 @@ mod tests {
         assert!(egui::text_edit::TextEditState::load(&ctx, name_id).is_none());
         assert!(egui::text_edit::TextEditState::load(&ctx, ticket_id).is_none());
         assert!(egui::text_edit::TextEditState::load(&ctx, preview_id).is_none());
+    }
+
+    #[test]
+    fn prompted_system_values_keep_the_invocation_snapshot_through_preview_and_submit() {
+        let mut entry = entry();
+        entry.text = "{{sys.time}} {{sys.clipboard}} {{sys.window_title}} {{name}}".into();
+        let ctx = egui::Context::default();
+        let mut dialog = SnippetPromptDialog::default();
+        let mut prompt_intent = intent(entry.clone());
+        prompt_intent.context = Some(invocation_context(
+            Some("captured clipboard"),
+            Some("captured foreground"),
+        ));
+        dialog.begin_execution(&ctx, prompt_intent);
+
+        assert_eq!(
+            dialog.preview().unwrap().text,
+            "03:04:05 captured clipboard captured foreground Ada"
+        );
+        dialog.set_value("name", "Grace".into());
+        assert_eq!(
+            dialog.preview().unwrap().text,
+            "03:04:05 captured clipboard captured foreground Grace"
+        );
+
+        let mut copied = Vec::new();
+        dialog
+            .submit_with(
+                &ctx,
+                |_| Ok(entry),
+                |text| {
+                    copied.push(text.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            copied,
+            ["03:04:05 captured clipboard captured foreground Grace"]
+        );
+    }
+
+    #[test]
+    fn system_only_preview_resolves_unavailable_values_empty_and_never_copies() {
+        let mut draft = entry();
+        draft.text = "{{sys.clipboard}}|{{sys.window_title}}|{{sys.date}}".into();
+        draft.prompt_for_fields = true;
+        draft.fields.clear();
+        let prepared = match crate::plugins::snippets::prepare_snippet_run(&draft).unwrap() {
+            SnippetRunMode::SystemOnly(prepared) => prepared,
+            _ => unreachable!(),
+        };
+        let ctx = egui::Context::default();
+        let mut dialog = SnippetPromptDialog::default();
+        let generation = dialog
+            .begin_preview_prepared(
+                &ctx,
+                draft.clone(),
+                prepared,
+                Some(invocation_context(None, None)),
+            )
+            .unwrap();
+
+        assert_eq!(dialog.preview().unwrap().text, "||2024-01-02");
+        assert!(dialog.is_preview_only());
+        let mut writes = 0;
+        assert_eq!(
+            dialog.submit_with(
+                &ctx,
+                |_| panic!("preview must not resolve"),
+                |_| {
+                    writes += 1;
+                    Ok(())
+                }
+            ),
+            Err(SnippetPromptError::PreviewOnly)
+        );
+        assert_eq!(writes, 0);
+        assert!(dialog.is_open());
+        assert_eq!(dialog.cancel(&ctx), Some(draft));
+        assert!(!dialog.is_open());
+        assert!(dialog.session().is_none());
+        assert_ne!(generation, 0);
     }
 
     #[test]

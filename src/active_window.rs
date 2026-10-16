@@ -1,3 +1,65 @@
+/// A direct snapshot of the foreground window before launcher activation.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExternalForegroundWindow {
+    pub(crate) hwnd: isize,
+    pub(crate) title: Option<String>,
+}
+
+pub(crate) enum ForegroundWindowObservation {
+    External(ExternalForegroundWindow),
+    Launcher,
+    Unavailable,
+}
+
+/// Capture the actual external foreground window without searching z-order.
+/// An unavailable title remains `None`; callers resolve it to empty template text.
+pub fn capture_external_foreground_window() -> Option<ExternalForegroundWindow> {
+    match observe_foreground_window() {
+        ForegroundWindowObservation::External(window) => Some(window),
+        ForegroundWindowObservation::Launcher | ForegroundWindowObservation::Unavailable => None,
+    }
+}
+
+pub(crate) fn observe_foreground_window() -> ForegroundWindowObservation {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+        };
+
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            return ForegroundWindowObservation::Unavailable;
+        }
+
+        let mut process_id = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+        if process_id == 0 {
+            return ForegroundWindowObservation::Unavailable;
+        }
+        if process_id == std::process::id() {
+            return ForegroundWindowObservation::Launcher;
+        }
+
+        let length = unsafe { GetWindowTextLengthW(hwnd) }.max(0) as usize;
+        let title = if length == 0 {
+            None
+        } else {
+            let mut title_buf = vec![0u16; length + 1];
+            let read = unsafe { GetWindowTextW(hwnd, &mut title_buf) }.max(0) as usize;
+            (read > 0).then(|| String::from_utf16_lossy(&title_buf[..read]))
+        };
+        ForegroundWindowObservation::External(ExternalForegroundWindow {
+            hwnd: hwnd.0 as isize,
+            title,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        ForegroundWindowObservation::Unavailable
+    }
+}
+
 /// Resolve the user's previously active eligible application window while the launcher owns
 /// foreground focus. The native implementation walks downward in z-order and excludes every
 /// window owned by this process.

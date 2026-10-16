@@ -205,8 +205,9 @@ fn execute_with_external(
 fn headless_snippet_text(entry: &crate::plugins::snippets::SnippetEntry) -> Result<&str, String> {
     match crate::plugins::snippets::prepare_snippet_run(entry).map_err(|error| error.to_string())? {
         crate::plugins::snippets::SnippetRunMode::Plain => Ok(&entry.text),
-        crate::plugins::snippets::SnippetRunMode::Prompted(_) => {
-            Err("prompted snippets require the launcher interface".into())
+        crate::plugins::snippets::SnippetRunMode::SystemOnly(_)
+        | crate::plugins::snippets::SnippetRunMode::Prompted(_) => {
+            Err("snippet context and prompted fields require the launcher interface".into())
         }
     }
 }

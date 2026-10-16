@@ -896,6 +896,7 @@ pub struct LauncherApp {
     enabled_plugins: Option<HashSet<String>>,
     enabled_capabilities: Option<std::collections::HashMap<String, Vec<String>>>,
     root_window_bridge: RootWindowBridge,
+    snippet_origin_window: Option<crate::active_window::ExternalForegroundWindow>,
     visible_flag: Arc<AtomicBool>,
     restore_flag: Arc<AtomicBool>,
     visibility_revision: crate::visibility::VisibilityRevision,
@@ -2463,6 +2464,7 @@ impl LauncherApp {
             enabled_plugins,
             enabled_capabilities,
             root_window_bridge: RootWindowBridge::default(),
+            snippet_origin_window: None,
             visible_flag: visible_flag.clone(),
             restore_flag: restore_flag.clone(),
             visibility_revision: crate::visibility::VisibilityRevision::default(),
@@ -2735,6 +2737,14 @@ impl LauncherApp {
             .sync_enabled_plugins(app.enabled_plugins.as_ref());
         app.recompute_query_results_layout();
         app
+    }
+
+    /// Transfer the foreground snapshot captured immediately before initial ROOT creation.
+    pub fn set_initial_snippet_origin_window(
+        &mut self,
+        origin: Option<crate::active_window::ExternalForegroundWindow>,
+    ) {
+        self.snippet_origin_window = origin;
     }
 
     pub fn maybe_refresh_timer_list(&mut self) {

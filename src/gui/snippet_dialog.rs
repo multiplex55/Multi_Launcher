@@ -526,14 +526,35 @@ impl SnippetDialog {
         Ok((expected, candidate, alias_validation))
     }
 
-    fn preview_editor_draft(&mut self) -> Option<SnippetEntry> {
-        if !self.prompt_for_fields {
-            self.inline_error = Some(
-                "Plain snippets are literal; enable Prompt for fields to preview inputs."
-                    .to_owned(),
-            );
-            return None;
+    fn can_preview_editor_draft(&self) -> bool {
+        if !self.body_revealed {
+            return false;
         }
+        if self.prompt_for_fields {
+            return true;
+        }
+
+        let Ok((expected, candidate, alias_validation)) = self.editor_candidate() else {
+            return false;
+        };
+        let candidate_index = alias_validation.edited_index.unwrap_or(expected.len());
+        let Some(draft) = candidate.get(candidate_index) else {
+            return false;
+        };
+        match crate::plugins::snippets::prepare_snippet_run(draft) {
+            Ok(crate::plugins::snippets::SnippetRunMode::SystemOnly(_)) => true,
+            Err(_) => {
+                crate::plugins::snippet_template::parse_plain_system_template(&draft.text)
+                    .is_err()
+            }
+            Ok(
+                crate::plugins::snippets::SnippetRunMode::Plain
+                | crate::plugins::snippets::SnippetRunMode::Prompted(_),
+            ) => false,
+        }
+    }
+
+    fn preview_editor_draft(&mut self) -> Option<SnippetEntry> {
         if !self.body_revealed {
             self.inline_error = Some("Reveal contents before previewing this snippet.".to_owned());
             return None;
@@ -564,6 +585,22 @@ impl SnippetDialog {
             self.inline_error = Some("The editor is no longer available.".to_owned());
             return None;
         };
+        match crate::plugins::snippets::prepare_snippet_run(&draft) {
+            Ok(
+                crate::plugins::snippets::SnippetRunMode::SystemOnly(_)
+                | crate::plugins::snippets::SnippetRunMode::Prompted(_),
+            ) => {}
+            Ok(crate::plugins::snippets::SnippetRunMode::Plain) => {
+                self.inline_error = Some(
+                    "Plain snippets are literal; add an automatic value to preview one.".into(),
+                );
+                return None;
+            }
+            Err(error) => {
+                self.inline_error = Some(error.to_string());
+                return None;
+            }
+        }
         self.inline_error = None;
         Some(draft)
     }
@@ -894,9 +931,9 @@ impl SnippetDialog {
                             }
                         }
                         let preview = ui.add_enabled(
-                                self.prompt_for_fields && self.body_revealed,
-                                egui::Button::new("Test / Preview"),
-                            );
+                            self.can_preview_editor_draft(),
+                            egui::Button::new("Test / Preview"),
+                        );
                         if with_button_emphasis(ui, preview, ButtonEmphasis::Primary).clicked() {
                             preview_request = true;
                         }
@@ -907,7 +944,7 @@ impl SnippetDialog {
                     if !self.prompt_for_fields {
                         secondary_help(
                             ui,
-                            "Plain snippets remain literal; enable Prompt for fields to test inputs.",
+                            "Plain text stays literal; include an automatic value to preview a plain snippet.",
                         );
                     } else if !self.body_revealed {
                         secondary_help(ui, "Reveal contents before testing this prompted snippet.");
@@ -1338,6 +1375,89 @@ mod tests {
         assert_eq!(snippets_version(), version);
         assert_eq!(app.usage, usage_before);
         assert_eq!(app.test_recorded_history_queries, history_before);
+    }
+
+    #[test]
+    fn plain_system_variable_editor_preview_is_read_only_and_reveal_gated() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let original = SnippetEntry {
+            alias: "saved".into(),
+            text: "Saved {{sys.date}}".into(),
+            hide_contents: true,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+        };
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let version = snippets_version();
+
+        let ctx = egui::Context::default();
+        let mut app = preview_app(&ctx, &directory);
+        app.snippet_dialog
+            .open_edit_from(path.to_str().unwrap(), "saved");
+        assert!(!app.snippet_dialog.body_revealed);
+        app.snippet_dialog.set_prompt_for_fields(false);
+        app.snippet_dialog.text = "Draft {{sys.date}}".into();
+        assert!(!app.snippet_dialog.can_preview_editor_draft());
+        assert!(app.snippet_dialog.preview_editor_draft().is_none());
+        assert!(
+            app.snippet_dialog
+                .inline_error
+                .as_deref()
+                .unwrap()
+                .contains("Reveal contents")
+        );
+        assert!(!app.snippet_prompt_dialog.is_open());
+
+        app.snippet_dialog.reveal_contents();
+        app.snippet_dialog.alias = "draft alias".into();
+        assert!(app.snippet_dialog.can_preview_editor_draft());
+        let draft = app.snippet_dialog.preview_editor_draft().unwrap();
+        assert_eq!(draft.text, "Draft {{sys.date}}");
+        app.begin_snippet_preview(draft.clone()).unwrap();
+        let session = app.snippet_prompt_dialog.session().unwrap();
+        assert!(app.snippet_prompt_dialog.is_preview_only());
+        assert!(session.prepared.fields.is_empty());
+        assert!(
+            app.snippet_prompt_dialog
+                .preview()
+                .unwrap()
+                .text
+                .starts_with("Draft ")
+        );
+
+        let copied = std::cell::Cell::new(false);
+        assert_eq!(
+            app.submit_snippet_prompt_with_test_backends(
+                |_| Err(()),
+                |_| {
+                    copied.set(true);
+                    Ok(())
+                },
+            ),
+            Err(crate::gui::snippet_prompt_dialog::SnippetPromptError::PreviewOnly)
+        );
+        assert!(!copied.get());
+        assert_eq!(app.cancel_snippet_prompt(), Some(draft));
+        assert_eq!(app.snippet_dialog.text, "Draft {{sys.date}}");
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
+
+        app.snippet_dialog.alias = "draft alias".into();
+        app.snippet_dialog.text = "Unknown {{sys.future}}".into();
+        assert!(app.snippet_dialog.can_preview_editor_draft());
+        assert!(app.snippet_dialog.preview_editor_draft().is_none());
+        assert!(
+            app.snippet_dialog
+                .inline_error
+                .as_deref()
+                .unwrap()
+                .contains("unknown system variable")
+        );
+        assert!(!app.snippet_prompt_dialog.is_open());
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
     }
 
     #[test]

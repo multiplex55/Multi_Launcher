@@ -2947,9 +2947,10 @@ fn radial_requirement_for_snippet_mode(
         if let Some(alias) = alias {
             match current_entry(alias).map(|entry| prepare_snippet_run(&entry)) {
                 Some(Ok(SnippetRunMode::Plain)) => requirement,
-                Some(Ok(SnippetRunMode::Prompted(_))) | Some(Err(_)) | None => {
-                    InteractionRequirement::LauncherUi
-                }
+                Some(Ok(SnippetRunMode::SystemOnly(_)))
+                | Some(Ok(SnippetRunMode::Prompted(_)))
+                | Some(Err(_))
+                | None => InteractionRequirement::LauncherUi,
             }
         } else {
             requirement

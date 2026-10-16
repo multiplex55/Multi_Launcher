@@ -19,11 +19,49 @@ enum PlaceholderBoundary {
     End,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TemplateParseMode {
+    Prompted,
+    PreserveLegacyPlain,
+}
+
 /// A parsed snippet template, with literal text and placeholder segments kept in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedTemplate {
     pub(crate) segments: Vec<TemplateSegment>,
     pub(crate) field_keys: Vec<String>,
+}
+
+impl ParsedTemplate {
+    pub(crate) fn has_system_variables(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|segment| matches!(segment, TemplateSegment::SystemVariable { .. }))
+    }
+
+    pub(crate) fn uses_clipboard(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            matches!(
+                segment,
+                TemplateSegment::SystemVariable {
+                    variable: SystemVariable::Clipboard,
+                    ..
+                }
+            )
+        })
+    }
+
+    pub(crate) fn uses_window_title(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            matches!(
+                segment,
+                TemplateSegment::SystemVariable {
+                    variable: SystemVariable::WindowTitle,
+                    ..
+                }
+            )
+        })
+    }
 }
 
 /// Segments used by the parser and the later pure renderer.
@@ -85,7 +123,8 @@ impl SystemVariable {
 /// launcher activation; callers must not use the launcher's own title as a fallback.
 /// `None` clipboard/title values remain distinguishable from available empty strings,
 /// and resolve to empty text when used by a template.
-pub(crate) struct SnippetInvocationContext {
+#[derive(Clone, PartialEq, Eq)]
+pub struct SnippetInvocationContext {
     timestamp: DateTime<FixedOffset>,
     clipboard_text: Option<String>,
     foreground_hwnd: Option<isize>,
@@ -93,7 +132,7 @@ pub(crate) struct SnippetInvocationContext {
 }
 
 impl SnippetInvocationContext {
-    pub(crate) fn new(
+    pub fn new(
         timestamp: DateTime<FixedOffset>,
         clipboard_text: Option<String>,
         foreground_hwnd: Option<isize>,
@@ -277,6 +316,23 @@ impl std::error::Error for TemplateError {}
 /// With two backslashes before an opening, the first remains literal and only
 /// the adjacent second backslash is consumed as the escape.
 pub(crate) fn parse_template(source: &str) -> Result<ParsedTemplate, TemplateError> {
+    parse_template_with_mode(source, TemplateParseMode::Prompted)
+}
+
+/// Parse automatic variables while preserving every legacy non-system byte literally.
+/// Ordinary placeholders, escapes, and malformed braces remain plain text.
+pub(crate) fn parse_plain_system_template(source: &str) -> Result<ParsedTemplate, TemplateError> {
+    parse_template_with_mode(source, TemplateParseMode::PreserveLegacyPlain)
+}
+
+fn parse_template_with_mode(
+    source: &str,
+    mode: TemplateParseMode,
+) -> Result<ParsedTemplate, TemplateError> {
+    if mode == TemplateParseMode::PreserveLegacyPlain {
+        return parse_legacy_plain_system_template(source);
+    }
+
     let bytes = source.as_bytes();
     let mut segments = Vec::new();
     let mut field_keys = Vec::new();
@@ -374,6 +430,74 @@ pub(crate) fn parse_template(source: &str) -> Result<ParsedTemplate, TemplateErr
     Ok(ParsedTemplate {
         segments,
         field_keys,
+    })
+}
+
+/// Keep the historical plain-snippet contract while recognizing automatic values.
+/// The same boundary scanner and system-variable parser used by prompted templates
+/// validate `sys.*`; all other brace text remains in the literal source untouched.
+fn parse_legacy_plain_system_template(source: &str) -> Result<ParsedTemplate, TemplateError> {
+    let bytes = source.as_bytes();
+    let mut segments = Vec::new();
+    let mut index = 0;
+    let mut literal_start = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && starts_with_pair(bytes, index + 1, OPEN) {
+            index = find_pair(bytes, index + 3, CLOSE)
+                .map(|close| close + 2)
+                .unwrap_or(bytes.len());
+            continue;
+        }
+
+        if starts_with_pair(bytes, index, OPEN) {
+            let identifier_start = index + 2;
+            let close = match find_placeholder_boundary(bytes, identifier_start) {
+                PlaceholderBoundary::Closing(close) => close,
+                PlaceholderBoundary::Nested(_) => {
+                    let Some(close) = find_pair(bytes, identifier_start, CLOSE) else {
+                        break;
+                    };
+                    index = close + 2;
+                    continue;
+                }
+                PlaceholderBoundary::End => break,
+            };
+            if identifier_start < close {
+                let expression = &source[identifier_start..close];
+                if expression.starts_with("sys.") {
+                    let variable = parse_system_variable(expression)
+                        .map_err(|kind| TemplateError::new(kind, identifier_start, close))?;
+                    push_literal(&mut segments, &source[literal_start..index]);
+                    segments.push(TemplateSegment::SystemVariable {
+                        variable,
+                        placeholder: source[index..close + 2].to_owned(),
+                    });
+                    index = close + 2;
+                    literal_start = index;
+                    continue;
+                }
+            }
+            index = close + 2;
+            continue;
+        }
+
+        if starts_with_pair(bytes, index, CLOSE) {
+            index += 2;
+            continue;
+        }
+
+        let character = source[index..]
+            .chars()
+            .next()
+            .expect("index is before the end of the UTF-8 source");
+        index += character.len_utf8();
+    }
+
+    push_literal(&mut segments, &source[literal_start..]);
+    Ok(ParsedTemplate {
+        segments,
+        field_keys: Vec::new(),
     })
 }
 

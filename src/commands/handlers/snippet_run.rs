@@ -42,16 +42,40 @@ fn handle_snippet_entry<H: HeadlessCommandHost + ?Sized>(
     captured_history_query: Option<&str>,
     entry: crate::plugins::snippets::SnippetEntry,
 ) -> Result<CommandOutcome, CommandError> {
-    let prepared = match crate::plugins::snippets::prepare_snippet_run(&entry)
-        .map_err(|error| snippet_error(error.to_string()))?
-    {
+    let mode = crate::plugins::snippets::prepare_snippet_run(&entry)
+        .map_err(|error| snippet_error(error.to_string()))?;
+    let prepared = match mode {
         crate::plugins::snippets::SnippetRunMode::Plain => {
             host.copy_snippet_text(&entry.text)
                 .map_err(|error| snippet_error(format!("failed to copy snippet: {error}")))?;
             return Ok(super::success_outcome(host, invocation));
         }
+        crate::plugins::snippets::SnippetRunMode::SystemOnly(prepared) => {
+            let context = host.capture_snippet_invocation_context(
+                invocation.source,
+                prepared.parsed.uses_clipboard(),
+                prepared.parsed.uses_window_title(),
+            );
+            let text = crate::plugins::snippet_template::render_for_copy_with_context(
+                &prepared.parsed,
+                &prepared.fields,
+                &std::collections::HashMap::new(),
+                &context,
+            )
+            .map_err(|_| snippet_error("snippet could not be rendered"))?;
+            host.copy_snippet_text(&text)
+                .map_err(|error| snippet_error(format!("failed to copy snippet: {error}")))?;
+            return Ok(super::success_outcome(host, invocation));
+        }
         crate::plugins::snippets::SnippetRunMode::Prompted(prepared) => prepared,
     };
+    let context = prepared.parsed.has_system_variables().then(|| {
+        host.capture_snippet_invocation_context(
+            invocation.source,
+            prepared.parsed.uses_clipboard(),
+            prepared.parsed.uses_window_title(),
+        )
+    });
     let safe_action = Action {
         label: entry.alias.clone(),
         desc: "Snippet".into(),
@@ -68,6 +92,7 @@ fn handle_snippet_entry<H: HeadlessCommandHost + ?Sized>(
             .map(str::to_owned)
             .unwrap_or_else(|| host.current_query().to_owned()),
         root_policy: host.snippet_root_policy(),
+        context,
     };
     host.request_snippet_prompt(intent)
         .map_err(|_| snippet_error("prompted snippet could not be queued"))?;
@@ -88,6 +113,7 @@ mod tests {
     use crate::commands::{
         ActivationSource, Command, CommandInvocation, HistoryPolicy, StorageCommand, ToastPolicy,
     };
+    use crate::plugins::snippet_template::SnippetInvocationContext;
     use crate::plugins::snippets::{
         SnippetEntry, SnippetFieldDefinition, SnippetInputKind, snippet_run_action,
     };
@@ -99,6 +125,8 @@ mod tests {
         query: String,
         root_policy: RootLauncherPolicy,
         should_fail_copy: bool,
+        context: SnippetInvocationContext,
+        capture_requests: Vec<(ActivationSource, bool, bool)>,
     }
 
     impl Default for FakeHost {
@@ -109,6 +137,13 @@ mod tests {
                 query: String::new(),
                 root_policy: RootLauncherPolicy::Legacy,
                 should_fail_copy: false,
+                context: SnippetInvocationContext::new(
+                    chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05-05:00").unwrap(),
+                    Some("clipboard snapshot".into()),
+                    Some(7),
+                    Some("origin window".into()),
+                ),
+                capture_requests: Vec::new(),
             }
         }
     }
@@ -139,6 +174,16 @@ mod tests {
             }
             self.copied.push(text.to_owned());
             Ok(())
+        }
+        fn capture_snippet_invocation_context(
+            &mut self,
+            source: ActivationSource,
+            needs_clipboard: bool,
+            needs_window_title: bool,
+        ) -> SnippetInvocationContext {
+            self.capture_requests
+                .push((source, needs_clipboard, needs_window_title));
+            self.context.clone()
         }
         fn request_snippet_prompt(
             &mut self,
@@ -203,7 +248,7 @@ mod tests {
 
     #[test]
     fn plain_run_copies_exact_current_literal_and_uses_normal_success_policy() {
-        let body = "first {{not-parsed}}\r\n秘密 🧪\nlast";
+        let body = "first {{not-parsed}}\r\n秘密 🧪\nlast {{";
         let mut host = FakeHost::default();
         let invocation = invocation("plain");
         let outcome = handle_snippet_entry(
@@ -219,6 +264,90 @@ mod tests {
         assert_eq!(outcome.visibility, crate::commands::VisibilityPolicy::Hide);
         assert_eq!(outcome.toasts, vec![ToastPolicy::Copied("plain".into())]);
         assert!(host.pending.is_none());
+        assert!(host.capture_requests.is_empty());
+    }
+
+    #[test]
+    fn plain_system_values_resolve_from_one_context_and_preserve_ordinary_braces() {
+        let body = "{{sys.date}} {{sys.time}} {{sys.clipboard}} {{sys.window_title}} {{date}} {{";
+        let mut host = FakeHost::default();
+        handle_snippet_entry(
+            &mut host,
+            &invocation("plain-system"),
+            None,
+            plain_entry("plain-system", body),
+        )
+        .unwrap();
+
+        assert_eq!(
+            host.copied,
+            ["2024-01-02 03:04:05 clipboard snapshot origin window {{date}} {{"]
+        );
+        assert_eq!(
+            host.capture_requests,
+            [(ActivationSource::Click, true, true)]
+        );
+        assert!(host.pending.is_none());
+    }
+
+    #[test]
+    fn system_only_prompt_opt_in_copies_immediately_without_empty_prompt() {
+        let entry = SnippetEntry {
+            prompt_for_fields: true,
+            ..plain_entry("automatic", "{{sys.time}}/{{sys.clipboard}}")
+        };
+        let mut host = FakeHost::default();
+        let outcome =
+            handle_snippet_entry(&mut host, &invocation("automatic"), None, entry).unwrap();
+
+        assert_eq!(host.copied, ["03:04:05/clipboard snapshot"]);
+        assert!(host.pending.is_none());
+        assert_eq!(
+            host.capture_requests,
+            [(ActivationSource::Click, true, false)]
+        );
+        assert_eq!(outcome.history, HistoryPolicy::Record);
+    }
+
+    #[test]
+    fn mixed_prompt_carries_the_captured_snapshot_until_preview_and_submit() {
+        let mut entry = prompted_entry();
+        entry.text = "Hello {{name}} from {{sys.window_title}}".into();
+        let mut host = FakeHost::default();
+        handle_snippet_entry(&mut host, &invocation("ticket"), None, entry).unwrap();
+
+        assert!(host.copied.is_empty());
+        assert_eq!(
+            host.capture_requests,
+            [(ActivationSource::Click, false, true)]
+        );
+        let intent = host.pending.unwrap();
+        let context = intent.context.as_ref().unwrap();
+        let preview = crate::plugins::snippet_template::render_preview_with_context(
+            &intent.prepared.parsed,
+            &intent.prepared.fields,
+            &std::collections::HashMap::from([("name".into(), "Ada".into())]),
+            context,
+        )
+        .unwrap();
+        assert_eq!(preview.text, "Hello Ada from origin window");
+    }
+
+    #[test]
+    fn unknown_system_variable_never_copies_or_opens_prompt() {
+        let mut host = FakeHost::default();
+        let error = handle_snippet_entry(
+            &mut host,
+            &invocation("bad"),
+            None,
+            plain_entry("bad", "{{sys.secret}}"),
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("unknown system variable"));
+        assert!(host.copied.is_empty());
+        assert!(host.pending.is_none());
+        assert!(host.capture_requests.is_empty());
     }
 
     #[test]
