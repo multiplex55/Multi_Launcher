@@ -34,8 +34,9 @@ No baseline behavior is claimed tested by this inventory. Feature-specific inspe
 |---|---|---|---|
 | M0-A | complete | baseline above | Clean checkout, toolchain and owner inventory inspected; no Clippy |
 | M0-B | complete | `946a3006` | Plan read; fixture/evidence policy established |
-| M1-A | complete | this checkpoint commit | `cargo check --lib` passed; `cargo test --lib launcher_scope`: 3 passed; `cargo nextest run --test plugin_routing`: 17 passed. Reviewer reload-boundary and typed-command precedence findings fixed; diff checked. Native evidence belongs to M1-C. |
-| M1-B/C | pending | — | Bounded planner handoffs ready for session, cache, controls and prefix compatibility |
+| M1-A | complete | `263330a6` | `cargo check --lib` passed; `cargo test --lib launcher_scope`: 3 passed; `cargo nextest run --test plugin_routing`: 17 passed. Reviewer reload-boundary and typed-command precedence findings fixed; diff checked. Native evidence belongs to M1-C. |
+| M1-B | complete | this checkpoint commit | Five session-local scopes, Ctrl+1–5, scope-aware cache/empty browse and fresh-session reset. `cargo nextest run --lib launcher_scope`: 11 passed. Reviewer confirmation ownership finding fixed; same slice rerun after final edits. |
+| M1-C | pending | — | Prefix/radial parity tests, help/docs and one native session |
 | M2-A/B/C/D | pending | — | — |
 | M3-A/B/C/D/E | pending | — | — |
 | M4-A/B/C | pending | — | — |

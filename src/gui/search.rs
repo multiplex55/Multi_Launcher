@@ -470,6 +470,26 @@ pub(crate) struct LauncherSearchOutcome {
     pub(super) provider_deferral: ProviderSearchDeferral,
 }
 
+fn actions_in_search_scope(
+    actions: Vec<Action>,
+    categories: Vec<crate::search_scope::SearchResultCategory>,
+    scope: crate::search_scope::SearchScope,
+) -> Vec<Action> {
+    if scope == crate::search_scope::SearchScope::All {
+        return actions;
+    }
+    debug_assert_eq!(
+        actions.len(),
+        categories.len(),
+        "search result provenance stays aligned with actions"
+    );
+    actions
+        .into_iter()
+        .zip(categories)
+        .filter_map(|(action, category)| scope.includes(category).then_some(action))
+        .collect()
+}
+
 impl LauncherApp {
     fn normalize_alias(alias: Option<String>) -> (Option<String>, Option<String>) {
         let alias_lc = alias.as_ref().map(|text| text.to_lowercase());
@@ -740,6 +760,49 @@ impl LauncherApp {
         }
     }
 
+    pub(crate) fn set_search_scope(&mut self, scope: crate::search_scope::SearchScope) {
+        if self.search_scope == scope {
+            return;
+        }
+
+        let previous_effective_scope = self.effective_search_scope();
+        self.search_scope = scope;
+        if previous_effective_scope == self.effective_search_scope() {
+            return;
+        }
+
+        let suggestions = std::mem::take(&mut self.suggestions);
+        let autocomplete_index = self.autocomplete_index;
+        self.last_results_valid = false;
+        self.search();
+        self.suggestions = suggestions;
+        self.autocomplete_index = autocomplete_index;
+    }
+
+    pub(crate) fn effective_search_scope(&self) -> crate::search_scope::SearchScope {
+        if self.search_scope == crate::search_scope::SearchScope::All
+            || self.query.trim().is_empty()
+        {
+            return self.search_scope;
+        }
+        let explicit_g_prefix = self
+            .query
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("g ");
+        if explicit_g_prefix
+            || self.plugins.has_enabled_query_prefix(
+                &self.query,
+                self.enabled_plugins.as_ref(),
+                self.enabled_capabilities.as_ref(),
+            )
+        {
+            crate::search_scope::SearchScope::All
+        } else {
+            self.search_scope
+        }
+    }
+
     pub(crate) fn is_note_search_query(query: &str) -> bool {
         query.trim_start().to_lowercase().starts_with("note search")
     }
@@ -797,7 +860,11 @@ impl LauncherApp {
             .radial_suppressed_provider_query
             .take()
             .is_some_and(|query| query == self.query);
-        if self.last_results_valid && self.query == self.last_search_query {
+        let effective_scope = self.effective_search_scope();
+        if self.last_results_valid
+            && self.query == self.last_search_query
+            && effective_scope == self.last_search_scope
+        {
             self.clear_selected_after_results_replaced();
             self.record_track_c_query_search_acceptance();
             crate::performance::log_elapsed("search.cached", total_started);
@@ -820,7 +887,9 @@ impl LauncherApp {
             self.last_search_result_catalog_versions = outcome.result_catalog_versions;
             self.last_search_result_catalog_versions_stable =
                 outcome.result_catalog_versions_stable;
-            self.results = outcome.actions;
+            self.results =
+                actions_in_search_scope(outcome.actions, outcome.categories, effective_scope);
+            self.last_search_scope = effective_scope;
             self.invalidate_root_list_results();
             self.clear_selected_after_results_replaced();
             self.recompute_query_results_layout();
@@ -845,15 +914,18 @@ impl LauncherApp {
         let c2c_install_observer = c2c_install_observer::current();
         #[cfg(test)]
         let installation_started = c2c_install_observer.as_ref().map(|_| Instant::now());
-        let same_raw_query = self.query == self.last_search_query;
+        let same_raw_query =
+            self.query == self.last_search_query && effective_scope == self.last_search_scope;
+        let scoped_actions =
+            actions_in_search_scope(outcome.actions, outcome.categories, effective_scope);
         let can_reuse_results =
-            same_raw_query && !self.results.is_empty() && !outcome.actions.is_empty();
+            same_raw_query && !self.results.is_empty() && !scoped_actions.is_empty();
         #[cfg(test)]
-        let incoming_actions = outcome.actions.len();
+        let incoming_actions = scoped_actions.len();
         let results_are_equal = if can_reuse_results {
             #[cfg(test)]
             let comparison_started = c2c_install_observer.as_ref().map(|_| Instant::now());
-            let equal = self.results == outcome.actions;
+            let equal = self.results == scoped_actions;
             #[cfg(test)]
             if let (Some(observer), Some(started)) =
                 (c2c_install_observer.as_ref(), comparison_started)
@@ -874,7 +946,7 @@ impl LauncherApp {
         };
 
         if results_are_equal {
-            drop(outcome.actions);
+            drop(scoped_actions);
             self.queue_popup_cleanup_after_preserved_results();
             #[cfg(test)]
             if let Some(observer) = c2c_install_observer.as_ref() {
@@ -885,7 +957,7 @@ impl LauncherApp {
                 );
             }
         } else {
-            self.results = outcome.actions;
+            self.results = scoped_actions;
             self.invalidate_root_list_results();
             #[cfg(test)]
             if let Some(observer) = c2c_install_observer.as_ref() {
@@ -907,6 +979,7 @@ impl LauncherApp {
         }
         self.clear_selected_after_results_replaced();
         self.last_search_query = self.query.clone();
+        self.last_search_scope = effective_scope;
         self.last_results_valid = outcome.provider_deferral == ProviderSearchDeferral::None;
         let completion_started = crate::performance::started_if(perf_enabled);
         self.update_suggestions();
@@ -1846,6 +1919,148 @@ mod tests {
         app.plugins
             .register(Box::new(ClipboardModifyPlugin::new(catalog)));
         app
+    }
+
+    fn launcher_scope_fixture_actions() -> Vec<Action> {
+        [
+            ("Scope Marker App", "legacy:scope-marker-app"),
+            ("Scope Marker File", r"folder:add:C:\Scope Marker"),
+            ("Scope Marker Note", "note:open:scope-marker-note"),
+            ("Scope Marker Command", "query:regex"),
+        ]
+        .into_iter()
+        .map(|(label, action)| Action {
+            label: label.into(),
+            desc: String::new(),
+            action: action.into(),
+            args: None,
+        })
+        .collect()
+    }
+
+    fn new_launcher_scope_app(ctx: &egui::Context) -> LauncherApp {
+        let mut app = new_app(ctx);
+        app.plugins = PluginManager::new_inert_for_test();
+        let actions = launcher_scope_fixture_actions();
+        app.custom_len = actions.len();
+        app.actions = Arc::new(actions);
+        app.update_action_cache();
+        app.command_cache.clear();
+        app
+    }
+
+    #[test]
+    fn launcher_scope_switches_filter_same_query_and_preserve_query_ui_state() {
+        let context = egui::Context::default();
+        let mut app = new_launcher_scope_app(&context);
+        app.query = "app scope marker".into();
+        app.search();
+        let all_results = app.results.clone();
+        assert_eq!(all_results.len(), 4);
+        assert_eq!(app.last_search_scope, crate::search_scope::SearchScope::All);
+        app.selected = Some(0);
+        app.suggestions = vec!["first suggestion".into(), "second suggestion".into()];
+        app.autocomplete_index = 1;
+        app.query_history.older("app scope marker", || {
+            vec!["recent query".into(), "older query".into()]
+        });
+        let history_digest = app.query_history.acceptance_digest();
+
+        app.set_search_scope(crate::search_scope::SearchScope::Notes);
+        assert_eq!(app.query, "app scope marker");
+        assert_eq!(app.last_search_query, "app scope marker");
+        assert_eq!(
+            app.last_search_scope,
+            crate::search_scope::SearchScope::Notes
+        );
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].action, "note:open:scope-marker-note");
+        assert_eq!(app.selected, None);
+        assert_eq!(app.suggestions, ["first suggestion", "second suggestion"]);
+        assert_eq!(app.autocomplete_index, 1);
+        assert_eq!(app.query_history.acceptance_digest(), history_digest);
+
+        app.set_search_scope(crate::search_scope::SearchScope::Commands);
+        assert_eq!(app.query, "app scope marker");
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].action, "query:regex");
+        app.set_search_scope(crate::search_scope::SearchScope::All);
+        assert_eq!(app.results, all_results);
+
+        // A valid same-query cache entry still has to miss when its effective
+        // scope differs from the scope used to build the visible results.
+        app.search_scope = crate::search_scope::SearchScope::Files;
+        app.last_results_valid = true;
+        app.last_search_scope = crate::search_scope::SearchScope::All;
+        app.results = all_results;
+        app.selected = Some(0);
+        app.search();
+        assert_eq!(
+            app.last_search_scope,
+            crate::search_scope::SearchScope::Files
+        );
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].action, r"folder:add:C:\Scope Marker");
+        assert_eq!(app.selected, None);
+    }
+
+    #[test]
+    fn launcher_scope_empty_browse_filters_catalog_and_returns_to_all_exactly() {
+        let context = egui::Context::default();
+        let mut app = new_launcher_scope_app(&context);
+        app.search();
+        let all_results = app.results.clone();
+        assert_eq!(all_results.len(), 4);
+        app.selected = Some(0);
+        app.suggestions = vec!["browse suggestion".into()];
+        app.autocomplete_index = 0;
+
+        app.set_search_scope(crate::search_scope::SearchScope::Notes);
+        assert!(app.query.is_empty());
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].action, "note:open:scope-marker-note");
+        assert_eq!(app.selected, None);
+        assert_eq!(app.suggestions, ["browse suggestion"]);
+        app.set_search_scope(crate::search_scope::SearchScope::Applications);
+        assert_eq!(app.results.len(), 1);
+        assert_eq!(app.results[0].action, "legacy:scope-marker-app");
+        app.set_search_scope(crate::search_scope::SearchScope::All);
+        assert_eq!(app.results, all_results);
+    }
+
+    #[test]
+    fn launcher_scope_prefix_temporarily_uses_all_and_keeps_selected_preference() {
+        let context = egui::Context::default();
+        let mut app = new_app(&context);
+        app.plugins = PluginManager::new_inert_for_test();
+        app.plugins
+            .register(Box::new(crate::plugins::regex_tester::RegexTesterPlugin));
+        app.search_scope = crate::search_scope::SearchScope::Notes;
+        app.query = "regex ".into();
+
+        assert_eq!(
+            app.effective_search_scope(),
+            crate::search_scope::SearchScope::All
+        );
+        app.set_search_scope(crate::search_scope::SearchScope::Files);
+        assert_eq!(app.search_scope, crate::search_scope::SearchScope::Files);
+        assert_eq!(
+            app.effective_search_scope(),
+            crate::search_scope::SearchScope::All
+        );
+
+        app.query = "ordinary query".into();
+        assert_eq!(
+            app.effective_search_scope(),
+            crate::search_scope::SearchScope::Files
+        );
+        app.enabled_plugins = Some(std::collections::HashSet::new());
+        app.query = "g web search".into();
+        assert_eq!(
+            app.effective_search_scope(),
+            crate::search_scope::SearchScope::All,
+            "the legacy g-prefix override remains outside the selected scope"
+        );
     }
 
     struct StaticSearchPlugin {

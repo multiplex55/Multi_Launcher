@@ -1658,6 +1658,14 @@ fn resolve_primary_radial_add_row(
 }
 
 impl LauncherApp {
+    fn should_reset_search_scope_for_new_session(
+        was_visible: bool,
+        should_be_visible: bool,
+        focus_intent: RootFocusIntent,
+    ) -> bool {
+        !was_visible && should_be_visible && focus_intent == RootFocusIntent::ActivateRoot
+    }
+
     pub(crate) fn launcher_query_keyboard_enabled(query_has_focus: bool) -> bool {
         query_has_focus
     }
@@ -2381,6 +2389,86 @@ fn show_root_query_editor(
     }
 }
 
+fn consume_launcher_search_scope_shortcut(
+    first_ui_pass: bool,
+    query_has_focus: bool,
+    action_sheet_owns_input: bool,
+    ocr_owns_input: bool,
+    confirmation_modal_open: bool,
+    file_search_open: bool,
+    diff_open: bool,
+    input: &mut egui::InputState,
+) -> Option<crate::search_scope::SearchScope> {
+    if !query_has_focus
+        || !launcher_scope_controls_enabled(
+            first_ui_pass,
+            action_sheet_owns_input,
+            ocr_owns_input,
+            confirmation_modal_open,
+            file_search_open,
+            diff_open,
+        )
+    {
+        return None;
+    }
+
+    let shortcut = input.events.iter().find_map(|event| {
+        let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        else {
+            return None;
+        };
+        if !modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.mac_cmd {
+            return None;
+        }
+        let number = match key {
+            egui::Key::Num1 => 1,
+            egui::Key::Num2 => 2,
+            egui::Key::Num3 => 3,
+            egui::Key::Num4 => 4,
+            egui::Key::Num5 => 5,
+            _ => return None,
+        };
+        crate::search_scope::SearchScope::from_shortcut_number(number)
+            .map(|scope| (*modifiers, *key, scope))
+    });
+    let (modifiers, key, scope) = shortcut?;
+    input.consume_key(modifiers, key).then_some(scope)
+}
+
+fn launcher_scope_controls_enabled(
+    first_ui_pass: bool,
+    action_sheet_owns_input: bool,
+    ocr_owns_input: bool,
+    confirmation_modal_open: bool,
+    file_search_open: bool,
+    diff_open: bool,
+) -> bool {
+    first_ui_pass
+        && !action_sheet_owns_input
+        && !ocr_owns_input
+        && !confirmation_modal_open
+        && !file_search_open
+        && !diff_open
+}
+
+fn launcher_search_scope_empty_message(
+    scope: crate::search_scope::SearchScope,
+    pending: bool,
+) -> Option<String> {
+    if scope == crate::search_scope::SearchScope::All {
+        None
+    } else if pending {
+        Some(format!("Searching {}…", scope.label()))
+    } else {
+        Some(format!("No {} found.", scope.label()))
+    }
+}
+
 impl LauncherApp {
     pub(super) fn invalidate_root_list_results(&mut self) {
         self.track_c_query_observer.results_invalidated();
@@ -2640,6 +2728,7 @@ impl LauncherApp {
             self.help_flag.store(false, Ordering::SeqCst);
         }
         let mut just_became_visible = false;
+        let mut reset_search_scope_for_new_session = false;
         let mut native_restore_target = None;
         let mut native_activation_requested = false;
         let color_pick_owns_root = self.color_pick_owns_root();
@@ -2652,6 +2741,16 @@ impl LauncherApp {
                     return;
                 }
                 just_became_visible = !self.last_visible && should_be_visible;
+                reset_search_scope_for_new_session =
+                    Self::should_reset_search_scope_for_new_session(
+                        self.last_visible,
+                        should_be_visible,
+                        focus_intent,
+                    ) && self.search_scope != crate::search_scope::SearchScope::All;
+                if reset_search_scope_for_new_session {
+                    self.search_scope = crate::search_scope::SearchScope::All;
+                    self.last_results_valid = false;
+                }
                 let visibility_changed = self.last_visible != should_be_visible;
                 if do_restore && should_be_visible {
                     acceptance_trace::emit(acceptance_trace::Event::Restore {
@@ -2743,6 +2842,9 @@ impl LauncherApp {
                 }
             },
         );
+        if reset_search_scope_for_new_session {
+            self.search();
+        }
         if let Some(target) = native_restore_target
             && !crate::window_manager::restore_launcher_to_current_desktop_ordered(
                 target,
@@ -3275,6 +3377,21 @@ impl LauncherApp {
                 let input_id = query_input_id;
 
                 let query_owned_focus = ui.ctx().memory(|memory| memory.has_focus(input_id));
+                let scope_shortcut = ctx.input_mut(|input| {
+                    consume_launcher_search_scope_shortcut(
+                        first_ui_pass,
+                        query_owned_focus,
+                        action_sheet_blocks_launcher_input,
+                        ocr_blocks_launcher_input,
+                        self.confirm_modal.is_open(),
+                        self.file_search_dialog.open,
+                        self.diff_dialog.open,
+                        input,
+                    )
+                });
+                if let Some(scope) = scope_shortcut {
+                    self.set_search_scope(scope);
+                }
                 let numpad_navigation = if first_ui_pass {
                     ui.ctx().input_mut(|input| {
                         consume_physical_numpad_navigation(
@@ -3311,7 +3428,6 @@ impl LauncherApp {
                     self.move_cursor_end = false;
                 }
                 let query_response = query_output.response;
-                query_bottom = query_response.rect.bottom();
                 if first_ui_pass
                     && Self::launcher_query_focus_should_be_requested(
                     just_became_visible,
@@ -3323,6 +3439,44 @@ impl LauncherApp {
                     self.focus_query = false;
                 }
                 let query_has_focus = query_response.has_focus();
+
+                let scope_controls_enabled = launcher_scope_controls_enabled(
+                    first_ui_pass,
+                    action_sheet_blocks_launcher_input,
+                    ocr_blocks_launcher_input,
+                    self.confirm_modal.is_open(),
+                    self.file_search_dialog.open,
+                    self.diff_dialog.open,
+                );
+                let mut clicked_scope = None;
+                let scope_strip = ui.horizontal(|ui| {
+                    ui.label("Scope");
+                    for scope in crate::search_scope::SearchScope::ALL {
+                        let response = ui
+                            .add_enabled(
+                                scope_controls_enabled,
+                                egui::Button::selectable(
+                                    self.search_scope == scope,
+                                    scope.short_label(),
+                                ),
+                            )
+                            .on_hover_text(format!(
+                                "{} (Ctrl+{})",
+                                scope.label(),
+                                scope.shortcut_number()
+                            ));
+                        if response.clicked() {
+                            clicked_scope = Some(scope);
+                        }
+                    }
+                });
+                query_bottom = scope_strip.response.rect.bottom();
+                if let Some(scope) = clicked_scope {
+                    self.set_search_scope(scope);
+                    if query_has_focus {
+                        query_response.request_focus();
+                    }
+                }
 
                 self.query_history.synchronize(&self.query);
                 if first_ui_pass && query_response.changed() {
@@ -3543,6 +3697,16 @@ impl LauncherApp {
                     }
                 }
             } else {
+                let displayed_scope = self.last_search_scope;
+                if self.results.is_empty()
+                    && displayed_scope != crate::search_scope::SearchScope::All
+                    && let Some(message) = launcher_search_scope_empty_message(
+                        displayed_scope,
+                        self.last_search_pending,
+                    )
+                {
+                    ui.weak(message);
+                }
                 // Align the viewport itself: aligning only scrolled content can be
                 // undone by the next scroll offset and still clip a native frame.
                 let pixels_per_point = ui.ctx().pixels_per_point();
@@ -21516,6 +21680,107 @@ mod tests {
             repeat: false,
             modifiers,
         }
+    }
+
+    #[test]
+    fn launcher_scope_shortcuts_require_root_query_ownership_and_leave_modal_keys_alone() {
+        for (
+            first_pass,
+            query_focus,
+            action_sheet,
+            ocr,
+            confirmation,
+            file_search,
+            diff_open,
+            key,
+            expected,
+        ) in [
+            (
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                egui::Key::Num4,
+                Some(crate::search_scope::SearchScope::Notes),
+            ),
+            (false, true, false, false, false, false, false, egui::Key::Num3, None),
+            (true, false, false, false, false, false, false, egui::Key::Num3, None),
+            (true, true, true, false, false, false, false, egui::Key::Num3, None),
+            (true, true, false, true, false, false, false, egui::Key::Num3, None),
+            // Confirmation windows retain the ROOT query's previous focus.
+            (true, true, false, false, true, false, false, egui::Key::Num3, None),
+            (true, true, false, false, false, true, false, egui::Key::Num3, None),
+            // Ctrl+1 and Ctrl+2 belong to the diff text view while it is open.
+            (true, true, false, false, false, false, true, egui::Key::Num1, None),
+            (true, true, false, false, false, false, true, egui::Key::Num2, None),
+        ] {
+            let ctx = egui::Context::default();
+            ctx.begin_pass(egui::RawInput {
+                events: vec![key_press(key, egui::Modifiers::CTRL)],
+                ..Default::default()
+            });
+            let (actual, event_still_available) = ctx.input_mut(|input| {
+                let scope = consume_launcher_search_scope_shortcut(
+                    first_pass,
+                    query_focus,
+                    action_sheet,
+                    ocr,
+                    confirmation,
+                    file_search,
+                    diff_open,
+                    input,
+                );
+                (scope, input.consume_key(egui::Modifiers::CTRL, key))
+            });
+            ctx.end_pass().drop_without_applying_deltas();
+            assert_eq!(actual, expected);
+            assert_eq!(event_still_available, expected.is_none());
+        }
+    }
+
+    #[test]
+    fn launcher_scope_new_session_reset_is_one_activation_edge_only() {
+        use crate::visibility::RootFocusIntent;
+
+        assert!(LauncherApp::should_reset_search_scope_for_new_session(
+            false,
+            true,
+            RootFocusIntent::ActivateRoot,
+        ));
+        assert!(!LauncherApp::should_reset_search_scope_for_new_session(
+            false,
+            true,
+            RootFocusIntent::PreserveForeground,
+        ));
+        assert!(!LauncherApp::should_reset_search_scope_for_new_session(
+            true,
+            true,
+            RootFocusIntent::ActivateRoot,
+        ));
+        assert!(!LauncherApp::should_reset_search_scope_for_new_session(
+            false,
+            false,
+            RootFocusIntent::ActivateRoot,
+        ));
+    }
+
+    #[test]
+    fn launcher_scope_empty_message_names_scoped_browse_and_preserves_all_dashboard() {
+        assert_eq!(
+            launcher_search_scope_empty_message(crate::search_scope::SearchScope::All, false),
+            None
+        );
+        assert_eq!(
+            launcher_search_scope_empty_message(crate::search_scope::SearchScope::Files, false),
+            Some("No Files found.".into())
+        );
+        assert_eq!(
+            launcher_search_scope_empty_message(crate::search_scope::SearchScope::Notes, true),
+            Some("Searching Notes…".into())
+        );
     }
 
     fn prompted_test_entry() -> crate::plugins::snippets::SnippetEntry {

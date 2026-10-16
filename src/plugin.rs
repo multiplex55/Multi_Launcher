@@ -41,7 +41,6 @@ use crate::plugins::network::NetworkPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::ocr::OcrPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
-use crate::search_scope::{LauncherSearchResult, SearchResultCategory};
 use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::qr::QrPlugin;
 use crate::plugins::radial::RadialPlugin;
@@ -73,6 +72,7 @@ use crate::plugins::wikipedia::WikipediaPlugin;
 use crate::plugins::windows::WindowsPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
+use crate::search_scope::{LauncherSearchResult, SearchResultCategory};
 use crate::settings::NetUnit;
 use crate::window_catalog::WindowCatalog;
 use eframe::egui;
@@ -1149,6 +1149,30 @@ impl PluginManager {
             enabled_caps,
         )
     }
+
+    /// Whether this query explicitly targets an enabled, searchable plugin.
+    ///
+    /// This mirrors the same query planning and enabled/capability filtering
+    /// used by launcher search without invoking any provider.
+    pub(crate) fn has_enabled_query_prefix(
+        &self,
+        query: &str,
+        enabled_plugins: Option<&HashSet<String>>,
+        enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ) -> bool {
+        let (filtered_query, _) = split_action_filters(query);
+        self.iter().any(|guard| {
+            let plugin = &**guard;
+            let query_plan = plugin_query_plan(plugin, query, &filtered_query);
+            query_plan.query_head.is_some_and(|head| {
+                plugin
+                    .query_prefixes()
+                    .iter()
+                    .any(|prefix| prefix.eq_ignore_ascii_case(head))
+                    && plugin_matches_search(plugin, Some(head), enabled_plugins, enabled_caps)
+            })
+        })
+    }
 }
 
 fn search_filtered_plugins<'a>(
@@ -1319,6 +1343,31 @@ mod tests {
         assert_eq!(synchronous[0].action, actions[0]);
         assert_eq!(snapshot.actions, actions);
         assert_eq!(snapshot.categories, [SearchResultCategory::Commands]);
+    }
+
+    #[test]
+    fn launcher_scope_prefix_override_respects_enabled_plugins_and_search_capability() {
+        let mut manager = PluginManager::new_inert_for_test();
+        manager.register(Box::new(RegexTesterPlugin));
+
+        let enabled = HashSet::from(["regex_tester".to_owned()]);
+        let search_caps = HashMap::from([("regex_tester".to_owned(), vec!["search".to_owned()])]);
+        assert!(manager.has_enabled_query_prefix("regex ", Some(&enabled), Some(&search_caps),));
+        assert!(!manager.has_enabled_query_prefix(
+            "regex ",
+            Some(&HashSet::new()),
+            Some(&search_caps),
+        ));
+        assert!(!manager.has_enabled_query_prefix(
+            "regex ",
+            Some(&enabled),
+            Some(&HashMap::from([("regex_tester".to_owned(), Vec::new())])),
+        ));
+        assert!(!manager.has_enabled_query_prefix(
+            "regex-like text",
+            Some(&enabled),
+            Some(&search_caps),
+        ));
     }
 
     #[test]

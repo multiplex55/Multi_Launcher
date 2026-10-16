@@ -178,6 +178,7 @@ use crate::plugin_editor::PluginEditor;
 use crate::plugins::clipboard_modify::ClipboardModifyPluginSettings;
 use crate::plugins::note::{NoteExternalOpen, NotePluginSettings};
 use crate::plugins::snippets::{SNIPPETS_FILE, remove_snippet};
+use crate::search_scope::SearchScope;
 use crate::settings::{MultiManagerSettings, NoteSettings, QueryResultsLayoutSettings, Settings};
 use crate::settings_editor::SettingsEditor;
 use crate::toast_log::{TOAST_LOG_FILE, append_toast_log};
@@ -1065,6 +1066,8 @@ pub struct LauncherApp {
     last_stopwatch_update: Instant,
     last_search_query: String,
     last_results_valid: bool,
+    search_scope: SearchScope,
+    last_search_scope: SearchScope,
     last_search_pending: bool,
     last_search_provider_revision: u64,
     last_search_result_catalog_versions:
@@ -2640,6 +2643,8 @@ impl LauncherApp {
             last_stopwatch_update: Instant::now(),
             last_search_query: String::new(),
             last_results_valid: false,
+            search_scope: SearchScope::All,
+            last_search_scope: SearchScope::All,
             last_search_pending: false,
             last_search_provider_revision: 0,
             last_search_result_catalog_versions: None,
@@ -3188,7 +3193,10 @@ impl LauncherApp {
     }
 
     pub fn should_show_dashboard(&self, trimmed: &str) -> bool {
-        self.dashboard_enabled && self.dashboard_show_when_empty && trimmed.trim().is_empty()
+        self.dashboard_enabled
+            && self.dashboard_show_when_empty
+            && trimmed.trim().is_empty()
+            && self.search_scope == SearchScope::All
     }
 
     pub fn move_cursor_end_flag(&self) -> bool {
