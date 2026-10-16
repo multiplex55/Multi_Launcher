@@ -1348,26 +1348,45 @@ mod tests {
     #[test]
     fn launcher_scope_prefix_override_respects_enabled_plugins_and_search_capability() {
         let mut manager = PluginManager::new_inert_for_test();
+        manager.register(Box::new(crate::plugins::file_search::FileSearchPlugin::default()));
         manager.register(Box::new(RegexTesterPlugin));
+        manager.register(Box::new(crate::plugins::mouse::MousePlugin));
 
-        let enabled = HashSet::from(["regex_tester".to_owned()]);
-        let search_caps = HashMap::from([("regex_tester".to_owned(), vec!["search".to_owned()])]);
-        assert!(manager.has_enabled_query_prefix("regex ", Some(&enabled), Some(&search_caps),));
+        let enabled = HashSet::from([
+            "file_search".to_owned(),
+            "regex_tester".to_owned(),
+            "mouse".to_owned(),
+        ]);
+        let search_caps = enabled
+            .iter()
+            .map(|name| (name.clone(), vec!["search".to_owned()]))
+            .collect::<HashMap<_, _>>();
+        for (prefix, query) in [
+            ("fs", " \tFS   file main"),
+            ("regex", " \tReGeX   test"),
+            ("mouse", " \tMoUsE   coords"),
+        ] {
+            assert!(
+                manager.has_enabled_query_prefix(query, Some(&enabled), Some(&search_caps)),
+                "enabled {prefix} query with case and whitespace variation should override scope"
+            );
+        }
         assert!(!manager.has_enabled_query_prefix(
-            "regex ",
+            "mouse coords",
             Some(&HashSet::new()),
             Some(&search_caps),
         ));
         assert!(!manager.has_enabled_query_prefix(
-            "regex ",
+            "FS file",
             Some(&enabled),
-            Some(&HashMap::from([("regex_tester".to_owned(), Vec::new())])),
+            Some(&HashMap::from([("file_search".to_owned(), Vec::new())])),
         ));
-        assert!(!manager.has_enabled_query_prefix(
-            "regex-like text",
-            Some(&enabled),
-            Some(&search_caps),
-        ));
+        for partial in ["f", "reg", "mous"] {
+            assert!(
+                !manager.has_enabled_query_prefix(partial, Some(&enabled), Some(&search_caps)),
+                "partial prefix {partial:?} must stay an ordinary scoped query"
+            );
+        }
     }
 
     #[test]

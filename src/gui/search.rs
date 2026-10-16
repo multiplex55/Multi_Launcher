@@ -1938,9 +1938,8 @@ mod tests {
         .collect()
     }
 
-    fn new_launcher_scope_app(ctx: &egui::Context) -> LauncherApp {
-        let mut app = new_app(ctx);
-        app.plugins = PluginManager::new_inert_for_test();
+    fn new_launcher_scope_app(ctx: &egui::Context, root: &std::path::Path) -> LauncherApp {
+        let mut app = new_inert_app(ctx, root);
         let actions = launcher_scope_fixture_actions();
         app.custom_len = actions.len();
         app.actions = Arc::new(actions);
@@ -1952,7 +1951,8 @@ mod tests {
     #[test]
     fn launcher_scope_switches_filter_same_query_and_preserve_query_ui_state() {
         let context = egui::Context::default();
-        let mut app = new_launcher_scope_app(&context);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_launcher_scope_app(&context, workspace.root());
         app.query = "app scope marker".into();
         app.search();
         let all_results = app.results.clone();
@@ -2002,12 +2002,15 @@ mod tests {
         assert_eq!(app.results.len(), 1);
         assert_eq!(app.results[0].action, r"folder:add:C:\Scope Marker");
         assert_eq!(app.selected, None);
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
     fn launcher_scope_empty_browse_filters_catalog_and_returns_to_all_exactly() {
         let context = egui::Context::default();
-        let mut app = new_launcher_scope_app(&context);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_launcher_scope_app(&context, workspace.root());
         app.search();
         let all_results = app.results.clone();
         assert_eq!(all_results.len(), 4);
@@ -2026,13 +2029,15 @@ mod tests {
         assert_eq!(app.results[0].action, "legacy:scope-marker-app");
         app.set_search_scope(crate::search_scope::SearchScope::All);
         assert_eq!(app.results, all_results);
+        drop(app);
+        drop(workspace);
     }
 
     #[test]
     fn launcher_scope_prefix_temporarily_uses_all_and_keeps_selected_preference() {
         let context = egui::Context::default();
-        let mut app = new_app(&context);
-        app.plugins = PluginManager::new_inert_for_test();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_inert_app(&context, workspace.root());
         app.plugins
             .register(Box::new(crate::plugins::regex_tester::RegexTesterPlugin));
         app.search_scope = crate::search_scope::SearchScope::Notes;
@@ -2042,13 +2047,21 @@ mod tests {
             app.effective_search_scope(),
             crate::search_scope::SearchScope::All
         );
+
+        app.query = "ordinary query".into();
+        assert_eq!(
+            app.effective_search_scope(),
+            crate::search_scope::SearchScope::Notes,
+            "ordinary queries return to the selected scope after an explicit prefix"
+        );
+
+        app.query = "regex ".into();
         app.set_search_scope(crate::search_scope::SearchScope::Files);
         assert_eq!(app.search_scope, crate::search_scope::SearchScope::Files);
         assert_eq!(
             app.effective_search_scope(),
             crate::search_scope::SearchScope::All
         );
-
         app.query = "ordinary query".into();
         assert_eq!(
             app.effective_search_scope(),
@@ -2061,6 +2074,75 @@ mod tests {
             crate::search_scope::SearchScope::All,
             "the legacy g-prefix override remains outside the selected scope"
         );
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn launcher_scope_all_and_read_only_snapshot_keep_unfiltered_order() {
+        let context = egui::Context::default();
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_launcher_scope_app(&context, workspace.root());
+        app.query = "app scope marker".into();
+        app.search();
+
+        let all_actions = app.results.clone();
+        assert_eq!(
+            all_actions
+                .iter()
+                .map(|action| action.action.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "legacy:scope-marker-app",
+                r"folder:add:C:\Scope Marker",
+                "note:open:scope-marker-note",
+                "query:regex",
+            ]
+        );
+        assert_eq!(app.search_read_only("app scope marker"), all_actions);
+
+        app.search_scope = crate::search_scope::SearchScope::Notes;
+        assert_eq!(app.search_read_only("app scope marker"), all_actions);
+
+        let provider_action = Action {
+            label: "Scope Marker Provider result".into(),
+            desc: String::new(),
+            action: "provider:captured-result".into(),
+            args: None,
+        };
+        let versions = crate::radial::dynamic::MutableResultCatalogVersions::default();
+        let snapshot = c2a_snapshot(vec![provider_action.clone()], false, 1, 1, versions, versions);
+        let snapshot_outcome = app.search_read_only_outcome_with_plugin_snapshot(
+            "app scope marker",
+            snapshot,
+        );
+        assert_eq!(
+            snapshot_outcome
+                .actions
+                .iter()
+                .take(all_actions.len())
+                .cloned()
+                .collect::<Vec<_>>(),
+            all_actions,
+            "captured radial/provider snapshots retain the launcher boundary's local order"
+        );
+        assert_eq!(
+            snapshot_outcome.actions.last(),
+            Some(&provider_action),
+            "the snapshot provider result remains present while a launcher scope is selected"
+        );
+        assert_eq!(
+            snapshot_outcome.categories,
+            [
+                crate::search_scope::SearchResultCategory::Applications,
+                crate::search_scope::SearchResultCategory::Files,
+                crate::search_scope::SearchResultCategory::Notes,
+                crate::search_scope::SearchResultCategory::Commands,
+                crate::search_scope::SearchResultCategory::Commands,
+            ]
+        );
+        drop(app);
+        drop(workspace);
     }
 
     struct StaticSearchPlugin {
@@ -4627,14 +4709,21 @@ mod tests {
     #[test]
     fn literal_qr_payload_survives_exact_sync_and_snapshot_search() {
         let ctx = egui::Context::default();
-        let mut app = new_app(&ctx);
+        let workspace = crate::performance::track_c_workloads::TrackCWorkspace::new();
+        let mut app = new_inert_app(&ctx, workspace.root());
         app.plugins.register(Box::new(crate::plugins::qr::QrPlugin));
         app.match_exact = true;
+        app.search_scope = crate::search_scope::SearchScope::Notes;
 
         let payload =
             "two  spaces \"quoted\" C:\\qr\n日本語 kind:private id:private !kind:other !id:other";
         let query = format!(" \tQR {payload}");
         app.query = query.clone();
+        assert_eq!(
+            app.effective_search_scope(),
+            crate::search_scope::SearchScope::All,
+            "an explicit enabled QR prefix bypasses the selected launcher scope"
+        );
         app.search();
 
         let synchronous = app
@@ -4658,6 +4747,8 @@ mod tests {
             .find(|action| action.action == "qr:open")
             .expect("snapshot QR result should survive exact display filtering");
         assert_eq!(snapshot_action.args.as_deref(), Some(payload));
+        drop(app);
+        drop(workspace);
     }
 }
 

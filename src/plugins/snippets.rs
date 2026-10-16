@@ -723,6 +723,17 @@ impl Plugin for SnippetsPlugin {
         &["search"]
     }
 
+    fn query_prefixes(&self) -> &[&str] {
+        &["cs"]
+    }
+
+    fn always_search(&self) -> bool {
+        // Preserve the legacy global invocation: search also accepts the
+        // adjacent-prefix form `csfoo`, even though only the exact `cs` head
+        // is an explicit launcher-scope override.
+        true
+    }
+
     fn commands(&self) -> Vec<Action> {
         vec![
             Action {
@@ -790,6 +801,53 @@ mod persistence_tests {
                 input_kind: SnippetInputKind::Multiline,
             }],
         }
+    }
+
+    #[test]
+    fn launcher_scope_cs_prefix_uses_isolated_snippets_provider() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&[snippet("foo", "example")]).unwrap(),
+        )
+        .unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+        let plugin = SnippetsPlugin::new_for_path(&path_text);
+        assert_eq!(plugin.query_prefixes(), ["cs"]);
+
+        let mut manager = crate::plugin::PluginManager::new_inert_for_test();
+        manager.register(Box::new(plugin));
+        let enabled = HashSet::from(["snippets".to_owned()]);
+        let capabilities = std::collections::HashMap::from([(
+            "snippets".to_owned(),
+            vec!["search".to_owned()],
+        )]);
+        assert!(manager.has_enabled_query_prefix(
+            " \tCS   add example text",
+            Some(&enabled),
+            Some(&capabilities),
+        ));
+        assert!(!manager.has_enabled_query_prefix(
+            "c add example text",
+            Some(&enabled),
+            Some(&capabilities),
+        ));
+        assert!(!manager.has_enabled_query_prefix(
+            "csfoo",
+            Some(&enabled),
+            Some(&capabilities),
+        ));
+        let legacy_adjacent_prefix = manager.search_filtered_results(
+            "csfoo",
+            Some(&enabled),
+            Some(&capabilities),
+        );
+        assert_eq!(legacy_adjacent_prefix.len(), 1);
+        assert_eq!(legacy_adjacent_prefix[0].action.action, snippet_run_action("foo"));
+        drop(manager);
+        drop(directory);
     }
 
     #[test]

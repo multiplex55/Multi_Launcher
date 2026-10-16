@@ -75,6 +75,17 @@ impl HelpWindow {
                             ui.label("Older query: Ctrl+Up");
                             ui.label("Newer query / restore draft: Ctrl+Down");
                             ui.separator();
+                            ui.label(egui::RichText::new("Launcher search scopes").strong());
+                            ui.label(
+                                "All (Ctrl+1), Applications (Ctrl+2), Files (Ctrl+3), Notes (Ctrl+4), Commands (Ctrl+5). Focus the query field to use the shortcuts.",
+                            );
+                            ui.label(
+                                "Scope selection lasts for this launcher session and resets to All when a new session opens. Enabled explicit plugin prefixes such as fs, regex, cs, and mouse keep their existing command behavior; ordinary queries return to the selected scope.",
+                            );
+                            ui.label(
+                                "The existing app <query> catalog syntax and the file-search plugin's Global/Directory options are unchanged. Generic provider results without a specific category appear in Commands.",
+                            );
+                            ui.separator();
                             ui.label(egui::RichText::new("Dashboard").strong());
                             let dashboard_guidance = ui.add(
                                 egui::Label::new(

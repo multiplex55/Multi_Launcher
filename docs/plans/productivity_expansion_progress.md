@@ -11,7 +11,7 @@ Clippy is globally deferred to M13-D; no baseline or intermediate lint runs.
 - Single implementation writer; bounded planner and reviewer source passes per milestone.
 - File mutations use only disposable `tempfile` roots named for productivity fixtures.
 - Native smoke sessions are autonomous, owned-process-only, with isolated app data; no user-operated validation.
-- Evidence location: `target/productivity_expansion/` (already Git-ignored; generated safe fixtures/screenshots only). Computer-use `@oai/sky` initialization and native window discovery succeeded; capture is assessed against the owned dev window.
+- Evidence location: `target/productivity_expansion/` (already Git-ignored; generated safe fixtures/screenshots only). Computer-use initialization/window discovery succeeded, but owned-app inspection timed out at app approval. One bounded retry found no window after containment timeout. Native control/capture is `not_run_environment`; do not repeat the unchanged approval blocker at subsequent milestones or ask the user to intervene.
 - Per checkpoint: at most two focused test slices, minimal compilation, and bounded repairs per approved plan.
 - Commit hashes are recorded at subsequent checkpoint boundaries to avoid self-referencing commits.
 
@@ -35,8 +35,8 @@ No baseline behavior is claimed tested by this inventory. Feature-specific inspe
 | M0-A | complete | baseline above | Clean checkout, toolchain and owner inventory inspected; no Clippy |
 | M0-B | complete | `946a3006` | Plan read; fixture/evidence policy established |
 | M1-A | complete | `263330a6` | `cargo check --lib` passed; `cargo test --lib launcher_scope`: 3 passed; `cargo nextest run --test plugin_routing`: 17 passed. Reviewer reload-boundary and typed-command precedence findings fixed; diff checked. Native evidence belongs to M1-C. |
-| M1-B | complete | this checkpoint commit | Five session-local scopes, Ctrl+1–5, scope-aware cache/empty browse and fresh-session reset. `cargo nextest run --lib launcher_scope`: 11 passed. Reviewer confirmation ownership finding fixed; same slice rerun after final edits. |
-| M1-C | pending | — | Prefix/radial parity tests, help/docs and one native session |
+| M1-B | complete | `49629e25` | Five session-local scopes, Ctrl+1–5, scope-aware cache/empty browse and fresh-session reset. `cargo nextest run --lib launcher_scope`: 11 passed. Reviewer confirmation ownership finding fixed; same slice rerun after final edits. |
+| M1-C | complete | this checkpoint commit | Composite Nextest scope/read-only/literal-QR slice: 15 passed; `cargo build --bin multi_launcher` passed. README/Quick Help updated. Real `cs` prefix metadata fixed, legacy `csfoo` preserved; disposable scope fixtures produced no root artifact. Native app launched; no UI interaction/screenshot completed (app approval timeout). Owned PID 35224 removed on helper timeout, post-cleanup Absent; evidence `target/productivity_expansion/M1-native-process/result.json`. |
 | M2-A/B/C/D | pending | — | — |
 | M3-A/B/C/D/E | pending | — | — |
 | M4-A/B/C | pending | — | — |
