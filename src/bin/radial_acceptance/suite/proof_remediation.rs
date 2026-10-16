@@ -3145,13 +3145,13 @@ mod tests {
                     self.present = false;
                     self.prompt = false;
                 }
-            } else if let Some(at) = self.escaped_at {
-                if self.polls - at >= self.close_after_polls {
-                    if self.dirty {
-                        self.prompt = true;
-                    } else {
-                        self.present = false;
-                    }
+            } else if let Some(at) = self.escaped_at
+                && self.polls - at >= self.close_after_polls
+            {
+                if self.dirty {
+                    self.prompt = true;
+                } else {
+                    self.present = false;
                 }
             }
         }
@@ -3211,32 +3211,32 @@ mod tests {
                     same_as_admitted: true,
                 },
             };
-            if let Some((at, fault)) = self.fault {
-                if at == self.editor_observations {
-                    match fault {
-                        NoteReadinessFault::WrongProcess => observation.readiness.process_id = 999,
-                        NoteReadinessFault::ReplacedEditor => {
-                            observation.readiness.same_as_admitted = false
-                        }
-                        NoteReadinessFault::MissingMarker => observation.marker_present = false,
-                        NoteReadinessFault::Disabled => observation.readiness.enabled = false,
-                        NoteReadinessFault::Offscreen => observation.readiness.offscreen = true,
-                        NoteReadinessFault::EmptyBounds => {
-                            observation.readiness.bounds[2] = observation.readiness.bounds[0]
-                        }
-                        NoteReadinessFault::OtherEditorFocused => {
-                            observation.readiness.has_keyboard_focus = false
-                        }
-                        NoteReadinessFault::PropertyError => {
-                            return Err(VisibleTextLookupError::Other(
-                                "current focus property failed".into(),
-                            ));
-                        }
-                        NoteReadinessFault::TransientProperty => {
-                            return Err(VisibleTextLookupError::TransientElementUnavailable(
-                                "current element temporarily unavailable".into(),
-                            ));
-                        }
+            if let Some((at, fault)) = self.fault
+                && at == self.editor_observations
+            {
+                match fault {
+                    NoteReadinessFault::WrongProcess => observation.readiness.process_id = 999,
+                    NoteReadinessFault::ReplacedEditor => {
+                        observation.readiness.same_as_admitted = false
+                    }
+                    NoteReadinessFault::MissingMarker => observation.marker_present = false,
+                    NoteReadinessFault::Disabled => observation.readiness.enabled = false,
+                    NoteReadinessFault::Offscreen => observation.readiness.offscreen = true,
+                    NoteReadinessFault::EmptyBounds => {
+                        observation.readiness.bounds[2] = observation.readiness.bounds[0]
+                    }
+                    NoteReadinessFault::OtherEditorFocused => {
+                        observation.readiness.has_keyboard_focus = false
+                    }
+                    NoteReadinessFault::PropertyError => {
+                        return Err(VisibleTextLookupError::Other(
+                            "current focus property failed".into(),
+                        ));
+                    }
+                    NoteReadinessFault::TransientProperty => {
+                        return Err(VisibleTextLookupError::TransientElementUnavailable(
+                            "current element temporarily unavailable".into(),
+                        ));
                     }
                 }
             }
@@ -3316,98 +3316,98 @@ mod tests {
             if let Some(snapshot) = &self.ownership_snapshot {
                 response.snapshot = Some(snapshot.clone());
             }
-            if let Some((at, fault)) = self.ownership_fault {
-                if at == self.ownership_calls {
-                    let snapshot = response.snapshot.as_mut().unwrap();
-                    match fault {
-                        NoteOwnershipFault::CoexistentNote => {
-                            snapshot.open_note_count = 2;
-                            snapshot.sole_note = None;
-                        }
-                        NoteOwnershipFault::WrongSlug => {
-                            snapshot.sole_note.as_mut().unwrap().fixture_slug = false
-                        }
-                        NoteOwnershipFault::WrongDigest => {
-                            snapshot.sole_note.as_mut().unwrap().slug_digest ^= 1
-                        }
-                        NoteOwnershipFault::MissingMarker => {
-                            snapshot.sole_note.as_mut().unwrap().fixture_marker = false
-                        }
-                        NoteOwnershipFault::WrongNonce => response.run_nonce[0] ^= 1,
-                        NoteOwnershipFault::WrongRequest => response.request_id += 1,
-                        NoteOwnershipFault::StaleFrame => {
-                            response.observed_frame_ordinal = request.after_frame_ordinal
-                        }
-                        NoteOwnershipFault::WrongHwnd => response.root.as_mut().unwrap().hwnd = 43,
-                        NoteOwnershipFault::WrongPid => {
-                            response.root.as_mut().unwrap().process_id = 999
-                        }
-                        NoteOwnershipFault::WrongGeneration => {
-                            response.root.as_mut().unwrap().generation = 99
-                        }
-                        NoteOwnershipFault::Failed => {
-                            response.status = NoteCloseGuiStatus::Failed;
-                            response.error = Some(NoteCloseGuiError::WrongRoot);
-                        }
-                        NoteOwnershipFault::MissingWidget => {
-                            snapshot.sole_note.as_mut().unwrap().rendered_discard = None
-                        }
-                        NoteOwnershipFault::WrongWidgetOwner => {
-                            snapshot
-                                .sole_note
-                                .as_mut()
-                                .unwrap()
-                                .rendered_discard
-                                .as_mut()
-                                .unwrap()
-                                .owner_slug_digest ^= 1
-                        }
-                        NoteOwnershipFault::DisabledWidget => {
-                            snapshot
-                                .sole_note
-                                .as_mut()
-                                .unwrap()
-                                .rendered_discard
-                                .as_mut()
-                                .unwrap()
-                                .enabled = false
-                        }
-                        NoteOwnershipFault::HiddenWidget => {
-                            snapshot
-                                .sole_note
-                                .as_mut()
-                                .unwrap()
-                                .rendered_discard
-                                .as_mut()
-                                .unwrap()
-                                .visible = false
-                        }
-                        NoteOwnershipFault::ClippedWidget => {
-                            snapshot
-                                .sole_note
-                                .as_mut()
-                                .unwrap()
-                                .rendered_discard
-                                .as_mut()
-                                .unwrap()
-                                .fully_visible = false
-                        }
-                        NoteOwnershipFault::WrongWidgetBounds => {
-                            snapshot
-                                .sole_note
-                                .as_mut()
-                                .unwrap()
-                                .rendered_discard
-                                .as_mut()
-                                .unwrap()
-                                .bounds[0] += 1
-                        }
-                        NoteOwnershipFault::WrongClient => snapshot.client_size[0] += 1,
-                        NoteOwnershipFault::TransportError => {
-                            return Err(query_window_error(
-                                "fixture snapshot transport failed".into(),
-                            ));
-                        }
+            if let Some((at, fault)) = self.ownership_fault
+                && at == self.ownership_calls
+            {
+                let snapshot = response.snapshot.as_mut().unwrap();
+                match fault {
+                    NoteOwnershipFault::CoexistentNote => {
+                        snapshot.open_note_count = 2;
+                        snapshot.sole_note = None;
+                    }
+                    NoteOwnershipFault::WrongSlug => {
+                        snapshot.sole_note.as_mut().unwrap().fixture_slug = false
+                    }
+                    NoteOwnershipFault::WrongDigest => {
+                        snapshot.sole_note.as_mut().unwrap().slug_digest ^= 1
+                    }
+                    NoteOwnershipFault::MissingMarker => {
+                        snapshot.sole_note.as_mut().unwrap().fixture_marker = false
+                    }
+                    NoteOwnershipFault::WrongNonce => response.run_nonce[0] ^= 1,
+                    NoteOwnershipFault::WrongRequest => response.request_id += 1,
+                    NoteOwnershipFault::StaleFrame => {
+                        response.observed_frame_ordinal = request.after_frame_ordinal
+                    }
+                    NoteOwnershipFault::WrongHwnd => response.root.as_mut().unwrap().hwnd = 43,
+                    NoteOwnershipFault::WrongPid => {
+                        response.root.as_mut().unwrap().process_id = 999
+                    }
+                    NoteOwnershipFault::WrongGeneration => {
+                        response.root.as_mut().unwrap().generation = 99
+                    }
+                    NoteOwnershipFault::Failed => {
+                        response.status = NoteCloseGuiStatus::Failed;
+                        response.error = Some(NoteCloseGuiError::WrongRoot);
+                    }
+                    NoteOwnershipFault::MissingWidget => {
+                        snapshot.sole_note.as_mut().unwrap().rendered_discard = None
+                    }
+                    NoteOwnershipFault::WrongWidgetOwner => {
+                        snapshot
+                            .sole_note
+                            .as_mut()
+                            .unwrap()
+                            .rendered_discard
+                            .as_mut()
+                            .unwrap()
+                            .owner_slug_digest ^= 1
+                    }
+                    NoteOwnershipFault::DisabledWidget => {
+                        snapshot
+                            .sole_note
+                            .as_mut()
+                            .unwrap()
+                            .rendered_discard
+                            .as_mut()
+                            .unwrap()
+                            .enabled = false
+                    }
+                    NoteOwnershipFault::HiddenWidget => {
+                        snapshot
+                            .sole_note
+                            .as_mut()
+                            .unwrap()
+                            .rendered_discard
+                            .as_mut()
+                            .unwrap()
+                            .visible = false
+                    }
+                    NoteOwnershipFault::ClippedWidget => {
+                        snapshot
+                            .sole_note
+                            .as_mut()
+                            .unwrap()
+                            .rendered_discard
+                            .as_mut()
+                            .unwrap()
+                            .fully_visible = false
+                    }
+                    NoteOwnershipFault::WrongWidgetBounds => {
+                        snapshot
+                            .sole_note
+                            .as_mut()
+                            .unwrap()
+                            .rendered_discard
+                            .as_mut()
+                            .unwrap()
+                            .bounds[0] += 1
+                    }
+                    NoteOwnershipFault::WrongClient => snapshot.client_size[0] += 1,
+                    NoteOwnershipFault::TransportError => {
+                        return Err(query_window_error(
+                            "fixture snapshot transport failed".into(),
+                        ));
                     }
                 }
             }
@@ -7760,7 +7760,7 @@ mod tests {
             202,
             &Ok(None),
             None,
-            &[root.clone()],
+            std::slice::from_ref(&root),
         );
         assert!(value["tool"].is_null() && value["native_client"].is_null());
         assert_eq!(value["windows"][0]["role"], "root");

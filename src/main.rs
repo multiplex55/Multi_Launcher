@@ -2114,10 +2114,10 @@ fn spawn_gui(
                 );
                 app.install_settings_save_worker_registry(settings_save_workers_for_window);
                 #[cfg(feature = "qa-framebuffer-capture")]
-                if let Some(request) = qa_framebuffer_request_for_window {
-                    if let Err(error) = app.install_qa_framebuffer_request(request) {
-                        tracing::error!(%error, "failed to install QA framebuffer capture");
-                    }
+                if let Some(request) = qa_framebuffer_request_for_window
+                    && let Err(error) = app.install_qa_framebuffer_request(request)
+                {
+                    tracing::error!(%error, "failed to install QA framebuffer capture");
                 }
                 if let Some(startup) = startup_indexing_for_window
                     && let Err(error) = app.install_startup_indexing(

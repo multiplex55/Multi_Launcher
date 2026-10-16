@@ -3317,6 +3317,8 @@ pub(super) fn run_aggregate(arguments: Arguments) -> Result<(PathBuf, bool), Str
 mod tests {
     use super::*;
 
+    type NamedMutation<T> = (&'static str, fn(&mut T));
+
     pub(crate) fn probe_report(kind: ProbeKind) -> AcceptanceReport {
         let mut report = super::super::tests::acceptance_report(PROBE_MODE);
         report.started_unix_ms = 1000;
@@ -3779,7 +3781,7 @@ mod tests {
         .unwrap();
         store.reload().unwrap();
         let restarted =
-            submenu_migration::startup_migrate(&store, &profile.path().join("settings.json"), true)
+            submenu_migration::startup_migrate(&store, profile.path().join("settings.json"), true)
                 .unwrap();
         assert!(!restarted.changed);
         assert_eq!(*restarted.document, migrated);
@@ -3824,10 +3826,11 @@ mod tests {
                 }),
             );
             if clipboard_present {
-                let mut preferences =
-                    multi_launcher::settings::ClipboardModifyPluginSettings::default();
-                preferences.hide_launcher_after_apply = false;
-                preferences.template_filter = "protected authored filter".into();
+                let preferences = multi_launcher::settings::ClipboardModifyPluginSettings {
+                    hide_launcher_after_apply: false,
+                    template_filter: "protected authored filter".into(),
+                    ..Default::default()
+                };
                 authored.plugin_settings.insert(
                     "clipboard_modify".into(),
                     serde_json::to_value(preferences).unwrap(),
@@ -3886,7 +3889,7 @@ mod tests {
             store.reload().unwrap();
             let restarted = multi_launcher::radial::submenu_migration::startup_migrate(
                 &store,
-                &profile.path().join("settings.json"),
+                profile.path().join("settings.json"),
                 true,
             )
             .unwrap();
@@ -5179,7 +5182,8 @@ mod tests {
             report.controlled_failures = Some(decoded);
             assert!(!report.passed() && validate_report_evidence(&report).is_err());
             assert!(
-                validate_attempt_inventory(&outer, &[attempt], &[proof.clone()]).is_err(),
+                validate_attempt_inventory(&outer, &[attempt], std::slice::from_ref(&proof))
+                    .is_err(),
                 "diagnostic completion must not be coerced to nonzero verified success"
             );
         }
@@ -5421,7 +5425,8 @@ mod tests {
         qualified.primary_error = None;
         outer.cases[0].status = CaseStatus::Passed;
         outer.cases[0].failure_stage = None;
-        validate_attempt_inventory(&outer, &[qualified.clone()], &[proof.clone()]).unwrap();
+        validate_attempt_inventory(&outer, &[qualified.clone()], std::slice::from_ref(&proof))
+            .unwrap();
         let mutations: Vec<fn(&mut SubprocessAttempt)> = vec![
             |attempt| {
                 if let SubprocessState::ExitObserved { origin, .. } = &mut attempt.process {
@@ -5462,7 +5467,10 @@ mod tests {
         for mutate in mutations {
             let mut changed = qualified.clone();
             mutate(&mut changed);
-            assert!(validate_attempt_inventory(&outer, &[changed], &[proof.clone()]).is_err());
+            assert!(
+                validate_attempt_inventory(&outer, &[changed], std::slice::from_ref(&proof))
+                    .is_err()
+            );
         }
         outer.controlled_failures = Some(Evidence::Aggregate {
             probes: vec![proof],
@@ -5807,7 +5815,7 @@ mod tests {
 
     #[test]
     fn controlled_stage_oracle_rejects_wrong_owner_kind_effects_and_cleanup() {
-        let mutations: Vec<(&str, fn(&mut AcceptanceReport))> = vec![
+        let mutations: Vec<NamedMutation<AcceptanceReport>> = vec![
             ("foreign PID", |r| r.environment.child_process_id = Some(8)),
             ("runner owns child PID", |r| {
                 r.environment.runner_process_id = 7
@@ -5937,7 +5945,7 @@ mod tests {
         // SendInput queues an edge. The raw immediate sample is retained; the
         // observed up plus measured final async/ownership retirement is decisive.
         validate_probe(&pending_async, true).unwrap();
-        let mutations: Vec<(&str, fn(&mut HeldKeyProof))> = vec![
+        let mutations: Vec<NamedMutation<HeldKeyProof>> = vec![
             ("no insertion", |k| k.down.inserted = 0),
             ("wrong key", |k| k.down.vk = 0xa1),
             ("wrong scan", |k| k.down.scan = 7),
@@ -6641,7 +6649,7 @@ mod tests {
         let command = command(&original, Path::new("probe"));
         let expected = expected(&original, &created, &owner, &command);
         parse_persisted(&serde_json::to_vec(&original).unwrap(), &expected).unwrap();
-        let mutations: Vec<(&str, fn(&mut ChildExitWait))> = vec![
+        let mutations: Vec<NamedMutation<ChildExitWait>> = vec![
             ("wait predates owner", |w| w.wait_entered_unix_ms = 900),
             ("pending before entry", |w| {
                 w.pending_observed_unix_ms = 1399
@@ -6896,27 +6904,29 @@ mod tests {
             fs::write(profile.path().join(name), b"{}").unwrap();
         }
         let path = profile.path().join("settings.json");
-        let mut settings = Settings::default();
-        settings.enabled_plugins = Some(
-            ["z-plugin", "a-plugin", "m-plugin"]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        );
-        settings.enabled_capabilities = Some(std::collections::HashMap::from([
-            ("z-plugin".into(), vec!["second".into(), "first".into()]),
-            ("a-plugin".into(), vec!["read".into()]),
-        ]));
-        settings.plugin_settings = std::collections::HashMap::from([
-            (
-                "z-plugin".into(),
-                serde_json::json!({"level":2,"ordered":["first","second"]}),
+        let settings = Settings {
+            enabled_plugins: Some(
+                ["z-plugin", "a-plugin", "m-plugin"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
             ),
-            (
-                "a-plugin".into(),
-                serde_json::json!({"flag":false,"nested":{"b":2,"a":1}}),
-            ),
-        ]);
+            enabled_capabilities: Some(std::collections::HashMap::from([
+                ("z-plugin".into(), vec!["second".into(), "first".into()]),
+                ("a-plugin".into(), vec!["read".into()]),
+            ])),
+            plugin_settings: std::collections::HashMap::from([
+                (
+                    "z-plugin".into(),
+                    serde_json::json!({"level":2,"ordered":["first","second"]}),
+                ),
+                (
+                    "a-plugin".into(),
+                    serde_json::json!({"flag":false,"nested":{"b":2,"a":1}}),
+                ),
+            ]),
+            ..Settings::default()
+        };
         // Capture the actual writer's f32 tokens. Promoting them through Value
         // can change protected decimals and is a rejection case below.
         settings.save(path.to_str().unwrap()).unwrap();
@@ -7219,10 +7229,12 @@ mod tests {
         for name in ["radial.json", "actions.json"] {
             fs::write(profile.path().join(name), b"{}").unwrap();
         }
-        let mut settings = Settings::default();
-        settings.query_scale = Some(1.17);
-        settings.list_scale = Some(0.5612154);
-        settings.enabled_plugins = Some(["alpha", "zeta"].into_iter().map(str::to_owned).collect());
+        let mut settings = Settings {
+            query_scale: Some(1.17),
+            list_scale: Some(0.5612154),
+            enabled_plugins: Some(["alpha", "zeta"].into_iter().map(str::to_owned).collect()),
+            ..Settings::default()
+        };
         settings.plugin_settings.insert("protected_text".into(), serde_json::json!("counter=18446744073709551617; quoted=\"1e999\"; slash=\\; negative=-0.123456789012345678901"));
         let source = serde_json::to_vec(&settings).unwrap();
         for placement in ["plugin", "unknown"] {
@@ -7295,17 +7307,18 @@ mod tests {
             (0.000001_f32, "0.000001", "1e-6"),
             (10_000_000_000_000.0_f32, "1e13", "10000000000000.0"),
         ] {
-            let mut settings = Settings::default();
-            settings.fuzzy_weight = weight;
-            settings.enabled_plugins =
-                Some(["zeta", "alpha"].into_iter().map(str::to_owned).collect());
-            settings.plugin_settings = std::collections::HashMap::from([
-                (
-                    "zeta".into(),
-                    serde_json::json!({"ordered":[2,1],"flag":false}),
-                ),
-                ("alpha".into(), serde_json::json!({"value":1.25})),
-            ]);
+            let settings = Settings {
+                fuzzy_weight: weight,
+                enabled_plugins: Some(["zeta", "alpha"].into_iter().map(str::to_owned).collect()),
+                plugin_settings: std::collections::HashMap::from([
+                    (
+                        "zeta".into(),
+                        serde_json::json!({"ordered":[2,1],"flag":false}),
+                    ),
+                    ("alpha".into(), serde_json::json!({"value":1.25})),
+                ]),
+                ..Settings::default()
+            };
             assert_eq!(serde_json::to_string(&weight).unwrap(), writer_token);
             // The typed f32 writer must be the source; constructing the tested
             // value through Value/f64 would miss both notation boundaries.
@@ -7415,8 +7428,10 @@ mod tests {
                 serde_json::to_string(&weight).unwrap(),
                 serde_json::to_string(&neighbor).unwrap()
             );
-            let mut settings = Settings::default();
-            settings.fuzzy_weight = weight;
+            let settings = Settings {
+                fuzzy_weight: weight,
+                ..Settings::default()
+            };
             settings.save(path.to_str().unwrap()).unwrap();
             let before_raw = fs::read(&path).unwrap();
             let before = read_profile_hashes(profile.path()).unwrap();
@@ -7624,8 +7639,10 @@ mod tests {
         for name in ["radial.json", "actions.json"] {
             fs::write(profile.path().join(name), b"{}").unwrap();
         }
-        let mut settings = Settings::default();
-        settings.enabled_plugins = Some(["alpha", "beta"].into_iter().map(str::to_owned).collect());
+        let mut settings = Settings {
+            enabled_plugins: Some(["alpha", "beta"].into_iter().map(str::to_owned).collect()),
+            ..Settings::default()
+        };
         settings
             .plugin_settings
             .insert("custom".into(), serde_json::json!({"nested":{"a":1,"b":2}}));

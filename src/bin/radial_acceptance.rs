@@ -19300,6 +19300,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    type NamedMutation<T> = (&'static str, fn(&mut T));
+
     fn h01_evidence_packet() -> HotkeyCaseEvidence {
         let stream = HotkeyCandidateStream::Main;
         let group = 1;
@@ -20792,8 +20794,7 @@ mod tests {
                              taps: usize,
                              initially_visible: bool| {
             let mut visible = initially_visible;
-            let mut group_gesture_index = 0_u64;
-            for _ in 0..taps {
+            for (group_gesture_index, _) in (0..taps).enumerate() {
                 visible = !visible;
                 let invocation_id = 1_000 + gesture_index;
                 let visibility_revision = 2_000 + gesture_index;
@@ -20955,8 +20956,9 @@ mod tests {
                 ];
                 let scheduled_cycle_us =
                     chord_edge_offsets_us[7] + H04_BURST_FIXTURE_TIMING.released.as_micros() as u64;
-                let runner_start_us =
-                    u64::from(group_id) * 10_000_000 + group_gesture_index * scheduled_cycle_us;
+                let runner_start_us = u64::from(group_id) * 10_000_000
+                    + u64::try_from(group_gesture_index).expect("gesture index fits u64")
+                        * scheduled_cycle_us;
                 runner_edges.extend(per_gesture_edges.into_iter().enumerate().map(
                     |(edge_index, (virtual_key, down))| HotkeyRunnerEdgeEvidence {
                         runner_relative_us: runner_start_us + chord_edge_offsets_us[edge_index],
@@ -20991,7 +20993,6 @@ mod tests {
                     },
                 });
                 gesture_index += 1;
-                group_gesture_index += 1;
             }
         };
 
@@ -22012,7 +22013,6 @@ mod tests {
     #[test]
     fn compact_candidate_event_wire_round_trips_non_burst_event_kinds() {
         let mut packet = h04_matrix_evidence_packet();
-        let template = packet.candidate_events[0].clone();
         let draw_focus = HotkeyCandidateEventEvidence {
             stream: HotkeyCandidateStream::Main,
             input_group_id: 90,
@@ -22036,7 +22036,6 @@ mod tests {
             terminal: None,
             activation_edge: None,
             radial_action_stage: None,
-            ..template.clone()
         };
         let native_activation = HotkeyCandidateEventEvidence {
             stream: HotkeyCandidateStream::Main,
@@ -22061,7 +22060,6 @@ mod tests {
             modifiers_match: None,
             provenance: None,
             radial_action_stage: None,
-            ..template.clone()
         };
         let radial_action = HotkeyCandidateEventEvidence {
             stream: HotkeyCandidateStream::Main,
@@ -22086,7 +22084,6 @@ mod tests {
             terminal: None,
             activation_edge: None,
             focus_intent: None,
-            ..template
         };
         packet
             .candidate_events
@@ -22620,7 +22617,7 @@ mod tests {
         let mut packet = h01_evidence_packet();
         append_screen_draw_restore(&mut packet, Some(5), HotkeyRootFocusIntent::ActivateRoot);
         let original = packet.candidate_events[3].clone();
-        let mutations: &[(&str, fn(&mut HotkeyCaseEvidence))] = &[
+        let mutations: &[NamedMutation<HotkeyCaseEvidence>] = &[
             ("missing typed owner", |p| p.follow_on_restorations.clear()),
             ("duplicate typed owner", |p| {
                 p.follow_on_restorations
@@ -23861,6 +23858,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Keeps stage, target, session, generation, value, sequence, click, and edit state independently controllable in the acceptance fixture; bundling them would be a substantial lint-only test migration."
+    )]
     fn gate_c_inspector_edit_fixture(
         stage: GateCInspectorTextStage,
         target_digest: u64,
@@ -23888,46 +23889,6 @@ mod tests {
             focused: !matches!(stage, GateCInspectorTextStage::Visible),
             clicked,
             changed,
-        }
-    }
-
-    fn gate_c_result_row(
-        surface: GateCSurface,
-        order: usize,
-        target_digest: u64,
-        _disambiguator_digest: u64,
-    ) -> GateCResultRowEvidence {
-        let identity = gate_c_identity(surface, 1, 1, 3, 71);
-        let search_sequence = gate_c_control_sequence("search", &identity, None);
-        GateCResultRowEvidence {
-            surface,
-            identity,
-            search_completion_sequence: search_sequence + 3,
-            observed_trace_sequence: search_sequence + 5,
-            order,
-            target_digest,
-            title_digest: 301,
-            type_digest: 302,
-            disambiguator_digest: 400 + target_digest,
-            action_digest: 401,
-            binding_digest: 501 + target_digest,
-            displayed_text_digest: 61,
-            enabled: true,
-            bounds: [
-                10,
-                40 + (order as i32 % 12) * 28,
-                600,
-                64 + (order as i32 % 12) * 28,
-            ],
-            full_bounds: [
-                10,
-                40 + (order as i32 % 12) * 28,
-                600,
-                64 + (order as i32 % 12) * 28,
-            ],
-            client_size: [800, 600],
-            fully_visible: true,
-            readable: true,
         }
     }
 
@@ -23972,6 +23933,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Keeps purpose, result ordering, target/action evidence, and duplicate-control dimensions explicit in the acceptance fixture; a context object would be a substantial lint-only test migration."
+    )]
     fn gate_c_add_search(
         packet: &mut GateCCaseEvidence,
         identity: GateCEditorIdentity,
@@ -24137,6 +24102,10 @@ mod tests {
         control
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Keeps the packet, output sink, operation/input sequence, editor identity, and control/binding correlation dimensions explicit at the acceptance fixture boundary; restructuring it is outside this lint cleanup."
+    )]
     fn gate_c_push_operation(
         packet: &mut GateCCaseEvidence,
         operations: &mut Vec<GateCQ14OperationEvidence>,
@@ -24910,7 +24879,7 @@ mod tests {
             outcome,
             document_before_digest: 28,
             document_after_digest: if cancelled { 28 } else { 29 },
-            document_undo_digest: if cancelled { 28 } else { 28 },
+            document_undo_digest: 28,
             document_redo_digest: if cancelled { 28 } else { 29 },
             unrelated_edit_digest_before: if outcome == GateCInsertionOutcome::Inserted {
                 0
@@ -24957,7 +24926,7 @@ mod tests {
             } else {
                 outcome != GateCInsertionOutcome::Inserted
             },
-            draft_dirty_redo: if cancelled { false } else { true },
+            draft_dirty_redo: !cancelled,
             radial_history_digest_before: 704,
             radial_history_digest_after: if cancelled { 704 } else { 705 },
             radial_history_digest_undo: if cancelled { 0 } else { 706 },
@@ -25007,6 +24976,10 @@ mod tests {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Keeps request/boundary, editor/session/document, history, undo/redo, and dirty-state dimensions independently controllable in the acceptance oracle; grouping them would be a substantial fixture API migration."
+    )]
     fn gate_c_insertion_observation_receipt(
         request_id: u64,
         trace_sequence: u64,
@@ -26774,6 +26747,10 @@ mod tests {
         );
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Keeps generation/document/selection and undo/redo/dirty evidence independently configurable for Gate D corruption cases; a parameter-bag migration is unrelated to this cleanup."
+    )]
     pub(super) fn gate_d_test_observation(
         generation: u64,
         document_digest: u64,
@@ -27766,7 +27743,7 @@ mod tests {
     fn gate_d_r0_rejects_wrong_parent_paths_search_targets_and_back_locations() {
         let valid = gate_d_test_navigation_packet();
         validate_gate_d_evidence_report(&gate_d_test_report("D13", valid.clone())).unwrap();
-        let corruptions: &[(&str, fn(&mut GateDCaseEvidence))] = &[
+        let corruptions: &[NamedMutation<GateDCaseEvidence>] = &[
             ("missing search reveal", |packet| {
                 packet.steps.remove(7);
             }),
@@ -27827,7 +27804,7 @@ mod tests {
     fn gate_d_r0_rejects_generated_source_text_popup_and_hotkey_owner_corruption() {
         let valid = gate_d_test_local_ui_packet();
         validate_gate_d_evidence_report(&gate_d_test_report("D14", valid.clone())).unwrap();
-        let corruptions: &[(&str, fn(&mut GateDCaseEvidence))] = &[
+        let corruptions: &[NamedMutation<GateDCaseEvidence>] = &[
             ("wrong generated source", |packet| {
                 packet.steps[8]
                     .control
@@ -27972,7 +27949,7 @@ mod tests {
         assert_gate_d_corruption_rejected(&valid, "missing checkpoint", |packet| {
             packet.local_ui_proof.as_mut().unwrap().text_undo_checkpoint = None;
         });
-        let corruptions: &[(&str, fn(&mut GateDTextUndoCheckpointEvidence))] = &[
+        let corruptions: &[NamedMutation<GateDTextUndoCheckpointEvidence>] = &[
             ("unsettled starter", |proof| proof.in_flux = true),
             ("different value", |proof| proof.value_digest += 1),
             ("unfocused field", |proof| proof.focused = false),
@@ -28078,7 +28055,7 @@ mod tests {
                 event.event_digest = 999;
             });
         }
-        let corruptions: &[(&str, fn(&mut GateDCaseEvidence))] = &[
+        let corruptions: &[NamedMutation<GateDCaseEvidence>] = &[
             ("marker executed", |packet| {
                 let proof = packet.no_action_proof.as_mut().unwrap();
                 proof.marker_lines_after = 1;
@@ -29761,7 +29738,7 @@ mod tests {
     #[test]
     fn write_report_persists_failed_gate_c_evidence_and_cleanup() {
         let mut report = valid_gate_c_evidence_report();
-        report.outcome = "failed".into();
+        report.outcome = "failed";
         let cleanup_before = serde_json::to_value(&report.cleanup).unwrap();
         let d04_case = report
             .cases
@@ -31803,7 +31780,7 @@ mod tests {
 
     #[test]
     fn gate_c_pending_search_controls_anchor_their_queued_requests() {
-        let mut report = valid_gate_c_evidence_report();
+        let report = valid_gate_c_evidence_report();
         validate_gate_c_evidence_report(&report).unwrap();
 
         let d09 = report
@@ -33807,7 +33784,7 @@ mod tests {
         assert!(
             d04.controls
                 .iter()
-                .all(|control| { matches!(control.identity.session_id, 9 | 10 | 11) })
+                .all(|control| { matches!(control.identity.session_id, 9..=11) })
         );
         assert!(
             d04.controls
@@ -37326,6 +37303,10 @@ mod tests {
         ));
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Keeps query resolution/requirements/outcomes, root policy and visibility, UI acknowledgement, effect counts, and identity independently variable in the oracle; consolidating them would be a substantial lint-only fixture migration."
+    )]
     pub(super) fn query_invocation_for_test(
         cell_id: &str,
         mode: QueryEvidenceMode,
@@ -38373,8 +38354,7 @@ mod tests {
                 "--hotkey",
                 "shift-alt-win-end",
             ])
-            .err()
-            .expect("exact chord remains restricted to its supported suites");
+            .expect_err("exact chord remains restricted to its supported suites");
             assert_eq!(
                 error,
                 "--hotkey shift-alt-win-end requires --suite hotkey, gate-d, or gate-s"
@@ -38390,8 +38370,7 @@ mod tests {
             "--profile-copy",
             "supplied-profile",
         ])
-        .err()
-        .expect("Gate D still requires its isolated deterministic fixture");
+        .expect_err("Gate D still requires its isolated deterministic fixture");
         assert_eq!(
             error,
             "--suite gate-d cannot be combined with --profile-copy"
@@ -38663,7 +38642,6 @@ mod tests {
         assert!(validate_hotkey_burst_trace(&baseline_echo, 3, true).is_err());
         let wrong_baseline_echo = baseline_echo
             .iter()
-            .cloned()
             .map(|line| line.replace("revision=41", "revision=40"))
             .collect::<Vec<_>>();
         assert!(
@@ -38721,8 +38699,12 @@ mod tests {
         format!(
             "evidence:v1; hotkey={}; burst={taps}; parity={}; initial_visible=true; final_visible={}; hook_pairs={taps}; configured_pairs={taps}; short_taps={taps}; visibility_edges={taps}; uninterrupted=true; inter_tap_ui_poll=0; inter_tap_refocus=0; setup_tap=none; preflight=registered_unregistered; runner_observer=exact_injected_pairs; observer_order={}; observer_keys={}; sendinput_down={}; sendinput_up={}; input_desktop=Default; invocation_count={taps}; invocation_ids=100,101,102",
             hotkey.as_str(),
-            if taps % 2 == 0 { "even" } else { "odd" },
-            taps % 2 == 0,
+            if taps.is_multiple_of(2) {
+                "even"
+            } else {
+                "odd"
+            },
+            taps.is_multiple_of(2),
             if is_f11 {
                 "alternating_down_up"
             } else {
@@ -39727,7 +39709,7 @@ mod tests {
             metadata.copied_initial_actions_sha256.as_deref().unwrap()
         );
 
-        let mut settings = match Settings::load_typed(&copy.path().join("settings.json")).unwrap() {
+        let mut settings = match Settings::load_typed(copy.path().join("settings.json")).unwrap() {
             LoadState::Loaded(settings) => settings,
             LoadState::Missing | LoadState::Empty => panic!("normalized settings must load"),
         };
@@ -39935,7 +39917,7 @@ mod tests {
             let copy = tempfile::tempdir().unwrap();
 
             let metadata = prepare_copied_profile(&source_inventory, copy.path()).unwrap();
-            let normalized = match Settings::load_typed(&copy.path().join("settings.json")).unwrap()
+            let normalized = match Settings::load_typed(copy.path().join("settings.json")).unwrap()
             {
                 LoadState::Loaded(settings) => settings,
                 LoadState::Missing | LoadState::Empty => {
@@ -39951,7 +39933,7 @@ mod tests {
             );
             validate_copied_profile_after_run(copy.path(), &metadata).unwrap();
 
-            let original = match Settings::load_typed(&source.path().join("settings.json")).unwrap()
+            let original = match Settings::load_typed(source.path().join("settings.json")).unwrap()
             {
                 LoadState::Loaded(settings) => settings,
                 LoadState::Missing | LoadState::Empty => {
@@ -39993,7 +39975,7 @@ mod tests {
             let error = prepare_copied_profile(&source_inventory, copy.path()).unwrap_err();
             assert!(error.contains("unfinished submenu migration receipt"));
             let unchanged_copy =
-                match Settings::load_typed(&copy.path().join("settings.json")).unwrap() {
+                match Settings::load_typed(copy.path().join("settings.json")).unwrap() {
                     LoadState::Loaded(settings) => settings,
                     LoadState::Missing | LoadState::Empty => {
                         panic!("rejected copy still retains source settings for diagnosis")

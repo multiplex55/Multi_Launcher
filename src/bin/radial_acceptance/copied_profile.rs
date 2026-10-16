@@ -726,8 +726,10 @@ mod tests {
 
     #[test]
     fn profile_inventory_enforces_explicit_size_limits() {
-        assert_eq!(MAX_PROFILE_FILES, 4_096);
-        assert!(MAX_PROFILE_FILE_BYTES >= 85_287_936);
-        assert!(MAX_PROFILE_TOTAL_BYTES >= 160_145_442);
+        const {
+            assert_eq!(MAX_PROFILE_FILES, 4_096);
+            assert!(MAX_PROFILE_FILE_BYTES >= 85_287_936);
+            assert!(MAX_PROFILE_TOTAL_BYTES >= 160_145_442);
+        }
     }
 }

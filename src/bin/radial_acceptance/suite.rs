@@ -21652,7 +21652,7 @@ fn query_radial_click_readiness_requires_current_executable_hover_generation() {
     let check = |lines: &[String]| {
         query_radial_selection_is_current(lines, 4293133620135121168, 8094860968890429075, 5)
     };
-    assert!(check(&[line.clone()]).is_ok());
+    assert!(check(std::slice::from_ref(&line)).is_ok());
     for invalid in [
         line.replace("4293133620135121168", "4293134719646749379"),
         line.replace("8094860968890429075", "99"),
@@ -41552,6 +41552,8 @@ mod tests {
     use super::*;
     use crate::query_cell_digest;
 
+    type NamedMutation<T> = (&'static str, fn(&mut T));
+
     fn action_tab_readiness_fixture() -> (AuthoringObservationEvidence, String, String) {
         let mut before = authoring_observation_evidence(278, 4_128);
         before.editor.session_id = 2;
@@ -42190,7 +42192,7 @@ mod tests {
             baseline_visibility_revision: Some(0),
         };
         HotkeyBurstEvidence {
-            final_visible: taps % 2 == 0,
+            final_visible: taps.is_multiple_of(2),
             invocation_ids: (100..100 + taps as u64).collect(),
             exact_key_edges: expected_hotkey_edges(hotkey, taps),
             input_group_id: 4,
@@ -44456,7 +44458,7 @@ mod tests {
         assert_eq!(proof.value_digest, value_digest);
         assert!(proof.focused);
         assert!(!proof.in_flux);
-        let corruptions: &[(&str, fn(&mut AuthoringControlSnapshot))] = &[
+        let corruptions: &[NamedMutation<AuthoringControlSnapshot>] = &[
             ("missing state", |control| control.text_undo = None),
             ("wrong field", |control| {
                 control.text_undo.as_mut().unwrap().field_id_digest += 1
@@ -46556,9 +46558,8 @@ mod tests {
             );
             assert!(
                 wait_all_trace_budget_profile(&path, Duration::ZERO)
-                    .and_then(|_| {
+                    .map(|_| {
                         admitted.set(admitted.get() + 1);
-                        Ok(())
                     })
                     .is_err(),
                 "{invalid}"
@@ -46567,9 +46568,8 @@ mod tests {
         }
         fs::write(&path, ready).unwrap();
         wait_all_trace_budget_profile(&path, Duration::ZERO)
-            .and_then(|_| {
+            .map(|_| {
                 admitted.set(admitted.get() + 1);
-                Ok(())
             })
             .unwrap();
         assert_eq!(admitted.get(), 1);
@@ -46813,6 +46813,10 @@ mod tests {
         let prompt_then_keep = vec![prompt.to_owned(), keep_editing.to_owned()];
         assert!(gate_c_existing_cleanup_prompt(&prompt_then_keep, 42, 41).is_none());
 
+        #[allow(
+            clippy::too_many_arguments,
+            reason = "Keeps request/baseline, frame/trace boundary, editor/session, and generation dimensions independently controllable in the cleanup correlation oracle; bundling them would be a substantial lint-only test migration."
+        )]
         fn state(
             request_id: u64,
             baseline_request_id: Option<u64>,
@@ -47389,7 +47393,6 @@ mod tests {
 
         let mut reversed_equal_time = trace.clone();
         reversed_equal_time[0] = reversed_equal_time[0].replace("elapsed_ms=10", "elapsed_ms=11");
-        reversed_equal_time[1] = reversed_equal_time[1].replace("elapsed_ms=11", "elapsed_ms=11");
         reversed_equal_time.swap(0, 1);
         assert!(
             correlated_query_trace(&reversed_equal_time, "qa-hidden-first", cell, session).is_err()
@@ -47943,7 +47946,7 @@ mod tests {
             process_id: context.root_process_id,
         };
         let events = screen_draw_follow_on_wait_events(HotkeyRootFocusIntent::ActivateRoot);
-        let mutations: &[(&str, fn(&mut Vec<HotkeyCandidateEventEvidence>))] = &[
+        let mutations: &[NamedMutation<Vec<HotkeyCandidateEventEvidence>>] = &[
             ("missing restore", |events| {
                 events.retain(|e| {
                     e.visibility_source != Some(HotkeyVisibilitySource::ScreenDrawRestore)
@@ -48761,15 +48764,14 @@ mod tests {
             202,
         );
         trace_lines.push(
-            "trace_event=\"configured_primary\" elapsed_ms=60 transition=Press invocation_id=7 modifiers_match=true provenance=ExternalInjected".into(),
+            "trace_event=\"configured_primary\" elapsed_ms=60 transition=Press invocation_id=7 modifiers_match=true provenance=ExternalInjected",
         );
         trace_lines.push(
-            "trace_event=\"configured_primary\" elapsed_ms=70 transition=Release invocation_id=7 modifiers_match=false provenance=ExternalInjected".into(),
+            "trace_event=\"configured_primary\" elapsed_ms=70 transition=Release invocation_id=7 modifiers_match=false provenance=ExternalInjected",
         );
-        trace_lines
-            .push("trace_event=\"short_tap\" elapsed_ms=72 invocation_id=7 terminal=true".into());
+        trace_lines.push("trace_event=\"short_tap\" elapsed_ms=72 invocation_id=7 terminal=true");
         trace_lines.push(
-            "trace_event=\"desired_visibility\" elapsed_ms=74 visible=true revision=9 source=ToggleBatch invocation_id=7".into(),
+            "trace_event=\"desired_visibility\" elapsed_ms=74 visible=true revision=9 source=ToggleBatch invocation_id=7",
         );
         fs::write(&trace_path, trace_lines.join("\n")).unwrap();
         complete_hotkey_capture_segment_in(&mut capture, &trace_path, trace_lines.len()).unwrap();
@@ -49139,7 +49141,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, line)| {
-                parse_hotkey_candidate_event(*line, stream, 6, purpose, index + 1)
+                parse_hotkey_candidate_event(line, stream, 6, purpose, index + 1)
                     .expect("parse legacy chord trace event")
             })
             .collect::<Vec<_>>();
@@ -49188,7 +49190,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, line)| {
-                parse_hotkey_candidate_event(*line, stream, 6, purpose, index + 1)
+                parse_hotkey_candidate_event(line, stream, 6, purpose, index + 1)
                     .expect("parse captured H16 complex legacy trace")
             })
             .collect::<Vec<_>>();
@@ -53884,21 +53886,21 @@ mod tests {
             7,
         ));
 
-        let mut wrong_session = after.clone();
+        let mut wrong_session = after;
         wrong_session.session_id += 1;
         assert!(!gate_c_canvas_cell_selection_transition_matches(
             &before,
             &wrong_session,
             7
         ));
-        let mut wrong_cell = after.clone();
+        let mut wrong_cell = after;
         wrong_cell.slot_index = Some(1);
         assert!(!gate_c_canvas_cell_selection_transition_matches(
             &before,
             &wrong_cell,
             7
         ));
-        let mut no_selection = after.clone();
+        let mut no_selection = after;
         no_selection.selected = false;
         assert!(!gate_c_canvas_cell_selection_transition_matches(
             &before,
@@ -53988,7 +53990,7 @@ mod tests {
             &cell, &inspector, 17, 704
         ));
 
-        let mut unselected = cell.clone();
+        let mut unselected = cell;
         unselected.selected = false;
         assert!(!gate_c_q14_reopened_inspector_follows_selected_cell(
             &unselected,
@@ -53997,7 +53999,7 @@ mod tests {
             704
         ));
 
-        let mut wrong_cell = cell.clone();
+        let mut wrong_cell = cell;
         wrong_cell.slot_index = Some(1);
         assert!(!gate_c_q14_reopened_inspector_follows_selected_cell(
             &wrong_cell,
@@ -54935,7 +54937,11 @@ mod tests {
         );
         let count = make("result_count", [10, 540, 120, 568], [10, 540, 120, 568], 20);
         assert_eq!(
-            gate_c_inspector_header_restore_step(&[count.clone()], identity, [800, 600]),
+            gate_c_inspector_header_restore_step(
+                std::slice::from_ref(&count),
+                identity,
+                [800, 600]
+            ),
             GateCInspectorHeaderRestoreStep::Wait,
             "a partial result-count frame is not evidence that the query header needs scrolling"
         );
@@ -54951,12 +54957,20 @@ mod tests {
         );
         let field = make("query_field", [10, 20, 120, 48], [10, 20, 120, 48], 22);
         assert_eq!(
-            gate_c_inspector_header_restore_step(&[field.clone()], identity, [800, 600]),
+            gate_c_inspector_header_restore_step(
+                std::slice::from_ref(&field),
+                identity,
+                [800, 600]
+            ),
             GateCInspectorHeaderRestoreStep::Ready(field)
         );
         let search = make("search", [130, 20, 200, 48], [130, 20, 200, 48], 23);
         assert_eq!(
-            gate_c_inspector_header_restore_step(&[search.clone()], identity, [800, 600]),
+            gate_c_inspector_header_restore_step(
+                std::slice::from_ref(&search),
+                identity,
+                [800, 600]
+            ),
             GateCInspectorHeaderRestoreStep::Wait,
             "a visible Search button is not the query-field receipt that will be clicked"
         );
@@ -55029,7 +55043,11 @@ mod tests {
             "horizontal clipping cannot be repaired by scrolling the fixed Properties header"
         );
         assert_eq!(
-            gate_c_inspector_header_restore_step(&[clipped_field.clone()], identity, [800, 600]),
+            gate_c_inspector_header_restore_step(
+                std::slice::from_ref(&clipped_field),
+                identity,
+                [800, 600]
+            ),
             GateCInspectorHeaderRestoreStep::Scroll(clipped_field),
             "only a fresh clipped Inspector query field authorizes an outer wheel"
         );
@@ -56412,7 +56430,11 @@ mod tests {
         );
         let fresh_interior = row(identity, 13, [32, 170, 300, 210]);
         assert_eq!(
-            gate_c_latest_scroll_anchor(&[fresh_interior.clone()], identity, Some(&anchor)),
+            gate_c_latest_scroll_anchor(
+                std::slice::from_ref(&fresh_interior),
+                identity,
+                Some(&anchor)
+            ),
             Some(fresh_interior)
         );
 

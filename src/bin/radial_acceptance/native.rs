@@ -8234,6 +8234,10 @@ fn send_pointer_correction_after_cursor(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps pointer target/surface/point/deadline and independent read/owner/correction/wait injections explicit at the native timing test seam; bundling this boundary would be a substantial lint-only migration."
+)]
 fn wait_for_pointer_move_ack_with(
     operation: &str,
     surface: &str,
@@ -11951,9 +11955,7 @@ mod tests {
             Ok(super::PointerButtonAckOrder::UpBeforeDown)
         );
 
-        let same_sample = concat!(
-            "trace_event=\"designer_pointer\" pointer_down=true pointer_up=true window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id=9 generation=3\n",
-        );
+        let same_sample = "trace_event=\"designer_pointer\" pointer_down=true pointer_up=true window_under_cursor_hwnd=41 cursor_screen_x=960 cursor_screen_y=600 session_id=9 generation=3\n";
         assert_eq!(
             super::scrollbar_pointer_button_ack_order_after(same_sample, 0, (960, 600), 41, 9, 3),
             Ok(super::PointerButtonAckOrder::UpAfterDown)
