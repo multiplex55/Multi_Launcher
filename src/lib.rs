@@ -81,6 +81,7 @@ pub mod window_catalog;
 
 pub mod global_hotkey;
 pub mod graph;
+pub mod hash_generator;
 pub mod gui;
 pub mod window_manager;
 pub mod windows_layout;
