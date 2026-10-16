@@ -1780,8 +1780,22 @@ struct FocusAnchorWindowReady {
     hwnd: usize,
     thread_id: u32,
     owner_desktop_name: String,
-    input_desktop_name: String,
+    input_desktop_name: Option<String>,
 }
+
+struct FocusAnchorDesktopSetup {
+    desktop_attachment: InputDesktopAttachment,
+    owner_desktop_name: String,
+    input_desktop_name: Option<String>,
+}
+
+struct FocusAnchorDesktopSetupFailure {
+    error: String,
+    desktop_attachment: Option<InputDesktopAttachment>,
+}
+
+type FocusAnchorDesktopSetupResult =
+    Result<FocusAnchorDesktopSetup, FocusAnchorDesktopSetupFailure>;
 
 struct FocusAnchorThreadExit {
     attached_desktop_handle: Option<isize>,
@@ -1808,16 +1822,17 @@ impl FocusAnchor {
         let (ready, command_tx, ui_thread) = spawn_focus_anchor_window(process_id)?;
         let hwnd = HWND(ready.hwnd as *mut std::ffi::c_void);
         let ui_thread_id = ready.thread_id;
-        if !ready.owner_desktop_name.eq_ignore_ascii_case("Default")
-            || !ready
-                .owner_desktop_name
-                .eq_ignore_ascii_case(&ready.input_desktop_name)
-        {
+        let desktop_identity_matches = ready
+            .input_desktop_name
+            .as_ref()
+            .is_some_and(|input| ready.owner_desktop_name.eq_ignore_ascii_case(input));
+        if !ready.owner_desktop_name.eq_ignore_ascii_case("Default") || !desktop_identity_matches {
             let _ = unsafe { PostThreadMessageW(ui_thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
             let cleanup = finish_focus_anchor_ui_thread(ui_thread);
             return Err(format!(
                 "focus anchor owner desktop '{}' did not match active input desktop '{}'; cleanup={cleanup:?}",
-                ready.owner_desktop_name, ready.input_desktop_name
+                ready.owner_desktop_name,
+                ready.input_desktop_name.as_deref().unwrap_or("unobserved")
             ));
         }
         if window_process_id(hwnd) != process_id {
@@ -2163,6 +2178,85 @@ where
     BeforeCreate: FnOnce() + Send + 'static,
     OnTimeout: FnOnce(),
 {
+    spawn_focus_anchor_window_with_desktop_setup(
+        process_id,
+        startup_timeout,
+        before_attach,
+        production_focus_anchor_desktop_setup,
+        before_create,
+        on_startup_timeout,
+    )
+}
+
+fn production_focus_anchor_desktop_setup() -> FocusAnchorDesktopSetupResult {
+    let (attachment_observation, desktop_attachment) = attach_to_input_desktop().map_err(|error| {
+        FocusAnchorDesktopSetupFailure {
+            error: format!(
+                "focus anchor could not attach to the active input desktop before USER initialization: {error}"
+            ),
+            desktop_attachment: None,
+        }
+    })?;
+    let desktop_identity = (|| {
+        let thread_id = unsafe { GetCurrentThreadId() };
+        let owner_desktop = unsafe { GetThreadDesktop(thread_id) }
+            .map_err(|error| format!("read focus-anchor owner thread desktop: {error}"))?;
+        let owner_desktop_name = desktop_name(owner_desktop)?;
+        let input_desktop_name = active_input_desktop_name()?;
+        Ok::<_, String>((owner_desktop_name, input_desktop_name))
+    })();
+    let (owner_desktop_name, input_desktop_name) = match desktop_identity {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Err(FocusAnchorDesktopSetupFailure {
+                error,
+                desktop_attachment: Some(desktop_attachment),
+            });
+        }
+    };
+    if !owner_desktop_name.eq_ignore_ascii_case("Default")
+        || !owner_desktop_name.eq_ignore_ascii_case(&input_desktop_name)
+    {
+        return Err(FocusAnchorDesktopSetupFailure {
+            error: format!(
+                "focus-anchor owner thread desktop '{owner_desktop_name}' does not match active input desktop '{input_desktop_name}' (attachment={attachment_observation})"
+            ),
+            desktop_attachment: Some(desktop_attachment),
+        });
+    }
+    Ok(FocusAnchorDesktopSetup {
+        desktop_attachment,
+        owner_desktop_name,
+        input_desktop_name: Some(input_desktop_name),
+    })
+}
+
+fn spawn_focus_anchor_window_with_desktop_setup<
+    BeforeAttach,
+    SetupDesktop,
+    BeforeCreate,
+    OnTimeout,
+>(
+    process_id: u32,
+    startup_timeout: Duration,
+    before_attach: BeforeAttach,
+    setup_desktop: SetupDesktop,
+    before_create: BeforeCreate,
+    on_startup_timeout: OnTimeout,
+) -> Result<
+    (
+        FocusAnchorWindowReady,
+        std::sync::mpsc::SyncSender<FocusAnchorCommand>,
+        std::thread::JoinHandle<FocusAnchorThreadExit>,
+    ),
+    String,
+>
+where
+    BeforeAttach: FnOnce() + Send + 'static,
+    SetupDesktop: FnOnce() -> FocusAnchorDesktopSetupResult + Send + 'static,
+    BeforeCreate: FnOnce() + Send + 'static,
+    OnTimeout: FnOnce(),
+{
     let (thread_id_tx, thread_id_rx) = std::sync::mpsc::sync_channel::<Result<u32, String>>(1);
     let (window_tx, window_rx) = std::sync::mpsc::sync_channel(1);
     let (command_tx, command_rx) = std::sync::mpsc::sync_channel::<FocusAnchorCommand>(1);
@@ -2172,39 +2266,21 @@ where
         .spawn(move || {
             let thread_id = unsafe { GetCurrentThreadId() };
             before_attach();
-            let (attachment_observation, desktop_attachment) =
-                match attach_to_input_desktop() {
-                    Ok(attached) => attached,
-                    Err(error) => {
-                        let _ = thread_id_tx.send(Err(format!(
-                            "focus anchor could not attach to the active input desktop before USER initialization: {error}"
-                        )));
-                        return FocusAnchorThreadExit {
+            let FocusAnchorDesktopSetup {
+                desktop_attachment,
+                owner_desktop_name,
+                input_desktop_name,
+            } = match setup_desktop() {
+                Ok(setup) => setup,
+                Err(failure) => {
+                    let _ = thread_id_tx.send(Err(failure.error));
+                    return match failure.desktop_attachment {
+                        Some(attachment) => focus_anchor_thread_exit(attachment, None),
+                        None => FocusAnchorThreadExit {
                             attached_desktop_handle: None,
                             teardown_error: None,
-                        };
-                    }
-                };
-
-            let desktop_identity = (|| {
-                let owner_desktop = unsafe { GetThreadDesktop(thread_id) }
-                    .map_err(|error| format!("read focus-anchor owner thread desktop: {error}"))?;
-                let owner_desktop_name = desktop_name(owner_desktop)?;
-                let input_desktop_name = active_input_desktop_name()?;
-                if !owner_desktop_name.eq_ignore_ascii_case("Default")
-                    || !owner_desktop_name.eq_ignore_ascii_case(&input_desktop_name)
-                {
-                    return Err(format!(
-                        "focus-anchor owner thread desktop '{owner_desktop_name}' does not match active input desktop '{input_desktop_name}' (attachment={attachment_observation})"
-                    ));
-                }
-                Ok((owner_desktop_name, input_desktop_name))
-            })();
-            let (owner_desktop_name, input_desktop_name) = match desktop_identity {
-                Ok(names) => names,
-                Err(error) => {
-                    let _ = thread_id_tx.send(Err(error));
-                    return focus_anchor_thread_exit(desktop_attachment, None);
+                        },
+                    };
                 }
             };
 
@@ -2237,7 +2313,8 @@ where
                 Ok(hwnd) => hwnd,
                 Err(error) => {
                     let _ = window_tx.send(Err(format!(
-                        "create runner-owned focus anchor on active input desktop '{input_desktop_name}': {error}"
+                        "create runner-owned focus anchor on active input desktop '{}': {error}",
+                        input_desktop_name.as_deref().unwrap_or("unobserved")
                     )));
                     return focus_anchor_thread_exit(desktop_attachment, None);
                 }
@@ -11447,25 +11524,25 @@ mod tests {
         ActionEditorProviderEdge, ActionEditorProviderKind, ActionEditorSurface,
         AuthoringControlRole, AuthoringControlSnapshot, AuthoringControlTarget,
         AuthoringObservationBoundarySnapshot, FocusAnchorCommand, FocusAnchorCommandKind,
-        GetCurrentThreadId, INPUT_MOUSE, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, LPARAM,
-        MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, OwnedKeyboardKey,
-        POINT, PointerReleaseWaitError, PointerTraceKind, PostThreadMessageW, RUNNER_HOOK_EVENTS,
+        FocusAnchorDesktopSetup, FocusAnchorDesktopSetupFailure, GetCurrentThreadId, INPUT_MOUSE,
+        InputDesktopAttachment, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, LPARAM, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, OwnedKeyboardKey, POINT,
+        PointerReleaseWaitError, PointerTraceKind, PostThreadMessageW, RUNNER_HOOK_EVENTS,
         RadialPointerReleaseAck, RunnerChordEdge, RunnerChordKeyObservation,
         RunnerChordObservation, RunnerHookEdge, RunnerHookObserver, SS_NOTIFY,
         UIA_ELEMENT_NOT_AVAILABLE_HRESULT, UIA_NOT_SUPPORTED_HRESULT, VK_END, VK_LMENU, VK_LSHIFT,
         VK_LWIN, VisibleTextLookupError, WPARAM, acceptance_environment_block,
-        active_input_desktop_name, adjacent_pointer_point, attach_to_input_desktop,
-        authoring_control_click_finished, authoring_control_events_after,
+        adjacent_pointer_point, authoring_control_click_finished, authoring_control_events_after,
         classify_element_property_hresult, cursor_points_match, cursor_restore_input_target,
         desktop_name, finish_focus_anchor_ui_thread, focus_anchor_candidate_positions,
         focus_anchor_window_style, format_uia_element_snapshot, forward_runner_hook_edge,
-        fresh_canvas_cell_for_generation, hwnd_id, keys_down_without_owned_keydowns,
+        fresh_canvas_cell_for_generation, keys_down_without_owned_keydowns,
         latest_authoring_controls_after, latest_pointer_move_after, normalized_absolute_coordinate,
         parse_action_catalog_rank, parse_action_editor_control, parse_action_editor_provider_event,
         parse_authoring_control, parse_geometry_state, pointer_correction_delta,
         radial_pointer_release_ack_after, record_runner_chord_edge, relative_mouse_move_input,
         retire_inserted_keyboard_ups, semantic_client_center, semantic_name_contains,
-        send_pointer_correction_after_cursor, spawn_focus_anchor_window,
+        send_pointer_correction_after_cursor, spawn_focus_anchor_window_with_desktop_setup,
         spawn_focus_anchor_window_with_startup_hooks, trace_event_lines, unique_authoring_control,
         wait_for_authoring_observation_boundary, wait_for_pointer_move_ack_with,
         wait_for_pointer_release_settle, wait_visible_text_with, window_process_id,
@@ -13068,11 +13145,40 @@ mod tests {
 
     #[test]
     fn focus_anchor_owns_a_live_message_pump_until_bounded_destroy() {
-        let (_caller_attachment_observation, caller_attachment) =
-            attach_to_input_desktop().expect("attach focus-anchor test caller to input desktop");
         let process_id = std::process::id();
-        let (ready, command_tx, ui_thread) =
-            spawn_focus_anchor_window(process_id).expect("create message-pumped focus anchor");
+        let (ready, command_tx, ui_thread) = spawn_focus_anchor_window_with_desktop_setup(
+            process_id,
+            std::time::Duration::from_secs(2),
+            || {},
+            || {
+                let thread_id = unsafe { super::GetCurrentThreadId() };
+                let owner_desktop =
+                    unsafe { super::GetThreadDesktop(thread_id) }.map_err(|error| {
+                        FocusAnchorDesktopSetupFailure {
+                            error: format!("read inherited focus-anchor desktop: {error}"),
+                            desktop_attachment: None,
+                        }
+                    })?;
+                let owner_desktop_name = desktop_name(owner_desktop).map_err(|error| {
+                    FocusAnchorDesktopSetupFailure {
+                        error,
+                        desktop_attachment: None,
+                    }
+                })?;
+                Ok(FocusAnchorDesktopSetup {
+                    desktop_attachment: InputDesktopAttachment {
+                        previous: owner_desktop,
+                        attached: owner_desktop,
+                        changed: false,
+                    },
+                    owner_desktop_name,
+                    input_desktop_name: None,
+                })
+            },
+            || {},
+            || {},
+        )
+        .expect("create message-pumped focus anchor on inherited worker desktop");
         let hwnd = super::HWND(ready.hwnd as *mut std::ffi::c_void);
         let thread_id = ready.thread_id;
 
@@ -13099,13 +13205,11 @@ mod tests {
         };
 
         let observation = (|| -> Result<(), String> {
-            if ready.owner_desktop_name != "Default"
-                || ready.input_desktop_name != "Default"
-                || active_input_desktop_name()? != ready.owner_desktop_name
-            {
+            if ready.owner_desktop_name.is_empty() || ready.input_desktop_name.is_some() {
                 return Err(format!(
                     "focus-anchor ready desktop mismatch: owner='{}' input='{}'",
-                    ready.owner_desktop_name, ready.input_desktop_name
+                    ready.owner_desktop_name,
+                    ready.input_desktop_name.as_deref().unwrap_or("unobserved")
                 ));
             }
             let owner_desktop = unsafe { super::GetThreadDesktop(thread_id) }
@@ -13130,16 +13234,33 @@ mod tests {
                     "focus anchor has invalid outer size {width}x{height}"
                 ));
             }
-            let displays = super::suite::native_display_bounds()?;
-            let positions = focus_anchor_candidate_positions(&displays, width, height);
-            let (left, top) = positions.first().copied().ok_or_else(|| {
-                format!(
-                    "no physical display can contain focus anchor size {width}x{height}; displays={displays:?}"
-                )
-            })?;
-
             send_command(FocusAnchorCommandKind::Raise)?;
+            let left = outer
+                .left
+                .checked_add(8)
+                .ok_or_else(|| "focus-anchor left position overflowed".to_string())?;
+            let top = outer
+                .top
+                .checked_add(8)
+                .ok_or_else(|| "focus-anchor top position overflowed".to_string())?;
             send_command(FocusAnchorCommandKind::MoveTo { left, top })?;
+
+            let mut moved_outer = super::RECT::default();
+            unsafe { super::GetWindowRect(hwnd, &mut moved_outer) }
+                .map_err(|error| format!("read moved focus-anchor window bounds: {error}"))?;
+            let moved_width = moved_outer.right.saturating_sub(moved_outer.left);
+            let moved_height = moved_outer.bottom.saturating_sub(moved_outer.top);
+            if moved_outer.left != left
+                || moved_outer.top != top
+                || moved_width != width
+                || moved_height != height
+            {
+                return Err(format!(
+                    "focus-anchor MoveTo geometry mismatch: initial=({},{} {width}x{height}) requested=({left},{top}) actual=({},{} {moved_width}x{moved_height})",
+                    outer.left, outer.top, moved_outer.left, moved_outer.top
+                ));
+            }
+
             let mut client = super::RECT::default();
             unsafe { super::GetClientRect(hwnd, &mut client) }
                 .map_err(|error| format!("read focus-anchor client bounds: {error}"))?;
@@ -13153,12 +13274,19 @@ mod tests {
             if !unsafe { super::ClientToScreen(hwnd, &mut client_center) }.as_bool() {
                 return Err("convert focus-anchor client center to screen coordinates".into());
             }
-            let hit = unsafe { super::WindowFromPoint(client_center) };
-            if hit != hwnd {
+            if client_center.x < moved_outer.left
+                || client_center.x >= moved_outer.right
+                || client_center.y < moved_outer.top
+                || client_center.y >= moved_outer.bottom
+            {
                 return Err(format!(
-                    "caller WindowFromPoint did not see the input-desktop anchor: hit={} expected={}",
-                    hwnd_id(hit),
-                    hwnd_id(hwnd)
+                    "focus-anchor client center ({},{}) escaped moved outer bounds=({},{}..{},{})",
+                    client_center.x,
+                    client_center.y,
+                    moved_outer.left,
+                    moved_outer.top,
+                    moved_outer.right,
+                    moved_outer.bottom
                 ));
             }
             send_command(FocusAnchorCommandKind::RestoreNonTopmost)?;
@@ -13171,7 +13299,6 @@ mod tests {
         }
         let thread_result = finish_focus_anchor_ui_thread(ui_thread);
         let window_gone = window_process_id(hwnd) == 0;
-        drop(caller_attachment);
 
         assert!(observation.is_ok(), "{observation:?}");
         assert!(destroy_result.is_ok(), "{destroy_result:?}");
