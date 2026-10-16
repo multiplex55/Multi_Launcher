@@ -27,7 +27,7 @@
 | File operations | **M10** | Hot Folder Automation | Persisted watched-folder rules, safe built-in actions and explicit launcher/macro actions. |
 | Desktop utilities | **M11** | Screenshot Pinboard | Independent, temporary floating screenshots with multiple pins, zoom and click-through. |
 | Desktop utilities | **M12** | Click Visualization | Lightweight configurable mouse click visual effects through the `mouse` feature family. |
-| Integration | **M13** | Integration, cleanup and handoff | Documentation, compatibility tests, screenshots and final report; no feature creep. |
+| Integration | **M13** | Integration, cleanup and final Clippy gate | Documentation, compatibility tests, screenshots, then **Clippy only at the very end**; no feature creep. |
 
 **Exactly 14 features:** M2 contains two; M5 contains two; the other ten feature milestones each contain one.
 
@@ -80,9 +80,9 @@ The following paths were present in the planning snapshot; **verify against the 
 ### 3.2 Active checkpoint commit cadence
 
 - Treat `M1-A`, `M1-B`, etc. as **small coherent commits** with working integration boundaries. Aim for **3–5 commits per normal milestone**; 5–6 for large file-automation/XML milestones. Subdivide further only if the code would otherwise become a large unreviewable diff.
-- Commit after the checkpoint's relevant behavior is implemented, targeted tests pass and Clippy shows **no newly introduced warnings**. Where baseline Clippy is clean, keep it clean: preferred command `cargo clippy --all-targets -- -D warnings` on the Windows target/toolchain. Run it at **each completed checkpoint**, taking advantage of incremental compilation; do not postpone warnings until M13.
+- Commit after the checkpoint's relevant behavior is implemented, focused tests or build checks pass, and the touched diff is reviewed. **Clippy warnings are allowed during M0–M12 and must not prevent checkpoint commits. Do not run Clippy at any checkpoint or at M0.** Accumulate lint cleanup for the dedicated **final step, M13-D**, after all other implementation, ordinary verification, UI evidence, formatting, documentation and commits are finished.
 - Before each commit inspect `git status`, `git diff --check` and the touched diff. Do not stage pre-existing unrelated user changes. Commit messages: `feat(search): [M1-B] add scope chips and keyboard switching`, `feat(snippets): [M2-C] add tag filters`, `test(rename): [M8-D] cover collision and undo`, etc.
-- An early failure during active editing is normal; fix it within the checkpoint. **Never claim a failing/blocked check passed.** Do not commit a knowingly broken feature merely to maintain cadence.
+- An early compiler or test failure during active editing is normal; fix it within the checkpoint. **Never claim a failing/blocked check passed.** Do not commit a knowingly broken feature merely to maintain cadence. **Lint-only warnings are explicitly deferred** and do not make a checkpoint blocked.
 - Do not force-push, reset away someone else's work, change unrelated branches or simultaneously assign multiple agents overlapping write access. Write-heavy checkpoints execute **sequentially**. Planner/reviewer agents may inspect in parallel read-only.
 
 ### 3.3 Exact bounded verification policy — prevent spiraling
@@ -90,7 +90,7 @@ The following paths were present in the planning snapshot; **verify against the 
 For **each checkpoint**, select:
 
 1. **At most two focused automated test targets/slices** proving the changed behavior (one often suffices); no unrelated tests.
-2. **One Clippy gate** after substantive code is ready. During repair, run only the narrowest needed compiler/test check, then repeat the gate **once after correction**. This does not excuse shipping new warnings.
+2. Use the narrowest useful **compiler, unit/integration test, or formatting check** for code correctness. **Do not run `cargo clippy`, `cargo clippy --fix`, or any Clippy wrapper during M0–M12.** Clippy is reserved solely for final cleanup M13-D. Its warnings may accumulate during implementation; they are not checkpoint failures.
 3. **At most one native UI smoke session per completed *feature milestone***, generally with **1–3 screenshots** covering its principal visible states; do not repeat screenshot tours at every tiny commit.
 4. Only M0 or M13 (or concrete shared-infrastructure regressions) may justify wider targeted integration checks; **do not automatically run full Nextest repeatedly** or initiate performance benchmarking campaigns.
 
@@ -110,7 +110,7 @@ For **each checkpoint**, select:
 
 ### 3.5 Progress and reviewer handoff
 
-Create a small progress document such as `docs/plans/productivity_expansion_progress.md` at M0 (location may follow existing project convention). Track for each checkpoint: status (`pending`, `in_progress`, `complete`, `blocked`), commit hash, focused test name/result, Clippy result, screenshot path if any, and one-line issue. Update at checkpoint boundaries only; avoid verbose continuous logging.
+Create a small progress document such as `docs/plans/productivity_expansion_progress.md` at M0 (location may follow existing project convention). Track for each checkpoint: status (`pending`, `in_progress`, `complete`, `blocked`), commit hash, focused test name/result, screenshot path if any, and one-line issue. **Do not create per-checkpoint Clippy fields or gates; mark lint review as globally deferred to M13-D.** Complete and commit the ledger before the final Clippy pass; record the final Clippy result in the concluding report so no source or documentation edits are needed afterward. Update at checkpoint boundaries only; avoid verbose continuous logging.
 
 For each milestone: planner (bounded source check) → **single implementer owning writes** → focused reviewer (correctness/scope/side effects) → implementer fixes substantive findings → checkpoint commit → next milestone. Do not repeatedly re-plan approved requirements or run successive review cycles after findings are resolved.
 
@@ -122,7 +122,7 @@ For each milestone: planner (bounded source check) → **single implementer owni
 - Guard system hooks and overlays from capturing their own injected inputs or interfering with radial menus, MkMacro, native recording or user input.
 - Use existing Windows-specific wrappers where appropriate. No new global input hook or polling loop without evidence the existing runtime cannot supply the events.
 - Document new commands in in-app help and README at each respective milestone, rather than saving everything for the final sprint.
-- Do not relax tests, disable lint gates or mask failures as the way to satisfy a checkpoint.
+- Do not relax tests or mask build/test failures to satisfy a checkpoint. Do not add broad Clippy suppressions during implementation; reserve all Clippy review and project-owned lint cleanup for M13-D. Never alter vendored crate sources solely to silence Clippy.
 
 ---
 
@@ -149,7 +149,7 @@ New features must appear through existing plugin registration, query prefixes an
 
 ### 4.4 Done means demonstrably complete
 
-A milestone is complete only when its primary user flow, error/empty states, relevant cancellation or recovery, focused tests, plugin/dialog wiring, help/doc updates, and mandatory lint check are addressed. UI screenshots are opportunistic evidence where a supported GUI session exists. **“Code compiles” alone is not completion.** If environmental limitations prevent some verification, label that limitation explicitly rather than pretending it was performed.
+A feature milestone (M1–M12) is complete when its primary user flow, error/empty states, relevant cancellation or recovery, focused tests, plugin/dialog wiring and help/doc updates are addressed. **Clippy is not a feature-milestone acceptance criterion; it is checked and cleaned up once, at the very end in M13-D.** UI screenshots are opportunistic evidence where a supported GUI session exists. **“Code compiles” alone is not completion.** If environmental limitations prevent some verification, label that limitation explicitly rather than pretending it was performed.
 
 ---
 
@@ -170,7 +170,7 @@ Dependency edges **do not** authorize broad framework refactoring. If current so
 - Record branch/HEAD, working-tree cleanliness, toolchain and Windows host availability. Preserve pre-existing modifications, including untracked files.
 - Read `AGENTS.md`, trace current launcher search, commands and plugin registry; trace relevant snippets, file search, JSON, regex, screenshots, mouse and persistence paths using the checkout, not historical assumptions.
 - List existing directly relevant test targets and note which individual baseline behaviors are already proven. Identify only material conflicts between this plan and repository state.
-- Record the current `cargo clippy --all-targets -- -D warnings` outcome **once** (use the project's appropriate target/profile if needed). If baseline contains pre-existing warnings, record the exact set; perform only a bounded directly relevant cleanup before feature work or identify unrelated baseline issues separately. Do not spend unlimited cycles fixing unrelated old lints.
+- **Do not run Clippy or collect a Clippy baseline in M0.** Confirm only the toolchain, relevant build/test availability and current repository state. All existing and newly introduced Clippy warnings, if any, are deliberately deferred to the last cleanup step M13-D; do not spend M0 time on lint remediation.
 
 ### M0-B — Create compact execution ledger and fixture policy
 
@@ -178,7 +178,7 @@ Dependency edges **do not** authorize broad framework refactoring. If current so
 - Record that UI smoke is autonomous and that file-changing tests are limited to disposable fixtures.
 - No artificial M0 commit if no repository files changed. If the ledger is created, use `docs(plan): [M0-B] initialize expansion ledger`.
 
-**Acceptance:** branch/checkout known, relevant owners identified, lint baseline honestly recorded, safety/evidence locations established; no feature or unrelated source churn.
+**Acceptance:** branch/checkout known, relevant owners identified, no premature Clippy run, safety/evidence locations established; no feature or unrelated source churn.
 
 ---
 ## M1 — Search Scope Filters
@@ -210,7 +210,7 @@ Dependency edges **do not** authorize broad framework refactoring. If current so
 - When GUI automation is available, launch Multi Launcher and capture one screen with scope controls and one scoped result state, using safe generated test data.
 - **Commit:** `test(search): [M1-C] protect scoped and unscoped result behavior`.
 
-**Done criteria:** five scopes filter correct results, keyboard interaction works, `All` remains behaviorally identical, existing plugin prefixes remain usable, no per-keystroke heavy rescans or new Clippy warnings.
+**Done criteria:** five scopes filter correct results, keyboard interaction works, `All` remains behaviorally identical, existing plugin prefixes remain usable, and no per-keystroke heavy rescans. Clippy lint cleanup is deferred to M13-D.
 
 **Non-goals:** new indexer, searching arbitrary file contents in the main search, provider-wide rewrite, persistent user-defined scopes, radial filtering, search ranking overhaul.
 
@@ -478,7 +478,7 @@ Dependency edges **do not** authorize broad framework refactoring. If current so
 - Add `xml` command/help, targeted integrated fixtures, and autonomous screenshots of valid tree + XPath matches and an XSD failure; avoid reading personal XML documents.
 - **Commit:** `feat(xml): [M7-F] complete XML toolkit UI and workflows`.
 
-**Done criteria:** XML parse, format, tree, XPath, XSD and file operations all work together with explicit error states and secure local-first resource resolution; Clippy clean and representative native screenshot(s) if supported.
+**Done criteria:** XML parse, format, tree, XPath, XSD and file operations all work together with explicit error states and secure local-first resource resolution; representative native screenshot(s) if supported. Clippy is deferred to M13-D.
 
 **Non-goals:** XML authoring IDE, XSLT, XML digital signatures, automatic remote schema downloads, HTML parsing, unlimited-size streaming XML editor, general WYSIWYG forms.
 
@@ -732,20 +732,44 @@ Execute **one focused integration pass** across the actual changed boundaries, s
 
 Run targeted Nextest integration suites for shared changed logic. If changes materially affect a shared command dispatcher, add one scoped plugin-command routing suite; do not run unrelated full test targets for appearance of completeness.
 
-### M13-B — Code cleanup, Clippy and final native screenshot collection
+### M13-B — Final code cleanup, formatting and native screenshot collection (no Clippy)
 
-- Verify touched code is `cargo fmt` clean and **`cargo clippy --all-targets -- -D warnings`** passes with no warnings introduced by this effort. Resolve any *in-scope* lint and compiler errors. Do not start broad unrelated lint modernization.
-- Inspect cumulative diff for temporary debug code, abandoned adapters, duplicated implementation, missing cancellations, accidental formatting churn, old code paths made obsolete by the new features and malformed data migrations.
+- Inspect the cumulative diff for temporary debug code, abandoned adapters, duplicated implementation, missing cancellations, accidental formatting churn, obsolete paths and malformed data migrations. Resolve concrete issues without starting a broad refactor.
+- Complete **all ordinary build/test verification and `cargo fmt` / formatting checks before Clippy**. Format project-owned touched code only; do not reformat vendored sources. Commit any necessary non-lint cleanup now.
 - Capture (or confirm previously captured) a compact **feature UI gallery**: search scopes, snippet tags/variables, Paste Sequence, Hash, JSON explorer, Regex cases, XML validation/tree, rename preview, replace diff, hot folder rule history, pinboard, click visualization. **Reuse milestone screenshots rather than redoing native sessions unnecessarily.**
 - If GUI screenshot capture is technically unavailable, link available test evidence and plainly state what was not observed; **do not ask the user to do it**.
-- **Commit:** `chore(quality): [M13-B] complete scoped verification and cleanup` (only if actual files changed).
+- **Do not invoke Clippy here.** Its warnings are still permitted at this stage.
+- **Commit:** `chore(quality): [M13-B] finish integration cleanup and evidence` (only if actual files changed).
 
-### M13-C — Documentation and final handoff
+### M13-C — Documentation and ledger closure (before Clippy)
 
 - Refresh README/in-app help for command discovery, current feature scope, safe file operations, XML local-only rules, paste focus safety, disabled-by-default Hot Folder rules and session-only pins.
-- Close execution ledger with each checkpoint's actual status, focused tests, Clippy result, screenshot paths, commit hashes and known limitations.
-- Provide a final concise report with: implemented features; noteworthy architectural decisions; exact verification commands and results; screenshot locations; commits; remaining genuine blocks/issues. **No “please run this” instructions and no intermediate approval request.**
+- Close the execution ledger with each checkpoint's actual status, focused tests, screenshot paths, commit hashes and known limitations. Mark final Clippy status **pending M13-D**; its actual outcome goes in the final user report, not a post-Clippy documentation edit.
+- Finish required repository-file edits and commits, including documentation and formatting changes, **before** the Clippy step. Do not begin a new feature or test campaign after this point.
 - **Commit:** `docs(productivity): [M13-C] finalize feature documentation` (only when it adds a substantive change).
+
+### M13-D — Final Clippy cleanup and last verification action
+
+**This is the only planned Clippy phase, and the final development/verification phase of the entire project.** Run it **after M0–M12 implementation, M13 integration tests, native UI sessions/screenshots, ordinary code cleanup, formatting, documentation, progress ledger and their checkpoint commits are complete**. Clippy warnings are explicitly tolerated before M13-D.
+
+1. **Determine project-owned package scope without linting vendored crates.** Inspect the actual `Cargo.toml` workspace membership using `cargo metadata --no-deps --format-version 1` or equivalent manifest inspection. For every vendored workspace package (e.g. manifest under a `vendor/`, `vendored/` or `third_party/` subtree), exclude its actual Cargo package name using `--exclude`. Normal third-party dependencies and vendored path dependencies **outside workspace membership** must not be promoted into explicit Clippy targets. Do not edit vendored crate source or demand warning-free vendor code.
+2. **Run Clippy only against maintained application/workspace crates, all relevant targets, with warnings denied.** Typical command when no vendored workspace package is included:
+
+   ```powershell
+   cargo clippy --workspace --all-targets -- -D warnings
+   ```
+
+   If vendored packages are workspace members, add one `--exclude <actual-vendored-package-name>` per vendored member **before** `--`:
+
+   ```powershell
+   cargo clippy --workspace --all-targets --exclude <vendored-package-name> -- -D warnings
+   ```
+
+   Replace the illustrative placeholder with verified package names and repeat `--exclude` as needed. Preserve the project's required Windows toolchain/target and supported feature set. Do **not** silence project-owned warnings globally with `-A warnings`, `--cap-lints allow`, blanket `#[allow(clippy::all)]`, or by skipping maintained workspace packages.
+3. **Fix Clippy findings in maintained crates as one final bounded cleanup.** Address newly introduced **and existing** warnings reported within the maintained scope. Group similar findings and correct them consistently without changing established behavior or rewriting unrelated code. **Ignore vendored-crate lint diagnostics**, even if vendor code is used as a dependency; do not alter its source or policies to obtain a green report. Treat compiler errors in maintained crates as actual errors, not ignorable lint.
+4. **Avoid validation spirals.** Make at most two substantive correction attempts for the same unchanged lint/failure class before recording a precise unresolved issue. Reuse compiler/test evidence already obtained. If a lint fix requires formatting or a focused correctness test, perform those **before** the final repeat of Clippy. Commit the lint-only cleanup as `chore(clippy): [M13-D] resolve maintained-crate lints` (only if source changes). Do not run Clippy for every warning or every file; use a single initial sweep and a minimal number of corrective sweeps.
+5. **Make the final successful Clippy pass the last automated code-quality/verification command.** After a clean pass, do not resume coding, reformat files, rerun unrelated tests, or start further audits. If project-owned lint findings cannot be cleared within the bounded correction policy, report the precise remaining diagnostics and mark the final lint gate blocked instead of claiming success. Vendor-only lint findings do **not** count as a failure.
+6. **Return the final report directly after the final Clippy outcome.** Summarize implemented features, checkpoint commits/hashes, test outcomes, screenshot paths, the **exact project-owned Clippy command and actual result**, excluded vendored packages and any genuine outstanding limitations. Never request intermediate or post-work user-run verification. User review remains a single optional final review.
 
 **Done criteria:** all unblocked features satisfy their acceptance criteria; final Clippy status truthfully reported; repository clean except intended files; no uncovered high-severity regression known; final user review is the **first** requested manual review.
 
@@ -773,7 +797,7 @@ This is a **menu of intended tests**, not a requirement to execute every row aft
 
 ### Validation stop conditions
 
-Stop a checkpoint's verification once the relevant invariants have evidence and the Clippy gate is satisfied. **No** mandatory screenshot pixel comparisons, benchmark parity mandates, mass repository test suites, repeated “just to be sure” reruns, unexplained waiting for hooks, speculative crash campaigns or manual user approval checkpoints.
+Stop a checkpoint's verification once the relevant behavior and safety invariants have adequate build/test evidence. **No Clippy gate applies to checkpoints M0–M12**; the single maintained-crate Clippy cleanup is **the final activity of M13-D**. **No** mandatory screenshot pixel comparisons, benchmark parity mandates, mass repository test suites, repeated “just to be sure” reruns, unexplained waiting for hooks, speculative crash campaigns or manual user approval checkpoints.
 
 If a checkpoint is genuinely blocked: identify the exact unsatisfied requirement and evidence, preserve useful work safely, mark it blocked, and proceed only with independent clean work. **Never erase a requirement from this plan just to report completion.**
 
@@ -793,10 +817,10 @@ If a checkpoint is genuinely blocked: identify the exact unsatisfied requirement
 - [ ] M10: Hot Folder rules start disabled, support declared conditions/actions, settle/dedupe, test mode, pause and execution history.
 - [ ] M11: Session-only floating multi-pin screenshots can move, zoom, copy/save, topmost/click-through and close independently.
 - [ ] M12: Left/right/middle click visualization supports three styles, settings, `mouse` command and input pass-through.
-- [ ] Continuous checkpoint commits and honest Clippy reporting are documented.
+- [ ] Frequent checkpoint commits and focused tests were maintained without intermediate Clippy checks; a final M13-D Clippy cleanup was run on maintained crates, excluding all vendored crates, with its actual result reported.
 - [ ] No manual testing/approval was requested of the user during the job.
 - [ ] Native UI screenshots were captured when feasible, with limitations explicitly noted when not feasible.
 - [ ] No destructive tests affected real user data or unrelated applications/processes.
 - [ ] README/help updated and final implementation report includes checkpoint hashes, evidence and genuine remaining issues.
 
-**Final instruction:** Once complete, stop implementing. Do not invent another optimization track, feature batch, redesign initiative, quality gate or manual acceptance phase. Return the finished result for the user's final review.
+**Final instruction:** Keep implementing and making checkpoint commits without running Clippy until M13-D. Complete ordinary verification, screenshots, formatting and documentation **before** M13-D; make project-owned Clippy cleanup the **last development/verification action**, ignore vendored crate lints, and report the outcome honestly. Then stop. Do not invent another optimization track, feature batch, redesign initiative, quality gate or manual acceptance phase. Return the finished result for the user's final review.
