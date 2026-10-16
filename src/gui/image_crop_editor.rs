@@ -1308,8 +1308,10 @@ mod tests {
             assert!((round_trip.x - source.x).abs() < 0.0001);
             assert!((round_trip.y - source.y).abs() < 0.0001);
         }
-        assert!(MIN_CROP_ZOOM > 0.0);
-        assert!(MAX_CROP_ZOOM > MIN_CROP_ZOOM);
+        const {
+            assert!(MIN_CROP_ZOOM > 0.0);
+            assert!(MAX_CROP_ZOOM > MIN_CROP_ZOOM);
+        }
     }
 
     #[test]

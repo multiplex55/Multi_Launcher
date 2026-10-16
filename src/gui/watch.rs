@@ -1172,7 +1172,7 @@ mod tests {
     struct TrackCActionsFixture {
         // The owner apps are local to each sample and drop before this fixture
         // drops its CWD/temp-directory guard.
-        _workspace: std::sync::Arc<
+        _workspace: std::rc::Rc<
             std::sync::Mutex<crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace>,
         >,
         handler_reports: std::sync::Arc<std::sync::Mutex<Vec<TrackCHandlerReport>>>,
@@ -1199,7 +1199,7 @@ mod tests {
 
     struct TrackCHandlerReleaseGuard {
         probe: Option<crate::performance::track_c_watcher_lifecycle::HandlerReleaseProbe>,
-        workspace: std::sync::Arc<
+        workspace: std::rc::Rc<
             std::sync::Mutex<crate::performance::track_c_watcher_lifecycle::HandlerOwnedWorkspace>,
         >,
         reports: std::sync::Arc<std::sync::Mutex<Vec<TrackCHandlerReport>>>,
@@ -1223,7 +1223,7 @@ mod tests {
                 .callbacks_may_use_paths();
             Self {
                 probe: Some(HandlerReleaseProbe::begin(&root)),
-                workspace: std::sync::Arc::clone(&fixture._workspace),
+                workspace: std::rc::Rc::clone(&fixture._workspace),
                 reports: std::sync::Arc::clone(&fixture.handler_reports),
                 report_overflow: std::sync::Arc::clone(&fixture.handler_report_overflow),
             }
@@ -1470,7 +1470,7 @@ mod tests {
         let fixture_signature = fixture.finish();
 
         TrackCActionsFixture {
-            _workspace: std::sync::Arc::new(std::sync::Mutex::new(workspace)),
+            _workspace: std::rc::Rc::new(std::sync::Mutex::new(workspace)),
             handler_reports: std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(
                 TRACK_C_HANDLER_REPORT_CAPACITY,
             ))),

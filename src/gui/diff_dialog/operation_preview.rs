@@ -147,30 +147,29 @@ impl OperationPreview {
         #[cfg(test)]
         if let (Some(window), Some(footer), Some(status)) =
             (window_output, footer_observation, status_response.as_ref())
+            && let Some(body) = body_observation
         {
-            if let Some(body) = body_observation {
-                ctx.data_mut(|data| {
-                    data.insert_temp(
-                        egui::Id::new(("folder-operation-preview-test", self.view_id)),
-                        PreviewChromeObservation {
-                            window_rect: window.response.rect,
-                            body_id: body.0,
-                            body_rect: body.1,
-                            content_size: body.2,
-                            offset: body.3,
-                            status_id: status.id,
-                            status_rect: status.rect,
-                            execute_id: footer.0,
-                            execute_rect: footer.1,
-                            execute_enabled: footer.2,
-                            cancel_id: footer.3,
-                            cancel_rect: footer.4,
-                            cancel_enabled: footer.5,
-                            footer_height: footer.6,
-                        },
-                    );
-                });
-            }
+            ctx.data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::new(("folder-operation-preview-test", self.view_id)),
+                    PreviewChromeObservation {
+                        window_rect: window.response.rect,
+                        body_id: body.0,
+                        body_rect: body.1,
+                        content_size: body.2,
+                        offset: body.3,
+                        status_id: status.id,
+                        status_rect: status.rect,
+                        execute_id: footer.0,
+                        execute_rect: footer.1,
+                        execute_enabled: footer.2,
+                        cancel_id: footer.3,
+                        cancel_rect: footer.4,
+                        cancel_enabled: footer.5,
+                        footer_height: footer.6,
+                    },
+                );
+            });
         }
         #[cfg(not(test))]
         let _ = window_output;
@@ -364,27 +363,27 @@ mod tests {
         let mut scrolled_layout = None;
         let mut scrolled_status_visible = false;
         let mut reached_legal_end = false;
-        if let Some(layout) = first_layout {
-            if let Some(mut state) = egui::scroll_area::State::load(&context, layout.body_id) {
-                let max_offset = (layout.content_size.y - layout.body_rect.height()).max(0.0);
-                state.offset = egui::vec2(0.0, max_offset);
-                state.store(&context, layout.body_id);
-                for _ in 0..3 {
-                    let output = context.run_ui(input(size), |ctx| {
-                        result = preview.show(ctx, false);
-                    });
-                    scrolled_layout = context
-                        .data(|data| data.get_temp::<PreviewChromeObservation>(observation_id));
-                    if let Some(scrolled) = scrolled_layout {
-                        let max_offset =
-                            (scrolled.content_size.y - scrolled.body_rect.height()).max(0.0);
-                        reached_legal_end = scrolled.offset.y >= max_offset - 1.0
-                            && scrolled.offset.y <= max_offset + 1.0;
-                        scrolled_status_visible |=
-                            full_status_is_visible(&output, &expected_status, scrolled.body_rect);
-                    }
-                    output.drop_without_applying_deltas();
+        if let Some(layout) = first_layout
+            && let Some(mut state) = egui::scroll_area::State::load(&context, layout.body_id)
+        {
+            let max_offset = (layout.content_size.y - layout.body_rect.height()).max(0.0);
+            state.offset = egui::vec2(0.0, max_offset);
+            state.store(&context, layout.body_id);
+            for _ in 0..3 {
+                let output = context.run_ui(input(size), |ctx| {
+                    result = preview.show(ctx, false);
+                });
+                scrolled_layout =
+                    context.data(|data| data.get_temp::<PreviewChromeObservation>(observation_id));
+                if let Some(scrolled) = scrolled_layout {
+                    let max_offset =
+                        (scrolled.content_size.y - scrolled.body_rect.height()).max(0.0);
+                    reached_legal_end = scrolled.offset.y >= max_offset - 1.0
+                        && scrolled.offset.y <= max_offset + 1.0;
+                    scrolled_status_visible |=
+                        full_status_is_visible(&output, &expected_status, scrolled.body_rect);
                 }
+                output.drop_without_applying_deltas();
             }
         }
 

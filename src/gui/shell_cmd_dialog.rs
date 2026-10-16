@@ -950,10 +950,10 @@ mod tests {
                 &mut dialog,
                 &mut app,
                 test_input(screen_rect, frame as f64, Vec::new()),
-            ) {
-                if layout.visible && !layout.sizing_pass {
-                    editor_layouts.push(layout);
-                }
+            ) && layout.visible
+                && !layout.sizing_pass
+            {
+                editor_layouts.push(layout);
             }
         }
         let editor = *editor_layouts
@@ -1010,10 +1010,10 @@ mod tests {
                 &mut dialog,
                 &mut app,
                 test_input(screen_rect, frame as f64, Vec::new()),
-            ) {
-                if layout.visible && !layout.sizing_pass {
-                    browse_layouts.push(layout);
-                }
+            ) && layout.visible
+                && !layout.sizing_pass
+            {
+                browse_layouts.push(layout);
             }
         }
         let browse = *browse_layouts

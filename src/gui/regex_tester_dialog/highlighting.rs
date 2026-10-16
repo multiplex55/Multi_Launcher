@@ -247,7 +247,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut session = evaluated("a", "aaé");
         let (text, mut view) = session.text_edit_parts();
-        text.insert_str(0, "文");
+        text.insert(0, '文');
         ctx.run_ui(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let job = layout(text, &view, ui, 100.0);

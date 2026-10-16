@@ -1915,9 +1915,11 @@ mod tests {
 
         let searches_app =
             trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{APP_PREFIX} "));
-        let action_query = searches_app
-            .then(|| trimmed.split_once(' ').map(|value| value.1).unwrap_or(""))
-            .unwrap_or("");
+        let action_query = if searches_app {
+            trimmed.split_once(' ').map(|value| value.1).unwrap_or("")
+        } else {
+            ""
+        };
         let (local_text, filters) = split_action_filters(action_query);
         let local_text = local_text.trim();
         let local_text_lc = local_text.to_lowercase();
@@ -2768,9 +2770,11 @@ mod tests {
         }
 
         let searches_app = trimmed_lc == "app" || trimmed_lc.starts_with("app ");
-        let action_query = searches_app
-            .then(|| trimmed.split_once(' ').map(|(_, tail)| tail).unwrap_or(""))
-            .unwrap_or("");
+        let action_query = if searches_app {
+            trimmed.split_once(' ').map(|(_, tail)| tail).unwrap_or("")
+        } else {
+            ""
+        };
         let query_term = action_query.trim().to_lowercase();
         let alias_matches = |action_id: &str| {
             app.folder_aliases_lc

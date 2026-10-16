@@ -1151,10 +1151,10 @@ mod tests {
                 &ctx,
                 &mut app,
                 test_input(screen_rect, frame as f64, Vec::new()),
-            ) {
-                if layout.visible && !layout.sizing_pass {
-                    browse_layouts.push(layout);
-                }
+            ) && layout.visible
+                && !layout.sizing_pass
+            {
+                browse_layouts.push(layout);
             }
         }
         assert!(browse_layouts.len() >= 2);
@@ -1258,10 +1258,10 @@ mod tests {
                 &ctx,
                 &mut app,
                 test_input(screen_rect, frame as f64, Vec::new()),
-            ) {
-                if layout.visible && !layout.sizing_pass {
-                    edit_layouts.push(layout);
-                }
+            ) && layout.visible
+                && !layout.sizing_pass
+            {
+                edit_layouts.push(layout);
             }
         }
         assert!(edit_layouts.len() >= 2);
@@ -1296,10 +1296,10 @@ mod tests {
                 &ctx,
                 &mut app,
                 test_input(screen_rect, frame as f64, Vec::new()),
-            ) {
-                if layout.visible && !layout.sizing_pass {
-                    scrolled_layouts.push(layout);
-                }
+            ) && layout.visible
+                && !layout.sizing_pass
+            {
+                scrolled_layouts.push(layout);
             }
         }
         assert!(scrolled_layouts.len() >= 2);

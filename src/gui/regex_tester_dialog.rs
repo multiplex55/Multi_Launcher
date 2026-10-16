@@ -1377,11 +1377,10 @@ mod tests {
         );
         render_scaled_regex_frame(&ctx, &mut dialog, size, pixels_per_point, Vec::new());
         let header_viewport = dialog.last_header_viewport.unwrap();
-        let (_, flag_rects) = dialog
+        let (_, flag_rects) = *dialog
             .last_pattern_controls
             .as_ref()
-            .expect("flags and suffix retain response geometry")
-            .clone();
+            .expect("flags and suffix retain response geometry");
         assert!(
             flag_rects
                 .iter()

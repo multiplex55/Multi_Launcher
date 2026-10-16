@@ -3443,7 +3443,7 @@ mod tests {
             wide_row.width_after > wide_viewport.width(),
             "an explicit Extend override preserves wide-title horizontal extent; wrap={:?}, title={:?}, header_width={}, width_before={}, width_after={}, viewport={:?}",
             dialog.notes_geometry.as_ref().unwrap().key.wrap_mode,
-            &dialog.entries[wide_row.original_index].title,
+            dialog.entries[wide_row.original_index].title,
             wide_row.header_width,
             wide_row.width_before,
             wide_row.width_after,
@@ -3971,7 +3971,12 @@ mod tests {
         assert_eq!(initial_geometry.key.font_revision, 0);
         assert_eq!(initial_rebuilds, 1);
 
-        run_with_installs(&mut dialog, &mut app, 1.1, &[default_definitions.clone()]);
+        run_with_installs(
+            &mut dialog,
+            &mut app,
+            1.1,
+            std::slice::from_ref(&default_definitions),
+        );
         assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
         assert_eq!(dialog.test_geometry_rebuilds, initial_rebuilds);
         assert_eq!(dialog.test_geometry_rows_measured, initial_rows_measured);
@@ -6246,7 +6251,7 @@ mod tests {
             state.app.note_settings.task_lists_enabled,
             state.initial_tasks
         );
-        assert_eq!(state.app.note_settings.task_lists_enabled, true);
+        assert!(state.app.note_settings.task_lists_enabled);
         let (global_revision, global_notes) =
             crate::plugins::note::note_cache_snapshot_with_version()
                 .expect("the current synthetic note cache remains healthy");
@@ -6561,7 +6566,7 @@ mod tests {
         let work = |select: fn(&TrackC2FSample) -> u64| {
             samples
                 .iter()
-                .map(|sample| select(sample))
+                .map(select)
                 .map(|value| value.to_string())
                 .collect::<Vec<_>>()
                 .join(",")

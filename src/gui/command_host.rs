@@ -1724,7 +1724,7 @@ mod tests {
                     ..
                 }
             )));
-            return result;
+            result
         }
         #[cfg(not(windows))]
         run(app)

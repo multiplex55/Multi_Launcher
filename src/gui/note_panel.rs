@@ -221,8 +221,8 @@ impl NoteRefreshObservationScope {
         let handle = NoteRefreshObserverHandle(std::rc::Rc::new(std::cell::RefCell::new(
             NoteRefreshObservation::default(),
         )));
-        let previous = NOTE_REFRESH_OBSERVER
-            .with(|observer| std::mem::replace(&mut *observer.borrow_mut(), Some(handle.clone())));
+        let previous =
+            NOTE_REFRESH_OBSERVER.with(|observer| observer.borrow_mut().replace(handle.clone()));
         Self { handle, previous }
     }
 
@@ -1049,7 +1049,7 @@ mod alias_warning_test_observer {
     }
 
     thread_local! {
-        static STATS: RefCell<Option<Stats>> = RefCell::new(None);
+        static STATS: RefCell<Option<Stats>> = const { RefCell::new(None) };
     }
 
     pub(super) struct Scope;
@@ -5743,8 +5743,7 @@ mod tests {
 
     impl TrackC1CObserverPause {
         fn new() -> Self {
-            let previous = NOTE_REFRESH_OBSERVER
-                .with(|observer| std::mem::replace(&mut *observer.borrow_mut(), None));
+            let previous = NOTE_REFRESH_OBSERVER.with(|observer| observer.borrow_mut().take());
             Self { previous }
         }
     }
@@ -7774,15 +7773,15 @@ mod tests {
                     done: index % 4 == 0,
                     priority: (index % 5) as u8,
                     tags: vec![format!("work-{:02}", index % 3)],
-                    entity_refs: linked
-                        .then(|| {
-                            vec![EntityRef::new(
-                                EntityKind::Note,
-                                current_slug,
-                                Some("Synthetic Unicode title 東京".into()),
-                            )]
-                        })
-                        .unwrap_or_default(),
+                    entity_refs: if linked {
+                        vec![EntityRef::new(
+                            EntityKind::Note,
+                            current_slug,
+                            Some("Synthetic Unicode title 東京".into()),
+                        )]
+                    } else {
+                        Vec::new()
+                    },
                 }
             })
             .collect();
@@ -9477,14 +9476,14 @@ mod tests {
         let ctrl = key_event(egui::Modifiers::CTRL);
         let command = key_event(egui::Modifiers::COMMAND);
         assert_eq!(
-            detect_note_paste_request(&[paste.clone()], false).unwrap(),
+            detect_note_paste_request(std::slice::from_ref(&paste), false).unwrap(),
             NotePasteRequest {
                 has_egui_paste: true,
                 has_egui_shortcut: false,
                 has_windows_shortcut: false
             }
         );
-        assert!(detect_note_paste_request(&[ctrl.clone()], false).is_some());
+        assert!(detect_note_paste_request(std::slice::from_ref(&ctrl), false).is_some());
         assert!(detect_note_paste_request(&[command], false).is_some());
 
         let mut events = vec![

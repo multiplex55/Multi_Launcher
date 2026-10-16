@@ -551,7 +551,7 @@ mod tests {
             .send(WatchEvent::IndexReady)
             .unwrap();
         assert!(matches!(rx.try_recv(), Ok(WatchEvent::Actions)));
-        assert!(matches!(rx.try_recv_for_dispatch(), Ok(_)));
+        assert!(rx.try_recv_for_dispatch().is_ok());
         let snapshot = recorder.snapshot();
         assert_eq!(snapshot.delivered.len(), 2);
         assert_eq!(snapshot.overflow, 0);
@@ -571,9 +571,9 @@ mod tests {
         tx.with_origin(EventOrigin::Gui)
             .send(WatchEvent::Bookmarks)
             .unwrap();
-        assert!(matches!(rx.try_recv(), Ok(_)));
-        assert!(matches!(rx.try_recv(), Ok(_)));
-        assert!(matches!(rx.try_recv(), Ok(_)));
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
+        assert!(rx.try_recv().is_ok());
         let snapshot = recorder.snapshot();
         assert_eq!(snapshot.delivered.len(), 2);
         assert_eq!(snapshot.overflow, 1, "overflow fails a benchmark receipt");

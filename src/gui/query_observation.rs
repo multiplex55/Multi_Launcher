@@ -2317,9 +2317,10 @@ mod tests {
         let timestamp = QueryObservationCounts::capture(&[timestamp_changed], &HashMap::new())
             .unwrap()
             .summary();
-        let original = QueryObservationCounts::capture(&[first.clone()], &HashMap::new())
-            .unwrap()
-            .summary();
+        let original =
+            QueryObservationCounts::capture(std::slice::from_ref(&first), &HashMap::new())
+                .unwrap()
+                .summary();
         assert_ne!(original.history_digest, timestamp.history_digest);
 
         let mut label_changed = first.clone();

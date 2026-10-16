@@ -1636,7 +1636,7 @@ mod tests {
         assert_eq!(state.persisted_baseline, baseline);
         assert!(state.can_commit());
         assert_eq!(ctx.theme(), egui::Theme::Light);
-        assert!(ctx.style_of(egui::Theme::Light).visuals.dark_mode == false);
+        assert!(!ctx.style_of(egui::Theme::Light).visuals.dark_mode);
     }
 
     #[test]

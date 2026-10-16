@@ -175,7 +175,7 @@ impl TempfileDialog {
                     });
                 }
                 #[cfg(not(test))]
-                let _ = (alias, editor_output);
+                let _ = (_alias, editor_output);
             });
 
         #[cfg(test)]
