@@ -918,6 +918,30 @@ fn select_snippet_origin_window(
     }
 }
 
+fn select_sequence_origin_window(
+    source: crate::commands::ActivationSource,
+    root_visible: bool,
+    observed: crate::active_window::ForegroundWindowObservation,
+    cached: Option<crate::active_window::ExternalForegroundWindow>,
+) -> Option<crate::active_window::ExternalForegroundWindow> {
+    match observed {
+        crate::active_window::ForegroundWindowObservation::External(window) => Some(window),
+        crate::active_window::ForegroundWindowObservation::Launcher
+            if root_visible
+                && matches!(
+                    source,
+                    crate::commands::ActivationSource::Click
+                        | crate::commands::ActivationSource::Enter
+                        | crate::commands::ActivationSource::Dashboard
+                ) =>
+        {
+            cached
+        }
+        crate::active_window::ForegroundWindowObservation::Launcher
+        | crate::active_window::ForegroundWindowObservation::Unavailable => None,
+    }
+}
+
 fn command_accepts_query_override(command: &Command) -> bool {
     !matches!(
         command,
@@ -935,6 +959,123 @@ fn command_accepts_query_override(command: &Command) -> bool {
 }
 
 impl LauncherApp {
+    /// Capture every invocation input before the sequence prompt or preflight
+    /// panel takes focus. The external HWND/PID/thread identity is mandatory,
+    /// even when no snippet uses `sys.window_title`.
+    fn capture_sequence_context(
+        &mut self,
+        source: crate::commands::ActivationSource,
+    ) -> Result<
+        crate::paste_sequence::SequenceInvocationContext,
+        crate::paste_sequence::SequencePreflightError,
+    > {
+        let timestamp = chrono::Local::now().fixed_offset();
+        let origin = select_sequence_origin_window(
+            source,
+            self.visible_flag.load(Ordering::SeqCst),
+            crate::active_window::observe_foreground_window(),
+            self.snippet_origin_window.clone(),
+        )
+        .ok_or(crate::paste_sequence::SequencePreflightError::InvalidTargetIdentity)?;
+        let target = crate::paste_sequence::SequenceTarget::from_external_window(
+            origin,
+            std::process::id(),
+        )?;
+        let clipboard_text = crate::actions::clipboard::get_text().ok();
+        Ok(crate::paste_sequence::SequenceInvocationContext::new(
+            timestamp,
+            clipboard_text,
+            target,
+        ))
+    }
+
+    /// Start preflight from an already inspected sequence and provider snapshots.
+    /// Captures context before opening the existing prompt form; the returned run
+    /// is available through `take_prepared_sequence_run` when no prompt is needed.
+    pub(crate) fn begin_paste_sequence_preflight(
+        &mut self,
+        sequence: crate::paste_sequence::Sequence,
+        snippets: &[crate::plugins::snippets::SnippetEntry],
+        history: &[String],
+        source: crate::commands::ActivationSource,
+    ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
+        self.begin_paste_sequence_preflight_using_context(
+            sequence,
+            snippets,
+            history,
+            source,
+            |app, source| app.capture_sequence_context(source),
+        )
+    }
+
+    fn begin_paste_sequence_preflight_using_context(
+        &mut self,
+        sequence: crate::paste_sequence::Sequence,
+        snippets: &[crate::plugins::snippets::SnippetEntry],
+        history: &[String],
+        source: crate::commands::ActivationSource,
+        capture_context: impl FnOnce(
+            &mut Self,
+            crate::commands::ActivationSource,
+        ) -> Result<
+            crate::paste_sequence::SequenceInvocationContext,
+            crate::paste_sequence::SequencePreflightError,
+        >,
+    ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
+        // Starting a new attempt invalidates any older prepared run even when
+        // context capture, source resolution, or prompt setup fails.
+        self.prepared_sequence_run = None;
+        let context = capture_context(self, source)?;
+        let preflight =
+            crate::paste_sequence::SequencePreflight::begin(sequence, snippets, history, context)?;
+        if preflight.current_prompt().is_some() {
+            self.snippet_prompt_dialog
+                .begin_sequence_preflight(&self.egui_ctx, preflight)
+                .map_err(|_| crate::paste_sequence::SequencePreflightError::InvalidSnippet)?;
+            self.focus_panel(super::Panel::SnippetPromptDialog);
+        } else {
+            self.prepared_sequence_run = Some(preflight.finish(snippets, history)?);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn take_prepared_sequence_run(
+        &mut self,
+    ) -> Option<crate::paste_sequence::PreparedSequenceRun> {
+        self.prepared_sequence_run.take()
+    }
+
+    fn submit_sequence_prompt(
+        &mut self,
+    ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        let completed = self.snippet_prompt_dialog.submit_sequence_with(
+            &self.egui_ctx,
+            || {
+                crate::plugins::snippets::load_snippets_for_reload(
+                    crate::plugins::snippets::SNIPPETS_FILE,
+                )
+                .map(|state| match state {
+                    crate::common::persistence::LoadState::Missing
+                    | crate::common::persistence::LoadState::Empty => Vec::new(),
+                    crate::common::persistence::LoadState::Loaded(entries) => entries,
+                })
+                .map_err(|_| ())
+            },
+            || {
+                crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE)
+                    .map(|history| history.into_iter().collect())
+                    .map_err(|_| ())
+            },
+        )?;
+        if let Some(run) = completed {
+            self.panel_states.snippet_prompt_dialog = false;
+            self.panel_stack
+                .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
+            self.prepared_sequence_run = Some(run);
+        }
+        Ok(())
+    }
+
     pub(crate) fn begin_snippet_preview(
         &mut self,
         draft: crate::plugins::snippets::SnippetEntry,
@@ -969,6 +1110,9 @@ impl LauncherApp {
     pub(crate) fn submit_snippet_prompt(
         &mut self,
     ) -> Result<(), super::snippet_prompt_dialog::SnippetPromptError> {
+        if self.snippet_prompt_dialog.is_sequence_preflight() {
+            return self.submit_sequence_prompt();
+        }
         self.submit_snippet_prompt_using(
             |alias| crate::plugins::snippets::resolve_snippet(alias).map_err(|_| ()),
             |text| crate::actions::clipboard::set_text(text).map_err(|_| ()),
@@ -1410,6 +1554,8 @@ mod tests {
     fn external_window(hwnd: isize, title: &str) -> crate::active_window::ExternalForegroundWindow {
         crate::active_window::ExternalForegroundWindow {
             hwnd,
+            process_id: 20,
+            thread_id: 30,
             title: Some(title.into()),
         }
     }
@@ -1501,6 +1647,109 @@ mod tests {
             );
             assert_eq!(selected.map(|window| window.hwnd), Some(20));
         }
+    }
+
+    #[test]
+    fn sequence_target_requires_a_real_origin_except_for_launcher_ui_activation() {
+        let cached = external_window(10, "session origin");
+        let ui_target = select_sequence_origin_window(
+            crate::commands::ActivationSource::Click,
+            true,
+            crate::active_window::ForegroundWindowObservation::Launcher,
+            Some(cached.clone()),
+        )
+        .unwrap();
+        assert_eq!(ui_target.hwnd, 10);
+        assert_eq!(ui_target.process_id, 20);
+        assert_eq!(ui_target.thread_id, 30);
+
+        for source in [
+            crate::commands::ActivationSource::Macro,
+            crate::commands::ActivationSource::Gesture,
+            crate::commands::ActivationSource::RadialShortcut,
+        ] {
+            assert!(
+                select_sequence_origin_window(
+                    source,
+                    true,
+                    crate::active_window::ForegroundWindowObservation::Launcher,
+                    Some(cached.clone()),
+                )
+                .is_none()
+            );
+        }
+
+        let fresh = external_window(11, "current origin");
+        assert_eq!(
+            select_sequence_origin_window(
+                crate::commands::ActivationSource::Macro,
+                true,
+                crate::active_window::ForegroundWindowObservation::External(fresh),
+                Some(cached),
+            )
+            .map(|window| window.hwnd),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn failed_new_sequence_preflight_invalidates_an_older_prepared_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::paste_sequence::SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let mut snapshot = store.load().unwrap();
+        let old_id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft::new(
+                "Old run",
+                vec![crate::paste_sequence::Step::LiteralText {
+                    text: "old payload".into(),
+                }],
+            ))
+            .unwrap();
+        let context = crate::paste_sequence::SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+02:00").unwrap(),
+            None,
+            crate::paste_sequence::SequenceTarget::from_external_window(
+                external_window(10, "origin"),
+                std::process::id(),
+            )
+            .unwrap(),
+        );
+        let old_run = crate::paste_sequence::SequencePreflight::begin(
+            snapshot.sequence(old_id).unwrap().clone(),
+            &[],
+            &[],
+            context.clone(),
+        )
+        .unwrap()
+        .finish(&[], &[])
+        .unwrap();
+        let failed_id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft::new(
+                "Missing snippet",
+                vec![crate::paste_sequence::Step::SnippetRef {
+                    alias: "missing".into(),
+                }],
+            ))
+            .unwrap();
+        let mut app = inert_test_app(directory.path());
+        app.prepared_sequence_run = Some(old_run);
+
+        let result = app.begin_paste_sequence_preflight_using_context(
+            snapshot.sequence(failed_id).unwrap().clone(),
+            &[],
+            &[],
+            crate::commands::ActivationSource::Click,
+            move |_, _| Ok(context),
+        );
+        assert!(matches!(
+            result,
+            Err(crate::paste_sequence::SequencePreflightError::MissingSnippet)
+        ));
+        assert!(app.take_prepared_sequence_run().is_none());
     }
 
     #[test]

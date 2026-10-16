@@ -71,7 +71,17 @@ pub(crate) struct SnippetPromptSession {
     pub(crate) values: HashMap<String, String>,
     pub(crate) initial_focus: Option<String>,
     context: Option<SnippetInvocationContext>,
+    sequence_flow: Option<crate::paste_sequence::SequencePreflight>,
+    sequence_step: Option<SequencePromptAttribution>,
     mode: SnippetPromptMode,
+}
+
+#[derive(Clone, Copy)]
+struct SequencePromptAttribution {
+    step_index: usize,
+    total_steps: usize,
+    prompt_index: usize,
+    total_prompts: usize,
 }
 
 enum SnippetPromptMode {
@@ -85,6 +95,7 @@ enum SnippetPromptMode {
     PreviewOnly {
         draft: SnippetEntry,
     },
+    SequencePreflight,
 }
 
 /// Safe submit failures contain no field values, rendered output, or template excerpts.
@@ -98,6 +109,7 @@ pub(crate) enum SnippetPromptError {
     SystemVariableFormatting,
     StaleTemplate,
     ClipboardUnavailable,
+    SequencePreflightFailed,
 }
 
 impl SnippetPromptError {
@@ -113,6 +125,9 @@ impl SnippetPromptError {
                 "This snippet changed while the prompt was open. Reopen it before copying."
             }
             Self::ClipboardUnavailable => "The snippet could not be copied to the clipboard.",
+            Self::SequencePreflightFailed => {
+                "The sequence could not be prepared. Reopen preflight and try again."
+            }
         }
     }
 }
@@ -145,6 +160,12 @@ impl SnippetPromptDialog {
             .is_some_and(|session| matches!(&session.mode, SnippetPromptMode::PreviewOnly { .. }))
     }
 
+    pub(crate) fn is_sequence_preflight(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| matches!(&session.mode, SnippetPromptMode::SequencePreflight))
+    }
+
     pub(crate) fn feedback(&self) -> Option<SnippetPromptError> {
         self.feedback
     }
@@ -167,6 +188,31 @@ impl SnippetPromptDialog {
             },
         );
         self.replace_session(ctx, session)
+    }
+
+    pub(crate) fn begin_sequence_preflight(
+        &mut self,
+        ctx: &egui::Context,
+        flow: crate::paste_sequence::SequencePreflight,
+    ) -> Result<u64, SnippetPromptError> {
+        let prompt = flow
+            .current_prompt()
+            .ok_or(SnippetPromptError::InvalidConfiguration)?;
+        let mut session = SnippetPromptSession::new(
+            prompt.alias,
+            prompt.prepared,
+            Some(prompt.context),
+            SnippetPromptMode::SequencePreflight,
+        );
+        session.values = prompt.values;
+        session.sequence_step = Some(SequencePromptAttribution {
+            step_index: prompt.step_index,
+            total_steps: prompt.total_steps,
+            prompt_index: prompt.prompt_index,
+            total_prompts: prompt.total_prompts,
+        });
+        session.sequence_flow = Some(flow);
+        Ok(self.replace_session(ctx, session))
     }
 
     pub(crate) fn begin_preview(
@@ -282,15 +328,24 @@ impl SnippetPromptDialog {
             }
         }
 
-        let title = format!(
-            "{} — {}",
-            if preview_only {
-                "Preview Snippet"
-            } else {
-                "Fill Snippet"
-            },
-            session.alias
-        );
+        let title = if let Some(attribution) = session.sequence_step {
+            format!(
+                "Prepare Sequence — Step {} of {} — {}",
+                attribution.step_index + 1,
+                attribution.total_steps,
+                session.alias
+            )
+        } else {
+            format!(
+                "{} — {}",
+                if preview_only {
+                    "Preview Snippet"
+                } else {
+                    "Fill Snippet"
+                },
+                session.alias
+            )
+        };
         let available = ctx.content_rect().size();
         let style = ctx.style_of(ctx.theme());
         let window_frame = egui::Frame::window(&style);
@@ -344,6 +399,15 @@ impl SnippetPromptDialog {
                         "Preview mode",
                         Some("Copying is disabled."),
                     );
+                }
+                if let Some(attribution) = session.sequence_step {
+                    ui.weak(format!(
+                        "Sequence step {} of {} · prompt {} of {}",
+                        attribution.step_index + 1,
+                        attribution.total_steps,
+                        attribution.prompt_index + 1,
+                        attribution.total_prompts
+                    ));
                 }
                 if session.prepared.parsed.has_system_variables() {
                     ui.weak(
@@ -472,8 +536,17 @@ impl SnippetPromptDialog {
                 }
                 ui.horizontal(|ui| {
                     if !preview_only {
+                        let submit_label = session.sequence_step.map_or("Copy", |attribution| {
+                            if attribution.prompt_index + 1 < attribution.total_prompts {
+                                "Continue"
+                            } else {
+                                "Prepare"
+                            }
+                        });
                         let response = ui
-                            .push_id(button_widget_id(generation, "copy"), |ui| ui.button("Copy"))
+                            .push_id(button_widget_id(generation, "copy"), |ui| {
+                                ui.button(submit_label)
+                            })
                             .inner;
                         #[cfg(test)]
                         {
@@ -608,7 +681,13 @@ impl SnippetPromptDialog {
                 root_policy,
             } = &session.mode
             else {
-                return Err(SnippetPromptError::PreviewOnly);
+                return Err(
+                    if matches!(&session.mode, SnippetPromptMode::SequencePreflight) {
+                        SnippetPromptError::SequencePreflightFailed
+                    } else {
+                        SnippetPromptError::PreviewOnly
+                    },
+                );
             };
 
             let rendered = render_session_for_copy(session).map_err(map_render_error)?;
@@ -644,6 +723,113 @@ impl SnippetPromptDialog {
         }
     }
 
+    /// Advance a prompted sequence step without using the normal clipboard-copy
+    /// path. The final callback reads one fresh snapshot of each source store;
+    /// only a fully resolved and still-current flow yields a prepared run.
+    pub(crate) fn submit_sequence_with(
+        &mut self,
+        ctx: &egui::Context,
+        current_snippets: impl FnOnce() -> Result<Vec<SnippetEntry>, ()>,
+        current_history: impl FnOnce() -> Result<Vec<String>, ()>,
+    ) -> Result<Option<crate::paste_sequence::PreparedSequenceRun>, SnippetPromptError> {
+        let result = self.submit_sequence_inner(ctx, current_snippets, current_history);
+        self.feedback = result.as_ref().err().copied();
+        result
+    }
+
+    fn submit_sequence_inner(
+        &mut self,
+        ctx: &egui::Context,
+        current_snippets: impl FnOnce() -> Result<Vec<SnippetEntry>, ()>,
+        current_history: impl FnOnce() -> Result<Vec<String>, ()>,
+    ) -> Result<Option<crate::paste_sequence::PreparedSequenceRun>, SnippetPromptError> {
+        let Some(session) = self.session.as_ref() else {
+            return Err(SnippetPromptError::NoActiveSession);
+        };
+        if !matches!(&session.mode, SnippetPromptMode::SequencePreflight) {
+            return Err(SnippetPromptError::InvalidConfiguration);
+        }
+
+        let values = session.values.clone();
+        let (has_current_prompt, final_prompt, requires_history) = {
+            let flow = session
+                .sequence_flow
+                .as_ref()
+                .ok_or(SnippetPromptError::InvalidConfiguration)?;
+            let prompt = flow.current_prompt();
+            (
+                prompt.is_some(),
+                prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.prompt_index + 1 == prompt.total_prompts),
+                flow.requires_history(),
+            )
+        };
+
+        if has_current_prompt && !final_prompt {
+            self.session
+                .as_mut()
+                .and_then(|session| session.sequence_flow.as_mut())
+                .ok_or(SnippetPromptError::InvalidConfiguration)?
+                .submit_current_prompt(&values)
+                .map_err(map_sequence_preflight_error)?;
+
+            let next_prompt = self
+                .session
+                .as_ref()
+                .and_then(|session| session.sequence_flow.as_ref())
+                .and_then(crate::paste_sequence::SequencePreflight::current_prompt)
+                .ok_or(SnippetPromptError::InvalidConfiguration)?;
+            let flow = self
+                .session
+                .as_mut()
+                .and_then(|session| session.sequence_flow.take())
+                .ok_or(SnippetPromptError::InvalidConfiguration)?;
+            let mut next_session = SnippetPromptSession::new(
+                next_prompt.alias,
+                next_prompt.prepared,
+                Some(next_prompt.context),
+                SnippetPromptMode::SequencePreflight,
+            );
+            next_session.values = next_prompt.values;
+            next_session.sequence_step = Some(SequencePromptAttribution {
+                step_index: next_prompt.step_index,
+                total_steps: next_prompt.total_steps,
+                prompt_index: next_prompt.prompt_index,
+                total_prompts: next_prompt.total_prompts,
+            });
+            next_session.sequence_flow = Some(flow);
+            self.replace_session(ctx, next_session);
+            return Ok(None);
+        }
+
+        let snippets =
+            current_snippets().map_err(|()| SnippetPromptError::SequencePreflightFailed)?;
+        let history = if requires_history {
+            current_history().map_err(|()| SnippetPromptError::SequencePreflightFailed)?
+        } else {
+            Vec::new()
+        };
+        let flow = self
+            .session
+            .as_ref()
+            .and_then(|session| session.sequence_flow.as_ref())
+            .ok_or(SnippetPromptError::InvalidConfiguration)?;
+        let run = if final_prompt {
+            flow.finish_with_current_prompt(&values, &snippets, &history)
+        } else {
+            flow.finish(&snippets, &history)
+        }
+        .map_err(map_sequence_preflight_error)?;
+
+        self.clear_widget_state(ctx);
+        self.session = None;
+        self.open = false;
+        self.feedback = None;
+        self.pending_focus = None;
+        Ok(Some(run))
+    }
+
     /// Cancel and drop entered values. Preview mode returns the exact unsaved draft
     /// so the editor can resume with its pre-preview state.
     pub(crate) fn cancel(&mut self, ctx: &egui::Context) -> Option<SnippetEntry> {
@@ -653,7 +839,9 @@ impl SnippetPromptDialog {
         self.pending_focus = None;
         match self.session.take().map(|session| session.mode) {
             Some(SnippetPromptMode::PreviewOnly { draft }) => Some(draft),
-            Some(SnippetPromptMode::Execute { .. }) | None => None,
+            Some(SnippetPromptMode::Execute { .. })
+            | Some(SnippetPromptMode::SequencePreflight)
+            | None => None,
         }
     }
 
@@ -788,6 +976,8 @@ impl SnippetPromptSession {
             values,
             initial_focus,
             context,
+            sequence_flow: None,
+            sequence_step: None,
             mode,
         }
     }
@@ -849,6 +1039,33 @@ fn map_render_error(error: TemplateRenderError) -> SnippetPromptError {
         RenderErrorKind::MissingValues => SnippetPromptError::MissingValue,
         RenderErrorKind::RequiredValues => SnippetPromptError::RequiredValueEmpty,
         RenderErrorKind::SystemVariableResolution => SnippetPromptError::SystemVariableFormatting,
+    }
+}
+
+fn map_sequence_preflight_error(
+    error: crate::paste_sequence::SequencePreflightError,
+) -> SnippetPromptError {
+    match error {
+        crate::paste_sequence::SequencePreflightError::RequiredValues => {
+            SnippetPromptError::RequiredValueEmpty
+        }
+        crate::paste_sequence::SequencePreflightError::InvalidSnippet => {
+            SnippetPromptError::InvalidConfiguration
+        }
+        crate::paste_sequence::SequencePreflightError::StaleSnippet
+        | crate::paste_sequence::SequencePreflightError::MissingSnippet
+        | crate::paste_sequence::SequencePreflightError::AmbiguousSnippet
+        | crate::paste_sequence::SequencePreflightError::MissingHistoryItem
+        | crate::paste_sequence::SequencePreflightError::HistoryUnavailable
+        | crate::paste_sequence::SequencePreflightError::SnippetsUnavailable => {
+            SnippetPromptError::StaleTemplate
+        }
+        crate::paste_sequence::SequencePreflightError::InvalidSequence
+        | crate::paste_sequence::SequencePreflightError::InvalidTargetIdentity
+        | crate::paste_sequence::SequencePreflightError::LauncherTarget
+        | crate::paste_sequence::SequencePreflightError::NotReady => {
+            SnippetPromptError::SequencePreflightFailed
+        }
     }
 }
 
@@ -918,6 +1135,24 @@ mod tests {
         )
     }
 
+    fn sequence_context() -> crate::paste_sequence::SequenceInvocationContext {
+        let target = crate::paste_sequence::SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 111,
+                process_id: 222,
+                thread_id: 333,
+                title: Some("origin window".into()),
+            },
+            444,
+        )
+        .unwrap();
+        crate::paste_sequence::SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+02:00").unwrap(),
+            Some("captured clipboard".into()),
+            target,
+        )
+    }
+
     fn render_frame(
         ctx: &egui::Context,
         dialog: &mut SnippetPromptDialog,
@@ -938,6 +1173,144 @@ mod tests {
             },
         );
         output.drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn sequence_prompt_reuses_fields_across_steps_and_completes_without_copying() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::paste_sequence::SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft::new(
+                "Prompt steps",
+                vec![
+                    crate::paste_sequence::Step::SnippetRef {
+                        alias: "ticketreply".into(),
+                    },
+                    crate::paste_sequence::Step::SnippetRef {
+                        alias: "ticketreply".into(),
+                    },
+                ],
+            ))
+            .unwrap();
+        let sequence = snapshot.sequence(id).unwrap().clone();
+        let saved = entry();
+        let snippets = vec![saved.clone()];
+        let history = Vec::new();
+        let flow = crate::paste_sequence::SequencePreflight::begin(
+            sequence,
+            &snippets,
+            &history,
+            sequence_context(),
+        )
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        let mut dialog = SnippetPromptDialog::default();
+        dialog.begin_sequence_preflight(&ctx, flow).unwrap();
+        assert!(dialog.is_sequence_preflight());
+        assert_eq!(
+            dialog.session().unwrap().sequence_step.unwrap().step_index,
+            0
+        );
+        dialog.set_value("name", "first value".into());
+        assert!(
+            dialog
+                .submit_sequence_with(
+                    &ctx,
+                    || panic!("do not resolve early"),
+                    || { panic!("do not resolve history early") }
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            dialog.session().unwrap().sequence_step.unwrap().step_index,
+            1
+        );
+        assert_eq!(
+            dialog
+                .session()
+                .unwrap()
+                .values
+                .get("name")
+                .map(String::as_str),
+            Some("Ada")
+        );
+        dialog.set_value("name", "second value".into());
+        let mut stale_snippets = snippets.clone();
+        stale_snippets[0].text.push_str(" changed");
+        assert_eq!(
+            dialog
+                .submit_sequence_with(
+                    &ctx,
+                    || Ok(stale_snippets),
+                    || panic!("do not resolve unrelated history"),
+                )
+                .unwrap_err(),
+            SnippetPromptError::StaleTemplate
+        );
+        assert!(dialog.is_sequence_preflight());
+        assert_eq!(
+            dialog
+                .session()
+                .unwrap()
+                .values
+                .get("name")
+                .map(String::as_str),
+            Some("second value")
+        );
+        dialog.set_value("name", "edited retry".into());
+        let run = dialog
+            .submit_sequence_with(
+                &ctx,
+                || Ok(snippets.clone()),
+                || panic!("do not resolve unrelated history"),
+            )
+            .unwrap()
+            .unwrap();
+
+        assert!(!dialog.is_open());
+        assert_eq!(run.step_text(0), Some("Hello first value, "));
+        assert_eq!(run.step_text(1), Some("Hello edited retry, "));
+        assert!(!format!("{run:?}").contains("first value"));
+    }
+
+    #[test]
+    fn cancelling_sequence_prompt_discards_entered_values_without_a_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::paste_sequence::SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft::new(
+                "Cancel prompt",
+                vec![crate::paste_sequence::Step::SnippetRef {
+                    alias: "ticketreply".into(),
+                }],
+            ))
+            .unwrap();
+        let flow = crate::paste_sequence::SequencePreflight::begin(
+            snapshot.sequence(id).unwrap().clone(),
+            &[entry()],
+            &[],
+            sequence_context(),
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut dialog = SnippetPromptDialog::default();
+        dialog.begin_sequence_preflight(&ctx, flow).unwrap();
+        dialog.set_value("name", "cancelled sentinel".into());
+        assert!(dialog.cancel(&ctx).is_none());
+        assert!(!dialog.is_open());
+        assert!(dialog.session().is_none());
     }
 
     fn type_into_rendered_field(

@@ -8,9 +8,16 @@
 //! through the atomic sequence store.
 
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
+use crate::plugins::snippet_template::{
+    SnippetInvocationContext, TemplateRenderError, render_for_copy_with_context,
+};
+use crate::plugins::snippets::{
+    PreparedSnippetTemplate, SnippetEntry, SnippetRunMode, prepare_snippet_run,
+};
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -605,17 +612,618 @@ fn load_document(path: &Path) -> Result<SequenceDocument, SequenceStoreError> {
     Ok(document)
 }
 
+/// The external window a prepared sequence is authorized to target. Its title
+/// is available to the explicit preflight UI, but omitted from Debug output.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SequenceTarget {
+    window: crate::active_window::ExternalForegroundWindow,
+}
+
+impl SequenceTarget {
+    pub(crate) fn from_external_window(
+        window: crate::active_window::ExternalForegroundWindow,
+        launcher_process_id: u32,
+    ) -> Result<Self, SequencePreflightError> {
+        if window.hwnd == 0 || window.process_id == 0 || window.thread_id == 0 {
+            return Err(SequencePreflightError::InvalidTargetIdentity);
+        }
+        if window.process_id == launcher_process_id {
+            return Err(SequencePreflightError::LauncherTarget);
+        }
+        Ok(Self { window })
+    }
+
+    pub(crate) fn hwnd(&self) -> isize {
+        self.window.hwnd
+    }
+
+    pub(crate) fn process_id(&self) -> u32 {
+        self.window.process_id
+    }
+
+    pub(crate) fn thread_id(&self) -> u32 {
+        self.window.thread_id
+    }
+
+    pub(crate) fn title(&self) -> Option<&str> {
+        self.window.title.as_deref()
+    }
+}
+
+impl fmt::Debug for SequenceTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SequenceTarget")
+            .field("hwnd_available", &(self.window.hwnd != 0))
+            .field("process_id_available", &(self.window.process_id != 0))
+            .field("thread_id_available", &(self.window.thread_id != 0))
+            .field("title_available", &self.window.title.is_some())
+            .finish()
+    }
+}
+
+/// One immutable clock/clipboard/template context and the independently
+/// validated external target captured before the preflight UI takes focus.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SequenceInvocationContext {
+    snippet_context: SnippetInvocationContext,
+    target: SequenceTarget,
+}
+
+impl SequenceInvocationContext {
+    pub(crate) fn new(
+        timestamp: DateTime<FixedOffset>,
+        clipboard_text: Option<String>,
+        target: SequenceTarget,
+    ) -> Self {
+        let snippet_context = SnippetInvocationContext::new(
+            timestamp,
+            clipboard_text,
+            Some(target.hwnd()),
+            target.title().map(str::to_owned),
+        );
+        Self {
+            snippet_context,
+            target,
+        }
+    }
+
+    pub(crate) fn snippet_context(&self) -> &SnippetInvocationContext {
+        &self.snippet_context
+    }
+
+    pub(crate) fn target(&self) -> &SequenceTarget {
+        &self.target
+    }
+}
+
+impl fmt::Debug for SequenceInvocationContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SequenceInvocationContext")
+            .field("snippet_context", &self.snippet_context)
+            .field("target", &self.target)
+            .finish()
+    }
+}
+
+/// Safe, payload-free preflight failures. User-authored aliases, templates,
+/// clipboard data and rendered text are never included in these errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SequencePreflightError {
+    InvalidSequence,
+    InvalidTargetIdentity,
+    LauncherTarget,
+    MissingSnippet,
+    AmbiguousSnippet,
+    StaleSnippet,
+    InvalidSnippet,
+    RequiredValues,
+    MissingHistoryItem,
+    HistoryUnavailable,
+    SnippetsUnavailable,
+    NotReady,
+}
+
+impl SequencePreflightError {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::InvalidSequence => "The sequence is empty or invalid.",
+            Self::InvalidTargetIdentity => "The originating window could not be identified.",
+            Self::LauncherTarget => "The launcher cannot be used as a sequence target.",
+            Self::MissingSnippet => "A referenced snippet no longer exists.",
+            Self::AmbiguousSnippet => "A referenced snippet alias is ambiguous.",
+            Self::StaleSnippet => "A referenced snippet changed during preflight.",
+            Self::InvalidSnippet => "A referenced snippet could not be prepared.",
+            Self::RequiredValues => "Fill in the required snippet fields before continuing.",
+            Self::MissingHistoryItem => "A referenced clipboard history item no longer exists.",
+            Self::HistoryUnavailable => "Clipboard history could not be read.",
+            Self::SnippetsUnavailable => "Saved snippets could not be read.",
+            Self::NotReady => "Finish every prompted snippet before preparing the sequence.",
+        }
+    }
+}
+
+/// A single prompted step exposed to the existing snippet prompt form. Values
+/// start from the snippet's configured defaults; the source entry and context
+/// remain fixed for the whole sequence invocation.
+pub(crate) struct SequencePrompt {
+    pub(crate) step_index: usize,
+    pub(crate) total_steps: usize,
+    pub(crate) prompt_index: usize,
+    pub(crate) total_prompts: usize,
+    pub(crate) alias: String,
+    pub(crate) prepared: PreparedSnippetTemplate,
+    pub(crate) context: SnippetInvocationContext,
+    pub(crate) values: HashMap<String, String>,
+}
+
+#[derive(Clone)]
+struct PendingSequencePrompt {
+    step_index: usize,
+    alias: String,
+    entry_snapshot: SnippetEntry,
+    prepared: PreparedSnippetTemplate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedStepKind {
+    Snippet,
+    ClipboardHistory,
+    LiteralText,
+}
+
+#[derive(Clone)]
+struct ResolvedSequenceStep {
+    text: String,
+    kind: PreparedStepKind,
+    hide_contents: bool,
+}
+
+/// In-memory, no-side-effect sequence preflight. It stores only clipboard
+/// history digests until all prompts and snapshot checks have succeeded.
+#[derive(Clone)]
+pub(crate) struct SequencePreflight {
+    sequence: Sequence,
+    context: SequenceInvocationContext,
+    snippets: Vec<(String, SnippetEntry)>,
+    prompts: Vec<PendingSequencePrompt>,
+    prompt_cursor: usize,
+    steps: Vec<Option<ResolvedSequenceStep>>,
+    history_references: Vec<(usize, String)>,
+}
+
+impl SequencePreflight {
+    pub(crate) fn begin(
+        sequence: Sequence,
+        snippets: &[SnippetEntry],
+        history: &[String],
+        context: SequenceInvocationContext,
+    ) -> Result<Self, SequencePreflightError> {
+        if sequence.id.0 == 0
+            || validate_sequence_fields(
+                &sequence.name,
+                sequence.hotkey.as_ref(),
+                sequence.delay_ms,
+                &sequence.steps,
+            )
+            .is_err()
+        {
+            return Err(SequencePreflightError::InvalidSequence);
+        }
+
+        let mut pending_snippets = Vec::new();
+        let mut prompts = Vec::new();
+        let mut steps = (0..sequence.steps.len())
+            .map(|_| None)
+            .collect::<Vec<Option<ResolvedSequenceStep>>>();
+        let mut history_references = Vec::new();
+
+        for (step_index, step) in sequence.steps.iter().enumerate() {
+            match step {
+                Step::SnippetRef { alias } => {
+                    let entry = exact_snippet(snippets, alias)?.clone();
+                    pending_snippets.push((alias.clone(), entry.clone()));
+                    match prepare_snippet_run(&entry)
+                        .map_err(|_| SequencePreflightError::InvalidSnippet)?
+                    {
+                        SnippetRunMode::Plain => {
+                            steps[step_index] = Some(ResolvedSequenceStep {
+                                text: entry.text,
+                                kind: PreparedStepKind::Snippet,
+                                hide_contents: entry.hide_contents,
+                            });
+                        }
+                        SnippetRunMode::SystemOnly(prepared) => {
+                            let text = render_for_copy_with_context(
+                                &prepared.parsed,
+                                &prepared.fields,
+                                &HashMap::new(),
+                                context.snippet_context(),
+                            )
+                            .map_err(map_template_error)?;
+                            steps[step_index] = Some(ResolvedSequenceStep {
+                                text,
+                                kind: PreparedStepKind::Snippet,
+                                hide_contents: entry.hide_contents,
+                            });
+                        }
+                        SnippetRunMode::Prompted(prepared) => {
+                            prompts.push(PendingSequencePrompt {
+                                step_index,
+                                alias: alias.clone(),
+                                entry_snapshot: entry,
+                                prepared,
+                            });
+                        }
+                    }
+                }
+                Step::ClipboardSnapshotOrRef { content_sha256, .. } => {
+                    if resolve_history_reference(history, content_sha256).is_none() {
+                        return Err(SequencePreflightError::MissingHistoryItem);
+                    }
+                    history_references.push((step_index, content_sha256.clone()));
+                }
+                Step::LiteralText { text } => {
+                    steps[step_index] = Some(ResolvedSequenceStep {
+                        text: text.clone(),
+                        kind: PreparedStepKind::LiteralText,
+                        hide_contents: false,
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            sequence,
+            context,
+            snippets: pending_snippets,
+            prompts,
+            prompt_cursor: 0,
+            steps,
+            history_references,
+        })
+    }
+
+    pub(crate) fn current_prompt(&self) -> Option<SequencePrompt> {
+        let prompt = self.prompts.get(self.prompt_cursor)?;
+        let values = prompt
+            .prepared
+            .fields
+            .iter()
+            .map(|field| (field.name.clone(), field.default_value.clone()))
+            .collect();
+        Some(SequencePrompt {
+            step_index: prompt.step_index,
+            total_steps: self.sequence.steps.len(),
+            prompt_index: self.prompt_cursor,
+            total_prompts: self.prompts.len(),
+            alias: prompt.alias.clone(),
+            prepared: prompt.prepared.clone(),
+            context: self.context.snippet_context().clone(),
+            values,
+        })
+    }
+
+    pub(crate) fn requires_history(&self) -> bool {
+        !self.history_references.is_empty()
+    }
+
+    pub(crate) fn submit_current_prompt(
+        &mut self,
+        values: &HashMap<String, String>,
+    ) -> Result<bool, SequencePreflightError> {
+        let prompt = self
+            .prompts
+            .get(self.prompt_cursor)
+            .ok_or(SequencePreflightError::NotReady)?;
+        let text = render_for_copy_with_context(
+            &prompt.prepared.parsed,
+            &prompt.prepared.fields,
+            values,
+            self.context.snippet_context(),
+        )
+        .map_err(map_template_error)?;
+        self.steps[prompt.step_index] = Some(ResolvedSequenceStep {
+            text,
+            kind: PreparedStepKind::Snippet,
+            hide_contents: prompt.entry_snapshot.hide_contents,
+        });
+        self.prompt_cursor += 1;
+        Ok(self.prompt_cursor < self.prompts.len())
+    }
+
+    pub(crate) fn finish(
+        &self,
+        current_snippets: &[SnippetEntry],
+        current_history: &[String],
+    ) -> Result<PreparedSequenceRun, SequencePreflightError> {
+        if self.prompt_cursor != self.prompts.len() {
+            return Err(SequencePreflightError::NotReady);
+        }
+        for (alias, snapshot) in &self.snippets {
+            let current = exact_snippet(current_snippets, alias)?;
+            if current != snapshot {
+                return Err(SequencePreflightError::StaleSnippet);
+            }
+        }
+
+        let mut steps = self
+            .steps
+            .iter()
+            .map(|step| {
+                step.as_ref().map(|step| ResolvedSequenceStep {
+                    text: step.text.clone(),
+                    kind: step.kind,
+                    hide_contents: step.hide_contents,
+                })
+            })
+            .collect::<Vec<_>>();
+        for (step_index, digest) in &self.history_references {
+            let text = resolve_history_reference(current_history, digest)
+                .ok_or(SequencePreflightError::MissingHistoryItem)?;
+            steps[*step_index] = Some(ResolvedSequenceStep {
+                text,
+                kind: PreparedStepKind::ClipboardHistory,
+                hide_contents: false,
+            });
+        }
+
+        let steps = steps
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or(SequencePreflightError::NotReady)?;
+        Ok(PreparedSequenceRun {
+            sequence_id: self.sequence.id,
+            name: self.sequence.name.clone(),
+            mode: self.sequence.mode,
+            delay_ms: self.sequence.delay_ms,
+            target: self.context.target.clone(),
+            steps,
+        })
+    }
+
+    /// Finalize the currently displayed prompt without mutating this flow.
+    /// Keeping the flow intact lets the user correct inputs if fresh source
+    /// snapshots or stale-reference checks fail during finalization.
+    pub(crate) fn finish_with_current_prompt(
+        &self,
+        values: &HashMap<String, String>,
+        current_snippets: &[SnippetEntry],
+        current_history: &[String],
+    ) -> Result<PreparedSequenceRun, SequencePreflightError> {
+        let mut candidate = self.clone();
+        candidate.submit_current_prompt(values)?;
+        candidate.finish(current_snippets, current_history)
+    }
+}
+
+fn exact_snippet<'a>(
+    snippets: &'a [SnippetEntry],
+    alias: &str,
+) -> Result<&'a SnippetEntry, SequencePreflightError> {
+    let mut matches = snippets.iter().filter(|entry| entry.alias == alias);
+    let Some(entry) = matches.next() else {
+        return Err(SequencePreflightError::MissingSnippet);
+    };
+    if matches.next().is_some() {
+        return Err(SequencePreflightError::AmbiguousSnippet);
+    }
+    Ok(entry)
+}
+
+fn resolve_history_reference(history: &[String], digest: &str) -> Option<String> {
+    let mut matched: Option<&str> = None;
+    for text in history {
+        if hex::encode(Sha256::digest(text.as_bytes())) != digest {
+            continue;
+        }
+        if matched.is_some_and(|previous| previous != text) {
+            return None;
+        }
+        matched = Some(text);
+    }
+    matched.map(str::to_owned)
+}
+
+fn map_template_error(error: TemplateRenderError) -> SequencePreflightError {
+    if error.kind == crate::plugins::snippet_template::RenderErrorKind::RequiredValues {
+        SequencePreflightError::RequiredValues
+    } else {
+        SequencePreflightError::InvalidSnippet
+    }
+}
+
+/// Final immutable, ordered sequence text. It has no Debug implementation and
+/// exposes payloads only to the playback owner after every preflight check.
+pub(crate) struct PreparedSequenceRun {
+    sequence_id: SequenceId,
+    name: String,
+    mode: PlaybackMode,
+    delay_ms: u32,
+    target: SequenceTarget,
+    steps: Vec<ResolvedSequenceStep>,
+}
+
+impl PreparedSequenceRun {
+    pub(crate) fn sequence_id(&self) -> SequenceId {
+        self.sequence_id
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn mode(&self) -> PlaybackMode {
+        self.mode
+    }
+
+    pub(crate) fn delay_ms(&self) -> u32 {
+        self.delay_ms
+    }
+
+    pub(crate) fn target(&self) -> &SequenceTarget {
+        &self.target
+    }
+
+    pub(crate) fn step_count(&self) -> usize {
+        self.steps.len()
+    }
+
+    pub(crate) fn step_text(&self, index: usize) -> Option<&str> {
+        self.steps.get(index).map(|step| step.text.as_str())
+    }
+
+    pub(crate) fn preview(&self) -> PreparedSequencePreview {
+        let target_label = self
+            .target
+            .title()
+            .filter(|title| !title.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Process {}", self.target.process_id()));
+        PreparedSequencePreview {
+            name: self.name.clone(),
+            mode: self.mode,
+            delay_ms: self.delay_ms,
+            item_count: self.steps.len(),
+            target_label,
+            target_title: self.target.title().map(str::to_owned),
+            ready: true,
+            steps: self
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, step)| PreparedSequencePreviewStep {
+                    index,
+                    kind: step.kind,
+                    hidden: step.hide_contents,
+                    text: (!step.hide_contents).then(|| step.text.clone()),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Presentation-ready metadata and per-step safe preview. Hidden snippets have
+/// no text value; callers cannot accidentally include their payload in passive UI.
+pub(crate) struct PreparedSequencePreview {
+    pub(crate) name: String,
+    pub(crate) mode: PlaybackMode,
+    pub(crate) delay_ms: u32,
+    pub(crate) item_count: usize,
+    pub(crate) target_label: String,
+    pub(crate) target_title: Option<String>,
+    pub(crate) ready: bool,
+    pub(crate) steps: Vec<PreparedSequencePreviewStep>,
+}
+
+pub(crate) struct PreparedSequencePreviewStep {
+    pub(crate) index: usize,
+    pub(crate) kind: PreparedStepKind,
+    pub(crate) hidden: bool,
+    pub(crate) text: Option<String>,
+}
+
+impl fmt::Debug for PreparedSequenceRun {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedSequenceRun")
+            .field("sequence_id", &self.sequence_id)
+            .field("step_count", &self.steps.len())
+            .field("delay_ms", &self.delay_ms)
+            .field("target", &self.target)
+            .finish()
+    }
+}
+
+impl fmt::Debug for PreparedSequencePreview {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedSequencePreview")
+            .field("step_count", &self.steps.len())
+            .field("delay_ms", &self.delay_ms)
+            .field("target_available", &self.target_title.is_some())
+            .field("ready", &self.ready)
+            .finish()
+    }
+}
+
+impl fmt::Debug for PreparedSequencePreviewStep {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedSequencePreviewStep")
+            .field("index", &self.index)
+            .field("hidden", &self.hidden)
+            .field("text_available", &self.text.is_some())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ClipboardReferenceLabel, HotkeyChord, MAX_SEQUENCE_DELAY_MS, MAX_SEQUENCE_NAME_CHARS,
-        PlaybackMode, SequenceDraft, SequenceId, SequenceStore, SequenceStoreError,
-        SequenceValidationError, Step,
+        PlaybackMode, PreparedStepKind, Sequence, SequenceDraft, SequenceId,
+        SequenceInvocationContext, SequencePreflight, SequencePreflightError, SequenceStore,
+        SequenceStoreError, SequenceTarget, SequenceValidationError, Step,
     };
+    use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition, SnippetInputKind};
+    use chrono::{DateTime, FixedOffset};
     use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
 
     fn clipboard_step(text: &str) -> Step {
         Step::clipboard_history_reference(text)
+    }
+
+    fn entry(alias: &str, text: &str, prompted: bool, hidden: bool) -> SnippetEntry {
+        SnippetEntry {
+            alias: alias.into(),
+            text: text.into(),
+            hide_contents: hidden,
+            prompt_for_fields: prompted,
+            fields: prompted
+                .then(|| SnippetFieldDefinition {
+                    name: "name".into(),
+                    label: "Name".into(),
+                    default_value: "default-name".into(),
+                    required: true,
+                    input_kind: SnippetInputKind::SingleLine,
+                })
+                .into_iter()
+                .collect(),
+            tags: Vec::new(),
+        }
+    }
+
+    fn target(process_id: u32) -> SequenceTarget {
+        SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: 123,
+                process_id,
+                thread_id: 456,
+                title: Some("origin editor".into()),
+            },
+            999,
+        )
+        .unwrap()
+    }
+
+    fn invocation_context() -> SequenceInvocationContext {
+        let timestamp: DateTime<FixedOffset> =
+            DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap();
+        SequenceInvocationContext::new(timestamp, Some("captured clipboard".into()), target(42))
+    }
+
+    fn sequence(steps: Vec<Step>) -> Sequence {
+        Sequence {
+            id: SequenceId(1),
+            name: "Preflight test".into(),
+            hotkey: None,
+            mode: PlaybackMode::Automatic,
+            delay_ms: 250,
+            steps,
+        }
     }
 
     #[test]
@@ -902,5 +1510,268 @@ mod tests {
         let reloaded = store.load().unwrap();
         assert_eq!(reloaded.sequences().len(), 1);
         assert_eq!(reloaded.sequences()[0].name, "First");
+    }
+
+    #[test]
+    fn preflight_resolves_mixed_steps_with_one_fixed_context_and_ordered_preview() {
+        let snippets = vec![
+            entry("legacy", "literal {{date}}", false, false),
+            entry(
+                "system",
+                "{{sys.time:%H:%M}}/{{sys.clipboard}}/{{sys.window_title}}",
+                false,
+                false,
+            ),
+            entry(
+                "prompt",
+                "Hello {{name}} at {{sys.time:%H:%M}}",
+                true,
+                false,
+            ),
+        ];
+        let history_item = "history snapshot".to_string();
+        let history = vec![history_item.clone()];
+        let mut preflight = SequencePreflight::begin(
+            sequence(vec![
+                Step::SnippetRef {
+                    alias: "legacy".into(),
+                },
+                Step::SnippetRef {
+                    alias: "system".into(),
+                },
+                Step::SnippetRef {
+                    alias: "prompt".into(),
+                },
+                clipboard_step(&history_item),
+                Step::LiteralText {
+                    text: "authored text".into(),
+                },
+            ]),
+            &snippets,
+            &history,
+            invocation_context(),
+        )
+        .unwrap();
+
+        let prompt = preflight.current_prompt().unwrap();
+        assert_eq!(prompt.step_index, 2);
+        assert_eq!(prompt.total_steps, 5);
+        assert_eq!(prompt.values.get("name").unwrap(), "default-name");
+        preflight
+            .submit_current_prompt(&HashMap::from([("name".into(), "Ada".into())]))
+            .unwrap();
+        let run = preflight.finish(&snippets, &history).unwrap();
+
+        assert_eq!(run.step_count(), 5);
+        assert_eq!(run.step_text(0), Some("literal {{date}}"));
+        assert_eq!(
+            run.step_text(1),
+            Some("03:04/captured clipboard/origin editor")
+        );
+        assert_eq!(run.step_text(2), Some("Hello Ada at 03:04"));
+        assert_eq!(run.step_text(3), Some("history snapshot"));
+        assert_eq!(run.step_text(4), Some("authored text"));
+        assert_eq!(run.target().hwnd(), 123);
+        assert_eq!(run.target().process_id(), 42);
+        assert_eq!(run.target().thread_id(), 456);
+
+        let preview = run.preview();
+        assert!(preview.ready);
+        assert_eq!(preview.item_count, 5);
+        assert_eq!(preview.target_label, "origin editor");
+        assert_eq!(preview.steps.len(), 5);
+        assert_eq!(preview.steps[1].kind, PreparedStepKind::Snippet);
+        assert_eq!(preview.steps[3].kind, PreparedStepKind::ClipboardHistory);
+        assert_eq!(preview.steps[4].kind, PreparedStepKind::LiteralText);
+        assert_eq!(
+            preview.steps[1].text.as_deref(),
+            Some("03:04/captured clipboard/origin editor")
+        );
+    }
+
+    #[test]
+    fn repeated_snippet_references_receive_independent_prompt_values() {
+        let snippets = vec![entry("same", "{{name}}", true, false)];
+        let history = Vec::new();
+        let mut preflight = SequencePreflight::begin(
+            sequence(vec![
+                Step::SnippetRef {
+                    alias: "same".into(),
+                },
+                Step::SnippetRef {
+                    alias: "same".into(),
+                },
+            ]),
+            &snippets,
+            &history,
+            invocation_context(),
+        )
+        .unwrap();
+        assert_eq!(preflight.current_prompt().unwrap().step_index, 0);
+        assert!(
+            preflight
+                .submit_current_prompt(&HashMap::from([("name".into(), "first".into())]))
+                .unwrap()
+        );
+        assert_eq!(preflight.current_prompt().unwrap().step_index, 1);
+        assert_eq!(
+            preflight
+                .current_prompt()
+                .unwrap()
+                .values
+                .get("name")
+                .unwrap(),
+            "default-name"
+        );
+        assert!(
+            !preflight
+                .submit_current_prompt(&HashMap::from([("name".into(), "second".into())]))
+                .unwrap()
+        );
+        let run = preflight.finish(&snippets, &history).unwrap();
+        assert_eq!(run.step_text(0), Some("first"));
+        assert_eq!(run.step_text(1), Some("second"));
+    }
+
+    #[test]
+    fn preflight_rejects_missing_ambiguous_stale_and_invalid_sources_atomically() {
+        let sequence_for = |alias: &str| {
+            sequence(vec![Step::SnippetRef {
+                alias: alias.into(),
+            }])
+        };
+        let context = invocation_context();
+        assert!(matches!(
+            SequencePreflight::begin(sequence_for("absent"), &[], &[], context.clone()),
+            Err(SequencePreflightError::MissingSnippet)
+        ));
+        let duplicate = entry("duplicate", "first", false, false);
+        assert!(matches!(
+            SequencePreflight::begin(
+                sequence_for("duplicate"),
+                &[duplicate.clone(), duplicate],
+                &[],
+                context.clone()
+            ),
+            Err(SequencePreflightError::AmbiguousSnippet)
+        ));
+
+        let saved = entry("saved", "before", false, false);
+        let preflight = SequencePreflight::begin(
+            sequence_for("saved"),
+            std::slice::from_ref(&saved),
+            &[],
+            context.clone(),
+        )
+        .unwrap();
+        let changed = entry("saved", "after", false, false);
+        assert!(matches!(
+            preflight.finish(&[changed], &[]),
+            Err(SequencePreflightError::StaleSnippet)
+        ));
+
+        let missing_history = SequencePreflight::begin(
+            sequence(vec![clipboard_step("vanished")]),
+            &[],
+            &[],
+            context.clone(),
+        );
+        assert!(matches!(
+            missing_history,
+            Err(SequencePreflightError::MissingHistoryItem)
+        ));
+
+        let history_item = "rolls during prompt".to_string();
+        let with_history = SequencePreflight::begin(
+            sequence(vec![clipboard_step(&history_item)]),
+            &[],
+            std::slice::from_ref(&history_item),
+            context,
+        )
+        .unwrap();
+        let run_result = with_history.finish(&[], &[]);
+        assert!(matches!(
+            run_result,
+            Err(SequencePreflightError::MissingHistoryItem)
+        ));
+    }
+
+    #[test]
+    fn target_identity_rejects_unknown_or_self_windows_and_hidden_preview_masks_text() {
+        let invalid = crate::active_window::ExternalForegroundWindow {
+            hwnd: 0,
+            process_id: 42,
+            thread_id: 456,
+            title: Some("unusable".into()),
+        };
+        assert!(matches!(
+            SequenceTarget::from_external_window(invalid, 999),
+            Err(SequencePreflightError::InvalidTargetIdentity)
+        ));
+        assert!(matches!(
+            SequenceTarget::from_external_window(
+                crate::active_window::ExternalForegroundWindow {
+                    hwnd: 123,
+                    process_id: 999,
+                    thread_id: 456,
+                    title: None,
+                },
+                999
+            ),
+            Err(SequencePreflightError::LauncherTarget)
+        ));
+
+        let secret = "hidden snippet secret";
+        let snippets = vec![entry("hidden", secret, false, true)];
+        let history = Vec::new();
+        let preflight = SequencePreflight::begin(
+            sequence(vec![Step::SnippetRef {
+                alias: "hidden".into(),
+            }]),
+            &snippets,
+            &history,
+            invocation_context(),
+        )
+        .unwrap();
+        let run = preflight.finish(&snippets, &history).unwrap();
+        let preview = run.preview();
+        assert!(preview.steps[0].hidden);
+        assert!(preview.steps[0].text.is_none());
+        assert!(!format!("{run:?}").contains(secret));
+        assert!(!format!("{preview:?}").contains(secret));
+        assert_eq!(run.step_text(0), Some(secret));
+    }
+
+    #[test]
+    fn required_values_reject_empty_submission_without_losing_defaults_or_context() {
+        let snippets = vec![entry("required", "{{name}}/{{sys.clipboard}}", true, false)];
+        let history = Vec::new();
+        let mut preflight = SequencePreflight::begin(
+            sequence(vec![Step::SnippetRef {
+                alias: "required".into(),
+            }]),
+            &snippets,
+            &history,
+            invocation_context(),
+        )
+        .unwrap();
+        assert!(matches!(
+            preflight.submit_current_prompt(&HashMap::from([("name".into(), String::new())])),
+            Err(SequencePreflightError::RequiredValues)
+        ));
+        assert_eq!(
+            preflight
+                .current_prompt()
+                .unwrap()
+                .values
+                .get("name")
+                .unwrap(),
+            "default-name"
+        );
+        preflight
+            .submit_current_prompt(&HashMap::from([("name".into(), "kept".into())]))
+            .unwrap();
+        let run = preflight.finish(&snippets, &history).unwrap();
+        assert_eq!(run.step_text(0), Some("kept/captured clipboard"));
     }
 }

@@ -2,6 +2,8 @@
 #[derive(Clone, PartialEq, Eq)]
 pub struct ExternalForegroundWindow {
     pub(crate) hwnd: isize,
+    pub(crate) process_id: u32,
+    pub(crate) thread_id: u32,
     pub(crate) title: Option<String>,
 }
 
@@ -33,8 +35,8 @@ pub(crate) fn observe_foreground_window() -> ForegroundWindowObservation {
         }
 
         let mut process_id = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-        if process_id == 0 {
+        let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+        if process_id == 0 || thread_id == 0 {
             return ForegroundWindowObservation::Unavailable;
         }
         if process_id == std::process::id() {
@@ -51,6 +53,8 @@ pub(crate) fn observe_foreground_window() -> ForegroundWindowObservation {
         };
         ForegroundWindowObservation::External(ExternalForegroundWindow {
             hwnd: hwnd.0 as isize,
+            process_id,
+            thread_id,
             title,
         })
     }
