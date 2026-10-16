@@ -1,7 +1,7 @@
 use super::MkMacroDialog;
 use crate::gui::theme::widgets::{self, ButtonEmphasis};
 use crate::mkmacro::{MkMacro, MkMacroDocument, MkMacroFolder};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 struct MacroGroup<'a> {
     /// None identifies the synthetic Unfiled group, never a persisted folder.
@@ -79,6 +79,28 @@ fn visible_macro_groups<'a>(
 }
 
 pub const SIDEBAR_WIDTH: f32 = 220.0;
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(super) struct LayoutGeometry {
+    pub(super) controls_assigned: eframe::egui::Rect,
+    pub(super) controls_viewport: eframe::egui::Rect,
+    pub(super) controls_clip: eframe::egui::Rect,
+    pub(super) controls_content_size: eframe::egui::Vec2,
+    pub(super) controls_offset: eframe::egui::Vec2,
+    pub(super) controls_id: eframe::egui::Id,
+    pub(super) search_rect: eframe::egui::Rect,
+    pub(super) search_id: eframe::egui::Id,
+    pub(super) search_has_focus: bool,
+    pub(super) list_viewport: eframe::egui::Rect,
+    pub(super) list_clip: eframe::egui::Rect,
+    pub(super) list_content_size: eframe::egui::Vec2,
+    pub(super) list_offset: eframe::egui::Vec2,
+    pub(super) first_macro_row: Option<eframe::egui::Rect>,
+    pub(super) folder_rows: HashMap<u64, eframe::egui::Rect>,
+    pub(super) macro_rows: HashMap<u64, eframe::egui::Rect>,
+}
+
 pub(super) fn show_empty(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let size = ui.available_size();
     ui.allocate_ui_with_layout(
@@ -203,46 +225,97 @@ fn show_folder_rename(
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     let mut command = None;
-    widgets::compact_section_heading(
-        ui,
-        "Macros",
-        Some("Browse folders and choose a workflow to edit."),
-    );
-    ui.horizontal_wrapped(|ui| {
-        if ui.button("New Macro").clicked() {
-            command = Some(Command::NewMacro);
-        }
-        if ui.button("New Folder").clicked() {
-            command = Some(Command::NewFolder);
-        }
-        let selected = d.selected_macro().map(|m| m.id);
-        if ui
-            .add_enabled(selected.is_some(), eframe::egui::Button::new("Duplicate"))
-            .clicked()
-        {
-            command = selected.map(Command::DuplicateMacro);
-        }
-        let delete = ui.add_enabled(selected.is_some(), eframe::egui::Button::new("Delete"));
-        if widgets::with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked() {
-            command = selected.map(Command::DeleteMacro);
-        }
-    });
-    widgets::labeled_form_row(ui, "Search", |ui| {
-        ui.add(
-            eframe::egui::TextEdit::singleline(&mut d.search)
-                .desired_width(ui.available_width())
-                .hint_text("Names and descriptions"),
-        )
-    });
+    let available_height = ui.available_height().max(0.0);
+    let item_spacing = ui.spacing().item_spacing.y;
+    let group_heading_height = ui.text_style_height(&eframe::egui::TextStyle::Body);
+    let macro_row_height = super::navigation::selectable_row_height(ui);
+    let reserved_list_height = group_heading_height + item_spacing + macro_row_height;
+    let controls_height = (available_height - reserved_list_height - item_spacing).max(0.0);
+    #[cfg(test)]
+    let controls_assigned = ui.max_rect();
+    #[cfg(test)]
+    let mut controls_clip = eframe::egui::Rect::NOTHING;
+    #[cfg(test)]
+    let mut search_rect = eframe::egui::Rect::NOTHING;
+    #[cfg(test)]
+    let mut search_id = eframe::egui::Id::NULL;
+    #[cfg(test)]
+    let mut search_has_focus = false;
+    let _controls_output = eframe::egui::ScrollArea::vertical()
+        .id_salt("mkmacro_macro_list_controls")
+        .auto_shrink([false, true])
+        .min_scrolled_height(0.0)
+        .max_height(controls_height)
+        .show(ui, |ui| {
+            #[cfg(test)]
+            {
+                controls_clip = ui.clip_rect();
+            }
+            widgets::compact_section_heading(
+                ui,
+                "Macros",
+                Some("Browse folders and choose a workflow to edit."),
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("New Macro").clicked() {
+                    command = Some(Command::NewMacro);
+                }
+                if ui.button("New Folder").clicked() {
+                    command = Some(Command::NewFolder);
+                }
+                let selected = d.selected_macro().map(|m| m.id);
+                if ui
+                    .add_enabled(selected.is_some(), eframe::egui::Button::new("Duplicate"))
+                    .clicked()
+                {
+                    command = selected.map(Command::DuplicateMacro);
+                }
+                let delete =
+                    ui.add_enabled(selected.is_some(), eframe::egui::Button::new("Delete"));
+                if widgets::with_button_emphasis(ui, delete, ButtonEmphasis::Destructive).clicked()
+                {
+                    command = selected.map(Command::DeleteMacro);
+                }
+            });
+            let _search = widgets::labeled_form_row(ui, "Search", |ui| {
+                ui.add(
+                    eframe::egui::TextEdit::singleline(&mut d.search)
+                        .desired_width(ui.available_width())
+                        .hint_text("Names and descriptions"),
+                )
+            });
+            #[cfg(test)]
+            {
+                search_rect = _search.rect;
+                search_id = _search.id;
+                search_has_focus = _search.has_focus();
+            }
+        });
     let mut rename_text = d.folder_rename_text.clone();
     let rename_needs_focus = std::mem::take(&mut d.folder_rename_needs_focus);
     let searching = !d.search.trim().is_empty();
     let groups = visible_macro_groups(&d.draft, &d.search, &d.collapsed_folders);
     let mut clicked = None;
     let mut toggled_folders = Vec::new();
-    eframe::egui::ScrollArea::vertical()
+    let list_height = ui.available_height().max(0.0);
+    #[cfg(test)]
+    let mut list_clip = eframe::egui::Rect::NOTHING;
+    #[cfg(test)]
+    let mut first_macro_row = None;
+    #[cfg(test)]
+    let mut folder_rows = HashMap::new();
+    #[cfg(test)]
+    let mut macro_rows = HashMap::new();
+    let _list_output = eframe::egui::ScrollArea::vertical()
+        .id_salt("mkmacro_macro_list_rows")
         .auto_shrink([false, false])
+        .min_scrolled_height(0.0)
+        .max_height(list_height)
         .show(ui, |ui| {
+            #[cfg(test)]
+            {
+                list_clip = ui.clip_rect();
+            }
             if searching && groups.is_empty() {
                 ui.label("No macros match this search.");
             }
@@ -269,6 +342,8 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                 eframe::egui::Button::new(format!("{arrow} {}", folder.name))
                                     .frame(false),
                             );
+                            #[cfg(test)]
+                            folder_rows.insert(folder.id, response.rect);
                             if response.clicked() && !searching {
                                 toggled_folders.push(folder.id);
                             }
@@ -296,6 +371,13 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                                         d.selected_macro_id == Some(m.id),
                                         &m.name,
                                     );
+                                    #[cfg(test)]
+                                    {
+                                        macro_rows.insert(m.id, response.rect);
+                                        if first_macro_row.is_none() {
+                                            first_macro_row = Some(response.rect);
+                                        }
+                                    }
                                     if response.clicked() {
                                         clicked = Some(m.id);
                                     }
@@ -343,6 +425,27 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
                 });
             }
         });
+    #[cfg(test)]
+    {
+        d.last_macro_list_geometry = Some(LayoutGeometry {
+            controls_assigned,
+            controls_viewport: _controls_output.inner_rect,
+            controls_clip,
+            controls_content_size: _controls_output.content_size,
+            controls_offset: _controls_output.state.offset,
+            controls_id: _controls_output.id,
+            search_rect,
+            search_id,
+            search_has_focus,
+            list_viewport: _list_output.inner_rect,
+            list_clip,
+            list_content_size: _list_output.content_size,
+            list_offset: _list_output.state.offset,
+            first_macro_row,
+            folder_rows,
+            macro_rows,
+        });
+    }
     d.folder_rename_text = rename_text;
     // Apply commands only after rendering has released its document borrows.
     for id in toggled_folders {

@@ -477,6 +477,26 @@ pub fn inspector_body_height() -> f32 {
     INSPECTOR_BODY_HEIGHT.clamp(150.0, 220.0)
 }
 
+pub(super) fn header_height(ui: &mut egui::Ui) -> f32 {
+    let spacing = ui.spacing().clone();
+    let font_id =
+        super::step_table::effective_font_id(ui, egui::TextStyle::Button.resolve(ui.style()));
+    let text_height =
+        ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + spacing.extra_text_line_spacing;
+    let header_height = (text_height + 2.0 * spacing.button_padding.y).max(spacing.interact_size.y);
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (header_height * pixels_per_point).ceil() / pixels_per_point
+}
+
+pub(super) fn reserved_height(ui: &mut egui::Ui, open: bool, body_height: f32) -> f32 {
+    let header_height = header_height(ui);
+    if open {
+        header_height + ui.spacing().item_spacing.y + body_height.max(0.0)
+    } else {
+        header_height
+    }
+}
+
 fn render_value(ui: &mut egui::Ui, value: &FormattedValue) {
     let text = egui::RichText::new(&value.table_text);
     let text = if value.is_null() {
@@ -578,10 +598,13 @@ fn render_body(
     view: &RuntimeInspectorViewModel,
     show_internal: &mut bool,
     builtins_open: &mut bool,
+    max_height: f32,
 ) {
     egui::ScrollArea::vertical()
         .id_salt("runtime_inspector_body")
         .auto_shrink([false, false])
+        .min_scrolled_height(0.0)
+        .max_height(max_height.max(0.0))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Macro:");
@@ -664,16 +687,23 @@ fn render_body(
         });
 }
 
-pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
+pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog, body_height: f32) {
     let Some(snapshot) = dialog.runtime_inspector_snapshot.clone() else {
         let response = egui::CollapsingHeader::new("Runtime Inspector — No Debug Data")
             .open(Some(dialog.runtime_inspector_open))
             .show(ui, |ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), inspector_body_height()),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| ui.label("Run Debug to capture read-only runtime variables."),
-                );
+                egui::ScrollArea::vertical()
+                    .id_salt("runtime_inspector_empty_body")
+                    .auto_shrink([false, false])
+                    .min_scrolled_height(0.0)
+                    .max_height(body_height.max(0.0))
+                    .show(ui, |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), body_height.max(0.0)),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| ui.label("Run Debug to capture read-only runtime variables."),
+                        );
+                    });
             });
         apply_header_intent(
             &mut dialog.runtime_inspector_open,
@@ -690,7 +720,7 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
         .open(Some(dialog.runtime_inspector_open))
         .show(ui, |ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), inspector_body_height()),
+                egui::vec2(ui.available_width(), body_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     render_body(
@@ -698,6 +728,7 @@ pub(super) fn show(ui: &mut egui::Ui, dialog: &mut MkMacroDialog) {
                         &view,
                         &mut dialog.runtime_inspector_show_internal,
                         &mut dialog.runtime_inspector_builtins_open,
+                        body_height,
                     )
                 },
             );

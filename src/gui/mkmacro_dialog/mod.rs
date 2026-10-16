@@ -178,6 +178,85 @@ enum RecordHotkeyCaptureOwner {
     Toolbar,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct CellTextGeometry {
+    cell: eframe::egui::Rect,
+    clip: eframe::egui::Rect,
+    label: eframe::egui::Rect,
+}
+
+#[cfg(test)]
+impl CellTextGeometry {
+    fn is_bounded(&self) -> bool {
+        self.cell.contains_rect(self.label) && self.clip.contains_rect(self.label)
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct FirstStepRowGeometry {
+    assigned_cell: eframe::egui::Rect,
+    cell_clip: eframe::egui::Rect,
+    current_cell_contents: Vec<eframe::egui::Rect>,
+    breakpoint_button: eframe::egui::Rect,
+    header_row_height: f32,
+    nominal_row_height: f32,
+    action_text: Option<CellTextGeometry>,
+    diagnostic_text: Option<CellTextGeometry>,
+    details_text: Option<CellTextGeometry>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct StepChromeGeometry {
+    viewport: eframe::egui::Rect,
+    clip: eframe::egui::Rect,
+    environment_notice: Option<eframe::egui::Rect>,
+    document_diagnostics_header: Option<eframe::egui::Rect>,
+    environment_pending: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct StripCellGeometry {
+    assigned: eframe::egui::Rect,
+    used: eframe::egui::Rect,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct MainBodyGeometry {
+    assigned: eframe::egui::Rect,
+    after_toolbar: eframe::egui::Rect,
+    after_strip: eframe::egui::Rect,
+    strip_cells: [Option<StripCellGeometry>; 3],
+}
+
+#[cfg(test)]
+impl FirstStepRowGeometry {
+    fn row_rect(&self) -> eframe::egui::Rect {
+        let bottom = self
+            .current_cell_contents
+            .iter()
+            .map(|rect| rect.bottom())
+            .fold(self.assigned_cell.bottom(), f32::max);
+        eframe::egui::Rect::from_min_max(
+            self.assigned_cell.min,
+            eframe::egui::pos2(self.assigned_cell.right(), bottom),
+        )
+    }
+
+    fn visible_in(&self, table: eframe::egui::Rect) -> bool {
+        let row = self.row_rect();
+        row.top() >= self.cell_clip.top() - 0.1
+            && row.bottom() <= self.cell_clip.bottom() + 0.1
+            && row.top() >= table.top() - 0.1
+            && row.bottom() <= table.bottom() + 0.1
+            && self.cell_clip.contains_rect(self.breakpoint_button)
+    }
+}
+
 pub struct MkMacroDialog {
     pub open: bool,
     pub store: Arc<MkMacroStore>,
@@ -236,6 +315,20 @@ pub struct MkMacroDialog {
     recording_preview_test_facade: Option<RecordingPreviewTestFacade>,
     #[cfg(test)]
     next_recording_preview_test_ticket: u64,
+    #[cfg(test)]
+    last_main_window_rect: Option<eframe::egui::Rect>,
+    #[cfg(test)]
+    last_first_step_row_geometry: Option<FirstStepRowGeometry>,
+    #[cfg(test)]
+    last_first_step_cell_rects: Option<Vec<eframe::egui::Rect>>,
+    #[cfg(test)]
+    last_step_chrome_geometry: Option<StepChromeGeometry>,
+    #[cfg(test)]
+    last_main_body_geometry: Option<MainBodyGeometry>,
+    #[cfg(test)]
+    last_macro_list_geometry: Option<macro_list::LayoutGeometry>,
+    #[cfg(test)]
+    last_outline_closed_button_geometry: Option<(eframe::egui::Rect, eframe::egui::Rect)>,
     queued_recording_reviews: VecDeque<recording_review::RecordingReviewSession>,
     recording_insert_undo: Vec<RecordingInsertTransaction>,
     recording_insert_redo: Vec<RecordingInsertTransaction>,
@@ -370,6 +463,44 @@ mod tests {
         (dir, MkMacroDialog::new(Arc::new(store)))
     }
 
+    fn layout_input(screen_rect: eframe::egui::Rect, native_scale: f32) -> eframe::egui::RawInput {
+        let mut input = eframe::egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+        input
+            .viewports
+            .get_mut(&eframe::egui::ViewportId::ROOT)
+            .expect("default raw input includes the root viewport")
+            .native_pixels_per_point = Some(native_scale);
+        input
+    }
+
+    fn render_main_window_frame(
+        ctx: &eframe::egui::Context,
+        dialog: &mut MkMacroDialog,
+        screen_rect: eframe::egui::Rect,
+        native_scale: f32,
+    ) -> Option<eframe::egui::Rect> {
+        render_main_window_frame_with_input(ctx, dialog, layout_input(screen_rect, native_scale))
+    }
+
+    fn render_main_window_frame_with_input(
+        ctx: &eframe::egui::Context,
+        dialog: &mut MkMacroDialog,
+        input: eframe::egui::RawInput,
+    ) -> Option<eframe::egui::Rect> {
+        let mut viewport = None;
+        let mut window_open = dialog.open;
+        let output = ctx.run_ui(input, |ctx| {
+            dialog.sync_external();
+            viewport = dialog.show_main_window(ctx, &mut window_open);
+        });
+        dialog.open = window_open;
+        output.drop_without_applying_deltas();
+        viewport
+    }
+
     #[test]
     fn minimum_size_main_layout_keeps_toolbar_and_steps_reachable_without_mutation() {
         use eframe::egui::{self, accesskit::Role, pos2, vec2};
@@ -411,10 +542,6 @@ mod tests {
         let before_stop_pending = crate::mkmacro::runtime::record_stop_pending();
 
         let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(680.0, 420.0));
-        let input = || egui::RawInput {
-            screen_rect: Some(screen_rect),
-            ..Default::default()
-        };
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
 
@@ -424,7 +551,9 @@ mod tests {
         for _ in 0..4 {
             let mut viewport = None;
             let mut window_open = dialog.open;
-            let output = ctx.run_ui(input(), |ctx| {
+            let output = ctx.run_ui(layout_input(screen_rect, 1.0), |ctx| {
+                assert_eq!(ctx.viewport_rect(), screen_rect);
+                assert!((ctx.pixels_per_point() - 1.0).abs() < 0.001);
                 dialog.sync_external();
                 viewport = dialog.show_main_window(ctx, &mut window_open);
             });
@@ -454,7 +583,9 @@ mod tests {
         for frame in 0..4 {
             let mut viewport = None;
             let mut window_open = dialog.open;
-            let output = ctx.run_ui(input(), |ctx| {
+            let output = ctx.run_ui(layout_input(screen_rect, 1.0), |ctx| {
+                assert_eq!(ctx.viewport_rect(), screen_rect);
+                assert!((ctx.pixels_per_point() - 1.0).abs() < 0.001);
                 dialog.sync_external();
                 viewport = dialog.show_main_window(ctx, &mut window_open);
             });
@@ -503,6 +634,7 @@ mod tests {
 
         assert!(stable_frame_observed, "the visible main window settles");
         let step_viewport = settled_viewport.expect("the selected macro has a visible step area");
+        let low_scale_row_geometry = dialog.last_first_step_row_geometry.clone();
         assert!(
             step_viewport.is_positive(),
             "the step table keeps a positive minimum viewport: {step_viewport:?}"
@@ -551,6 +683,550 @@ mod tests {
             before_stop_pending
         );
         assert_eq!(dialog.take_macro_properties_preferences_for_persist(), None);
+        let mut geometry_violations = Vec::new();
+        if let Some(geometry) = low_scale_row_geometry {
+            let visible = geometry.visible_in(step_viewport);
+            if !visible {
+                geometry_violations.push(format!(
+                    "100% row_visible={visible}, geometry={geometry:?}, table={step_viewport:?}"
+                ));
+            }
+        } else {
+            geometry_violations.push("100% first body row was not painted".to_owned());
+        }
+        let (_scaled_directory, mut scaled_dialog) = self::dialog();
+        scaled_dialog.open = true;
+        scaled_dialog.create_macro();
+        let sample_macro_id = scaled_dialog
+            .selected_macro()
+            .expect("the initial short macro is selected")
+            .id;
+        scaled_dialog
+            .selected_macro_mut()
+            .unwrap()
+            .steps
+            .push(MkStep {
+                id: 90_002,
+                action: MkAction::UnsetVariable {
+                    name: "ui polish unused_1".into(),
+                },
+                enabled: true,
+                breakpoint: false,
+                repeat: 1,
+                delay_after_ms: 0,
+                on_error: Default::default(),
+                metadata: Default::default(),
+            });
+        scaled_dialog.mark_dirty();
+        scaled_dialog.dirty = false;
+        let mut scaled_before_draft = scaled_dialog.draft.clone();
+        let mut scaled_before_revision = scaled_dialog.draft_revision();
+        let scaled_context = egui::Context::default();
+        let mut scaled_theme = crate::settings::ThemeSettings::default();
+        scaled_theme.preferences.typography_scale = 2.0;
+        crate::gui::theme::publish_committed(&scaled_context, &scaled_theme);
+        scaled_context.enable_accesskit();
+        scaled_context.style_mut_of(scaled_context.theme(), |style| style.animation_time = 0.0);
+        let scaled_screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+
+        for (master_open, focus_steps, inspector_open) in [
+            (false, false, false),
+            (true, false, false),
+            (true, true, false),
+            (false, false, true),
+            (true, false, false),
+        ] {
+            if master_open {
+                scaled_dialog.mkmacro_properties_preferences.expand_all();
+            }
+            scaled_dialog.mkmacro_properties_preferences.master_open = master_open;
+            scaled_dialog.mkmacro_properties_preferences.focus_steps = focus_steps;
+            scaled_dialog.runtime_inspector_open = inspector_open;
+
+            let mut previous_viewport: Option<egui::Rect> = None;
+            let mut previous_window: Option<egui::Rect> = None;
+            let mut stable_viewport = None;
+            let mut stable_window = None;
+            let mut observed_geometry = Vec::new();
+            for _ in 0..32 {
+                let viewport = render_main_window_frame(
+                    &scaled_context,
+                    &mut scaled_dialog,
+                    scaled_screen_rect,
+                    1.0,
+                );
+                let window = scaled_dialog.last_main_window_rect;
+                observed_geometry.push((
+                    viewport,
+                    window,
+                    scaled_dialog.last_first_step_row_geometry.clone(),
+                ));
+                if observed_geometry.len() > 5 {
+                    observed_geometry.remove(0);
+                }
+                if let (Some(previous), Some(current), Some(previous_window), Some(current_window)) =
+                    (previous_viewport, viewport, previous_window, window)
+                    && (previous.min.x - current.min.x).abs() < 0.5
+                    && (previous.min.y - current.min.y).abs() < 0.5
+                    && (previous.max.x - current.max.x).abs() < 0.5
+                    && (previous.max.y - current.max.y).abs() < 0.5
+                    && (previous_window.min.x - current_window.min.x).abs() < 0.5
+                    && (previous_window.min.y - current_window.min.y).abs() < 0.5
+                    && (previous_window.max.x - current_window.max.x).abs() < 0.5
+                    && (previous_window.max.y - current_window.max.y).abs() < 0.5
+                {
+                    stable_viewport = viewport;
+                    stable_window = window;
+                    break;
+                }
+                previous_viewport = viewport;
+                previous_window = window;
+            }
+
+            let viewport = stable_viewport.unwrap_or_else(|| {
+                panic!("the 200% step viewport and window settle; frames={observed_geometry:?}")
+            });
+            let window = stable_window.expect("the 200% main window settles");
+            let geometry = scaled_dialog
+                .last_first_step_row_geometry
+                .clone()
+                .expect("the 200% first step row is painted");
+            let row = geometry.row_rect();
+            let cells = scaled_dialog.last_first_step_cell_rects.clone();
+            let chrome = scaled_dialog
+                .last_step_chrome_geometry
+                .clone()
+                .expect("the pending environment notice uses the bounded table chrome");
+            let macro_list = scaled_dialog
+                .last_macro_list_geometry
+                .clone()
+                .expect("the macro list records its control and entry viewports");
+            let body = scaled_dialog
+                .last_main_body_geometry
+                .clone()
+                .expect("the current-pass main body and Strip cell bounds are recorded");
+            let rail_geometry = scaled_dialog.last_outline_closed_button_geometry;
+            assert_eq!(
+                scaled_context.viewport_rect().size(),
+                scaled_screen_rect.size()
+            );
+            assert!((scaled_context.pixels_per_point() - 1.0).abs() < 0.001);
+            let resolved = crate::gui::theme::resolved_for_current_context(&scaled_context)
+                .expect("the 200% typography theme is installed");
+            assert!((resolved.metrics.body_text_size - 28.0).abs() < 0.01);
+            assert!(viewport.is_positive());
+            assert!(
+                row.height() >= 40.0,
+                "the 200% body row uses scaled text: {row:?}"
+            );
+            let row_visible = geometry.visible_in(viewport);
+            let action_text_bounded = geometry
+                .action_text
+                .as_ref()
+                .is_some_and(CellTextGeometry::is_bounded);
+            let details_text_bounded = geometry
+                .details_text
+                .as_ref()
+                .is_some_and(CellTextGeometry::is_bounded);
+            let diagnostic_text_bounded = geometry
+                .diagnostic_text
+                .as_ref()
+                .is_some_and(|text| text.is_bounded() && text.label.is_positive());
+            let macro_controls_bounded = macro_list
+                .controls_assigned
+                .contains_rect(macro_list.controls_viewport)
+                && macro_list
+                    .controls_clip
+                    .contains_rect(macro_list.controls_viewport);
+            let macro_entry_visible = macro_list.first_macro_row.is_some_and(|entry| {
+                macro_list.list_viewport.contains_rect(entry)
+                    && macro_list.list_clip.contains_rect(entry)
+            });
+            let chrome_bounded = chrome.environment_pending
+                && chrome.viewport.is_positive()
+                && chrome.clip.intersects(chrome.viewport)
+                && chrome
+                    .environment_notice
+                    .is_some_and(|notice| notice.intersects(chrome.viewport));
+            let chrome_precedes_table = chrome.viewport.bottom() <= viewport.top() + 0.5;
+            let toolbar_overflows = body.after_toolbar.bottom() > body.assigned.bottom() + 0.5;
+            let strip_overflows = body.strip_cells.iter().flatten().any(|cell| {
+                cell.used.bottom() > cell.assigned.bottom() + 0.5
+                    || cell.used.right() > cell.assigned.right() + 0.5
+            });
+            let body_overflows = body.after_strip.bottom() > body.assigned.bottom() + 0.5;
+            let window_contained = scaled_screen_rect.contains_rect(window);
+            let rail_contained = rail_geometry.is_some_and(|(rail, button)| {
+                button.width() <= rail.width() + 0.1
+                    && button.left() >= rail.left() - 0.1
+                    && button.right() <= rail.right() + 0.1
+            });
+            if !row_visible
+                || !action_text_bounded
+                || !details_text_bounded
+                || !diagnostic_text_bounded
+                || !window_contained
+                || !rail_contained
+                || !chrome_bounded
+                || !chrome_precedes_table
+                || !macro_controls_bounded
+                || !macro_entry_visible
+            {
+                geometry_violations.push(format!(
+                    "200% master_open={master_open}, focus_steps={focus_steps}, inspector_open={inspector_open}: row_visible={row_visible}, action_text_bounded={action_text_bounded}, details_text_bounded={details_text_bounded}, diagnostic_text_bounded={diagnostic_text_bounded}, window_contained={window_contained}, rail_contained={rail_contained}, chrome_bounded={chrome_bounded}, chrome_precedes_table={chrome_precedes_table}, macro_controls_bounded={macro_controls_bounded}, macro_entry_visible={macro_entry_visible}, toolbar_overflows={toolbar_overflows}, strip_overflows={strip_overflows}, body_overflows={body_overflows}, window={window:?}, body={body:?}, macro_list={macro_list:?}, chrome={chrome:?}, viewport={viewport:?}, row={row:?}, row_geometry={geometry:?}, header={:.1}, nominal_body_row={:.1}, cells={cells:?}, closed_rail/button={rail_geometry:?}",
+                    geometry.header_row_height,
+                    geometry.nominal_row_height,
+                ));
+            }
+            assert_eq!(scaled_dialog.draft, scaled_before_draft);
+            assert_eq!(scaled_dialog.draft_revision(), scaled_before_revision);
+            assert!(!scaled_dialog.dirty);
+        }
+        let diagnostic_label = scaled_dialog
+            .last_first_step_row_geometry
+            .as_ref()
+            .and_then(|geometry| geometry.diagnostic_text.as_ref())
+            .expect("the invalid variable row exposes a bounded diagnostic target")
+            .label;
+        let diagnostic_position = diagnostic_label.center();
+        let mut diagnostic_press = layout_input(scaled_screen_rect, 1.0);
+        diagnostic_press.events = vec![
+            egui::Event::PointerMoved(diagnostic_position),
+            egui::Event::PointerButton {
+                pos: diagnostic_position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        render_main_window_frame_with_input(&scaled_context, &mut scaled_dialog, diagnostic_press);
+        let mut diagnostic_release = layout_input(scaled_screen_rect, 1.0);
+        diagnostic_release.events = vec![
+            egui::Event::PointerMoved(diagnostic_position),
+            egui::Event::PointerButton {
+                pos: diagnostic_position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        render_main_window_frame_with_input(
+            &scaled_context,
+            &mut scaled_dialog,
+            diagnostic_release,
+        );
+        assert_eq!(scaled_dialog.selection.primary, Some(90_002));
+        assert_eq!(scaled_dialog.draft, scaled_before_draft);
+        assert_eq!(scaled_dialog.draft_revision(), scaled_before_revision);
+        assert!(!scaled_dialog.dirty);
+        scaled_dialog.selection.clear();
+        assert_eq!(
+            scaled_dialog.take_macro_properties_preferences_for_persist(),
+            None
+        );
+        let sample_folder_id = scaled_dialog.create_folder();
+        scaled_dialog
+            .draft
+            .folders
+            .iter_mut()
+            .find(|folder| folder.id == sample_folder_id)
+            .expect("the sample folder was created")
+            .name = "UI polish samples".into();
+        for index in 0..6 {
+            assert!(scaled_dialog.create_macro_in_folder(Some(sample_folder_id)));
+            scaled_dialog
+                .selected_macro_mut()
+                .expect("the filler macro is selected")
+                .name = format!("Sample workflow {index}");
+        }
+        let target_macro = scaled_dialog
+            .draft
+            .macros
+            .iter_mut()
+            .find(|macro_| macro_.id == sample_macro_id)
+            .expect("the initial macro remains in the document");
+        target_macro.name = "UI polish sample A".into();
+        target_macro.folder_id = Some(sample_folder_id);
+        let target_index = scaled_dialog
+            .draft
+            .macros
+            .iter()
+            .position(|macro_| macro_.id == sample_macro_id)
+            .expect("the named sample macro remains in the document");
+        let target_macro = scaled_dialog.draft.macros.remove(target_index);
+        scaled_dialog.draft.macros.push(target_macro);
+        scaled_dialog.set_selected_macro(Some(sample_macro_id));
+        scaled_dialog.dirty = false;
+        scaled_before_draft = scaled_dialog.draft.clone();
+        scaled_before_revision = scaled_dialog.draft_revision();
+        render_main_window_frame(&scaled_context, &mut scaled_dialog, scaled_screen_rect, 1.0);
+        let macro_list = scaled_dialog
+            .last_macro_list_geometry
+            .clone()
+            .expect("the final layout records a scrollable macro-list control area");
+        let maximum_controls_scroll =
+            (macro_list.controls_content_size.y - macro_list.controls_viewport.height()).max(0.0);
+        assert!(
+            maximum_controls_scroll > 1.0,
+            "the 200% control viewport reserves a real macro-entry row; controls={macro_list:?}"
+        );
+        let mut scrolled_macro_list = macro_list.clone();
+        for _ in 0..8 {
+            if scrolled_macro_list
+                .controls_viewport
+                .contains_rect(scrolled_macro_list.search_rect)
+            {
+                break;
+            }
+            let wheel_position = scrolled_macro_list.controls_viewport.center();
+            let mut wheel_input = layout_input(scaled_screen_rect, 1.0);
+            wheel_input.events = vec![
+                eframe::egui::Event::PointerMoved(wheel_position),
+                eframe::egui::Event::MouseWheel {
+                    unit: eframe::egui::MouseWheelUnit::Point,
+                    delta: vec2(0.0, -maximum_controls_scroll - 300.0),
+                    phase: eframe::egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_main_window_frame_with_input(&scaled_context, &mut scaled_dialog, wheel_input);
+            scrolled_macro_list = scaled_dialog
+                .last_macro_list_geometry
+                .clone()
+                .expect("the scrolled control and list viewports remain observable");
+        }
+        assert!(
+            scrolled_macro_list.controls_offset.y > 0.0,
+            "wheel input scrolls the bounded macro controls: {scrolled_macro_list:?}"
+        );
+        assert!(
+            scrolled_macro_list
+                .controls_viewport
+                .contains_rect(scrolled_macro_list.search_rect),
+            "Search becomes fully reachable within the controls viewport: {scrolled_macro_list:?}"
+        );
+        let search_position = scrolled_macro_list.search_rect.center();
+        let mut search_input = layout_input(scaled_screen_rect, 1.0);
+        search_input.events = vec![
+            egui::Event::PointerMoved(search_position),
+            egui::Event::PointerButton {
+                pos: search_position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        render_main_window_frame_with_input(&scaled_context, &mut scaled_dialog, search_input);
+        let mut focused_macro_list = scaled_dialog
+            .last_macro_list_geometry
+            .clone()
+            .expect("the focused search layout remains observable");
+        assert!(
+            focused_macro_list.search_has_focus,
+            "the scrolled Search field accepts focus"
+        );
+        let mut search_release = layout_input(scaled_screen_rect, 1.0);
+        search_release.events = vec![
+            egui::Event::PointerMoved(search_position),
+            egui::Event::PointerButton {
+                pos: search_position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        render_main_window_frame_with_input(&scaled_context, &mut scaled_dialog, search_release);
+        focused_macro_list = scaled_dialog
+            .last_macro_list_geometry
+            .clone()
+            .expect("the released Search layout remains observable");
+        assert!(focused_macro_list.search_has_focus);
+        scaled_context.memory_mut(|memory| {
+            memory.surrender_focus(focused_macro_list.search_id);
+        });
+        let folder_row = focused_macro_list
+            .folder_rows
+            .get(&sample_folder_id)
+            .copied()
+            .expect("the named sample folder row is rendered");
+        assert!(
+            focused_macro_list.list_viewport.contains_rect(folder_row)
+                && focused_macro_list.list_clip.contains_rect(folder_row),
+            "the actual sample folder is fully visible in the list: {focused_macro_list:?}"
+        );
+        let maximum_list_scroll = (focused_macro_list.list_content_size.y
+            - focused_macro_list.list_viewport.height())
+        .max(0.0);
+        assert!(
+            maximum_list_scroll > 1.0,
+            "the sample folder contains enough entries to exercise list scrolling: {focused_macro_list:?}"
+        );
+        scaled_dialog.set_selected_macro(None);
+        let mut revealed_macro_list = focused_macro_list.clone();
+        for _ in 0..8 {
+            let target_row = revealed_macro_list
+                .macro_rows
+                .get(&sample_macro_id)
+                .copied()
+                .expect("the named sample macro row is rendered");
+            let target_visible = revealed_macro_list.list_viewport.contains_rect(target_row)
+                && revealed_macro_list.list_clip.contains_rect(target_row);
+            if revealed_macro_list.list_offset.y > 0.0 && target_visible {
+                break;
+            }
+            let desired_offset = (revealed_macro_list.list_offset.y + target_row.center().y
+                - revealed_macro_list.list_viewport.center().y)
+                .clamp(0.0, maximum_list_scroll);
+            let scroll_delta = desired_offset - revealed_macro_list.list_offset.y;
+            assert!(
+                scroll_delta.abs() > 0.5,
+                "the target row can be aligned with the visible list viewport"
+            );
+            let wheel_position = revealed_macro_list.list_viewport.center();
+            let mut wheel_input = layout_input(scaled_screen_rect, 1.0);
+            wheel_input.events = vec![
+                egui::Event::PointerMoved(wheel_position),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(0.0, -scroll_delta),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ];
+            render_main_window_frame_with_input(&scaled_context, &mut scaled_dialog, wheel_input);
+            render_main_window_frame(&scaled_context, &mut scaled_dialog, scaled_screen_rect, 1.0);
+            revealed_macro_list = scaled_dialog
+                .last_macro_list_geometry
+                .clone()
+                .expect("the scrolled macro rows remain observable");
+        }
+        let sample_macro_row = revealed_macro_list
+            .macro_rows
+            .get(&sample_macro_id)
+            .copied()
+            .expect("the named sample macro row is rendered after scrolling");
+        assert!(
+            revealed_macro_list.list_offset.y > 0.0
+                && revealed_macro_list
+                    .list_viewport
+                    .contains_rect(sample_macro_row)
+                && revealed_macro_list
+                    .list_clip
+                    .contains_rect(sample_macro_row),
+            "real list wheel input fully reveals the named sample macro: {revealed_macro_list:?}"
+        );
+        let sample_macro_position = sample_macro_row.center();
+        let mut select_press = layout_input(scaled_screen_rect, 1.0);
+        select_press.events = vec![
+            egui::Event::PointerMoved(sample_macro_position),
+            egui::Event::PointerButton {
+                pos: sample_macro_position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        render_main_window_frame_with_input(&scaled_context, &mut scaled_dialog, select_press);
+        let mut select_release = layout_input(scaled_screen_rect, 1.0);
+        select_release.events = vec![
+            egui::Event::PointerMoved(sample_macro_position),
+            egui::Event::PointerButton {
+                pos: sample_macro_position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        render_main_window_frame_with_input(&scaled_context, &mut scaled_dialog, select_release);
+        assert_eq!(scaled_dialog.selected_macro_id, Some(sample_macro_id));
+        assert_eq!(scaled_dialog.draft, scaled_before_draft);
+        assert_eq!(scaled_dialog.draft_revision(), scaled_before_revision);
+        assert!(!scaled_dialog.dirty);
+        assert!(scaled_dialog.search.is_empty());
+        assert!(
+            geometry_violations.is_empty(),
+            "the first full body row and its window/rail remain within their 100%/200% viewports:\n{}",
+            geometry_violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn empty_macro_actions_remain_inside_a_200_percent_viewport() {
+        use eframe::egui::{self, accesskit::Role, pos2, vec2};
+
+        fn button_bounds(output: &egui::FullOutput, label: &str) -> Option<egui::Rect> {
+            output
+                .platform_output
+                .accesskit_update
+                .as_ref()?
+                .nodes
+                .iter()
+                .find_map(|(_, node)| {
+                    if node.role() != Role::Button || node.label() != Some(label) {
+                        return None;
+                    }
+                    let bounds = node.bounds()?;
+                    Some(egui::Rect::from_min_max(
+                        pos2(bounds.x0 as f32, bounds.y0 as f32),
+                        pos2(bounds.x1 as f32, bounds.y1 as f32),
+                    ))
+                })
+        }
+
+        let (_directory, mut dialog) = dialog();
+        dialog.open = true;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut theme = crate::settings::ThemeSettings::default();
+        theme.preferences.typography_scale = 2.0;
+        crate::gui::theme::publish_committed(&ctx, &theme);
+        let screen_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1100.0, 800.0));
+        let mut previous_window = None;
+        let mut stable_window = None;
+        let mut new_macro_bounds = None;
+        let mut new_folder_bounds = None;
+
+        for _ in 0..32 {
+            let mut open = dialog.open;
+            let output = ctx.run_ui(layout_input(screen_rect, 1.0), |ctx| {
+                assert_eq!(ctx.viewport_rect(), screen_rect);
+                assert!((ctx.pixels_per_point() - 1.0).abs() < 0.001);
+                dialog.sync_external();
+                dialog.show_main_window(ctx, &mut open);
+            });
+            dialog.open = open;
+            let window = dialog
+                .last_main_window_rect
+                .expect("the empty macro window is rendered");
+            new_macro_bounds = button_bounds(&output, "New Macro");
+            new_folder_bounds = button_bounds(&output, "New Folder");
+            output.drop_without_applying_deltas();
+
+            if previous_window.is_some_and(|previous: egui::Rect| {
+                (previous.min - window.min).length() < 0.5
+                    && (previous.max - window.max).length() < 0.5
+            }) {
+                stable_window = Some(window);
+                break;
+            }
+            previous_window = Some(window);
+        }
+
+        let window = stable_window.expect("the scaled empty macro window settles");
+        assert!(screen_rect.contains_rect(window), "window={window:?}");
+        for (label, bounds) in [
+            ("New Macro", new_macro_bounds),
+            ("New Folder", new_folder_bounds),
+        ] {
+            let bounds = bounds.unwrap_or_else(|| panic!("{label} remains accessible"));
+            assert!(
+                window.contains_rect(bounds),
+                "{label} remains inside the scaled empty-window viewport: window={window:?}, bounds={bounds:?}"
+            );
+        }
+        assert!(dialog.draft.macros.is_empty());
+        assert!(dialog.draft.folders.is_empty());
+        assert!(!dialog.dirty);
     }
 
     #[test]
@@ -5091,6 +5767,20 @@ impl MkMacroDialog {
             recording_preview_test_facade: None,
             #[cfg(test)]
             next_recording_preview_test_ticket: 1,
+            #[cfg(test)]
+            last_main_window_rect: None,
+            #[cfg(test)]
+            last_first_step_row_geometry: None,
+            #[cfg(test)]
+            last_first_step_cell_rects: None,
+            #[cfg(test)]
+            last_step_chrome_geometry: None,
+            #[cfg(test)]
+            last_main_body_geometry: None,
+            #[cfg(test)]
+            last_macro_list_geometry: None,
+            #[cfg(test)]
+            last_outline_closed_button_geometry: None,
             queued_recording_reviews: VecDeque::new(),
             recording_insert_undo: Vec::new(),
             recording_insert_redo: Vec::new(),
@@ -6257,17 +6947,26 @@ impl MkMacroDialog {
         open: &mut bool,
     ) -> Option<eframe::egui::Rect> {
         let mut table_viewport = None;
+        let viewport_size = ctx.viewport_rect().size();
+        let max_size = [viewport_size.x.max(1.0), viewport_size.y.max(1.0)];
+        let default_size = [920.0_f32.min(max_size[0]), 620.0_f32.min(max_size[1])];
+        let min_size = [680.0_f32.min(max_size[0]), 420.0_f32.min(max_size[1])];
         // Manual regression: resize this window, add 100 steps, expand/edit rows,
         // and delete them again. Its chosen outer height must remain unchanged.
-        eframe::egui::Window::new("Mouse/Keyboard Macros")
+        let _window_output = eframe::egui::Window::new("Mouse/Keyboard Macros")
             .id(eframe::egui::Id::new("mkmacro_main_window"))
             .open(open)
-            .default_size([920.0, 620.0])
-            .min_size([680.0, 420.0])
+            .default_size(default_size)
+            .min_size(min_size)
+            .max_size(max_size)
             .resizable(true)
             .show(ctx, |ui| {
                 table_viewport = self.show_contents_with_table_viewport(ui);
             });
+        #[cfg(test)]
+        {
+            self.last_main_window_rect = _window_output.as_ref().map(|output| output.response.rect);
+        }
         table_viewport
     }
     fn close_children(&mut self) {
@@ -6300,11 +6999,19 @@ impl MkMacroDialog {
         &mut self,
         ui: &mut eframe::egui::Ui,
     ) -> Option<eframe::egui::Rect> {
+        #[cfg(test)]
+        let body_assigned = ui.max_rect();
+        #[cfg(test)]
+        {
+            self.last_main_body_geometry = None;
+        }
         search::shortcuts(ui.ctx(), self);
         self.publish_recording_target();
         self.observe_runtime_snapshot(crate::mkmacro::runtime::snapshot());
         self.drain_pending_recording_reviews();
         toolbar::show(ui, self);
+        #[cfg(test)]
+        let body_after_toolbar = ui.min_rect();
         let mut table_viewport = None;
         if self.draft.macros.is_empty() && self.draft.folders.is_empty() {
             let properties_height = (ui.available_height() - 100.0).max(0.0);
@@ -6321,27 +7028,60 @@ impl MkMacroDialog {
                 |ui| macro_list::show_empty(ui, self),
             );
         } else {
+            #[cfg(test)]
+            let mut strip_cells = [None; 3];
+            let closed_outline_width = outline::closed_rail_width(ui);
             egui_extras::StripBuilder::new(ui)
                 .size(egui_extras::Size::exact(macro_list::SIDEBAR_WIDTH))
                 .size(egui_extras::Size::remainder())
                 .size(egui_extras::Size::exact(if self.navigation.outline.open {
                     250.0
                 } else {
-                    30.0
+                    closed_outline_width
                 }))
                 .horizontal(|mut strip| {
-                    strip.cell(|ui| macro_list::show(ui, self));
                     strip.cell(|ui| {
-                        let inspector_height = if self.runtime_inspector_open {
-                            runtime_inspector::INSPECTOR_BODY_HEIGHT + ui.spacing().interact_size.y
+                        #[cfg(test)]
+                        let assigned = ui.max_rect();
+                        macro_list::show(ui, self);
+                        #[cfg(test)]
+                        {
+                            strip_cells[0] = Some(StripCellGeometry {
+                                assigned,
+                                used: ui.min_rect(),
+                            });
+                        }
+                    });
+                    strip.cell(|ui| {
+                        #[cfg(test)]
+                        let assigned = ui.max_rect();
+                        let available_height = ui.available_height();
+                        let step_layout = step_table::StepPaneLayout::new(self);
+                        let table_height = step_table::minimum_viewport_height(ui, &step_layout);
+                        let header_height = runtime_inspector::header_height(ui);
+                        let spacing = ui.spacing().item_spacing.y;
+                        let separator_height = ui
+                            .style()
+                            .separator_style(
+                                &eframe::egui::widget_style::Classes::default(),
+                                eframe::egui::widget_style::WidgetState::Inactive,
+                            )
+                            .spacing;
+                        let reserved_gaps = 4.0 * spacing + 2.0 * separator_height;
+                        let inspector_body_height = if self.runtime_inspector_open {
+                            (available_height - table_height - header_height - reserved_gaps)
+                                .clamp(0.0, runtime_inspector::inspector_body_height())
                         } else {
-                            ui.spacing().interact_size.y
+                            0.0
                         };
-                        let properties_height = (ui.available_height()
-                            - step_table::MIN_TABLE_VIEWPORT_HEIGHT
-                            - inspector_height
-                            - 2.0 * ui.spacing().item_spacing.y)
-                            .max(0.0);
+                        let inspector_height = runtime_inspector::reserved_height(
+                            ui,
+                            self.runtime_inspector_open,
+                            inspector_body_height,
+                        );
+                        let properties_height =
+                            (available_height - table_height - inspector_height - reserved_gaps)
+                                .max(0.0);
                         eframe::egui::ScrollArea::vertical()
                             .id_salt("mkmacro_macro_properties_scroll")
                             .auto_shrink([false, true])
@@ -6349,12 +7089,39 @@ impl MkMacroDialog {
                             .max_height(properties_height)
                             .show(ui, |ui| macro_properties::show(ui, self));
                         ui.separator();
-                        runtime_inspector::show(ui, self);
+                        runtime_inspector::show(ui, self, inspector_body_height);
                         ui.separator();
-                        table_viewport = step_table::show(ui, self);
+                        table_viewport = step_table::show_with_layout(ui, self, &step_layout);
+                        #[cfg(test)]
+                        {
+                            strip_cells[1] = Some(StripCellGeometry {
+                                assigned,
+                                used: ui.min_rect(),
+                            });
+                        }
                     });
-                    strip.cell(|ui| outline::show(ui, self));
+                    strip.cell(|ui| {
+                        #[cfg(test)]
+                        let assigned = ui.max_rect();
+                        outline::show(ui, self);
+                        #[cfg(test)]
+                        {
+                            strip_cells[2] = Some(StripCellGeometry {
+                                assigned,
+                                used: ui.min_rect(),
+                            });
+                        }
+                    });
                 });
+            #[cfg(test)]
+            {
+                self.last_main_body_geometry = Some(MainBodyGeometry {
+                    assigned: body_assigned,
+                    after_toolbar: body_after_toolbar,
+                    after_strip: ui.min_rect(),
+                    strip_cells,
+                });
+            }
         }
         action_catalog::show_modal(ui.ctx(), self);
         search::show(ui.ctx(), self);

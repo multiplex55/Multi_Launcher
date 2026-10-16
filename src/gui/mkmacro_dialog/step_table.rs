@@ -5,6 +5,7 @@ use crate::mkmacro::{
     MkDelayPayload, MkStep, RuntimePauseReason, RuntimeSnapshot, RuntimeState, StepState,
 };
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 #[derive(Default, Debug, Clone)]
 pub struct Selection {
@@ -75,7 +76,7 @@ const BREAKPOINT_HOVER_TEXT: &str = "Breakpoint\nPauses before this step during 
 const BREAKPOINT_LOCKED_HOVER_TEXT: &str = "Stop the current playback before changing breakpoints.";
 const ACTIVE_BREAKPOINT_STATUS_TEXT: &str = "Paused at breakpoint\nThis step has not executed yet.";
 
-fn effective_font_id(
+pub(super) fn effective_font_id(
     ui: &eframe::egui::Ui,
     fallback: eframe::egui::FontId,
 ) -> eframe::egui::FontId {
@@ -443,6 +444,90 @@ fn base_menu_model(
 }
 pub(super) const MIN_TABLE_VIEWPORT_HEIGHT: f32 = 48.0;
 
+pub(super) struct StepPaneLayout {
+    diagnostics: Arc<Vec<crate::mkmacro::MkDiagnostic>>,
+    environment_pending: bool,
+    selected_macro_id: Option<u64>,
+    selected_macro_diagnostics: usize,
+}
+
+impl StepPaneLayout {
+    pub(super) fn new(d: &MkMacroDialog) -> Self {
+        let diagnostics = d.cached_diagnostics();
+        let environment_pending = d.analysis_cache.borrow().environment_pending;
+        let selected_macro_id = d.selected_macro_id;
+        let selected_macro_diagnostics = selected_macro_id.map_or(0, |macro_id| {
+            diagnostics
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.macro_id == macro_id && diagnostic.step_id.is_none()
+                })
+                .count()
+        });
+        Self {
+            diagnostics,
+            environment_pending,
+            selected_macro_id,
+            selected_macro_diagnostics,
+        }
+    }
+
+    fn has_chrome(&self) -> bool {
+        !self.diagnostics.is_empty()
+            || self.environment_pending
+            || self.selected_macro_diagnostics > 0
+            || self.selected_macro_id.is_none()
+    }
+
+    fn minimum_chrome_height(&self, ui: &mut eframe::egui::Ui) -> f32 {
+        let mut height = 0.0;
+        let spacing = ui.spacing().item_spacing.y;
+        if !self.diagnostics.is_empty() {
+            add_chrome_height(
+                &mut height,
+                super::runtime_inspector::header_height(ui),
+                spacing,
+            );
+        }
+        if self.environment_pending || self.selected_macro_diagnostics > 0 {
+            add_chrome_height(&mut height, body_text_line_height(ui), spacing);
+        }
+        if self.selected_macro_id.is_none() && height == 0.0 {
+            height = body_text_line_height(ui);
+        }
+        height
+    }
+}
+
+fn add_chrome_height(total: &mut f32, next: f32, spacing: f32) {
+    if *total > 0.0 {
+        *total += spacing;
+    }
+    *total += next;
+}
+
+fn body_text_line_height(ui: &mut eframe::egui::Ui) -> f32 {
+    let font_id = effective_font_id(ui, eframe::egui::TextStyle::Body.resolve(ui.style()));
+    let height =
+        ui.fonts_mut(|fonts| fonts.row_height(&font_id)) + ui.spacing().extra_text_line_spacing;
+    let pixels_per_point = ui.ctx().pixels_per_point().max(f32::EPSILON);
+    (height * pixels_per_point).ceil() / pixels_per_point
+}
+
+fn minimum_table_viewport_height(ui: &mut eframe::egui::Ui) -> f32 {
+    (table_header_row_height(ui) + ui.spacing().item_spacing.y + table_body_row_height(ui))
+        .max(MIN_TABLE_VIEWPORT_HEIGHT)
+}
+
+pub(super) fn minimum_viewport_height(ui: &mut eframe::egui::Ui, layout: &StepPaneLayout) -> f32 {
+    let table_height = minimum_table_viewport_height(ui);
+    if layout.has_chrome() {
+        layout.minimum_chrome_height(ui) + ui.spacing().item_spacing.y + table_height
+    } else {
+        table_height
+    }
+}
+
 fn menu_model(
     step: &MkStep,
     selection: &BTreeSet<u64>,
@@ -481,8 +566,8 @@ fn menu_model(
 
 /// Uses all height assigned to the step area; the number of rows is deliberately
 /// irrelevant because rows belong to the table's scroll area.
-fn table_viewport_height(available_height: f32) -> f32 {
-    available_height.max(MIN_TABLE_VIEWPORT_HEIGHT)
+fn table_viewport_height(available_height: f32, minimum_height: f32) -> f32 {
+    available_height.max(minimum_height)
 }
 
 fn diagnostic_visual(
@@ -495,86 +580,175 @@ fn diagnostic_visual(
     }
 }
 
-fn show_diagnostics(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> bool {
-    use eframe::egui::RichText;
-    let diagnostics = d.cached_diagnostics();
-    let mut target = None;
-    if diagnostics.is_empty() {
-        return false;
-    }
-    eframe::egui::CollapsingHeader::new(format!("Diagnostics ({})", diagnostics.len()))
-        .id_salt("mkmacro_document_diagnostics")
-        .show(ui, |ui| {
-            eframe::egui::ScrollArea::vertical()
-                .id_salt("mkmacro_diagnostics_scroll")
-                .max_height(150.0)
-                .show_rows(
-                    ui,
-                    ui.text_style_height(&eframe::egui::TextStyle::Body),
-                    diagnostics.len(),
-                    |ui, range| {
-                        for index in range {
-                            let diagnostic = &diagnostics[index];
-                            let (severity, color) = diagnostic_visual(ui, diagnostic.severity);
-                            let owner = d
-                                .draft
-                                .macros
-                                .iter()
-                                .find(|m| m.id == diagnostic.macro_id)
-                                .map(|m| m.name.as_str())
-                                .unwrap_or("Document");
-                            let text = format!("{severity} · {owner}: {}", diagnostic.message);
-                            if ui
-                                .add(
-                                    eframe::egui::Label::new(RichText::new(text).color(color))
-                                        .truncate()
-                                        .sense(eframe::egui::Sense::click()),
-                                )
-                                .on_hover_text(format!(
-                                    "{}\nCode: {}",
-                                    diagnostic.message, diagnostic.code
-                                ))
-                                .clicked()
-                            {
-                                target = Some(index);
-                            }
-                        }
-                    },
-                );
-        });
-    if let Some(index) = target {
-        return super::navigation::navigate_diagnostic(d, &diagnostics[index]);
-    }
-    false
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ActionDiagnosticWidths {
+    action: f32,
+    indicator: f32,
+    gap: f32,
+    compact_indicator: bool,
 }
 
-pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<eframe::egui::Rect> {
-    if show_diagnostics(ui, d) {
-        return None;
+fn action_diagnostic_widths(
+    available: f32,
+    severity: f32,
+    compact: f32,
+    minimum_action: f32,
+    gap: f32,
+) -> ActionDiagnosticWidths {
+    let available = available.max(0.0);
+    let compact_indicator = severity + gap + minimum_action > available;
+    let indicator = if compact_indicator { compact } else { severity }.min(available);
+    let gap = gap.max(0.0).min((available - indicator).max(0.0));
+    ActionDiagnosticWidths {
+        action: (available - indicator - gap).max(0.0),
+        indicator,
+        gap,
+        compact_indicator,
     }
-    let Some(mid) = d.selected_macro_id else {
-        ui.label("Select a macro");
+}
+
+fn show_diagnostics(
+    ui: &mut eframe::egui::Ui,
+    d: &mut MkMacroDialog,
+    diagnostics: &[crate::mkmacro::MkDiagnostic],
+) -> (bool, Option<eframe::egui::Rect>) {
+    use eframe::egui::RichText;
+    let mut target = None;
+    if diagnostics.is_empty() {
+        return (false, None);
+    }
+    let response =
+        eframe::egui::CollapsingHeader::new(format!("Diagnostics ({})", diagnostics.len()))
+            .id_salt("mkmacro_document_diagnostics")
+            .show(ui, |ui| {
+                eframe::egui::ScrollArea::vertical()
+                    .id_salt("mkmacro_diagnostics_scroll")
+                    .max_height(150.0)
+                    .show_rows(
+                        ui,
+                        ui.text_style_height(&eframe::egui::TextStyle::Body),
+                        diagnostics.len(),
+                        |ui, range| {
+                            for index in range {
+                                let diagnostic = &diagnostics[index];
+                                let (severity, color) = diagnostic_visual(ui, diagnostic.severity);
+                                let owner = d
+                                    .draft
+                                    .macros
+                                    .iter()
+                                    .find(|m| m.id == diagnostic.macro_id)
+                                    .map(|m| m.name.as_str())
+                                    .unwrap_or("Document");
+                                let text = format!("{severity} · {owner}: {}", diagnostic.message);
+                                if ui
+                                    .add(
+                                        eframe::egui::Label::new(RichText::new(text).color(color))
+                                            .truncate()
+                                            .sense(eframe::egui::Sense::click()),
+                                    )
+                                    .on_hover_text(format!(
+                                        "{}\nCode: {}",
+                                        diagnostic.message, diagnostic.code
+                                    ))
+                                    .clicked()
+                                {
+                                    target = Some(index);
+                                }
+                            }
+                        },
+                    );
+            });
+    let navigated =
+        target.is_some_and(|index| super::navigation::navigate_diagnostic(d, &diagnostics[index]));
+    (navigated, Some(response.header_response.rect))
+}
+
+#[cfg(test)]
+pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<eframe::egui::Rect> {
+    let layout = StepPaneLayout::new(d);
+    show_with_layout(ui, d, &layout)
+}
+
+pub(super) fn show_with_layout(
+    ui: &mut eframe::egui::Ui,
+    d: &mut MkMacroDialog,
+    layout: &StepPaneLayout,
+) -> Option<eframe::egui::Rect> {
+    #[cfg(test)]
+    {
+        d.last_first_step_row_geometry = None;
+        d.last_first_step_cell_rects = None;
+        d.last_step_chrome_geometry = None;
+    }
+    if layout.has_chrome() {
+        let table_height = minimum_table_viewport_height(ui);
+        let chrome_height =
+            (ui.available_height() - table_height - ui.spacing().item_spacing.y).max(0.0);
+        let mut navigated = false;
+        let mut _notice_rect = None;
+        let mut _chrome_clip = eframe::egui::Rect::NOTHING;
+        let _output = eframe::egui::ScrollArea::vertical()
+            .id_salt("mkmacro_step_table_chrome")
+            .auto_shrink([false, true])
+            .min_scrolled_height(0.0)
+            .max_height(chrome_height)
+            .show(ui, |ui| {
+                _chrome_clip = ui.clip_rect();
+                let (diagnostic_navigated, _document_diagnostics_header) =
+                    show_diagnostics(ui, d, &layout.diagnostics);
+                navigated |= diagnostic_navigated;
+                if layout.environment_pending {
+                    _notice_rect = Some(
+                        ui.weak(
+                            "External image and monitor checks need refresh. Save and Run refresh automatically.",
+                        )
+                        .rect,
+                    );
+                }
+                if let Some(mid) = layout.selected_macro_id {
+                    for diagnostic in layout
+                        .diagnostics
+                        .iter()
+                        .filter(|x| x.macro_id == mid && x.step_id.is_none())
+                    {
+                        let (severity, color) = diagnostic_visual(ui, diagnostic.severity);
+                        ui.colored_label(color, format!("{severity} · {}", diagnostic.message))
+                            .on_hover_text(format!(
+                                "{}\nCode: {}",
+                                diagnostic.message, diagnostic.code
+                            ));
+                    }
+                } else {
+                    ui.label("Select a macro");
+                }
+                #[cfg(test)]
+                {
+                    d.last_step_chrome_geometry = Some(super::StepChromeGeometry {
+                        viewport: eframe::egui::Rect::NOTHING,
+                        clip: _chrome_clip,
+                        environment_notice: _notice_rect,
+                        document_diagnostics_header: _document_diagnostics_header,
+                        environment_pending: layout.environment_pending,
+                    });
+                }
+            });
+        #[cfg(test)]
+        if let Some(geometry) = &mut d.last_step_chrome_geometry {
+            geometry.viewport = _output.inner_rect;
+        }
+        if navigated {
+            return None;
+        }
+    }
+    let Some(mid) = layout.selected_macro_id else {
         return None;
     };
-    let diagnostics = d.cached_diagnostics();
-    if d.analysis_cache.borrow().environment_pending {
-        ui.weak(
-            "External image and monitor checks need refresh. Save and Run refresh automatically.",
-        );
-    }
+    let diagnostics = &layout.diagnostics;
     let mut row_diagnostics = HashMap::<u64, Vec<_>>::new();
     for diagnostic in diagnostics.iter().filter(|x| x.macro_id == mid) {
         if let Some(step_id) = diagnostic.step_id {
             row_diagnostics.entry(step_id).or_default().push(diagnostic);
         }
-    }
-    for diagnostic in diagnostics
-        .iter()
-        .filter(|x| x.macro_id == mid && x.step_id.is_none())
-    {
-        let (severity, color) = diagnostic_visual(ui, diagnostic.severity);
-        ui.colored_label(color, format!("{severity} · {}", diagnostic.message))
-            .on_hover_text(format!("{}\nCode: {}", diagnostic.message, diagnostic.code));
     }
     let runtime = crate::mkmacro::runtime::snapshot();
     let breakpoint_locked = !breakpoint_editable(runtime.as_deref());
@@ -616,18 +790,24 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
     let mut drag_start = None;
     let mut drop_rows = Vec::new();
     let interaction_blocked = d.action_editor.draft.is_some() || table_modal_open(d);
-    let table_height = table_viewport_height(ui.available_height());
+    let header_row_height = table_header_row_height(ui);
+    let body_row_height = table_body_row_height(ui);
+    let header_body_spacing = ui.spacing().item_spacing.y;
+    let minimum_table_height =
+        (header_row_height + header_body_spacing + body_row_height).max(MIN_TABLE_VIEWPORT_HEIGHT);
+    let table_height = table_viewport_height(ui.available_height(), minimum_table_height);
+    let body_scroll_height =
+        (table_height - header_row_height - header_body_spacing).max(body_row_height);
     let table_response = ui.allocate_ui_with_layout(
         eframe::egui::vec2(ui.available_width(), table_height),
         eframe::egui::Layout::top_down(eframe::egui::Align::Min),
         |ui| {
     ui.push_id(("mkmacro_steps", mid), |ui| {
-    let max_scroll_height = ui.available_height().max(MIN_TABLE_VIEWPORT_HEIGHT);
-    let header_row_height = table_header_row_height(ui);
-    let body_row_height = table_body_row_height(ui);
+    let max_scroll_height = body_scroll_height;
     let mut table = egui_extras::TableBuilder::new(ui)
         .striped(true)
         .auto_shrink([false, false])
+        .min_scrolled_height(body_row_height)
         .max_scroll_height(max_scroll_height)
         .column(egui_extras::Column::exact(BREAKPOINT_COLUMN_WIDTH))
         .column(egui_extras::Column::exact(38.0))
@@ -654,7 +834,32 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                 let mut s = source.clone();
                 body.row(body_row_height, |mut r| {
                     r.set_selected(d.selection.ids.contains(&s.id) || d.selection.primary == Some(s.id));
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    let capture_first_row = d.last_first_step_row_geometry.is_none();
+                    #[cfg(test)]
+                    let mut first_cell_clip = None;
+                    #[cfg(test)]
+                    let mut first_cell_assigned = None;
+                    #[cfg(test)]
+                    let mut first_breakpoint_button = None;
+                    #[cfg(test)]
+                    let mut first_action_cell = None;
+                    #[cfg(test)]
+                    let mut first_action_label = None;
+                    #[cfg(test)]
+                    let mut first_diagnostic_label = None;
+                    #[cfg(test)]
+                    let mut first_details_cell = None;
+                    #[cfg(test)]
+                    let mut first_details_label = None;
+                    #[cfg(test)]
+                    let mut first_row_cell_rects = Vec::with_capacity(8);
+                    let _cell_response = r.col(|ui| {
+                        #[cfg(test)]
+                        {
+                            first_cell_clip = Some(ui.clip_rect());
+                            first_cell_assigned = Some(ui.max_rect());
+                        }
                         let visual = breakpoint_visual(s.breakpoint);
                         let response = ui.add_enabled(
                             !breakpoint_locked,
@@ -663,6 +868,10 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                             )
                             .frame(false),
                         );
+                        #[cfg(test)]
+                        if capture_first_row {
+                            first_breakpoint_button = Some(response.rect);
+                        }
                         let response = if breakpoint_locked {
                             response.on_disabled_hover_text(BREAKPOINT_LOCKED_HOVER_TEXT)
                         } else {
@@ -672,7 +881,11 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                             breakpoint_toggles.push(s.id);
                         }
                     });
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                    }
+                    let _cell_response = r.col(|ui| {
                         let response = ui.push_id((mid, s.id, "step_drag"), |ui| ui.add(
                             eframe::egui::Label::new(format!("⠿ {}", i + 1))
                                 .sense(eframe::egui::Sense::click_and_drag())
@@ -683,13 +896,45 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                         }
                         if !interaction_blocked && response.drag_started() { drag_start = Some(s.id); }
                     });
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                    }
+                    let _cell_response = r.col(|ui| {
                         changed |= ui.add_enabled(
                             s.action.can_be_disabled(),
                             eframe::egui::Checkbox::without_text(&mut s.enabled),
                         ).changed();
                     });
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                    }
+                    let _cell_response = r.col(|ui| {
+                        let cell_rect = ui.max_rect();
+                        let cell_clip = ui.clip_rect().intersect(cell_rect);
+                        ui.set_clip_rect(cell_clip);
+                        #[cfg(test)]
+                        if capture_first_row {
+                            first_action_cell = Some((cell_rect, cell_clip));
+                        }
+                        let row_diagnostic = row_diagnostics.get(&s.id).map(|items| {
+                            let first = items
+                                .iter()
+                                .copied()
+                                .find(|diagnostic| {
+                                    diagnostic.severity
+                                        == crate::mkmacro::DiagnosticSeverity::Fatal
+                                })
+                                .unwrap_or(items[0]);
+                            let (severity, color) = diagnostic_visual(ui, first.severity);
+                            let hover = items
+                                .iter()
+                                .map(|item| format!("{}\nCode: {}", item.message, item.code))
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            (severity, color, hover)
+                        });
                         ui.horizontal(|ui| {
                         if let Some(block) = super::folding::foldable_block(&structure, s.id) {
                             let collapsed = d.editor_state.folds.is_collapsed(mid, s.id);
@@ -700,7 +945,55 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                         }
                         let structural = matches!(s.action, crate::mkmacro::MkAction::Else|crate::mkmacro::MkAction::EndIf|crate::mkmacro::MkAction::RepeatEnd|crate::mkmacro::MkAction::WhileEnd);
                         let label = format!("{}{}", "  ".repeat(depths[i]), super::action_catalog::action_name(&s.action));
-                        let response=if structural { ui.strong(label) } else { ui.label(label) };
+                        let rich_text = eframe::egui::RichText::new(label.clone());
+                        let rich_text = if structural { rich_text.strong() } else { rich_text };
+                        let available_width = ui.available_width();
+                        let diagnostic_widths = row_diagnostic.as_ref().map_or(
+                            ActionDiagnosticWidths {
+                                action: available_width.max(0.0),
+                                indicator: 0.0,
+                                gap: 0.0,
+                                compact_indicator: false,
+                            },
+                            |(severity, _, _)| {
+                            let font_id = effective_font_id(
+                                ui,
+                                eframe::egui::TextStyle::Body.resolve(ui.style()),
+                            );
+                            let (severity_width, compact_width, minimum_action_width) =
+                                ui.fonts_mut(|fonts| {
+                                    let mut measure = |text: &str| {
+                                        fonts
+                                    .layout_no_wrap(
+                                                    text.to_owned(),
+                                                    font_id.clone(),
+                                        eframe::egui::Color32::PLACEHOLDER,
+                                    )
+                                    .size()
+                                    .x
+                                    };
+                                    (measure(severity), measure("!"), measure("…"))
+                                });
+                            action_diagnostic_widths(
+                                available_width,
+                                severity_width,
+                                compact_width,
+                                minimum_action_width,
+                                ui.spacing().item_spacing.x,
+                            )
+                        });
+                        let response = ui
+                            .add_sized(
+                                [diagnostic_widths.action, ui.available_height()],
+                                eframe::egui::Label::new(rich_text)
+                                    .truncate()
+                                    .sense(eframe::egui::Sense::click()),
+                            )
+                            .on_hover_text(label);
+                        #[cfg(test)]
+                        if capture_first_row {
+                            first_action_label = Some(response.rect);
+                        }
                         if response.double_clicked(){command=Some(Command::Edit(s.id));}
                         if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }
                         response.context_menu(|ui| {
@@ -713,17 +1006,45 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                             );
                             render_context_menu(ui, &menu, &mut command);
                         });
-                        if let Some(items) = row_diagnostics.get(&s.id) {
-                            let first = items.iter().copied().find(|diagnostic| diagnostic.severity == crate::mkmacro::DiagnosticSeverity::Fatal).unwrap_or(items[0]);
-                            let (severity, color) = diagnostic_visual(ui, first.severity);
-                            let hover = items.iter().map(|x| format!("{}\nCode: {}", x.message, x.code)).collect::<Vec<_>>().join("\n\n");
-                            if ui.add(eframe::egui::Label::new(eframe::egui::RichText::new(format!("{severity} · {}", first.message)).color(color)).sense(eframe::egui::Sense::click())).on_hover_text(hover).clicked() {
-                                if !interaction_blocked { diagnostic_target = Some(s.id); }
+                        if let Some((severity, color, hover)) = &row_diagnostic {
+                            let displayed_severity = if diagnostic_widths.compact_indicator {
+                                "!"
+                            } else {
+                                *severity
+                            };
+                            let response = ui
+                                .add_sized(
+                                    [diagnostic_widths.indicator, ui.available_height()],
+                                    eframe::egui::Label::new(
+                                        eframe::egui::RichText::new(displayed_severity)
+                                            .color(*color),
+                                    )
+                                    .truncate()
+                                    .sense(eframe::egui::Sense::click()),
+                                )
+                                .on_hover_text(format!("{severity}\n{hover}"));
+                            #[cfg(test)]
+                            if capture_first_row {
+                                first_diagnostic_label = Some(response.rect);
+                            }
+                            if response.clicked() && !interaction_blocked {
+                                diagnostic_target = Some(s.id);
                             }
                         }
                         });
                     });
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                    }
+                    let _cell_response = r.col(|ui| {
+                        let cell_rect = ui.max_rect();
+                        let cell_clip = ui.clip_rect().intersect(cell_rect);
+                        ui.set_clip_rect(cell_clip);
+                        #[cfg(test)]
+                        if capture_first_row {
+                            first_details_cell = Some((cell_rect, cell_clip));
+                        }
                         ui.horizontal(|ui| {
                             if let Some(color) = super::action_editor::accent_color(s.metadata.accent) { ui.colored_label(color, "●").on_hover_text("Step accent"); }
                             if s.metadata.bookmarked { ui.label("★").on_hover_text("Bookmarked step"); }
@@ -734,8 +1055,17 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                                     .map_or(details.clone(), |b| format!("{details} — {} hidden steps", b.closer_index - b.opener_index))
                             } else { details };
                             let full = if s.metadata.label.is_empty() { details } else { format!("{} — {details}", s.metadata.label) };
-                            let short = if full.chars().count() > 80 { format!("{}…", full.chars().take(80).collect::<String>()) } else { full.clone() };
-                            let response = ui.label(short).on_hover_text(full);
+                            let response = ui
+                                .add(
+                                    eframe::egui::Label::new(full.clone())
+                                        .truncate()
+                                        .sense(eframe::egui::Sense::click()),
+                                )
+                                .on_hover_text(full);
+                            #[cfg(test)]
+                            if capture_first_row {
+                                first_details_label = Some(response.rect);
+                            }
                             if response.double_clicked() { command = Some(Command::Edit(s.id)); }
                             if response.secondary_clicked() && !d.selection.ids.contains(&s.id) { clicked = Some((i, false, false)); }
                             response.context_menu(|ui| {
@@ -744,13 +1074,25 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                             });
                         });
                     });
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                    }
+                    let _cell_response = r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.repeat).range(1..=1_000_000)).changed();
                     });
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                    }
+                    let _cell_response = r.col(|ui| {
                         changed |= ui.add(eframe::egui::DragValue::new(&mut s.delay_after_ms).range(0..=86_400_000)).changed();
                     });
-                    r.col(|ui| {
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                    }
+                    let _cell_response = r.col(|ui| {
                         if let Some(state) = runtime.as_ref().and_then(|run| {
                             run.macro_steps.get(&crate::mkmacro::MacroStepKey::new(mid, s.id))
                         }) {
@@ -784,6 +1126,44 @@ pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) -> Option<e
                             }
                         }
                     });
+                    #[cfg(test)]
+                    if capture_first_row {
+                        first_row_cell_rects.push(_cell_response.0);
+                        if let (Some(assigned_cell), Some(cell_clip), Some(breakpoint_button)) =
+                            (first_cell_assigned, first_cell_clip, first_breakpoint_button)
+                        {
+                            d.last_first_step_row_geometry = Some(super::FirstStepRowGeometry {
+                                assigned_cell,
+                                cell_clip,
+                                current_cell_contents: first_row_cell_rects.clone(),
+                                breakpoint_button,
+                                header_row_height,
+                                nominal_row_height: body_row_height,
+                                action_text: first_action_cell
+                                    .zip(first_action_label)
+                                    .map(|((cell, clip), label)| super::CellTextGeometry {
+                                        cell,
+                                        clip,
+                                        label,
+                                    }),
+                                details_text: first_details_cell
+                                    .zip(first_details_label)
+                                    .map(|((cell, clip), label)| super::CellTextGeometry {
+                                        cell,
+                                        clip,
+                                        label,
+                                    }),
+                                diagnostic_text: first_action_cell
+                                    .zip(first_diagnostic_label)
+                                    .map(|((cell, clip), label)| super::CellTextGeometry {
+                                        cell,
+                                        clip,
+                                        label,
+                                    }),
+                            });
+                            d.last_first_step_cell_rects = Some(first_row_cell_rects);
+                        }
+                    }
                     let after = if d.editor_state.folds.is_collapsed(mid, s.id) {
                         super::folding::foldable_block(&structure, s.id).map_or(s.id, |b| b.closer_id)
                     } else { s.id };
@@ -1378,14 +1758,37 @@ mod layout_tests {
 
     #[test]
     fn table_uses_all_remaining_height() {
-        assert_eq!(table_viewport_height(500.0), 500.0);
-        assert_eq!(table_viewport_height(250.0), 250.0);
-        assert_eq!(table_viewport_height(20.0), MIN_TABLE_VIEWPORT_HEIGHT);
+        assert_eq!(
+            table_viewport_height(500.0, MIN_TABLE_VIEWPORT_HEIGHT),
+            500.0
+        );
+        assert_eq!(
+            table_viewport_height(250.0, MIN_TABLE_VIEWPORT_HEIGHT),
+            250.0
+        );
+        assert_eq!(
+            table_viewport_height(20.0, MIN_TABLE_VIEWPORT_HEIGHT),
+            MIN_TABLE_VIEWPORT_HEIGHT
+        );
+        assert_eq!(table_viewport_height(20.0, 112.0), 112.0);
+    }
+
+    #[test]
+    fn folded_warning_indicator_stays_inside_narrow_action_cell() {
+        // A 200% warning word can be wider than the Action cell after its fold
+        // button. The compact clickable indicator must still leave room for a
+        // truncated action label and remain bounded by the cell.
+        let widths = action_diagnostic_widths(30.0, 78.0, 10.0, 6.0, 8.0);
+        assert!(widths.compact_indicator);
+        assert!(widths.action >= 6.0);
+        assert!(widths.indicator > 0.0);
+        assert!(widths.action + widths.gap + widths.indicator <= 30.0);
     }
 
     #[test]
     fn row_count_cannot_affect_table_height() {
-        let allocations = [0_usize, 10, 500].map(|_row_count| table_viewport_height(500.0));
+        let allocations = [0_usize, 10, 500]
+            .map(|_row_count| table_viewport_height(500.0, MIN_TABLE_VIEWPORT_HEIGHT));
         assert_eq!(allocations, [500.0; 3]);
     }
 

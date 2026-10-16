@@ -10,6 +10,29 @@ pub(super) struct OutlineState {
     last_show_all: bool,
     visible: Arc<Vec<usize>>,
 }
+
+pub(super) fn closed_rail_width(ui: &eframe::egui::Ui) -> f32 {
+    let style = ui.style().clone();
+    let button = style.button_style(
+        &eframe::egui::widget_style::Classes::default(),
+        eframe::egui::widget_style::WidgetState::Inactive,
+    );
+    let font_id = super::step_table::effective_font_id(ui, button.text_style.font_id.clone());
+    let text_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap("◀".to_owned(), font_id, button.text_style.color)
+            .size()
+            .x
+    });
+    let frame_width = if ui.visuals().button_frame {
+        button.frame.total_margin().sum().x
+    } else {
+        0.0
+    };
+
+    30.0_f32.max(text_width + frame_width)
+}
+
 impl Default for OutlineState {
     fn default() -> Self {
         Self {
@@ -26,7 +49,13 @@ impl Default for OutlineState {
 
 pub(super) fn show(ui: &mut eframe::egui::Ui, d: &mut MkMacroDialog) {
     if !d.navigation.outline.open {
-        if ui.button("◀").on_hover_text("Show Outline").clicked() {
+        let _rail_rect = ui.available_rect_before_wrap();
+        let response = ui.button("◀").on_hover_text("Show Outline");
+        #[cfg(test)]
+        {
+            d.last_outline_closed_button_geometry = Some((_rail_rect, response.rect));
+        }
+        if response.clicked() {
             d.navigation.outline.open = true;
         }
         return;
