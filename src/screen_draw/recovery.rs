@@ -240,13 +240,12 @@ impl ScreenDrawRecoveryBridge {
             if !self.is_active() {
                 return;
             }
-            if emergency.handle.is_some() {
-                if let Err(error) =
+            if emergency.handle.is_some()
+                && let Err(error) =
                     self.transition_activity_locked(true, true, false, &mut emergency)
-                {
-                    tracing::error!(%error, "could not replace Screen Draw native emergency handle");
-                    return;
-                }
+            {
+                tracing::error!(%error, "could not replace Screen Draw native emergency handle");
+                return;
             }
             if let Some(lifetime) = self.active_lifetime() {
                 emergency.handle = Some((lifetime, handle));

@@ -333,13 +333,12 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
             && self.failures[EffectKind::Zoom.index()]
                 .presentation
                 .is_none()
+            && let Err(error) = self.ensure_zoom_outline(preferences.zoom)
         {
-            if let Err(error) = self.ensure_zoom_outline(preferences.zoom) {
-                self.fail_native_surface(
-                    EffectKind::Zoom,
-                    format!("Could not configure zoom outline: {error}"),
-                );
-            }
+            self.fail_native_surface(
+                EffectKind::Zoom,
+                format!("Could not configure zoom outline: {error}"),
+            );
         }
 
         if !requests.halo && !requests.zoom {
@@ -949,9 +948,7 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         }
         if kind == EffectKind::Halo && !self.operations.has_surface(kind) {
             self.failures[index].native = Some(combined.clone());
-            let preferences = self
-                .halo_preferences
-                .unwrap_or_else(HaloPreferences::default);
+            let preferences = self.halo_preferences.unwrap_or_default();
             if let Err(error) = self.ensure_halo_outline(preferences, true) {
                 self.failures[index].presentation = Some(error.clone());
                 let hide_error = self.operations.hide_surface(kind).err();

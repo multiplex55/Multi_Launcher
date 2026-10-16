@@ -5122,14 +5122,14 @@ impl LauncherApp {
             }
             return;
         }
-        if poll.restore_launcher {
-            if let Err(error) = self.restore_screen_draw_launcher_exact(
+        if poll.restore_launcher
+            && let Err(error) = self.restore_screen_draw_launcher_exact(
                 crate::screen_draw::ScreenDrawRestoreCause::CapturePoll,
                 None,
-            ) {
-                tracing::error!(error = %error, "failed to restore Screen Draw launcher geometry");
-                self.report_error_message("screen_draw.restore", error);
-            }
+            )
+        {
+            tracing::error!(error = %error, "failed to restore Screen Draw launcher geometry");
+            self.report_error_message("screen_draw.restore", error);
         }
         if poll.capture_completed
             && let Some(transaction) = self.screen_draw_launcher_parking.as_mut()
@@ -5351,12 +5351,11 @@ impl LauncherApp {
             let mut repark_error = None;
             if retain_for_resume && !should_be_visible {
                 let controller = &self.screen_draw_controller;
-                if let Some(transaction) = self.screen_draw_launcher_parking.as_mut() {
-                    if let Err(error) = transaction
+                if let Some(transaction) = self.screen_draw_launcher_parking.as_mut()
+                    && let Err(error) = transaction
                         .repark_after_stale_restore(|| controller.begin_launcher_repark())
-                    {
-                        repark_error = Some(error);
-                    }
+                {
+                    repark_error = Some(error);
                 }
             } else if !retain_for_resume {
                 self.screen_draw_launcher_parking = None;

@@ -158,7 +158,7 @@ pub(crate) fn desktop_rect_from_logical_edges(
         } else {
             value.ceil()
         };
-        (value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX)).then(|| value as i32)
+        (value >= f64::from(i32::MIN) && value <= f64::from(i32::MAX)).then_some(value as i32)
     };
     desktop_rect_from_native_edges(
         scaled(left, true)?,
@@ -465,10 +465,9 @@ mod windows_toolbar {
     unsafe extern "system" fn resolve_callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let context = unsafe { &mut *(lparam.0 as *mut ResolutionContext<'_>) };
         if let Some(info) = inspect_hwnd(hwnd, context.title, context.process_id, context.thread_id)
+            && context.found.replace(info).is_some()
         {
-            if context.found.replace(info).is_some() {
-                context.ambiguous = true;
-            }
+            context.ambiguous = true;
         }
         BOOL(1)
     }

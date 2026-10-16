@@ -161,14 +161,14 @@ impl ActionsEditor {
                 #[cfg(not(test))]
                 let _ = (parent_max_rect, parent_clip_rect, list_output);
 
-                if let Some(i) = remove {
-                    if let Err(e) = app.update_custom_actions(move |actions| {
+                if let Some(i) = remove
+                    && let Err(e) = app.update_custom_actions(move |actions| {
                         anyhow::ensure!(i < actions.len(), "only custom actions can be removed");
                         actions.remove(i);
                         Ok(())
-                    }) {
-                        app.report_error("ui operation", format!("Failed to save: {e}"));
-                    }
+                    })
+                {
+                    app.report_error("ui operation", format!("Failed to save: {e}"));
                 }
             });
 

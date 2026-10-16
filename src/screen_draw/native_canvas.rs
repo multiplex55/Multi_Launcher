@@ -885,8 +885,10 @@ mod windows_canvas {
             let target = unsafe { std::slice::from_raw_parts_mut(self.bits, self.byte_len) };
             for (source, destination) in image
                 .as_raw()
-                .chunks_exact(4)
-                .zip(target.chunks_exact_mut(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(target.as_chunks_mut::<4>().0.iter_mut())
             {
                 destination.copy_from_slice(&[source[2], source[1], source[0], source[3]]);
             }
@@ -1062,15 +1064,9 @@ mod windows_canvas {
                 &transient,
             )
             .map_err(|error| format!("failed to rebuild Screen Draw dirty region: {error:?}"))?;
-            if preview {
-                if let Some(kind) = self.canvas.preview() {
-                    crate::screen_draw::raster::render_preview_into(
-                        &mut image,
-                        dirty.origin(),
-                        &kind,
-                    )
+            if preview && let Some(kind) = self.canvas.preview() {
+                crate::screen_draw::raster::render_preview_into(&mut image, dirty.origin(), &kind)
                     .map_err(|error| format!("failed to render tool preview: {error:?}"))?;
-                }
             }
             let local = self
                 .bounds
@@ -1204,30 +1200,30 @@ mod windows_canvas {
             if !self.input_enabled || !self.canvas.has_active_operation() {
                 return;
             }
-            if let Some(point) = self.cursor_point() {
-                if let Some(update) = self.canvas.extend_tool_excluding(
+            if let Some(point) = self.cursor_point()
+                && let Some(update) = self.canvas.extend_tool_excluding(
                     point,
                     self.thickness.max(8.0) * 0.5,
                     self.elapsed(),
                     self.toolbar_bounds,
-                ) {
-                    match update {
-                        CanvasUpdate::Segments(segments) if self.tool == ScreenDrawTool::Pen => {
-                            for segment in segments.iter() {
-                                self.draw_segment(segment);
-                            }
+                )
+            {
+                match update {
+                    CanvasUpdate::Segments(segments) if self.tool == ScreenDrawTool::Pen => {
+                        for segment in segments.iter() {
+                            self.draw_segment(segment);
                         }
-                        CanvasUpdate::Segments(segments) => {
-                            if let Some(dirty) = segments.dirty() {
-                                let _ = self.rebuild_region(dirty, true);
-                            }
-                        }
-                        CanvasUpdate::Preview(dirty) => {
+                    }
+                    CanvasUpdate::Segments(segments) => {
+                        if let Some(dirty) = segments.dirty() {
                             let _ = self.rebuild_region(dirty, true);
                         }
-                        CanvasUpdate::Rebuild(dirty) => {
-                            let _ = self.rebuild_region(dirty, true);
-                        }
+                    }
+                    CanvasUpdate::Preview(dirty) => {
+                        let _ = self.rebuild_region(dirty, true);
+                    }
+                    CanvasUpdate::Rebuild(dirty) => {
+                        let _ = self.rebuild_region(dirty, true);
                     }
                 }
             }
@@ -1255,10 +1251,10 @@ mod windows_canvas {
                 return;
             }
             let old = self.canvas.pending_text_bounds();
-            if self.canvas.append_text(character) {
-                if let (Some(old), Some(new)) = (old, self.canvas.pending_text_bounds()) {
-                    let _ = self.rebuild_region(union_rect(old, new), true);
-                }
+            if self.canvas.append_text(character)
+                && let (Some(old), Some(new)) = (old, self.canvas.pending_text_bounds())
+            {
+                let _ = self.rebuild_region(union_rect(old, new), true);
             }
         }
 
@@ -1270,11 +1266,10 @@ mod windows_canvas {
                 match virtual_key {
                     0x08 => {
                         let old = self.canvas.pending_text_bounds();
-                        if self.canvas.backspace_text() {
-                            if let (Some(old), Some(new)) = (old, self.canvas.pending_text_bounds())
-                            {
-                                let _ = self.rebuild_region(union_rect(old, new), true);
-                            }
+                        if self.canvas.backspace_text()
+                            && let (Some(old), Some(new)) = (old, self.canvas.pending_text_bounds())
+                        {
+                            let _ = self.rebuild_region(union_rect(old, new), true);
                         }
                         return true;
                     }
@@ -1710,12 +1705,11 @@ mod windows_canvas {
                 return;
             };
             passive.hide();
-            if visible {
-                if self.state.rebuild_passive().is_ok() {
-                    if let Some(passive) = self.state.passive.as_mut() {
-                        passive.show();
-                    }
-                }
+            if visible
+                && self.state.rebuild_passive().is_ok()
+                && let Some(passive) = self.state.passive.as_mut()
+            {
+                passive.show();
             }
         }
         pub(crate) fn hide_passive(&mut self) {

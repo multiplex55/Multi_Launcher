@@ -212,8 +212,10 @@ mod windows_picker {
             for (source, destination) in snapshot
                 .image
                 .as_raw()
-                .chunks_exact(4)
-                .zip(destination.chunks_exact_mut(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(destination.as_chunks_mut::<4>().0.iter_mut())
             {
                 destination.copy_from_slice(&[source[2], source[1], source[0], 255]);
             }

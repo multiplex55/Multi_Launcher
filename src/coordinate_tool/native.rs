@@ -17,9 +17,9 @@ impl NativeCoordinatePointSampler {
     pub(crate) fn new() -> Result<Self, String> {
         #[cfg(windows)]
         {
-            return Ok(Self {
+            Ok(Self {
                 sampler: windows_runtime::WindowsSampler::new()?,
-            });
+            })
         }
         #[cfg(not(windows))]
         {
@@ -52,7 +52,7 @@ impl CoordinateRuntimeFactory for NativeCoordinateRuntimeFactory {
     fn create_sampler(&self) -> Result<Box<dyn CoordinateSampler>, String> {
         #[cfg(windows)]
         {
-            return Ok(Box::new(windows_runtime::WindowsSampler::new()?));
+            Ok(Box::new(windows_runtime::WindowsSampler::new()?))
         }
         #[cfg(not(windows))]
         {
@@ -63,7 +63,7 @@ impl CoordinateRuntimeFactory for NativeCoordinateRuntimeFactory {
     fn create_backend(&self) -> Result<Box<dyn CoordinateSurfaceBackend>, String> {
         #[cfg(windows)]
         {
-            return Ok(Box::new(windows_runtime::WindowsSurfaceBackend::new()?));
+            Ok(Box::new(windows_runtime::WindowsSurfaceBackend::new()?))
         }
         #[cfg(not(windows))]
         {
@@ -487,7 +487,7 @@ mod windows_runtime {
             unsafe { ptr::write_bytes(self.bits, 0, self.byte_len) };
             let brush_timer =
                 crate::performance::MetricTimer::start(crate::performance::Metric::HudGdiCreate);
-            let brush = unsafe { CreateSolidBrush(COLORREF(0x001B_1B_1B)) };
+            let brush = unsafe { CreateSolidBrush(COLORREF(0x001B_1B1B)) };
             drop(brush_timer);
             record_gdi_operation(GdiObject::Brush, true, !brush.0.is_null());
             if brush.0.is_null() {
@@ -561,7 +561,8 @@ mod windows_runtime {
             // GDI text rendering updates BGR but leaves the reserved alpha byte
             // undefined. The HUD is an intentionally opaque dark panel.
             for pixel in unsafe { std::slice::from_raw_parts_mut(self.bits, self.byte_len) }
-                .chunks_exact_mut(4)
+                .as_chunks_mut::<4>()
+                .0
             {
                 pixel[3] = 255;
             }

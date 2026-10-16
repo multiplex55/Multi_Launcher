@@ -990,7 +990,7 @@ fn parse_file_search(s: &str) -> Option<FileSearchCommand> {
     use crate::file_search::actions::{
         CANCEL_ACTION, MODE_PREFIX, OPEN_ACTION, START_PREFIX, decode_action_payload,
     };
-    let command = if s == OPEN_ACTION {
+    if s == OPEN_ACTION {
         Some(FileSearchCommand::Open)
     } else if s == CANCEL_ACTION {
         Some(FileSearchCommand::Cancel)
@@ -1020,8 +1020,7 @@ fn parse_file_search(s: &str) -> Option<FileSearchCommand> {
         Some(payload)
     } else {
         None
-    };
-    command
+    }
 }
 
 fn parse_todo(s: &str) -> Option<TodoCommand> {

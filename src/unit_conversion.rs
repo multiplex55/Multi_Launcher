@@ -799,7 +799,7 @@ pub static UNIT_CATALOG: &[UnitDefinition] = &[
         Acre,
         Area,
         "ac",
-        Strategy::Linear(4046.856_422_4),
+        Strategy::Linear(4_046.856_422_4),
         ["ac", "acre", "acres"]
     ),
     unit!(
@@ -1560,12 +1560,10 @@ pub fn catalog() -> &'static [UnitDefinition] {
 
 /// Resolves a current unit name or alias without duplicating catalog knowledge.
 pub fn unit_by_alias(alias: &str) -> Option<Unit> {
-    if let Some(definition) = UNIT_CATALOG.iter().find(|definition| {
-        definition
-            .case_sensitive_aliases
-            .iter()
-            .any(|candidate| *candidate == alias)
-    }) {
+    if let Some(definition) = UNIT_CATALOG
+        .iter()
+        .find(|definition| definition.case_sensitive_aliases.contains(&alias))
+    {
         return Some(definition.unit);
     }
 
@@ -1670,11 +1668,11 @@ pub fn convert(value: f64, from: Unit, to: Unit) -> Option<f64> {
             Some(value * (from_factor / to_factor))
         }
         (Strategy::Temperature(from_scale), Strategy::Temperature(to_scale)) => {
-            Some(to_scale.from_kelvin(from_scale.to_kelvin(value)))
+            Some(to_scale.value_from_kelvin(from_scale.to_kelvin(value)))
         }
-        (Strategy::FuelEconomy(from_scale), Strategy::FuelEconomy(to_scale)) => {
-            Some(to_scale.from_kilometers_per_liter(from_scale.to_kilometers_per_liter(value)))
-        }
+        (Strategy::FuelEconomy(from_scale), Strategy::FuelEconomy(to_scale)) => Some(
+            to_scale.value_from_kilometers_per_liter(from_scale.to_kilometers_per_liter(value)),
+        ),
         _ => None,
     }
 }
@@ -2010,8 +2008,7 @@ fn update_alias_match(
 
 fn match_alias_prefix(input: &str, alias: &str, case_sensitive: bool) -> Option<usize> {
     let mut input_offset = 0;
-    let mut alias_characters = alias.chars().peekable();
-    while let Some(alias_character) = alias_characters.next() {
+    for alias_character in alias.chars() {
         if alias_character.is_whitespace() {
             let mut found_whitespace = false;
             while let Some(character) = input[input_offset..].chars().next()
@@ -2236,7 +2233,7 @@ impl TemperatureScale {
         }
     }
 
-    fn from_kelvin(self, value: f64) -> f64 {
+    fn value_from_kelvin(self, value: f64) -> f64 {
         match self {
             Self::Celsius => value - 273.15,
             Self::Fahrenheit => (value - 273.15) * 9.0 / 5.0 + 32.0,
@@ -2255,7 +2252,7 @@ impl FuelEconomyScale {
         }
     }
 
-    fn from_kilometers_per_liter(self, value: f64) -> f64 {
+    fn value_from_kilometers_per_liter(self, value: f64) -> f64 {
         match self {
             Self::KilometerPerLiter => value,
             Self::LiterPer100Kilometers => 100.0 / value,

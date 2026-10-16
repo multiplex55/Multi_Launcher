@@ -417,7 +417,7 @@ fn render_pen_stroke_in_tiles(
             }
             let mask = slice::from_raw_parts(bits as *const u8, byte_len);
             let stroke_color = color(stroke.color);
-            for (index, pixel) in mask.chunks_exact(4).enumerate() {
+            for (index, pixel) in mask.as_chunks::<4>().0.iter().enumerate() {
                 if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
                     let x = tile.x - origin.x + (index % tile.width as usize) as i32;
                     let y = tile.y - origin.y + (index / tile.width as usize) as i32;

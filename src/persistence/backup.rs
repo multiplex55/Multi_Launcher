@@ -297,7 +297,7 @@ impl<'a> BackupEngine<'a> {
         } else {
             SnapshotStatus::Complete
         };
-        save_json_atomic(&staging.join(MANIFEST_FILE), &manifest)
+        save_json_atomic(staging.join(MANIFEST_FILE), &manifest)
             .context("write durable snapshot manifest")?;
         Ok(manifest)
     }
@@ -450,19 +450,19 @@ fn copy_source(
             ));
         }
     } else if metadata.is_file() {
-        if let Some(parent) = destination.parent() {
-            if let Err(error) = fs::create_dir_all(parent) {
-                manifest.failed.push(entry_at(
-                    store,
-                    source,
-                    destination
-                        .strip_prefix(staging)
-                        .ok()
-                        .map(Path::to_path_buf),
-                    Some(format!("create destination failed: {error}")),
-                ));
-                return Ok(());
-            }
+        if let Some(parent) = destination.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            manifest.failed.push(entry_at(
+                store,
+                source,
+                destination
+                    .strip_prefix(staging)
+                    .ok()
+                    .map(Path::to_path_buf),
+                Some(format!("create destination failed: {error}")),
+            ));
+            return Ok(());
         }
         match copier.copy(source, destination) {
             Ok(()) => manifest.included.push(entry_at(

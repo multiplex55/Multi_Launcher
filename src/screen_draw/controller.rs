@@ -1295,12 +1295,11 @@ impl ScreenDrawController {
                                 ScreenDrawState::Finish { .. }
                                     | ScreenDrawState::DisplayChanged { .. }
                             )
+                            && self.pending_editor_handoff.is_none()
                         {
-                            if self.pending_editor_handoff.is_none() {
-                                self.pending_editor_handoff =
-                                    Some(ScreenDrawEditorHandoff { generation, image });
-                                worker.request_shutdown();
-                            }
+                            self.pending_editor_handoff =
+                                Some(ScreenDrawEditorHandoff { generation, image });
+                            worker.request_shutdown();
                         }
                     }
                     NativeSessionEvent::DocumentChanged => {}

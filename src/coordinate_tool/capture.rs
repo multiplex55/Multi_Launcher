@@ -396,25 +396,23 @@ impl CoordinateCaptureController {
             .is_some_and(|worker| worker.join.is_finished());
         let mut changed = self.drain_updates();
 
-        if finished {
-            if let Some(worker) = self.worker.take() {
-                let result = worker.join.join();
-                // The terminal send is the worker's final action, so a message
-                // can arrive after the first drain but before `is_finished`.
-                // Join first, then drain once more before starting another id.
-                self.drain_updates();
-                let outcome = match (result, self.take_pending_completion(worker.session_id)) {
-                    (Err(_), _) => CaptureOutcome::Failed(
-                        "Coordinate capture worker stopped before cleanup was confirmed".into(),
-                    ),
-                    (Ok(()), Some(outcome)) => outcome,
-                    (Ok(()), None) => CaptureOutcome::Failed(
-                        "Coordinate capture worker exited without a terminal result".into(),
-                    ),
-                };
-                self.finish_worker(worker.session_id, outcome);
-                changed = true;
-            }
+        if finished && let Some(worker) = self.worker.take() {
+            let result = worker.join.join();
+            // The terminal send is the worker's final action, so a message
+            // can arrive after the first drain but before `is_finished`.
+            // Join first, then drain once more before starting another id.
+            self.drain_updates();
+            let outcome = match (result, self.take_pending_completion(worker.session_id)) {
+                (Err(_), _) => CaptureOutcome::Failed(
+                    "Coordinate capture worker stopped before cleanup was confirmed".into(),
+                ),
+                (Ok(()), Some(outcome)) => outcome,
+                (Ok(()), None) => CaptureOutcome::Failed(
+                    "Coordinate capture worker exited without a terminal result".into(),
+                ),
+            };
+            self.finish_worker(worker.session_id, outcome);
+            changed = true;
         }
         changed
     }
@@ -696,7 +694,6 @@ impl CaptureMachine {
                 CaptureInput::Key {
                     key: CaptureKey::Escape,
                     edge: ButtonEdge::Down,
-                    injected: _,
                     ..
                 } if escape_unowned => {
                     self.state = MachineState::Waiting {
@@ -780,7 +777,6 @@ impl CaptureMachine {
                 CaptureInput::Key {
                     key: CaptureKey::Escape,
                     edge: ButtonEdge::Down,
-                    injected: _,
                     ..
                 } if escape_unowned => {
                     self.state = MachineState::Capturing {
@@ -1076,10 +1072,10 @@ pub(crate) fn drive_capture_session(
     machine.borrow_mut().apply_control(&control);
     publish_machine_phase(&machine, &updates, &control);
 
-    if !machine.borrow().needs_teardown() {
-        if let Err(error) = driver.pump(&machine, &control, &updates) {
-            machine.borrow_mut().request_failure(error);
-        }
+    if !machine.borrow().needs_teardown()
+        && let Err(error) = driver.pump(&machine, &control, &updates)
+    {
+        machine.borrow_mut().request_failure(error);
     }
     machine.borrow_mut().apply_control(&control);
     if !machine.borrow().needs_teardown() {
@@ -1117,7 +1113,7 @@ impl CaptureRuntime for NativeCoordinateCaptureRuntime {
         #[cfg(windows)]
         {
             let mut driver = windows_native::WindowsCaptureDriver::default();
-            return drive_capture_session(session_id, control, updates, &mut driver);
+            drive_capture_session(session_id, control, updates, &mut driver)
         }
         #[cfg(not(windows))]
         {

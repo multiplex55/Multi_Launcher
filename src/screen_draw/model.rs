@@ -173,9 +173,12 @@ pub struct AnnotationObject {
     pub kind: AnnotationKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenDrawTool {
+    #[default]
     Pen,
     Highlighter,
     StraightLine,
@@ -188,16 +191,11 @@ pub enum ScreenDrawTool {
     Eyedropper,
 }
 
-impl Default for ScreenDrawTool {
-    fn default() -> Self {
-        Self::Pen
-    }
-}
-
 /// The selected canvas source. Ghost mode is intentionally not a background.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CanvasBackground {
+    #[default]
     FrozenDesktop,
     White,
     Black,
@@ -212,19 +210,14 @@ pub enum ExportScope {
     Region(ScreenRect),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ExportBackground {
+    #[default]
     FrozenDesktop,
     Transparent,
     White,
     Black,
     Solid(RgbaColor),
-}
-
-impl Default for ExportBackground {
-    fn default() -> Self {
-        Self::FrozenDesktop
-    }
 }
 
 impl From<CanvasBackground> for ExportBackground {
@@ -252,28 +245,18 @@ pub struct ExportRequest {
     pub destination: ExportDestination,
 }
 
-impl Default for CanvasBackground {
-    fn default() -> Self {
-        Self::FrozenDesktop
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolbarOrientation {
+    #[default]
     Vertical,
     Horizontal,
 }
 
-impl Default for ToolbarOrientation {
-    fn default() -> Self {
-        Self::Vertical
-    }
-}
-
 /// High-level session state mirrored outside the native worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenDrawMode {
+    #[default]
     NoSession,
     AwaitingLauncherParking,
     Capturing,
@@ -283,12 +266,6 @@ pub enum ScreenDrawMode {
     SelectingRegion,
     DisplayChanged,
     Failed,
-}
-
-impl Default for ScreenDrawMode {
-    fn default() -> Self {
-        Self::NoSession
-    }
 }
 
 #[cfg(test)]

@@ -534,7 +534,7 @@ impl ResetCandidate {
                 let value: serde_json::Value = serde_json::from_slice(bytes)
                     .context("parse canonical reset JSON for fingerprint")?;
                 let mut hash = Fnv64::default();
-                hash.update(&[b'F']);
+                hash.update(b"F");
                 hash_json(&value, &mut hash);
                 Ok(format!("fnv1a64:{:016x}", hash.0))
             }
@@ -721,10 +721,7 @@ fn apply_restore_target(
             }
         }
     }
-    check_cancelled(cancelled).map_err(|error| {
-        cleanup_materialized(&materialized);
-        error
-    })?;
+    check_cancelled(cancelled).inspect_err(|_| cleanup_materialized(&materialized))?;
     if let Some(expected) = expected_target_fingerprint {
         let staged_candidates = materialized
             .iter()
@@ -847,7 +844,7 @@ fn install_materialized(
                 .validated_file_bytes
                 .as_deref()
                 .context("validated recovery file bytes are unavailable")?;
-            install_file_with(&store.path, &bytes, reason, save_atomic)
+            install_file_with(&store.path, bytes, reason, save_atomic)
                 .context("atomically install recovered file")
         }
         StoreKind::Directory => install_staged_directory(&store.path, &materialized.path, reason),
@@ -912,7 +909,7 @@ fn install_materialized_group(
                         .validated_file_bytes
                         .as_deref()
                         .context("validated recovery group file bytes are unavailable")?;
-                    save_atomic(&store.path, &bytes)
+                    save_atomic(&store.path, bytes)
                         .context("durably install recovery group file")?;
                 }
                 StoreKind::Directory => {
@@ -1137,23 +1134,23 @@ fn install_staged_directory(destination: &Path, staging: &Path, reason: &str) ->
     } else {
         None
     };
-    if let Some(backup) = &backup {
-        if let Err(error) = fs::rename(destination, backup) {
-            cleanup_created_directory(parent, &staging);
-            return Err(error).context("preserve current recovery directory");
-        }
+    if let Some(backup) = &backup
+        && let Err(error) = fs::rename(destination, backup)
+    {
+        cleanup_created_directory(parent, staging);
+        return Err(error).context("preserve current recovery directory");
     }
-    if let Err(error) = fs::rename(&staging, destination) {
-        if let Some(backup) = &backup {
-            if let Err(rollback_error) = fs::rename(backup, destination) {
-                cleanup_created_directory(parent, &staging);
-                bail!(
-                    "install recovery directory failed ({error}); rollback failed ({rollback_error}); preserved destination is {}",
-                    backup.display()
-                );
-            }
+    if let Err(error) = fs::rename(staging, destination) {
+        if let Some(backup) = &backup
+            && let Err(rollback_error) = fs::rename(backup, destination)
+        {
+            cleanup_created_directory(parent, staging);
+            bail!(
+                "install recovery directory failed ({error}); rollback failed ({rollback_error}); preserved destination is {}",
+                backup.display()
+            );
         }
-        cleanup_created_directory(parent, &staging);
+        cleanup_created_directory(parent, staging);
         return Err(error).context("install complete recovery directory");
     }
     Ok(())
@@ -1346,13 +1343,13 @@ fn fingerprint(path: &Path, cancelled: &dyn Fn() -> bool) -> Result<String> {
     reject_reparse_metadata(path, &metadata)?;
     let mut hash = Fnv64::default();
     if metadata.is_file() {
-        hash.update(&[b'F']);
+        hash.update(b"F");
         hash_file_framed(path, &mut hash, cancelled)?;
     } else if metadata.is_dir() {
-        hash.update(&[b'D']);
+        hash.update(b"D");
         for relative in regular_tree_paths(path, cancelled)? {
             check_cancelled(cancelled)?;
-            hash.update(&[b'E']);
+            hash.update(b"E");
             hash_segment(&mut hash, relative.to_string_lossy().as_bytes());
             hash_file_framed(&path.join(relative), &mut hash, cancelled)?;
         }
@@ -1371,7 +1368,7 @@ fn fingerprint_bytes(kind: u8, bytes: &[u8]) -> String {
 
 fn empty_directory_fingerprint() -> String {
     let mut hash = Fnv64::default();
-    hash.update(&[b'D']);
+    hash.update(b"D");
     format!("fnv1a64:{:016x}", hash.0)
 }
 

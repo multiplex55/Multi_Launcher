@@ -8,8 +8,10 @@ pub(crate) fn premultiplied_bgra(image: &RgbaImage, output: &mut [u8]) -> Result
     }
     for (source, destination) in image
         .as_raw()
-        .chunks_exact(4)
-        .zip(output.chunks_exact_mut(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<4>().0.iter_mut())
     {
         let alpha = u16::from(source[3]);
         let premultiply = |channel: u8| ((u16::from(channel) * alpha + 127) / 255) as u8;

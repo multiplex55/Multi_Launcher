@@ -61,7 +61,7 @@ pub struct CoordinateRenderFrame {
     pub sample_error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SharedState {
     preferences: CoordinateToolPreferences,
     runtime: CoordinateToolRuntimeState,
@@ -70,20 +70,6 @@ struct SharedState {
     sample_error: Option<String>,
     backend_error: Option<String>,
     effects_status: CoordinateEffectsStatus,
-}
-
-impl Default for SharedState {
-    fn default() -> Self {
-        Self {
-            preferences: CoordinateToolPreferences::default(),
-            runtime: CoordinateToolRuntimeState::default(),
-            latest_sample: None,
-            pending_freeze: false,
-            sample_error: None,
-            backend_error: None,
-            effects_status: CoordinateEffectsStatus::default(),
-        }
-    }
 }
 
 enum WorkerMessage {
@@ -423,10 +409,10 @@ fn run_worker(
                 }
                 Err(error) => lock(&shared).backend_error = Some(error),
             }
-        } else if frame.current_sample.is_some() {
-            if let Err(error) = backend.refresh_stationary_sources(&frame) {
-                lock(&shared).backend_error = Some(error);
-            }
+        } else if frame.current_sample.is_some()
+            && let Err(error) = backend.refresh_stationary_sources(&frame)
+        {
+            lock(&shared).backend_error = Some(error);
         }
         lock(&shared).effects_status = backend.effects_status();
     }
