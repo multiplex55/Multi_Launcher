@@ -1827,6 +1827,10 @@ fn query_input_error(error: String) -> CaseFailure {
     CaseFailure::new(FailureStage::InputInjection, error)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 pub fn run_suite(
     executable: &str,
     profile: &Path,
@@ -2185,6 +2189,10 @@ pub fn run_suite(
     Some(anchor)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 pub fn run_hotkey_suite(
     executable: &str,
     profile: &Path,
@@ -2322,6 +2330,10 @@ pub fn run_hotkey_suite(
     Some(anchor)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 pub fn run_query_suite(
     executable: &str,
     profile: &Path,
@@ -2418,8 +2430,6 @@ pub fn run_query_suite(
         report,
         "Q02",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2453,8 +2463,6 @@ pub fn run_query_suite(
         report,
         "Q03",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2489,8 +2497,6 @@ pub fn run_query_suite(
         report,
         "Q05",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2525,8 +2531,6 @@ pub fn run_query_suite(
         report,
         "Q07",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2573,8 +2577,6 @@ pub fn run_query_suite(
         report,
         "Q10",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2633,8 +2635,6 @@ pub fn run_query_suite(
         report,
         "Q11",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2668,8 +2668,6 @@ pub fn run_query_suite(
         report,
         "Q12",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2703,8 +2701,6 @@ pub fn run_query_suite(
         report,
         "Q13",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -2782,8 +2778,6 @@ pub fn run_query_suite(
         report,
         "Q15",
         &child,
-        &anchor,
-        &ui,
         trace_path,
         output,
         marker_path.as_path(),
@@ -3359,6 +3353,10 @@ fn await_note_close_gui_response(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps fixture correlation and expected before/after evidence explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn request_query_observation(
     child: &NativeChild,
     phase: &'static str,
@@ -4642,6 +4640,10 @@ impl Drop for GateCAuthoringSearchHold {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_start_held_authoring_search(
     packet: &mut GateCCaseEvidence,
     child: &NativeChild,
@@ -5333,6 +5335,10 @@ fn empty_gate_c_packet(report: &AcceptanceReport, case_id: &str) -> GateCCaseEvi
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_gate_c_case(
     report: &mut AcceptanceReport,
     id: &str,
@@ -5427,6 +5433,10 @@ fn recover_gate_c_case_failure(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_gate_c_case_with_failure_cleanup(
     report: &mut AcceptanceReport,
     id: &str,
@@ -5451,6 +5461,10 @@ fn append_gate_c_case_with_failure_cleanup(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_gate_c_case_with_failure_cleanup_using(
     report: &mut AcceptanceReport,
     id: &str,
@@ -5730,6 +5744,10 @@ fn gate_c_inspector_result_count_step(
         .unwrap_or(GateCInspectorResultCountStep::Wait)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn wait_gate_c_inspector_result_count_after_applied(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -6354,6 +6372,10 @@ fn gate_c_insertion_has_accepted_consent_for_destination(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_readable_result_row(
     packet: &mut GateCCaseEvidence,
     child: &NativeChild,
@@ -7024,6 +7046,10 @@ fn gate_c_wait_search_preparation_with(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_search_preparation(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -7120,6 +7146,10 @@ fn gate_c_search_clicked_receipt_is_current(
         && clicked.bounds == clicked.full_bounds
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_gate_c_search(
     packet: &mut GateCCaseEvidence,
     child: &NativeChild,
@@ -7937,6 +7967,10 @@ fn gate_c_properties_modal_receipts_match(
         && in_client(query_field.bounds)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_fresh_canvas_cell_after(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -7974,6 +8008,10 @@ fn gate_c_wait_fresh_canvas_cell_after(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_fresh_canvas_cell_after_with(
     trace_path: &Path,
     cursor: usize,
@@ -8313,6 +8351,10 @@ fn gate_c_capture_action_control(
     control
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_set_action_text(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -8357,6 +8399,10 @@ fn gate_c_set_action_text(
     Ok(gate_c_capture_action_control(packet, edited))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_click_action_control(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -8458,6 +8504,10 @@ fn gate_c_owner_control_sequence(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps fixture correlation and expected before/after evidence explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn gate_c_capture_owner_control(
     packet: &mut GateCCaseEvidence,
     control: &AuthoringControlSnapshot,
@@ -8634,6 +8684,10 @@ fn gate_c_popup_apply_owner_transition_is_valid(
         })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_click_owner_control(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -8889,6 +8943,10 @@ fn gate_c_ensure_action_tab_with(
     Ok((tab, field))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_ensure_action_tab_after(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -9008,6 +9066,10 @@ fn gate_c_observed_action_editor_identity(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_run_binding_transaction(
     packet: &mut GateCCaseEvidence,
     child: &mut NativeChild,
@@ -9906,7 +9968,10 @@ fn gate_c_custom_action_target(index: usize) -> GateCReadableTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GateCPinViewportStep {
-    Ready(ActionEditorControlSnapshot, ActionEditorControlSnapshot),
+    Ready(
+        Box<ActionEditorControlSnapshot>,
+        ActionEditorControlSnapshot,
+    ),
     Scroll {
         anchor: ActionEditorControlSnapshot,
         delta: i16,
@@ -9927,7 +9992,7 @@ struct GateCPinThumbDragPlan {
 enum GateCPinInnerScrollAction {
     NotApplicable,
     Wait,
-    Drag(GateCPinThumbDragPlan),
+    Drag(Box<GateCPinThumbDragPlan>),
 }
 
 fn gate_c_scroll_control_matches_inner_clip(
@@ -10071,12 +10136,12 @@ fn gate_c_pin_inner_scroll_action(
     {
         return GateCPinInnerScrollAction::Wait;
     }
-    GateCPinInnerScrollAction::Drag(GateCPinThumbDragPlan {
+    GateCPinInnerScrollAction::Drag(Box::new(GateCPinThumbDragPlan {
         scroll: scroll.clone(),
         start_client: start,
         end_client: end,
         offset_direction: actual_offset_delta.signum() as i8,
-    })
+    }))
 }
 
 fn point_in_bounds(point: [i32; 2], bounds: [i32; 4]) -> bool {
@@ -10252,7 +10317,7 @@ fn gate_c_pin_viewport_step(
             )
             && pin.trace_sequence > row.trace_sequence
         {
-            return GateCPinViewportStep::Ready(row.clone(), pin.clone());
+            return GateCPinViewportStep::Ready(Box::new(row.clone()), pin.clone());
         }
         let clipped_row = !row.fully_visible || row.bounds != row.full_bounds;
         let clipped_pin =
@@ -10402,6 +10467,10 @@ fn gate_c_wait_for_pin_repaint_with<E>(
     Ok(true)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_pin_viewport_ready(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -10654,7 +10723,7 @@ fn gate_c_wait_pin_viewport_ready(
                 live_client_size,
                 current_anchor.as_ref().or(retained_anchor.as_ref()),
             ) {
-                GateCPinViewportStep::Ready(row, pin) => return Ok((row, pin)),
+                GateCPinViewportStep::Ready(row, pin) => return Ok((*row, pin)),
                 GateCPinViewportStep::Scroll {
                     anchor,
                     delta,
@@ -10934,6 +11003,10 @@ fn gate_c_wait_stable_pin_pair_with<E>(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_stable_pin_viewport_ready(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -11461,6 +11534,10 @@ fn gate_c_pin_pre_down_status(
     GateCPinPreDownStatus::Ready
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_fresh_pin_before_pointer_down(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -11555,6 +11632,10 @@ fn gate_c_pin_identity_transition_matches(
             || observed.binding_digest == row_binding_digest)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_gate_c_editor_search_case(
     packet: &mut GateCCaseEvidence,
     child: &NativeChild,
@@ -11856,6 +11937,10 @@ fn gate_c_start_root_add_from_existing_designer(
     Ok((root, source_before, source_baseline_receipt, source_add))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_visible_text_containing(
     case_id: &str,
     diagnostic_tag: &str,
@@ -12111,6 +12196,10 @@ fn gate_c_trace_sequence_cursor(trace_path: &Path) -> Result<u64, String> {
         .ok_or_else(|| "acceptance trace has no published sequence cursor".to_string())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_insertion_widget(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -12183,6 +12272,10 @@ fn gate_c_wait_insertion_widget(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_click_insertion_widget(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -12721,6 +12814,10 @@ fn gate_c_marker_counts_digest(counts: &BTreeMap<String, usize>) -> Result<u64, 
         .map_err(|error| format!("could not serialize isolated marker ledger counts: {error}"))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_click_insertion_destination(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -12813,6 +12910,10 @@ fn gate_c_click_insertion_destination(
     Ok(clicked)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps fixture correlation and expected before/after evidence explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn gate_c_build_inserted_binding(
     plan: &GateCInsertionSourcePlan,
     source: &GateCInsertionControlEvidence,
@@ -13732,6 +13833,10 @@ struct GateCDirtyAddAttempt {
     initial_snapshot_receipt: GateCInitialSnapshotReceipt,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_prepare_dirty_add(
     child: &NativeChild,
     uia: &UiAutomation,
@@ -13992,6 +14097,10 @@ fn gate_c_prepare_dirty_add(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_select_cell_and_verify_label(
     case_id: &str,
     packet: &mut GateCCaseEvidence,
@@ -14176,6 +14285,10 @@ fn gate_c_inspector_text_evidence(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_inspector_text_edit(
     case_id: &str,
     child: &NativeChild,
@@ -14202,6 +14315,10 @@ fn gate_c_wait_inspector_text_edit(
     .map_err(|error| CaseFailure::new(FailureStage::DesignerReadiness, error))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_wait_for_inspector_text_edit_receipt(
     case_id: &str,
     cursor: usize,
@@ -14242,6 +14359,10 @@ fn gate_c_wait_for_inspector_text_edit_receipt(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_replace_focused_inspector_text(
     case_id: &str,
     packet: &mut GateCCaseEvidence,
@@ -14298,6 +14419,10 @@ fn gate_c_replace_focused_inspector_text(
     Ok(changed)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps fixture correlation and expected before/after evidence explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn gate_c_build_dirty_insertion_evidence(
     attempt: &GateCDirtyAddAttempt,
     layout: GateCResultLayout,
@@ -15681,6 +15806,10 @@ fn gate_c_q14_click_with_preclick_cursor<T>(
     click().map(|receipt| (cursor, receipt))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn gate_c_q14_enter_search_and_read_row(
     packet: &mut GateCCaseEvidence,
     child: &NativeChild,
@@ -16479,6 +16608,10 @@ fn run_gate_c_q14_case(
     ))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 pub fn run_gate_c_suite(
     executable: &str,
     profile: &Path,
@@ -16764,6 +16897,10 @@ pub fn run_gate_c_suite(
     Some(anchor)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 pub fn run_gate_d_suite(
     executable: &str,
     profile: &Path,
@@ -17809,6 +17946,10 @@ impl GateDControlPresentationStability {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_d_wait_settled_control_with(
     before: &GateDObservationEvidence,
     boundary: GateDPresentationBoundary,
@@ -17928,6 +18069,10 @@ fn gate_d_wait_settled_control_with(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_d_ready_control(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -17951,6 +18096,10 @@ fn gate_d_ready_control(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_d_ready_control_before_deadline(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -18163,6 +18312,10 @@ fn gate_d_wait_control_before_pointer_down_with(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_d_wait_control_before_pointer_down(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -18864,6 +19017,10 @@ fn run_gate_d_search_back_case(
     Ok("native double-clicks traversed both distinct parent paths to the same shared child; a real authored search-result click revealed the independently expected cell, and Back restored its prior root cell; live paths, edges, and breadcrumb geometry matched without editing the draft".into())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_gate_d_local_filter_case(
     packet: &mut GateDCaseEvidence,
     profile: &Path,
@@ -19576,6 +19733,10 @@ fn gate_d_keyboard_transition_is_ready(
     }))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_d_wait_keyboard_transition_with(
     before: &GateDObservationEvidence,
     expected: AuthoringControlSnapshot,
@@ -20599,6 +20760,10 @@ fn append_gate_d_unreached_cases(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_gate_d_case(
     report: &mut AcceptanceReport,
     id: &str,
@@ -21065,12 +21230,14 @@ struct PrecleanupDiagnosticArtifacts {
     errors: Vec<String>,
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps query case identity, output locations, hotkey expectations, and its execution closure explicit in the case wrapper; consolidating them would require a substantial lint-only migration."
+)]
 fn run_query_case<F, R>(
     report: &mut AcceptanceReport,
     id: &str,
     child: &NativeChild,
-    anchor: &FocusAnchor,
-    ui: &UiAutomation,
     trace_path: &Path,
     output: &Path,
     marker_path: &Path,
@@ -21085,8 +21252,6 @@ fn run_query_case<F, R>(
         report,
         id,
         child,
-        anchor,
-        ui,
         trace_path,
         output,
         marker_path,
@@ -21099,12 +21264,14 @@ fn run_query_case<F, R>(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps the query case, child/output evidence locations, hotkey expectations, and diagnostic callback explicit where results are qualified and recorded; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn run_query_case_with_diagnostics<F, R>(
     report: &mut AcceptanceReport,
     id: &str,
     child: &NativeChild,
-    anchor: &FocusAnchor,
-    ui: &UiAutomation,
     trace_path: &Path,
     output: &Path,
     marker_path: &Path,
@@ -21135,7 +21302,6 @@ fn run_query_case_with_diagnostics<F, R>(
         hold_threshold_ms,
         diagnostics,
     );
-    let _ = (anchor, ui);
 }
 
 fn qualify_query_case_result<R: IntoQueryInvocations>(
@@ -21165,6 +21331,10 @@ fn qualify_query_case_result<R: IntoQueryInvocations>(
     (result, evidence)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_query_case_result_with_diagnostics(
     report: &mut AcceptanceReport,
     id: &str,
@@ -21227,6 +21397,10 @@ fn query_operation_requires_ordinary_observation(events: &[String]) -> bool {
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps query invocation, focus/UI ownership, diagnostics, and evidence correlation explicit at this acceptance boundary; consolidating them would require a substantial lint-only query-runner migration."
+)]
 fn run_query_invocation<F>(
     child: &NativeChild,
     anchor: &FocusAnchor,
@@ -21593,6 +21767,10 @@ fn hover_query_cell(
     ))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps fixture correlation and expected before/after evidence explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn parse_query_invocation(
     events: &[String],
     all_operation_events: &[String],
@@ -21890,6 +22068,16 @@ fn query_source_label(source: QueryEvidenceSource) -> &'static str {
     }
 }
 
+type QueryRootSnapshotEvidence = (
+    Option<QueryEvidenceSource>,
+    Option<QueryRootStateEvidence>,
+    Option<QueryRootStateEvidence>,
+);
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps fixture correlation and expected before/after evidence explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn parse_query_root_snapshots(
     events: &[String],
     invocation_id: u64,
@@ -21899,14 +22087,7 @@ fn parse_query_root_snapshots(
     selected_digest: Option<u64>,
     root_policy: QueryEvidenceRootPolicy,
     dispatch_outcome: QueryEvidenceOutcome,
-) -> Result<
-    (
-        Option<QueryEvidenceSource>,
-        Option<QueryRootStateEvidence>,
-        Option<QueryRootStateEvidence>,
-    ),
-    CaseFailure,
-> {
+) -> Result<QueryRootSnapshotEvidence, CaseFailure> {
     let lines = events
         .iter()
         .enumerate()
@@ -22608,6 +22789,10 @@ fn hotkey_setup_failure_case_ids() -> impl Iterator<Item = &'static str> {
         .filter(|id| !matches!(*id, "CLEANUP" | "R0"))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_burst_case(
     report: &mut AcceptanceReport,
     id: &str,
@@ -23062,6 +23247,10 @@ fn attach_h04_contamination_artifact(report: &mut AcceptanceReport, path: PathBu
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 fn run_hotkey_behavior_cases(
     executable: &str,
     profile: &Path,
@@ -23205,6 +23394,10 @@ fn run_hotkey_behavior_cases(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_root_focus_case(
     report: &mut AcceptanceReport,
     id: &str,
@@ -23780,6 +23973,10 @@ fn hover_executable_radial_cell_with(
     Ok(final_ack.cell_digest)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_tap_dismiss_case(
     report: &mut AcceptanceReport,
     id: &str,
@@ -23949,6 +24146,10 @@ fn run_hotkey_tap_dismiss_case(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_pending_open_case(
     profile: &Path,
     report: &mut AcceptanceReport,
@@ -24424,6 +24625,10 @@ fn run_hotkey_hold_close_case(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_hold_attempt(
     child: &NativeChild,
     anchor: &FocusAnchor,
@@ -26013,6 +26218,10 @@ fn run_hotkey_designer_preview_preservation_case(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 fn run_hotkey_direct_trigger_preservation_case(
     executable: &str,
     profile: &Path,
@@ -26811,6 +27020,10 @@ fn run_hotkey_hidden_root_wake_case(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 fn run_hotkey_dual_profile_case(
     executable: &str,
     _profile: &Path,
@@ -27230,6 +27443,10 @@ fn run_hotkey_burst_attempt(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_burst_attempt_on_target(
     child: &NativeChild,
     target_hwnd: HWND,
@@ -27255,6 +27472,10 @@ fn run_hotkey_burst_attempt_on_target(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_burst_attempt_on_target_checked<F>(
     child: &NativeChild,
     target_hwnd: HWND,
@@ -27285,6 +27506,10 @@ where
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_burst_attempt_on_target_with_policy(
     child: &NativeChild,
     target_hwnd: HWND,
@@ -27312,6 +27537,10 @@ fn run_hotkey_burst_attempt_on_target_with_policy(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps hotkey gesture/threshold, candidate ownership, and correlated trace evidence explicit at this acceptance boundary; consolidating them would require a substantial lint-only migration."
+)]
 fn run_hotkey_burst_attempt_on_target_with_policy_checked<F>(
     child: &NativeChild,
     target_hwnd: HWND,
@@ -28135,6 +28364,10 @@ fn hotkey_observer_keys(hotkey: AcceptanceHotkey) -> Vec<u32> {
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 pub fn run_copied_profile_suite(
     executable: &str,
     profile: &Path,
@@ -28488,6 +28721,10 @@ fn restore_cursor_before_shutdown(cursor_restore: Option<POINT>, runner_log: &mu
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_tap_case(
     report: &mut AcceptanceReport,
     id: &str,
@@ -28905,6 +29142,10 @@ fn run_hold_open_case<'a>(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_hold_release_case(
     report: &mut AcceptanceReport,
     child: &NativeChild,
@@ -29132,6 +29373,10 @@ fn run_hold_release_case(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_second_hold_case(
     report: &mut AcceptanceReport,
     child: &NativeChild,
@@ -30623,6 +30868,10 @@ fn run_designer_focus_case(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_designer_pointer_case(
     report: &mut AcceptanceReport,
     child: &mut NativeChild,
@@ -30726,6 +30975,10 @@ fn run_designer_pointer_case(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_tab_case(
     report: &mut AcceptanceReport,
     child: &mut NativeChild,
@@ -31404,6 +31657,10 @@ fn wait_for_authoring_control(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn wait_for_authoring_control_after(
     trace_path: &Path,
     first_line: usize,
@@ -31434,6 +31691,10 @@ fn wait_for_authoring_control_after(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn wait_for_authoring_control_after_repaint(
     child: &NativeChild,
     designer: &WindowSnapshot,
@@ -31461,6 +31722,10 @@ fn wait_for_authoring_control_after_repaint(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn wait_for_authoring_control_after_repaint_with(
     first_line: usize,
     session_id: u64,
@@ -31900,6 +32165,10 @@ fn authoring_case_failure(stage: FailureStage, error: impl std::fmt::Display) ->
     CaseFailure::new(stage, error.to_string())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_authoring_geometry_cases(
     report: &mut AcceptanceReport,
     child: &mut NativeChild,
@@ -32886,6 +33155,10 @@ fn all_properties_pin_is_staged(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_radial_action_authoring_cases(
     report: &mut AcceptanceReport,
     child: &mut NativeChild,
@@ -34257,6 +34530,10 @@ fn run_radial_action_authoring_cases(
     reopened_entry.map(|entry| (entry, style_glow_after_edit.unwrap_or(false)))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps fixture correlation and expected before/after evidence explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn verify_saved_authoring_fixture(
     profile: &Path,
     authored_graph: &PersistedMenuGraphExpectation,
@@ -34557,6 +34834,10 @@ fn append_blocked_ids(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 fn run_designer_lifecycle_cases(
     report: &mut AcceptanceReport,
     child: &mut NativeChild,
@@ -35839,6 +36120,10 @@ fn wait_for_authoring_control_selected_after(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn wait_for_canvas_cell_in_generation(
     trace_path: &Path,
     session_id: u64,
@@ -37220,6 +37505,10 @@ fn result_with_trace_budget_status(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_case(
     report: &mut AcceptanceReport,
     id: &str,
@@ -37237,6 +37526,10 @@ fn append_case(
 
 /// A case owns its failure-time snapshot before cleanup. Some(empty) still
 /// means capture was attempted; later ROOT images cannot replace it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_case_with_precleanup_artifacts(
     report: &mut AcceptanceReport,
     id: &str,
@@ -37897,6 +38190,10 @@ fn l08_cleanup_diagnostic_bytes(
     Ok(bytes)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_case_with_diagnostic_context(
     report: &mut AcceptanceReport,
     id: &str,
@@ -37924,6 +38221,10 @@ fn append_case_with_diagnostic_context(
     );
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps case identity, report mutation, cleanup, and pre-cleanup evidence ownership explicit in the result path; consolidating them would require a substantial lint-only report-pipeline migration."
+)]
 fn append_case_with_case_diagnostics(
     report: &mut AcceptanceReport,
     id: &str,
@@ -58459,7 +58760,7 @@ mod tests {
         let first_pair = retained_controls.clone();
         let (first_row, first_pin) =
             match gate_c_pin_viewport_step(&first_pair, identity, &target, 5, [640, 480], None) {
-                GateCPinViewportStep::Ready(row, pin) => (row, pin),
+                GateCPinViewportStep::Ready(row, pin) => (*row, pin),
                 other => panic!("the later Pin should pair with the retained row: {other:?}"),
             };
         assert_eq!(first_row.trace_sequence, 10);
@@ -58540,7 +58841,7 @@ mod tests {
         let fresh_pair = action_editor_controls_after(&trace_path, cursor).unwrap();
         let (fresh_row, fresh_pin) =
             match gate_c_pin_viewport_step(&fresh_pair, identity, &target, 5, [640, 480], None) {
-                GateCPinViewportStep::Ready(row, pin) => (row, pin),
+                GateCPinViewportStep::Ready(row, pin) => (*row, pin),
                 other => panic!("the delayed repaint should publish a matching pair: {other:?}"),
             };
         assert!(gate_c_pin_pair_geometry_is_stable(

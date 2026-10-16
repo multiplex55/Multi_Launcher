@@ -31,8 +31,8 @@
 | CL3-D1 | implemented; final gates pending | Remaining presentation/compiler idioms: 52 sites / 26 files |
 | CL3-D2 | implemented; final gates pending | Remaining routing/plugins/integration idioms: 29 sites / 11 files |
 | CL4-A | implemented; final gates pending | Revised minimal binary local idioms: 83 sites; no context migration |
-| CL4-B | pending | Revised per-function argument exceptions + two small Pin layouts + semantic tuple alias/dead forwarding removal |
-| CL-QA | pending | Final formatting, strict all-workspace/all-target/all-feature Clippy, full Nextest, cumulative review and warning reconciliation |
+| CL4-B | implemented; final gates pending | Revised per-function argument exceptions + two small Pin layouts + semantic tuple alias/dead forwarding removal |
+| CL-QA | in_progress | Final formatting, strict all-workspace/all-target/all-feature Clippy, full Nextest, cumulative review and warning reconciliation |
 
 ### CL1-A handoff
 
@@ -153,3 +153,8 @@ CL3-D2 fmt/diff exit0; 11sourcefiles29sitesimplemented, timerhandlerindentationo
 CL3-D2 commit: `262542d2`. CL4-A83localbinarysites authorized; all97argexceptions/Pinlayouts/alias/deadforwardingheldforB. Currentminimalartifactoverrideshistorical5contextmigrations. NoCargo validation beforeallcleanup.
 
 CL4-A implemented/reviewed: 83 original local sites / 11 actual binary/shared-smoke source files. Root inspected scope/reader/serde/native userdata/profile diffs; Reviewer no substantive findings. Stream tags main/alternate/legacy and explicit UNQUALIFIED remain wire compatible. Reader intentionally emits one existing-protocol ERROR on first read failure then terminates; success, EOF/channel close/reader join/child ownership unchanged, no new subsystem. create_scene_window borrows same stable Box-allocated RefCell pointer; no moved/cloned App. Evidence ordering, clocks and precleanup semantics preserved. Actual shared paths are src/bin/smoke/*.rs. fmt/diff pass; no check/lint/test/build. Commit `refactor(tools): [CL4-A] simplify acceptance and smoke idioms`; final acceptance pending.
+CL4-A commit: `24c62b8d`. FinalCL4-Bminimal100-sitepacketauthorized:97exactreasonedfunctionexceptions,2coldprivatePinpayloadfixes,1semantictuplealias; onlyconfirmed2deadforwardparametersremoved, no contextmigration. FinalClippyrunbeginsafterthissourcepacketreview/commit; noearlierCargo validation.
+
+CL4-B final source review accepted: exact 97 newly added function-scoped reasoned argument allowances (98 total in these files includes one unchanged legacy native.rs allowance). Root audited non-attribute diff; Reviewer sampled technical categories and found no broad allowance or substantive issue. Twelve earlier public/hot payload exceptions remain, 109 new necessary exceptions total under combined API/performance/no-substantial-refactor constraints. Ready boxes one row receipt, Drag one cold plan; direct owned return/test boundaries unbox without weaker evidence/Clone/Eq. Semantic alias retains three independent Options. Dead anchor/UI forwarding removed through both case wrappers and nine suite calls plus proof-remediation call; real invocation closures retain UI/focus dependencies. This is local necessary caller cleanup, no new runner/context owner.
+
+Formatting initially hit transient Windows mapped-file error1224 on radial_acceptance.rs; retry after source readers finished passed, diffcheck passed. No test/check/lint/build ran for this packet. Six binary source files / 100 original sites implemented. All542 original sites plus newly exposed WatchEvent diagnostic now have source edits/necessary item exemptions; only final actual command can establish lint acceptance. Commit `chore(acceptance): [CL4-B] document explicit tool contracts`. Final workspace format/strict Clippy now authorized after commit; original full Nextest once at end after clean lint.

@@ -403,6 +403,10 @@ fn step(
     });
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps Screen Draw packet identity, phase/selection expectations, and native observation inputs explicit in this acceptance oracle; consolidating them would require a substantial lint-only oracle migration."
+)]
 fn clicked_step(
     packet: &mut GateSCaseEvidence,
     operation: GateSOperation,
@@ -1229,6 +1233,10 @@ fn preview_dispatch_count(trace: &Path, session: u64) -> u64 {
         .unwrap_or(0)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 pub fn run_gate_s_suite(
     executable: &str,
     profile: &Path,

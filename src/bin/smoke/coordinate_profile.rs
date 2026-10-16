@@ -410,6 +410,10 @@ pub(super) fn run() -> Result<(), String> {
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps independent run/profile configuration, report outputs, and child/resource lifetimes explicit at the acceptance-suite boundary; consolidating them would require a substantial lint-only runner migration."
+)]
 fn run_phase(
     name: &'static str,
     requested: Duration,

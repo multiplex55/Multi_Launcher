@@ -7165,6 +7165,10 @@ pub(super) fn click_designer_client_bounds_before_deadline(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps target identity/geometry, acknowledgement deadlines, pre-down validation, and owned-input cleanup explicit at the native pointer boundary; consolidating them would require a substantial lint-only API migration."
+)]
 fn click_designer_client_bounds_with_pre_down_check_and_owned_keys(
     child: &NativeChild,
     target: &WindowSnapshot,
@@ -7341,6 +7345,10 @@ fn with_ready_radial_point<T>(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps target identity/geometry, acknowledgement deadlines, pre-down validation, and owned-input cleanup explicit at the native pointer boundary; consolidating them would require a substantial lint-only API migration."
+)]
 pub(super) fn click_owned_radial_point(
     child: &NativeChild,
     surface: &WindowSnapshot,
@@ -7725,6 +7733,10 @@ fn click_screen_point_with_pre_down_check(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps target identity/geometry, acknowledgement deadlines, pre-down validation, and owned-input cleanup explicit at the native pointer boundary; consolidating them would require a substantial lint-only API migration."
+)]
 fn click_screen_point_with_pre_down_check_and_owned_keys<'a>(
     child: &NativeChild,
     target: &WindowSnapshot,
@@ -8040,6 +8052,10 @@ fn validate_root_pointer_geometry(target: &WindowSnapshot) -> Result<(), String>
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps target identity/geometry, acknowledgement deadlines, pre-down validation, and owned-input cleanup explicit at the native pointer boundary; consolidating them would require a substantial lint-only API migration."
+)]
 fn wait_for_pointer_move_ack(
     child: &NativeChild,
     target_window: &WindowSnapshot,
@@ -8109,6 +8125,10 @@ fn check_designer_pointer_measurement(
     Ok(diagnostic)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps target identity/geometry, acknowledgement deadlines, pre-down validation, and owned-input cleanup explicit at the native pointer boundary; consolidating them would require a substantial lint-only API migration."
+)]
 fn wait_for_pointer_move_ack_checked(
     child: &NativeChild,
     target_window: &WindowSnapshot,
@@ -8238,6 +8258,10 @@ fn wait_for_pointer_move_ack_with(
     .map_err(PointerClickPreDownError::into_message)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps target identity/geometry, acknowledgement deadlines, pre-down validation, and owned-input cleanup explicit at the native pointer boundary; consolidating them would require a substantial lint-only API migration."
+)]
 fn wait_for_pointer_move_ack_measured_with(
     operation: &str,
     surface: &str,
@@ -10767,6 +10791,10 @@ fn ensure_scrollbar_button_still_down(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps target identity/geometry, acknowledgement deadlines, pre-down validation, and owned-input cleanup explicit at the native pointer boundary; consolidating them would require a substantial lint-only API migration."
+)]
 fn send_held_scrollbar_drag_move(
     child: &NativeChild,
     target: &WindowSnapshot,

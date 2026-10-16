@@ -1093,6 +1093,10 @@ fn placement_toggle(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps authoring candidate, native UI/focus, session, and expected-state inputs explicit at this interaction boundary; consolidating them would require a substantial lint-only context migration."
+)]
 pub(super) fn run_l08_placement_case(
     report: &mut AcceptanceReport,
     child: &NativeChild,
@@ -1109,8 +1113,6 @@ pub(super) fn run_l08_placement_case(
         report,
         "L08",
         child,
-        anchor,
-        ui,
         trace_path,
         output,
         marker_path,
@@ -1942,6 +1944,10 @@ fn admit_toolbar_observation_from_trace(
     Ok(receipt)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn wait_screen_draw_observation(
     child: &NativeChild,
     trace_path: &Path,
@@ -2016,6 +2022,10 @@ fn wait_screen_draw_observation(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn admit_prechord_toolbar_baseline(
     lines: &[String],
     entry_cursor: usize,

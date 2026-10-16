@@ -2607,6 +2607,10 @@ struct ScreenDrawToolbarReceipt {
 
 /// One contract for live admission and persisted H15 proof. Native client
 /// measurement and presentation are independent of the producer's UI frame.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn validate_screen_draw_toolbar_receipt(
     receipt: &ScreenDrawToolbarReceipt,
     mode: ScreenDrawToolbarMode,
@@ -2703,6 +2707,10 @@ fn validate_screen_draw_toolbar_receipt(
 
 /// The pre-input frame is an observation of the current owners, rather than a
 /// historical desired-visibility event or a value inferred from recovery.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn validate_screen_draw_baseline_receipt(
     baseline: &ScreenDrawToolbarReceipt,
     ready: &ScreenDrawToolbarReceipt,
@@ -8899,6 +8907,10 @@ fn gate_c_insertion_widget_pair_is_valid(
     })
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Keeps correlated readiness predicates, the absolute deadline, and injected observation/wait callbacks explicit in this readiness oracle; consolidating them would require a substantial lint-only migration."
+)]
 fn gate_c_insertion_widget_matches(
     control: &GateCInsertionControlEvidence,
     source: &GateCInsertionControlEvidence,
