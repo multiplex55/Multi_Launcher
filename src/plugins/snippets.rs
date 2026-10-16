@@ -1191,6 +1191,24 @@ mod persistence_tests {
     }
 
     #[test]
+    fn plain_snippet_template_bypasses_system_parsing_and_preserves_legacy_braces() {
+        for text in ["{{sys.date}}", "{{sys.future}}", "{{date}}", "{{"] {
+            let entry = snippet("legacy", text);
+            assert!(matches!(
+                prepare_snippet_run(&entry),
+                Ok(SnippetRunMode::Plain)
+            ));
+
+            let edited = prepare_snippet_text(&entry, text).unwrap();
+            assert_eq!(edited.text, text);
+            assert!(matches!(
+                prepare_snippet_run(&edited),
+                Ok(SnippetRunMode::Plain)
+            ));
+        }
+    }
+
+    #[test]
     fn runtime_preparation_rejects_duplicate_config_before_reconciliation() {
         let duplicate = vec![
             SnippetFieldDefinition::new("name"),

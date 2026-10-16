@@ -1,10 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use chrono::format::{Item, StrftimeItems};
+use chrono::{DateTime, FixedOffset};
+
 use super::snippets::SnippetFieldDefinition;
 
 const OPEN: &[u8; 2] = b"{{";
 const CLOSE: &[u8; 2] = b"}}";
+
+/// Defaults used by `{{sys.date}}` and `{{sys.time}}` when no format is supplied.
+const DEFAULT_DATE_FORMAT: &str = "%Y-%m-%d";
+const DEFAULT_TIME_FORMAT: &str = "%H:%M:%S";
 
 enum PlaceholderBoundary {
     Closing(usize),
@@ -23,7 +30,97 @@ pub(crate) struct ParsedTemplate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TemplateSegment {
     Literal(String),
-    Field(String),
+    PromptField(String),
+    SystemVariable {
+        variable: SystemVariable,
+        /// Preserve the authored token when a legacy renderer has no context.
+        placeholder: String,
+    },
+}
+
+/// A supported automatic value. Date/time formats are validated during parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SystemVariable {
+    Date { format: String },
+    Time { format: String },
+    Clipboard,
+    WindowTitle,
+}
+
+impl SystemVariable {
+    fn resolve(&self, context: &SnippetInvocationContext) -> Result<String, fmt::Error> {
+        let mut value = String::new();
+        match self {
+            Self::Date { format } | Self::Time { format } => {
+                fmt::write(
+                    &mut value,
+                    format_args!("{}", context.timestamp.format(format)),
+                )?;
+            }
+            // Missing values intentionally resolve to empty text. Availability remains
+            // distinguishable from an available-but-empty value in the snapshot.
+            Self::Clipboard => {
+                value.push_str(context.clipboard_text.as_deref().unwrap_or_default())
+            }
+            Self::WindowTitle => {
+                value.push_str(context.foreground_title.as_deref().unwrap_or_default());
+            }
+        }
+        Ok(value)
+    }
+
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Date { .. } => "sys.date",
+            Self::Time { .. } => "sys.time",
+            Self::Clipboard => "sys.clipboard",
+            Self::WindowTitle => "sys.window_title",
+        }
+    }
+}
+
+/// Immutable inputs captured once before launcher focus changes for a snippet run.
+///
+/// The foreground handle and title must describe the actual foreground window before
+/// launcher activation; callers must not use the launcher's own title as a fallback.
+/// `None` clipboard/title values remain distinguishable from available empty strings,
+/// and resolve to empty text when used by a template.
+pub(crate) struct SnippetInvocationContext {
+    timestamp: DateTime<FixedOffset>,
+    clipboard_text: Option<String>,
+    foreground_hwnd: Option<isize>,
+    foreground_title: Option<String>,
+}
+
+impl SnippetInvocationContext {
+    pub(crate) fn new(
+        timestamp: DateTime<FixedOffset>,
+        clipboard_text: Option<String>,
+        foreground_hwnd: Option<isize>,
+        foreground_title: Option<String>,
+    ) -> Self {
+        Self {
+            timestamp,
+            clipboard_text,
+            foreground_hwnd,
+            foreground_title,
+        }
+    }
+}
+
+impl fmt::Debug for SnippetInvocationContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SnippetInvocationContext")
+            .field("timestamp", &self.timestamp)
+            .field("clipboard_available", &self.clipboard_text.is_some())
+            .field("foreground_hwnd_available", &self.foreground_hwnd.is_some())
+            .field(
+                "foreground_title_available",
+                &self.foreground_title.is_some(),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +129,7 @@ pub(crate) enum RenderIssueKind {
     MissingFieldDefinition,
     MissingValue,
     RequiredValueEmpty,
+    SystemVariableFormatting,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +143,7 @@ pub(crate) enum RenderErrorKind {
     InvalidConfiguration,
     MissingValues,
     RequiredValues,
+    SystemVariableResolution,
 }
 
 impl RenderErrorKind {
@@ -53,6 +152,7 @@ impl RenderErrorKind {
             Self::InvalidConfiguration => "invalid field configuration",
             Self::MissingValues => "missing field values",
             Self::RequiredValues => "required fields need values",
+            Self::SystemVariableResolution => "system variable could not be formatted",
         }
     }
 }
@@ -67,7 +167,7 @@ impl fmt::Display for TemplateRenderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} ({} field issue(s))",
+            "{} ({} issue(s))",
             self.kind.reason(),
             self.issues.len()
         )
@@ -76,10 +176,20 @@ impl fmt::Display for TemplateRenderError {
 
 impl std::error::Error for TemplateRenderError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct RenderedPreview {
     pub(crate) text: String,
     pub(crate) validation_errors: Vec<RenderIssue>,
+}
+
+impl fmt::Debug for RenderedPreview {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RenderedPreview")
+            .field("text_bytes", &self.text.len())
+            .field("validation_errors", &self.validation_errors)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +197,9 @@ pub(crate) enum TemplateErrorKind {
     UnclosedPlaceholder,
     EmptyPlaceholder,
     InvalidIdentifier,
+    UnknownSystemVariable,
+    InvalidSystemVariableFormat,
+    UnsupportedSystemVariableFormat,
     NestedPlaceholder,
     UnexpectedClosing,
 }
@@ -97,6 +210,15 @@ impl TemplateErrorKind {
             Self::UnclosedPlaceholder => "unclosed placeholder",
             Self::EmptyPlaceholder => "empty placeholder",
             Self::InvalidIdentifier => "invalid placeholder identifier",
+            Self::UnknownSystemVariable => {
+                "unknown system variable (supported: sys.date, sys.time, sys.clipboard, sys.window_title)"
+            }
+            Self::InvalidSystemVariableFormat => {
+                "invalid date/time format (use a valid chrono format such as %Y-%m-%d)"
+            }
+            Self::UnsupportedSystemVariableFormat => {
+                "format modifiers are supported only for sys.date and sys.time"
+            }
             Self::NestedPlaceholder => "nested placeholder",
             Self::UnexpectedClosing => "unexpected closing braces",
         }
@@ -143,6 +265,11 @@ impl fmt::Display for TemplateError {
 impl std::error::Error for TemplateError {}
 
 /// Parse placeholders left to right without interpreting ordinary backslashes.
+///
+/// `{{date}}` and other ordinary identifiers remain prompted fields. Automatic
+/// variables use `sys.date`, `sys.time`, `sys.clipboard`, and `sys.window_title`;
+/// date defaults to `%Y-%m-%d`, time defaults to `%H:%M:%S`, and date/time may
+/// include a validated chrono format after `:`.
 ///
 /// `\{{...}}` is a literal opening and consumes through the next `}}`, even if
 /// its interior would be invalid as a placeholder. If that escaped opening is
@@ -201,19 +328,28 @@ pub(crate) fn parse_template(source: &str) -> Result<ParsedTemplate, TemplateErr
                     close + 2,
                 ));
             }
-            let identifier = &source[identifier_start..close];
-            if !is_valid_identifier(identifier.as_bytes()) {
-                return Err(TemplateError::new(
-                    TemplateErrorKind::InvalidIdentifier,
-                    identifier_start,
-                    close,
-                ));
+            let expression = &source[identifier_start..close];
+            if expression.starts_with("sys.") {
+                let variable = parse_system_variable(expression)
+                    .map_err(|kind| TemplateError::new(kind, identifier_start, close))?;
+                segments.push(TemplateSegment::SystemVariable {
+                    variable,
+                    placeholder: source[index..close + 2].to_owned(),
+                });
+            } else {
+                if !is_valid_identifier(expression.as_bytes()) {
+                    return Err(TemplateError::new(
+                        TemplateErrorKind::InvalidIdentifier,
+                        identifier_start,
+                        close,
+                    ));
+                }
+                let key = expression.to_owned();
+                if seen_keys.insert(key.clone()) {
+                    field_keys.push(key.clone());
+                }
+                segments.push(TemplateSegment::PromptField(key));
             }
-            let key = identifier.to_owned();
-            if seen_keys.insert(key.clone()) {
-                field_keys.push(key.clone());
-            }
-            segments.push(TemplateSegment::Field(key));
             index = close + 2;
             literal_start = index;
             continue;
@@ -247,7 +383,27 @@ pub(crate) fn render_for_copy(
     fields: &[SnippetFieldDefinition],
     values: &HashMap<String, String>,
 ) -> Result<String, TemplateRenderError> {
-    let rendered = evaluate_template(template, fields, values)?;
+    let rendered = evaluate_template(template, fields, values, None)?;
+    if rendered.validation_errors.is_empty() {
+        Ok(rendered.text)
+    } else {
+        Err(TemplateRenderError {
+            kind: RenderErrorKind::RequiredValues,
+            issues: rendered.validation_errors,
+        })
+    }
+}
+
+/// Render a completed template using one immutable invocation snapshot.
+///
+/// The default formats are `%Y-%m-%d` for date and `%H:%M:%S` for time.
+pub(crate) fn render_for_copy_with_context(
+    template: &ParsedTemplate,
+    fields: &[SnippetFieldDefinition],
+    values: &HashMap<String, String>,
+    context: &SnippetInvocationContext,
+) -> Result<String, TemplateRenderError> {
+    let rendered = evaluate_template(template, fields, values, Some(context))?;
     if rendered.validation_errors.is_empty() {
         Ok(rendered.text)
     } else {
@@ -265,7 +421,21 @@ pub(crate) fn render_preview(
     fields: &[SnippetFieldDefinition],
     values: &HashMap<String, String>,
 ) -> Result<RenderedPreview, TemplateRenderError> {
-    let rendered = evaluate_template(template, fields, values)?;
+    let rendered = evaluate_template(template, fields, values, None)?;
+    Ok(RenderedPreview {
+        text: rendered.text,
+        validation_errors: rendered.validation_errors,
+    })
+}
+
+/// Render a preview using one immutable invocation snapshot.
+pub(crate) fn render_preview_with_context(
+    template: &ParsedTemplate,
+    fields: &[SnippetFieldDefinition],
+    values: &HashMap<String, String>,
+    context: &SnippetInvocationContext,
+) -> Result<RenderedPreview, TemplateRenderError> {
+    let rendered = evaluate_template(template, fields, values, Some(context))?;
     Ok(RenderedPreview {
         text: rendered.text,
         validation_errors: rendered.validation_errors,
@@ -281,6 +451,7 @@ fn evaluate_template(
     template: &ParsedTemplate,
     fields: &[SnippetFieldDefinition],
     values: &HashMap<String, String>,
+    context: Option<&SnippetInvocationContext>,
 ) -> Result<EvaluatedTemplate, TemplateRenderError> {
     let mut definitions = HashMap::with_capacity(fields.len());
     let mut duplicate_definitions = Vec::new();
@@ -348,7 +519,7 @@ fn evaluate_template(
     for segment in &template.segments {
         match segment {
             TemplateSegment::Literal(literal) => text.push_str(literal),
-            TemplateSegment::Field(key) => {
+            TemplateSegment::PromptField(key) => {
                 let Some(value) = values.get(key) else {
                     return Err(TemplateRenderError {
                         kind: RenderErrorKind::MissingValues,
@@ -360,6 +531,24 @@ fn evaluate_template(
                 };
                 text.push_str(value);
             }
+            TemplateSegment::SystemVariable {
+                variable,
+                placeholder,
+            } => {
+                if let Some(context) = context {
+                    let value = variable.resolve(context).map_err(|_| TemplateRenderError {
+                        kind: RenderErrorKind::SystemVariableResolution,
+                        issues: vec![RenderIssue {
+                            key: variable.key().to_owned(),
+                            kind: RenderIssueKind::SystemVariableFormatting,
+                        }],
+                    })?;
+                    text.push_str(&value);
+                } else {
+                    // Existing no-context callers retain the authored token literally.
+                    text.push_str(placeholder);
+                }
+            }
         }
     }
 
@@ -367,6 +556,51 @@ fn evaluate_template(
         text,
         validation_errors,
     })
+}
+
+fn parse_system_variable(expression: &str) -> Result<SystemVariable, TemplateErrorKind> {
+    let (name, format) = expression
+        .split_once(':')
+        .map_or((expression, None), |(name, format)| (name, Some(format)));
+
+    match name {
+        "sys.date" => {
+            let format = format.unwrap_or(DEFAULT_DATE_FORMAT);
+            validate_date_time_format(format)?;
+            Ok(SystemVariable::Date {
+                format: format.to_owned(),
+            })
+        }
+        "sys.time" => {
+            let format = format.unwrap_or(DEFAULT_TIME_FORMAT);
+            validate_date_time_format(format)?;
+            Ok(SystemVariable::Time {
+                format: format.to_owned(),
+            })
+        }
+        "sys.clipboard" if format.is_none() => Ok(SystemVariable::Clipboard),
+        "sys.window_title" if format.is_none() => Ok(SystemVariable::WindowTitle),
+        "sys.clipboard" | "sys.window_title" => {
+            Err(TemplateErrorKind::UnsupportedSystemVariableFormat)
+        }
+        _ => Err(TemplateErrorKind::UnknownSystemVariable),
+    }
+}
+
+fn validate_date_time_format(format: &str) -> Result<(), TemplateErrorKind> {
+    if format.is_empty() || StrftimeItems::new(format).any(|item| matches!(item, Item::Error)) {
+        return Err(TemplateErrorKind::InvalidSystemVariableFormat);
+    }
+    // Some directives are accepted by chrono's parser for parsing but cannot be
+    // rendered. Probe formatting itself with a fixed timestamp during validation.
+    let Ok(sample) = DateTime::parse_from_rfc3339("2001-02-03T04:05:06+00:00") else {
+        return Err(TemplateErrorKind::InvalidSystemVariableFormat);
+    };
+    let mut output = String::new();
+    if fmt::write(&mut output, format_args!("{}", sample.format(format))).is_err() {
+        return Err(TemplateErrorKind::InvalidSystemVariableFormat);
+    }
+    Ok(())
 }
 
 fn starts_with_pair(source: &[u8], index: usize, pair: &[u8; 2]) -> bool {
@@ -421,10 +655,12 @@ fn push_literal(segments: &mut Vec<TemplateSegment>, literal: &str) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParsedTemplate, RenderErrorKind, RenderIssueKind, TemplateErrorKind, TemplateSegment,
-        TemplateSpan, parse_template, render_for_copy, render_preview,
+        ParsedTemplate, RenderErrorKind, RenderIssueKind, SnippetInvocationContext, SystemVariable,
+        TemplateErrorKind, TemplateSegment, TemplateSpan, parse_template, render_for_copy,
+        render_for_copy_with_context, render_preview, render_preview_with_context,
     };
     use crate::plugins::snippets::{SnippetFieldDefinition, SnippetInputKind};
+    use chrono::DateTime;
     use std::collections::HashMap;
 
     fn field(name: &str, required: bool, default_value: &str) -> SnippetFieldDefinition {
@@ -464,16 +700,16 @@ mod tests {
             parsed.segments,
             vec![
                 TemplateSegment::Literal("λ ".into()),
-                TemplateSegment::Field("name".into()),
-                TemplateSegment::Field("ticket_id".into()),
+                TemplateSegment::PromptField("name".into()),
+                TemplateSegment::PromptField("ticket_id".into()),
                 TemplateSegment::Literal(" / ".into()),
-                TemplateSegment::Field("name".into()),
+                TemplateSegment::PromptField("name".into()),
                 TemplateSegment::Literal(" / ".into()),
-                TemplateSegment::Field("Name".into()),
+                TemplateSegment::PromptField("Name".into()),
                 TemplateSegment::Literal(" ".into()),
-                TemplateSegment::Field("_".into()),
+                TemplateSegment::PromptField("_".into()),
                 TemplateSegment::Literal(" ".into()),
-                TemplateSegment::Field("_field_9".into()),
+                TemplateSegment::PromptField("_field_9".into()),
             ]
         );
     }
@@ -486,7 +722,7 @@ mod tests {
         assert_eq!(
             parsed.segments,
             vec![
-                TemplateSegment::Field("name".into()),
+                TemplateSegment::PromptField("name".into()),
                 TemplateSegment::Literal(r" {{bad-key}} \{{also bad}} {{".into()),
             ]
         );
@@ -501,7 +737,7 @@ mod tests {
             parsed.segments,
             vec![
                 TemplateSegment::Literal("{{bad key {{nested}} tail ".into()),
-                TemplateSegment::Field("name".into()),
+                TemplateSegment::PromptField("name".into()),
             ]
         );
     }
@@ -516,6 +752,192 @@ mod tests {
             }
         );
         assert_eq!(parse_template("{{date}}").unwrap().field_keys, vec!["date"]);
+    }
+
+    #[test]
+    fn parses_supported_system_variables_without_turning_them_into_prompt_fields() {
+        let parsed = parse_template(
+            "{{sys.date}} {{sys.time:%H:%M}} {{sys.clipboard}} {{sys.window_title}}",
+        )
+        .unwrap();
+
+        assert!(parsed.field_keys.is_empty());
+        assert_eq!(
+            parsed.segments,
+            vec![
+                TemplateSegment::SystemVariable {
+                    variable: SystemVariable::Date {
+                        format: "%Y-%m-%d".into(),
+                    },
+                    placeholder: "{{sys.date}}".into(),
+                },
+                TemplateSegment::Literal(" ".into()),
+                TemplateSegment::SystemVariable {
+                    variable: SystemVariable::Time {
+                        format: "%H:%M".into(),
+                    },
+                    placeholder: "{{sys.time:%H:%M}}".into(),
+                },
+                TemplateSegment::Literal(" ".into()),
+                TemplateSegment::SystemVariable {
+                    variable: SystemVariable::Clipboard,
+                    placeholder: "{{sys.clipboard}}".into(),
+                },
+                TemplateSegment::Literal(" ".into()),
+                TemplateSegment::SystemVariable {
+                    variable: SystemVariable::WindowTitle,
+                    placeholder: "{{sys.window_title}}".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn system_variables_keep_ordinary_date_and_escaped_tokens_compatible() {
+        let parsed = parse_template(r"\{{sys.unknown}} {{date}} {{sys.date}} {{name}}").unwrap();
+
+        assert_eq!(parsed.field_keys, vec!["date", "name"]);
+        assert_eq!(
+            parsed.segments,
+            vec![
+                TemplateSegment::Literal("{{sys.unknown}} ".into()),
+                TemplateSegment::PromptField("date".into()),
+                TemplateSegment::Literal(" ".into()),
+                TemplateSegment::SystemVariable {
+                    variable: SystemVariable::Date {
+                        format: "%Y-%m-%d".into(),
+                    },
+                    placeholder: "{{sys.date}}".into(),
+                },
+                TemplateSegment::Literal(" ".into()),
+                TemplateSegment::PromptField("name".into()),
+            ]
+        );
+
+        // Legacy renderers do not have invocation context and continue to leave
+        // automatic tokens as authored text.
+        let without_context = render_preview(
+            &parsed,
+            &[field("date", false, ""), field("name", false, "")],
+            &HashMap::from([
+                ("date".into(), "ordinary date".into()),
+                ("name".into(), "Ada".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            without_context.text,
+            "{{sys.unknown}} ordinary date {{sys.date}} Ada"
+        );
+    }
+
+    #[test]
+    fn unknown_system_variables_and_invalid_formats_have_safe_utf8_spans() {
+        for (expression, kind) in [
+            ("sys.future", TemplateErrorKind::UnknownSystemVariable),
+            (
+                "sys.date:%Q",
+                TemplateErrorKind::InvalidSystemVariableFormat,
+            ),
+            (
+                "sys.time:%#z",
+                TemplateErrorKind::InvalidSystemVariableFormat,
+            ),
+            ("sys.date:", TemplateErrorKind::InvalidSystemVariableFormat),
+            (
+                "sys.clipboard:%Y",
+                TemplateErrorKind::UnsupportedSystemVariableFormat,
+            ),
+        ] {
+            let source = format!("雪{{{{{expression}}}}}");
+            let error = parse_template(&source).unwrap_err();
+            assert_eq!(error.kind, kind);
+            assert_eq!(error.span.start_byte, "雪{{".len());
+            assert_eq!(error.span.end_byte, "雪{{".len() + expression.len());
+            assert!(!error.to_string().contains(expression));
+        }
+    }
+
+    #[test]
+    fn unvalidated_typed_format_returns_error_instead_of_panicking() {
+        let timestamp = DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z").unwrap();
+        let context = SnippetInvocationContext::new(timestamp, None, None, None);
+        let template = ParsedTemplate {
+            segments: vec![TemplateSegment::SystemVariable {
+                variable: SystemVariable::Time {
+                    format: "%#z".into(),
+                },
+                placeholder: "{{sys.time:%#z}}".into(),
+            }],
+            field_keys: Vec::new(),
+        };
+
+        let error =
+            render_for_copy_with_context(&template, &[], &HashMap::new(), &context).unwrap_err();
+        assert_eq!(error.kind, RenderErrorKind::SystemVariableResolution);
+        assert_eq!(
+            error.issues[0].kind,
+            RenderIssueKind::SystemVariableFormatting
+        );
+    }
+
+    #[test]
+    fn invocation_context_resolves_repeated_mixed_and_custom_formatted_values() {
+        let timestamp = DateTime::parse_from_rfc3339("2024-02-29T23:07:08+05:30").unwrap();
+        let context = SnippetInvocationContext::new(
+            timestamp,
+            Some("clipboard 雪".into()),
+            Some(123),
+            Some("Editor – draft".into()),
+        );
+        let parsed = parse_template(
+            "{{name}}|{{sys.date}}|{{sys.time:%I:%M %p %:z}}|{{sys.clipboard}}/{{sys.clipboard}}|{{sys.window_title}}",
+        )
+        .unwrap();
+        let fields = vec![field("name", true, "unused")];
+        let values = HashMap::from([("name".to_owned(), "Ada".to_owned())]);
+
+        let text = render_for_copy_with_context(&parsed, &fields, &values, &context).unwrap();
+        assert_eq!(
+            text,
+            "Ada|2024-02-29|11:07 PM +05:30|clipboard 雪/clipboard 雪|Editor – draft"
+        );
+        let preview = render_preview_with_context(&parsed, &fields, &values, &context).unwrap();
+        assert_eq!(preview.text, text);
+        let diagnostic = format!("{preview:?}");
+        assert!(!diagnostic.contains("clipboard 雪"));
+        assert!(!diagnostic.contains("Editor – draft"));
+    }
+
+    #[test]
+    fn missing_context_values_resolve_empty_and_debug_redacts_contents() {
+        let timestamp = DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z").unwrap();
+        let context = SnippetInvocationContext::new(
+            timestamp,
+            Some("CLIPBOARD_SECRET".into()),
+            None,
+            Some("TITLE_SECRET".into()),
+        );
+        let unavailable = SnippetInvocationContext::new(
+            DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z").unwrap(),
+            None,
+            None,
+            None,
+        );
+        let template = parse_template("[{{sys.clipboard}}][{{sys.window_title}}]").unwrap();
+
+        assert_eq!(
+            render_for_copy_with_context(&template, &[], &HashMap::new(), &unavailable).unwrap(),
+            "[][]"
+        );
+        assert_eq!(
+            render_for_copy_with_context(&template, &[], &HashMap::new(), &context).unwrap(),
+            "[CLIPBOARD_SECRET][TITLE_SECRET]"
+        );
+        let diagnostic = format!("{context:?}");
+        assert!(diagnostic.contains("foreground_title_available: true"));
+        assert!(!diagnostic.contains("TITLE_SECRET"));
+        assert!(!diagnostic.contains("CLIPBOARD_SECRET"));
     }
 
     #[test]

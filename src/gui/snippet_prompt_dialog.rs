@@ -93,6 +93,7 @@ pub(crate) enum SnippetPromptError {
     InvalidConfiguration,
     MissingValue,
     RequiredValueEmpty,
+    SystemVariableFormatting,
     StaleTemplate,
     ClipboardUnavailable,
 }
@@ -105,6 +106,9 @@ impl SnippetPromptError {
             Self::InvalidConfiguration => "The snippet field configuration is invalid.",
             Self::MissingValue => "A snippet field value is missing.",
             Self::RequiredValueEmpty => "Fill in the required snippet fields before copying.",
+            Self::SystemVariableFormatting => {
+                "An automatic snippet value could not be formatted."
+            }
             Self::StaleTemplate => {
                 "This snippet changed while the prompt was open. Reopen it before copying."
             }
@@ -778,6 +782,9 @@ fn map_render_error(error: TemplateRenderError) -> SnippetPromptError {
         RenderErrorKind::InvalidConfiguration => SnippetPromptError::InvalidConfiguration,
         RenderErrorKind::MissingValues => SnippetPromptError::MissingValue,
         RenderErrorKind::RequiredValues => SnippetPromptError::RequiredValueEmpty,
+        RenderErrorKind::SystemVariableResolution => {
+            SnippetPromptError::SystemVariableFormatting
+        }
     }
 }
 
