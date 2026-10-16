@@ -5494,8 +5494,7 @@ mod tests {
         assert!(track[1] <= thumb[1] && track[3] >= thumb[3]);
         let raw_height = thumb[3] - thumb[1];
         let painted_height = painted_thumb[3] - painted_thumb[1];
-        let min_painted_height =
-            ((handle_min_length as i64 * pixels_per_point as i64) + 500_000) / 1_000_000;
+        let min_painted_height = ((handle_min_length * pixels_per_point) + 500_000) / 1_000_000;
         assert!(
             i64::from(raw_height) < min_painted_height,
             "dense result rows exercise egui's minimum painted handle"
@@ -6059,7 +6058,7 @@ mod tests {
         crate::gui::set_execute_action_hook(None);
 
         let received = received.lock().unwrap();
-        assert_eq!(received.as_slice(), &[selected.clone()]);
+        assert_eq!(received.as_slice(), std::slice::from_ref(&selected));
         assert_eq!(
             received[0].args.as_deref(),
             Some("frozen query action args")

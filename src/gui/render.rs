@@ -4847,7 +4847,7 @@ impl LauncherApp {
                 passes += 1;
             })
         });
-        if let Some(times) = phase_times.as_deref_mut() {
+        if let Some(times) = phase_times {
             let started = std::time::Instant::now();
             self.finish_ui_frame_receipt();
             times.finish_ui_frame_receipt_ns = times
@@ -7814,7 +7814,7 @@ mod tests {
         }
         let worker_broker = Arc::clone(&broker);
         let worker = thread::spawn(move || {
-            let result = PromptBackend::prompt(
+            PromptBackend::prompt(
                 worker_broker.as_ref(),
                 PromptRequest {
                     id: crate::mkmacro::next_request_id(),
@@ -7823,8 +7823,7 @@ mod tests {
                     default_value: "initial".into(),
                 },
                 &RunControl::default(),
-            );
-            result
+            )
         });
         // The broker wake reaches the hidden native path first. Acquisition in
         // that path must schedule ROOT again because native show_ui was already
@@ -8628,7 +8627,8 @@ mod tests {
             "track-c2d-root-list-recipe",
             source_actions.len(),
         );
-        for text in [recipe.token()] {
+        {
+            let text = recipe.token();
             signature.number(text.len() as u64);
             signature.bytes(text.as_bytes());
         }
@@ -10024,9 +10024,8 @@ mod tests {
                 track_c_prepare_root_list_state(workspace.root(), &fixture.values, cold);
             let frame = state.frame_index;
             state.frame_index += 1;
-            let _ =
-                run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
-                    .drop_without_applying_deltas();
+            run_root_list_frame(&state.ctx, &mut state.app, frame, 960.0, 640.0, Vec::new())
+                .drop_without_applying_deltas();
             let _ = track_c_validate_root_list_state(&state);
             drop(state);
         }
@@ -13475,7 +13474,6 @@ mod tests {
         let mut term = trimmed
             .strip_prefix("app")
             .expect("the controlled query uses the app prefix")
-            .trim()
             .split_whitespace()
             .filter(|token| !token.starts_with("!id:"))
             .collect::<Vec<_>>()
@@ -16488,7 +16486,7 @@ mod tests {
                 output.drop_without_applying_deltas();
             };
 
-        run_frame_with_installs(&mut app, frame, &[default_definitions.clone()]);
+        run_frame_with_installs(&mut app, frame, std::slice::from_ref(&default_definitions));
         frame += 1;
         assert_eq!(crate::gui::font_revision::active_revision(&ctx), 0);
         assert_eq!(app.root_list_geometry.test_observation(), initial);
@@ -17129,7 +17127,7 @@ mod tests {
         };
         let first_palette_color = egui::Color32::from_rgb(231, 23, 143);
         let second_palette_color = egui::Color32::from_rgb(17, 219, 167);
-        let mut visuals = (*ctx.style_of(ctx.theme())).visuals.clone();
+        let mut visuals = ctx.style_of(ctx.theme()).visuals.clone();
         visuals.striped = true;
         visuals.faint_bg_color = first_palette_color;
         let mut style = (*ctx.style_of(ctx.theme())).clone();
@@ -19533,7 +19531,7 @@ mod tests {
             app.run_root_frame_for_test_with(&ctx, egui::RawInput::default(), false, |app, root| {
                 for _ in 0..3 {
                     app.event_tx
-                        .send(WatchEvent::ScreenDrawRecover(first.clone()))
+                        .send(WatchEvent::ScreenDrawRecover(first))
                         .unwrap();
                 }
                 app.process_watch_events();
@@ -19591,7 +19589,7 @@ mod tests {
         assert_ne!(first.id(), second.id());
         let (output, queued) = crate::window_manager::with_launcher_restore_queue_for_test(|| {
             app.run_root_frame_for_test_with(&ctx, egui::RawInput::default(), false, |app, root| {
-                for intent in [second.clone(), first.clone(), second.clone()] {
+                for intent in [second, first, second] {
                     app.event_tx
                         .send(WatchEvent::ScreenDrawRecover(intent))
                         .unwrap();
@@ -21908,7 +21906,7 @@ mod tests {
         app.focus_query = false;
         app.follow_mouse = false;
         focus_launcher_query(ctx, app);
-        app.run_root_frame_for_test(&ctx, actual_query_input(true), false)
+        app.run_root_frame_for_test(ctx, actual_query_input(true), false)
             .0
             .drop_without_applying_deltas();
     }

@@ -918,7 +918,7 @@ mod tests {
             Some(root_cell.clone()),
         ));
         path.direct_reveal(second_parent.clone(), Some(child_selection.clone()), false);
-        assert_eq!(path.as_slice(), &[second_parent.clone()]);
+        assert_eq!(path.as_slice(), std::slice::from_ref(&second_parent));
         assert!(path.enter_submenu(
             submenu_edge(&document, &second_parent, &child),
             Some(second_parent_cell.clone()),
@@ -946,7 +946,7 @@ mod tests {
 
         path.direct_reveal(second_parent.clone(), None, false);
         path.validate_document_path(&document);
-        assert_eq!(path.as_slice(), &[second_parent.clone()]);
+        assert_eq!(path.as_slice(), std::slice::from_ref(&second_parent));
         assert!(path.can_back());
 
         let (menu, selection) = path

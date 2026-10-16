@@ -189,7 +189,7 @@ mod tests {
             .choose(editor.session.as_ref().unwrap(), 3)
             .unwrap();
         draw(&mut editor);
-        let pending = editor.session.as_ref().unwrap().pending_request.clone();
+        let pending = editor.session.as_ref().unwrap().pending_request;
         editor.invalidate_appearance_resources();
         assert_eq!(editor.session.as_ref().unwrap().pending_request, pending);
         assert!(

@@ -2034,8 +2034,8 @@ mod paste_tests {
             descriptor.editor.contract(),
             Some(EditorContract::Configurable { field_count: 1.. })
         ));
-        assert!(matches(&descriptor, "rectangle"));
-        assert!(matches(&descriptor, "padding"));
+        assert!(matches(descriptor, "rectangle"));
+        assert!(matches(descriptor, "padding"));
         assert_eq!(
             action_details(&action),
             "100×100 @ (0,0) · Left · random · padding 0"

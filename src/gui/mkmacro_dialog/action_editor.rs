@@ -7538,10 +7538,7 @@ mod tests {
         let rect = ScreenRect::new(-1920, -80, 3840, 1080);
         editor.apply_visual_capture_outcome(
             Some(17),
-            super::super::visual_capture_workflow::WorkflowOutcome::Region {
-                token: token.clone(),
-                rect,
-            },
+            super::super::visual_capture_workflow::WorkflowOutcome::Region { token, rect },
         );
         assert!(editor.draft_changed);
         assert!(matches!(
@@ -7679,15 +7676,15 @@ mod tests {
             let output = context.run_ui(input(), |ctx| super::show(ctx, &mut dialog));
             let apply_response = dialog.action_editor.test_apply_response;
             let cancel_response = dialog.action_editor.test_cancel_response;
-            if let Some(response) = apply_response {
-                if let Some(bounds) = response_node_bounds(&output, Some(response), "Apply") {
-                    last_apply_node = Some((response.0, bounds));
-                }
+            if let Some(response) = apply_response
+                && let Some(bounds) = response_node_bounds(&output, Some(response), "Apply")
+            {
+                last_apply_node = Some((response.0, bounds));
             }
-            if let Some(response) = cancel_response {
-                if let Some(bounds) = response_node_bounds(&output, Some(response), "Cancel") {
-                    last_cancel_node = Some((response.0, bounds));
-                }
+            if let Some(response) = cancel_response
+                && let Some(bounds) = response_node_bounds(&output, Some(response), "Cancel")
+            {
+                last_cancel_node = Some((response.0, bounds));
             }
             let layout = match (
                 dialog.action_editor.test_body_clip,
@@ -7998,10 +7995,11 @@ mod tests {
     #[test]
     fn region_preview_dispatches_each_authored_variant_without_desktop_union() {
         use super::super::visual_overlay::WindowAreaKind;
-        let monitors = Ok(vec![
+        let monitor_list = vec![
             monitor(0, ScreenRect::new(-100, 0, 100, 80)),
             monitor(7, ScreenRect::new(50, 20, 70, 60)),
-        ]);
+        ];
+        let monitors = Ok(monitor_list.clone());
         let fake = FakePreview::default();
         let outer = ScreenRect::new(-701, -503, 411, 307);
         let client = ScreenRect::new(-680, -460, 350, 220);
@@ -8049,7 +8047,7 @@ mod tests {
         assert_eq!(
             *fake.0.lock().unwrap(),
             vec![
-                PreviewCall::Desktop(monitors.unwrap()),
+                PreviewCall::Desktop(monitor_list),
                 PreviewCall::Monitor(monitor(7, ScreenRect::new(50, 20, 70, 60))),
                 PreviewCall::Rectangle(signed),
                 PreviewCall::Window(outer, WindowAreaKind::WholeWindow),
@@ -9285,7 +9283,7 @@ mod tests {
             }),
         }));
         editor.bind_owner(Some(42));
-        let path = super::super::condition_editor::ConditionPath::from_indexes(&[0]);
+        let path = super::super::condition_editor::ConditionPath::from_indexes([0]);
         let request = editor.ocr_condition_test_request(42, &path).unwrap();
         assert_eq!(request.identity.macro_id, 42);
         assert_eq!(request.identity.condition_path, Some(path));
@@ -9482,7 +9480,7 @@ mod tests {
         editor.image_search = Some(direct);
         let direct_before = editor.image_search.clone();
 
-        let path = super::super::condition_editor::ConditionPath::from_indexes(&[1, 0]);
+        let path = super::super::condition_editor::ConditionPath::from_indexes([1, 0]);
         let mut nested = super::super::image_search_controls::SearchRegionEditorState::from_region(
             &SearchRegion::Monitor { index: 8 },
         );

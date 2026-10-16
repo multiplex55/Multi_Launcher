@@ -280,8 +280,12 @@ mod tests {
     #[test]
     fn package_preview_does_not_mutate_and_accept_is_one_undo_unit() {
         let source = RadialDocument::starter();
-        let bytes =
-            export_bytes(&source, &[source.default_menu_id.clone()], &BTreeMap::new()).unwrap();
+        let bytes = export_bytes(
+            &source,
+            std::slice::from_ref(&source.default_menu_id),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let mut target = session();
         let before = target.draft.clone();
         let preview = PendingImport::package(&bytes, &target).unwrap();
@@ -299,8 +303,12 @@ mod tests {
     fn changed_draft_and_hostile_or_unsupported_package_are_rejected() {
         let mut target = session();
         let source = RadialDocument::starter();
-        let bytes =
-            export_bytes(&source, &[source.default_menu_id.clone()], &BTreeMap::new()).unwrap();
+        let bytes = export_bytes(
+            &source,
+            std::slice::from_ref(&source.default_menu_id),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let preview = PendingImport::package(&bytes, &target).unwrap();
         target.generation.0 += 1;
         assert_eq!(

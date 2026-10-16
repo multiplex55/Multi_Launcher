@@ -14600,8 +14600,7 @@ mod tests {
         let mut pending_identities = Vec::new();
         for index in 0..8 {
             let mut identity = test_action_editor_identity(40 + index);
-            identity.scope.editor_session =
-                crate::radial::authoring::AuthoringSessionId(u64::from(index) + 1);
+            identity.scope.editor_session = crate::radial::authoring::AuthoringSessionId(index + 1);
             let cancellation = bridge.begin_action_search(identity.clone());
             let request = test_provider_search_request(
                 identity.clone(),
@@ -17556,18 +17555,14 @@ mod tests {
             .filter(|(_, node)| node.role() == egui::accesskit::Role::Label)
             .filter_map(|(_, node)| node.value())
             .collect::<Vec<_>>();
-        assert!(names.iter().any(|name| *name == "Info: Exported package"));
-        assert!(
-            names
-                .iter()
-                .any(|name| *name == "Info: Managed and portable")
-        );
+        assert!(names.contains(&"Info: Exported package"));
+        assert!(names.contains(&"Info: Managed and portable"));
         assert!(
             names
                 .iter()
                 .any(|name| name.starts_with("Warning: External path"))
         );
-        assert!(names.iter().any(|name| *name == "Error: Decode failed"));
+        assert!(names.contains(&"Error: Decode failed"));
         output.drop_without_applying_deltas();
     }
 
