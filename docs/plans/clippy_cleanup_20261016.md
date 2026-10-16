@@ -18,8 +18,16 @@
 |---|---|---|
 | CL1-A | complete | Eight equivalent Atomic::fetch_update→try_update substitutions in six owners; preserve orderings/callback/Result semantics; four existing targeted tests |
 | CL1-B | complete | Core/native idioms; preserve pixel remainders, cfg branches, side effects and test instrumentation |
-| CL2 | pending | Separate runtime/payload checkpoints for recording/native effects, persistence/event errors, radial authoring/handoff; review public API and hot-path allocation decisions |
-| CL3 | pending | Separate MkMacro, radial editor and remaining launcher/dialog idioms; preserve borrow/drop timing, widget identity and event ordering |
+| CL2-A | complete | Preserve eight exported enum representations and exact authoring reply error contract with individually documented necessary exceptions; additive Default/is_empty |
+| CL2-B | pending | Private GUI intent/error payload ownership |
+| CL2-C1 | pending | Allocation-free native effects cache/views plus deferred coordinate render idiom |
+| CL2-C2 | pending | Allocation-free synchronous trace publication views |
+| CL3-A | pending | MkMacro domain/runtime idioms: 29 sites / 14 files |
+| CL3-B | pending | MkMacro GUI/editor/overlay idioms: 63 sites / 19 files |
+| CL3-C1 | pending | Radial runtime/resources/evidence idioms: 49 sites / 12 files |
+| CL3-C2 | pending | Radial Designer/editor idioms: 45 sites / 6 files |
+| CL3-D1 | pending | Remaining presentation/compiler idioms: 52 sites / 26 files |
+| CL3-D2 | pending | Remaining routing/plugins/integration idioms: 29 sites / 11 files |
 | CL4 | pending | Acceptance/smoke idioms followed by argument ownership at existing native-click, trace-observation and suite-run boundaries |
 | CL-QA | pending | Final formatting, strict all-workspace/all-target/all-feature Clippy, full Nextest, cumulative review and warning reconciliation |
 
@@ -73,3 +81,14 @@ Focused library tests: pause_resume_excludes_prompt_key_and_balances_pre_pause_h
 - Exact planned library Nextest union: 65 passed, 5306 skipped; run ID `1db4fec3-03db-479b-8bbc-8cc46b47091c`, exit 0.
 - Independent Reviewer: no substantive findings; Root inspected initial pixel/conversion/parser/default and capture/recovery/GUI restore hunks, confirmed scoped diff. Source is 18 files / 61 reconciled original warning sites.
 - Commit subject: `refactor(core): [CL1-B] clean native and persistence idioms`; hash in next update.
+CL1-B commit: `f94b5700`.
+
+CL2-A source review: exact eight enum exemptions plus one sender method exemption; no broad/duplicate attributes. Exported variants/payloads and send signature unchanged. Default delegates existing initialization; is_empty uses same underlying map as len. Actual font-cache owner is FontLayoutService (Planner's RadialFontCache label was stale). Existing cache tests assert empty/nonempty states. Reviewer requested precise reason text: DataServiceResult large payload is SnapshotResult/inline manifest, not RecoveryStaged; sender explanation must state exact public SendError return type. Implementer correcting documentation. All-feature library diagnostic Clippy exits 0 with 281 warnings, remaining seven large enum and three large error warnings later-owned, no len_without_is_empty; tests pending.
+Remaining executable Planner artifact: ignored target/clippy-cleanup-20261016/planner-remaining-packets.md. All 542 original owned sites assigned once: CL1-A 8; CL1-B 61; CL2-A 12; CL2-B 8; CL2-C1 2; CL2-C2 1; CL3-A 29; CL3-B 63; CL3-C1 49; CL3-C2 45; CL3-D1 52; CL3-D2 29; CL4 183. Exact C/D lint/line/column tables verified against 175 inventory entries after initial artifact formatting correction. Original locations are locators, not post-edit line numbers. CL4 includes all binary paths, including ../smoke, 97 argument-count sites, private binary enums/type complexity and remaining compiler/mechanical diagnostics. New warnings from final required command remain in scope.
+### CL2-A terminal verification
+
+- Corrected reason wording inspected by Root: exact public SendError contract and snapshot completion payload; one recorder attribute with allocation rationale. Nine source files / 32 insertions; no representation/signature changes, eight enum + one function exemptions only. Independent functional/API review accepted; reason corrections resolved.
+- `cargo clippy -p multi_launcher --lib --all-features --message-format=json`: exit 0; evidence `target/clippy-cleanup-20261016/cl2a-clippy.jsonl`, 281 later-owned diagnostics. Zero len_without_is_empty. Seven large-enum / three large-error diagnostics remain outside this checkpoint.
+- Three targeted library cases passed (run `d3a13d7c-0d6e-436e-aedc-532b4f062305`); recorder direct-public-constructor integration case passed (run `6f2584da-ca6c-4500-a33c-bd2b2c847fda`); authoring constructor case passed (run `b75232f2-3736-447e-aede-4ae8ec4a9f1d`). Five tests total.
+- Final `cargo fmt --all -- --check` and `git diff --check`: pass. No Cargo process remains.
+- Commit subject: `refactor(api): [CL2-A] preserve exported payload contracts`; hash in next ledger update.

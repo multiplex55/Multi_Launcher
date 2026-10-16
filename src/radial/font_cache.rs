@@ -235,6 +235,10 @@ impl<C: FontCatalog> FontLayoutService<C> {
         layout
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
     pub fn len(&self) -> usize {
         self.cache.len()
     }
@@ -937,6 +941,7 @@ mod tests {
             loads: AtomicUsize::new(0),
         };
         let mut service = FontLayoutService::with_catalog(catalog, 8);
+        assert!(service.is_empty());
         let source = "same text";
         let label_request = request(None, 80_000);
         let mut tooltip_request = label_request.clone();
@@ -945,6 +950,7 @@ mod tests {
         tooltip_request.max_lines = 8;
         tooltip_request.max_height_milli = 100_000;
         let label = service.prepare(source, label_request.clone());
+        assert!(!service.is_empty());
         let tooltip = service.prepare(source, tooltip_request.clone());
         assert!(!Arc::ptr_eq(&label, &tooltip));
         tooltip_request.max_width_milli = 120_000;

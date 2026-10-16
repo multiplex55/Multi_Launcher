@@ -166,6 +166,10 @@ pub trait EventEnricher: Send {
     fn invalidate_root(&mut self, _root: usize) {}
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "RecordingBoundary::Event retains enriched context for each accepted hook event; boxing changes its public pattern API and adds normalization-time allocation and cloning on this hot path."
+)]
 pub enum RecordingBoundary {
     Event(HookEvent, Option<EventContext>),
     Pause { timestamp_us: u64 },

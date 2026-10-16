@@ -220,6 +220,7 @@ pub struct ResolvedDeferredSelection {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant, reason = "DeferredResolutionResult::Ready is returned through the public deferred reply API; boxing it would change existing result construction and matching.")]
 pub enum DeferredResolutionResult {
     Ready(ResolvedDeferredSelection),
     Pending {
@@ -295,6 +296,7 @@ pub enum DispatchEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant, reason = "DispatchIntent::Dispatch exposes the full request from this public handoff state machine; boxing it would break existing intent consumers.")]
 pub enum DispatchIntent {
     CloseRadial { session_id: SessionId },
     AwaitInvocationRelease { invocation_id: InvocationId },

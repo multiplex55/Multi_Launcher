@@ -322,6 +322,10 @@ enum Job {
     Stop,
 }
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "ObservationResult is the worker channel's public result contract; boxing its directly matched payload variants would break existing consumers."
+)]
 pub enum ObservationResult {
     Clipboard(ClipboardObservation),
     UiElement(ClickInspection),

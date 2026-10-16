@@ -523,6 +523,7 @@ impl AssetMutations {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant, reason = "ReplaceDocument carries the full authored document through this public mutation API; boxing it would break existing mutation constructors and matches.")]
 pub enum DocumentMutation {
     RenameMenu {
         id: MenuId,
@@ -686,6 +687,7 @@ pub enum CommitDisposition {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant, reason = "AuthoringRequest::Commit carries the document and asset mutations through the public request channel; boxing them would change caller-visible request construction.")]
 pub enum AuthoringRequest {
     Snapshot {
         id: AuthoringRequestId,
@@ -1318,6 +1320,7 @@ pub struct AuthoringReplySender {
 }
 
 impl AuthoringReplySender {
+    #[allow(clippy::result_large_err, reason = "The public Result<(), SendError<AuthoringReply>> preserves the exact unsent reply on disconnect; boxing the error would change that API signature.")]
     pub fn send(&self, reply: AuthoringReply) -> Result<(), mpsc::SendError<AuthoringReply>> {
         let correlation = Correlation {
             request_id: reply.id().0,

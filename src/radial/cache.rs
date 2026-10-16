@@ -120,6 +120,10 @@ impl<T> PreparedAssetCache<T> {
         self.cost = 0;
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -144,7 +148,9 @@ mod tests {
     #[test]
     fn cache_identity_includes_version_and_dpi_and_hits_are_shared() {
         let mut cache = PreparedAssetCache::new(4, 64);
+        assert!(cache.is_empty());
         let first = cache.insert_ready(key("a", "v1", 1000), vec![1u8], 1);
+        assert!(!cache.is_empty());
         assert!(
             matches!(cache.get(&key("a", "v1", 1000)), Some(CachedAsset::Ready(value)) if Arc::ptr_eq(&first, &value))
         );

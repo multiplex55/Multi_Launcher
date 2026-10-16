@@ -147,6 +147,7 @@ impl Drop for HandoffDeadlineScheduler {
 }
 
 #[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant, reason = "ControllerEvent is the public controller output contract; boxing its directly matched preparation and dispatch events would break host integrations.")]
 pub enum ControllerEvent {
     ToggleLegacyLauncher {
         invocation_id: InvocationId,

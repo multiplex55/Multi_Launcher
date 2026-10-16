@@ -129,6 +129,11 @@ mod platform {
             }
         }
     }
+    impl Default for WindowsNotificationBackend {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
     impl NotificationBackend for WindowsNotificationBackend {
         fn notify(&self, notification: &ResolvedNotification) -> ExecResult {
             self.initialization.clone()?;
