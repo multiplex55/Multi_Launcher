@@ -2116,9 +2116,7 @@ impl NotePanel {
         &mut self,
         ctx: &egui::Context,
         app: &mut LauncherApp,
-        mut observed_discard: Option<
-            &mut Option<super::query_observation::NoteCloseRenderedDiscard>,
-        >,
+        observed_discard: Option<&mut Option<super::query_observation::NoteCloseRenderedDiscard>>,
     ) {
         if !self.open {
             return;
@@ -2213,12 +2211,12 @@ impl NotePanel {
                     ui.label("URL:");
                     ui.text_edit_singleline(&mut self.link_url);
                     ui.horizontal(|ui| {
-                        if ui.button("Insert").clicked() {
-                            if let Some(id) = self.last_textedit_id {
-                                self.insert_link(ctx, id);
-                                // Return focus to the editor after insertion.
-                                self.focus_textedit_next_frame = true;
-                            }
+                        if ui.button("Insert").clicked()
+                            && let Some(id) = self.last_textedit_id
+                        {
+                            self.insert_link(ctx, id);
+                            // Return focus to the editor after insertion.
+                            self.focus_textedit_next_frame = true;
                         }
                         if ui.button("Cancel").clicked() {
                             self.link_text.clear();
@@ -2249,11 +2247,10 @@ impl NotePanel {
                         );
                         if widgets::with_button_emphasis(ui, confirm, ButtonEmphasis::Primary)
                             .clicked()
+                            && let Some(id) = self.last_textedit_id
                         {
-                            if let Some(id) = self.last_textedit_id {
-                                self.insert_or_create_note_link(ctx, id, app);
-                                self.focus_textedit_next_frame = true;
-                            }
+                            self.insert_or_create_note_link(ctx, id, app);
+                            self.focus_textedit_next_frame = true;
                         }
                         if ui.button("Cancel").clicked() {
                             self.link_new_name.clear();
@@ -2338,7 +2335,7 @@ impl NotePanel {
                             response,
                             ButtonEmphasis::Destructive,
                         );
-                        if let Some(observed) = observed_discard.as_deref_mut() {
+                        if let Some(observed) = observed_discard {
                             *observed = super::query_observation::observe_note_discard_response(
                                 ui,
                                 &response,
@@ -4035,10 +4032,6 @@ impl NotePanel {
                         {
                             _markdown_response.response.id
                         }
-                        #[cfg(not(test))]
-                        {
-                            ()
-                        }
                     })
             }));
             #[cfg(test)]
@@ -4937,7 +4930,7 @@ fn extract_snippet_around(content: &str, needle: &str) -> String {
     if let Some(observer) = &observer {
         observer.record_materialized_string(NoteRefreshStringClass::Snippet, &needle_lower);
     }
-    let output = if let Some(pos) = lower.find(&needle_lower) {
+    if let Some(pos) = lower.find(&needle_lower) {
         let start = pos.saturating_sub(WINDOW);
         let end = (pos + needle_lower.len() + WINDOW).min(compact.len());
         let mut out = compact[start..end].trim().to_string();
@@ -4963,8 +4956,7 @@ fn extract_snippet_around(content: &str, needle: &str) -> String {
             observer.record_materialized_string(NoteRefreshStringClass::Snippet, &output);
         }
         output
-    };
-    output
+    }
 }
 
 fn format_note_editor_timestamp<Tz>(timestamp: DateTime<Tz>) -> String

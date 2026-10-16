@@ -597,7 +597,7 @@ impl ImageCropEditorState {
         &mut self,
         ctx: &egui::Context,
         options: &CropEditorUiOptions,
-        mut save_as_filename: Option<&mut String>,
+        save_as_filename: Option<&mut String>,
     ) -> Option<CropEditorAction> {
         if !self.open {
             return None;
@@ -624,7 +624,7 @@ impl ImageCropEditorState {
                 let mut filename_label_response = None;
                 #[cfg(test)]
                 let mut filename_edit_response = None;
-                if let Some(filename) = save_as_filename.as_deref_mut() {
+                if let Some(filename) = save_as_filename {
                     let label = ui.label("Save As filename");
                     #[cfg(test)]
                     {

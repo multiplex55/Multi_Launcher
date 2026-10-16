@@ -384,21 +384,18 @@ impl LayoutsWidget {
             schedule,
             &mut self.refresh_pending,
             &mut self.cache.last_refresh,
-        ) {
-            if !self
-                .pending_requests
-                .iter()
-                .any(|request| matches!(request.kind, LayoutRequestKind::Refresh))
-            {
-                let _ = self.enqueue(LayoutRequestKind::Refresh);
-            }
+        ) && !self
+            .pending_requests
+            .iter()
+            .any(|request| matches!(request.kind, LayoutRequestKind::Refresh))
+        {
+            let _ = self.enqueue(LayoutRequestKind::Refresh);
         }
         if !self.loader.is_in_flight()
             && let Some(request) = self.pending_requests.pop_front()
+            && self.loader.request(request, repaint)
         {
-            if self.loader.request(request, repaint) {
-                self.cache.last_refresh = std::time::Instant::now();
-            }
+            self.cache.last_refresh = std::time::Instant::now();
         }
     }
 

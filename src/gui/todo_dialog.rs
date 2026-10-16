@@ -440,13 +440,11 @@ impl TodoDialog {
             }
             self.pending_clear_confirm = false;
         }
-        if save_now {
-            if self.save(app, false, candidate_entries) {
-                self.text.clear();
-                self.priority = 0;
-                if !self.persist_tags {
-                    self.tags.clear();
-                }
+        if save_now && self.save(app, false, candidate_entries) {
+            self.text.clear();
+            self.priority = 0;
+            if !self.persist_tags {
+                self.tags.clear();
             }
         }
     }

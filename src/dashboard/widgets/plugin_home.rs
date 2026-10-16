@@ -236,16 +236,15 @@ impl PluginHomeWidget {
             && stale
             && self.requested_source.as_ref() != Some(&source)
             && self.failed_source.as_ref() != Some(&source)
-        {
-            if self.loader.request(
+            && self.loader.request(
                 PluginHomeRequest {
                     source: source.clone(),
                     plugin,
                 },
                 repaint,
-            ) {
-                self.requested_source = Some(source);
-            }
+            )
+        {
+            self.requested_source = Some(source);
         }
         &self.cached_actions
     }

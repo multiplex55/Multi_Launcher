@@ -236,7 +236,7 @@ impl ShellCmdDialog {
                     let mut editor_args_id = None;
                     #[cfg(test)]
                     let mut editor_has_focus = false;
-                    let editor_output = egui::ScrollArea::vertical()
+                    let _editor_output = egui::ScrollArea::vertical()
                         .id_salt("shell_cmd_args_scroll")
                         .auto_shrink([false, false])
                         .min_scrolled_height(0.0)
@@ -324,7 +324,7 @@ impl ShellCmdDialog {
                             scroll: ShellScrollLayout {
                                 parent_max_rect,
                                 viewport_clip_rect: parent_clip_rect,
-                                content_size: editor_output.content_size,
+                                content_size: _editor_output.content_size,
                             },
                             name_rect: name_response.rect,
                             editor_clip_rect,

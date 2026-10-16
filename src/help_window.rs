@@ -42,7 +42,7 @@ impl HelpWindow {
                 .default_size((300.0, 200.0))
                 .collapsible(false)
                 .show(ctx, |ui| {
-                    let (filter_label_response, filter_response) = ui
+                    let (_filter_label_response, _filter_response) = ui
                         .horizontal(|ui| {
                             let label = ui.label("Filter:");
                             let filter = ui
@@ -56,7 +56,7 @@ impl HelpWindow {
                     let filt = self.filter.to_lowercase();
                     #[cfg(test)]
                     let mut content_targets = [None; 3];
-                    let body = egui::ScrollArea::vertical()
+                    let _body = egui::ScrollArea::vertical()
                         .id_salt("quick_help_content")
                         .auto_shrink([false, false])
                         .min_scrolled_height(0.0)
@@ -119,14 +119,14 @@ impl HelpWindow {
                         });
                     #[cfg(test)]
                     self.test_scrolls.push(HelpScrollObservation {
-                        id: body.id,
+                        id: _body.id,
                         window_rect: None,
-                        inner_rect: body.inner_rect,
-                        content_size: body.content_size,
-                        offset: body.state.offset,
-                        filter_id: filter_response.id,
-                        filter_label_id: filter_label_response.id,
-                        filter_rect: filter_response.rect,
+                        inner_rect: _body.inner_rect,
+                        content_size: _body.content_size,
+                        offset: _body.state.offset,
+                        filter_id: _filter_response.id,
+                        filter_label_id: _filter_label_response.id,
+                        filter_rect: _filter_response.rect,
                         examples: None,
                         content_targets,
                     });
@@ -167,7 +167,7 @@ impl HelpWindow {
                         ),
                     }
                 }
-                let (filter_label_response, filter_response) = ui
+                let (_filter_label_response, _filter_response) = ui
                     .horizontal(|ui| {
                         let label = ui.label("Filter:");
                         let filter = ui
@@ -186,7 +186,7 @@ impl HelpWindow {
                 let filt = self.filter.to_lowercase();
                 #[cfg(test)]
                 let mut content_targets = [None; 3];
-                let body = egui::ScrollArea::vertical()
+                let _body = egui::ScrollArea::vertical()
                     .id_salt("command_help_content")
                     .auto_shrink([false, false])
                     .min_scrolled_height(0.0)
@@ -292,14 +292,14 @@ impl HelpWindow {
                     });
                 #[cfg(test)]
                 self.test_scrolls.push(HelpScrollObservation {
-                    id: body.id,
+                    id: _body.id,
                     window_rect: None,
-                    inner_rect: body.inner_rect,
-                    content_size: body.content_size,
-                    offset: body.state.offset,
-                    filter_id: filter_response.id,
-                    filter_label_id: filter_label_response.id,
-                    filter_rect: filter_response.rect,
+                    inner_rect: _body.inner_rect,
+                    content_size: _body.content_size,
+                    offset: _body.state.offset,
+                    filter_id: _filter_response.id,
+                    filter_label_id: _filter_label_response.id,
+                    filter_rect: _filter_response.rect,
                     examples: Some((examples_response.id, examples_response.rect)),
                     content_targets,
                 });

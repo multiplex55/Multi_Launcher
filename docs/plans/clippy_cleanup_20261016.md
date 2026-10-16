@@ -27,7 +27,7 @@
 | CL3-B | implemented; final gates pending | MkMacro GUI/editor/overlay idioms: 63 sites / 19 files |
 | CL3-C1 | implemented; final gates pending | Radial runtime/resources/evidence idioms: 49 sites / 12 files |
 | CL3-C2 | implemented; final gates pending | Radial Designer/editor idioms: 45 sites / 6 files |
-| CL3-D1 | pending | Remaining presentation/compiler idioms: 52 sites / 26 files |
+| CL3-D1 | implemented; final gates pending | Remaining presentation/compiler idioms: 52 sites / 26 files |
 | CL3-D2 | pending | Remaining routing/plugins/integration idioms: 29 sites / 11 files |
 | CL4 | pending | Acceptance/smoke idioms followed by argument ownership at existing native-click, trace-observation and suite-run boundaries |
 | CL-QA | pending | Final formatting, strict all-workspace/all-target/all-feature Clippy, full Nextest, cumulative review and warning reconciliation |
@@ -140,3 +140,6 @@ CL3-C1 review accepted: Root inspected arithmetic/font/current-host loop diffs a
 CL3-C1 commit: `d124d7ef`. CL3-C2 six-file45-site Designer/editor localidiom packet authorized; staticseededhashowner/mask andstagedUIboundariespreserved, noCargo validation beforeallcleanup.
 
 CL3-C2 reviewed/implemented: six source files / 45 sites. Root inspected hash/default/expression/scope diffs; Reviewer no correctness/compatibility findings. Same static RandomState/i64::MAX mask and field-for-field EmbeddedPreview default; staged properties/scope/popup/drag/drop collapses retain ordering and one callback. Final Option<&mut AuthoringSession> use remains last use. fmt/diff exit0; no tests/checks/Clippy per user. Commit `refactor(radial): [CL3-C2] simplify Designer editor idioms`; acceptance pending final gates.
+CL3-C2 commit: `621a1b48`. CL3-D1 26-file52-site presentation/compiler packet authorized with localidioms/testreceiptpreservation/UTF16validation. No check/lint/tests untilallcleanup.
+
+CL3-D1 implemented/reviewed: 26 source files / 52 sites. Root inspected scoped diff/calendar/help/clipboard/UTF16; Reviewer no concrete findings. Actual UI calls, IDs/order/test receipt geometry retained; Calendar test-only mutable rectangle locals gated without gating rendering. UTF16 rejects odd length before allocation-free chunk-view conversion, preserves endian/error behavior and existing output buffer. CropDialog default exact six fields; query mailbox read/parse/apply/cleanup ordering unchanged. fmt/diff exit0, no check/lint/tests. Commit `refactor(gui): [CL3-D1] clean presentation and test receipt idioms`; final gates pending.

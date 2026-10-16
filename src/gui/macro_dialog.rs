@@ -189,7 +189,7 @@ impl MacroDialog {
         let mut test_visible = false;
         #[cfg(test)]
         let mut test_sizing_pass = false;
-        let window_output = egui::Window::new("Macros")
+        let _window_output = egui::Window::new("Macros")
             .open(&mut open)
             .resizable(true)
             .max_width(ctx.content_rect().width().max(1.0))
@@ -435,8 +435,8 @@ impl MacroDialog {
                             });
                             if self.add_plugin == "app" {
                                 let filter = self.add_filter.trim().to_lowercase();
-                                let picker_max_rect = ui.max_rect();
-                                let picker_clip_rect = ui.clip_rect();
+                                let _picker_max_rect = ui.max_rect();
+                                let _picker_clip_rect = ui.clip_rect();
                                 let app_output = egui::ScrollArea::vertical()
                                     .id_salt("macro_app_list")
                                     .auto_shrink([false, false])
@@ -481,8 +481,8 @@ impl MacroDialog {
                                 {
                                     picker_scroll = Some(macro_scroll_layout(
                                         app_output.id,
-                                        picker_max_rect,
-                                        picker_clip_rect,
+                                        _picker_max_rect,
+                                        _picker_clip_rect,
                                         app_output.inner_rect,
                                         app_output.content_size,
                                         app_output.state.offset,
@@ -772,7 +772,7 @@ impl MacroDialog {
         self.open = open || pinned;
         #[cfg(test)]
         if let Some(mut layout) = test_layout {
-            layout.window_rect = window_output
+            layout.window_rect = _window_output
                 .as_ref()
                 .map_or(egui::Rect::NOTHING, |window| window.response.rect);
             self.test_layout = Some(layout);

@@ -121,10 +121,10 @@ impl CommandHistoryWidget {
         if let Some(result) = self.pins_loader.poll() {
             publish_pins_or_retain(&mut self.cached_pins, result);
         }
-        if self.last_pins_load.elapsed() > Duration::from_secs(2) {
-            if self.pins_loader.request((), repaint) {
-                self.last_pins_load = Instant::now();
-            }
+        if self.last_pins_load.elapsed() > Duration::from_secs(2)
+            && self.pins_loader.request((), repaint)
+        {
+            self.last_pins_load = Instant::now();
         }
     }
 
@@ -539,19 +539,19 @@ impl Widget for CommandHistoryWidget {
                         query_override: Some(entry.query.clone()),
                     });
                 }
-                if entry.missing && ui.button("Unpin").clicked() {
-                    if matches!(
+                if entry.missing
+                    && ui.button("Unpin").clicked()
+                    && matches!(
                         crate::history::remove_pin(
                             HISTORY_PINS_FILE,
                             &entry.action_id,
                             entry.action.args.as_deref(),
                         ),
                         Ok(true)
-                    ) {
-                        self.cached_pins.retain(|p| {
-                            p.action_id != entry.action_id || p.args != entry.action.args
-                        });
-                    }
+                    )
+                {
+                    self.cached_pins
+                        .retain(|p| p.action_id != entry.action_id || p.args != entry.action.args);
                 }
                 ui.label(timestamp);
             });

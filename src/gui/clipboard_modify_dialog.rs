@@ -551,7 +551,7 @@ impl ClipboardModifyDialogState {
 
         #[cfg(test)]
         let mut constrained_scroll = None;
-        let (navigation_overflows, body_rect, body_max_height, footer_response) =
+        let (_navigation_overflows, _body_rect, _body_max_height, footer_response) =
             if constrained_overflow {
                 #[cfg(test)]
                 let mut scroll_clip_rect = egui::Rect::NOTHING;
@@ -601,9 +601,9 @@ impl ClipboardModifyDialogState {
         #[cfg(test)]
         {
             self.section_layout_observation = Some(SectionLayoutObservation {
-                navigation_overflows,
-                body_rect,
-                body_max_height,
+                navigation_overflows: _navigation_overflows,
+                body_rect: _body_rect,
+                body_max_height: _body_max_height,
                 constrained_scroll,
             });
         }

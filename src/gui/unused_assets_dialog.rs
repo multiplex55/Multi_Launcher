@@ -76,7 +76,7 @@ impl UnusedAssetsDialog {
                 let footer_height =
                     unused_assets_footer_reserved_height(ui, &["Delete Selected", "Close"]);
                 let list_height = (ui.available_height() - footer_height).max(0.0);
-                let list = egui::ScrollArea::vertical()
+                let _list = egui::ScrollArea::vertical()
                     .id_salt("unused_note_assets_list")
                     .auto_shrink([false, false])
                     .min_scrolled_height(0.0)
@@ -87,10 +87,10 @@ impl UnusedAssetsDialog {
                         } else {
                             for (idx, asset) in self.assets.iter().enumerate() {
                                 ui.horizontal(|ui| {
-                                    let selection = ui.checkbox(&mut self.selected[idx], "");
+                                    let _selection = ui.checkbox(&mut self.selected[idx], "");
                                     #[cfg(test)]
                                     if idx == 0 {
-                                        first_selection = Some((selection.id, selection.rect));
+                                        first_selection = Some((_selection.id, _selection.rect));
                                     }
                                     let label = ui.add(
                                         egui::Label::new(asset).wrap_mode(egui::TextWrapMode::Wrap),
@@ -146,10 +146,10 @@ impl UnusedAssetsDialog {
                 if let (Some(delete), Some(close)) = (delete_response, close_response) {
                     test_layout = Some(UnusedAssetsLayoutObservation {
                         window_rect: None,
-                        scroll_id: list.id,
-                        scroll_rect: list.inner_rect,
-                        content_size: list.content_size,
-                        scroll_offset: list.state.offset,
+                        scroll_id: _list.id,
+                        scroll_rect: _list.inner_rect,
+                        content_size: _list.content_size,
+                        scroll_offset: _list.state.offset,
                         footer_reserved_height: footer_height,
                         delete_id: delete.id,
                         delete_rect: delete.rect,

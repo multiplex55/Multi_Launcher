@@ -854,12 +854,11 @@ impl QueryObservationMailbox {
             return true;
         };
         let mut response = None;
-        if metadata.len() as usize <= MAX_REQUEST_BYTES {
-            if let Ok(bytes) = std::fs::read(&request_path) {
-                if let Ok(request) = serde_json::from_slice::<QueryObservationRequest>(&bytes) {
-                    response = Some(self.apply_request(request, root, counts));
-                }
-            }
+        if metadata.len() as usize <= MAX_REQUEST_BYTES
+            && let Ok(bytes) = std::fs::read(&request_path)
+            && let Ok(request) = serde_json::from_slice::<QueryObservationRequest>(&bytes)
+        {
+            response = Some(self.apply_request(request, root, counts));
         }
         let _ = std::fs::remove_file(&request_path);
         let response = response.unwrap_or_else(|| QueryObservationResponse {
@@ -916,12 +915,11 @@ impl QueryObservationMailbox {
             return true;
         };
         let mut response = None;
-        if metadata.len() as usize <= MAX_REQUEST_BYTES {
-            if let Ok(bytes) = std::fs::read(&request_path) {
-                if let Ok(request) = serde_json::from_slice::<AuthoringObservationRequest>(&bytes) {
-                    response = Some(self.apply_authoring_request(request, root, counts, editor));
-                }
-            }
+        if metadata.len() as usize <= MAX_REQUEST_BYTES
+            && let Ok(bytes) = std::fs::read(&request_path)
+            && let Ok(request) = serde_json::from_slice::<AuthoringObservationRequest>(&bytes)
+        {
+            response = Some(self.apply_authoring_request(request, root, counts, editor));
         }
         let _ = std::fs::remove_file(&request_path);
         let mut response = response.unwrap_or_else(|| AuthoringObservationResponse {

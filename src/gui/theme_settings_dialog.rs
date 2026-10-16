@@ -882,14 +882,12 @@ fn section_presets(ui: &mut egui::Ui, state: &mut ThemeSettingsDialogState) -> b
     } else {
         None
     };
-    let selected_text = active_name
-        .as_deref()
-        .unwrap_or_else(|| match state.draft.mode {
-            ThemeMode::System => "System palette",
-            ThemeMode::Dark => "Dark palette",
-            ThemeMode::Light => "Light palette",
-            ThemeMode::Custom => "Custom colors",
-        });
+    let selected_text = active_name.as_deref().unwrap_or(match state.draft.mode {
+        ThemeMode::System => "System palette",
+        ThemeMode::Dark => "Dark palette",
+        ThemeMode::Light => "Light palette",
+        ThemeMode::Custom => "Custom colors",
+    });
     let mut changed = false;
 
     egui::ComboBox::from_label("Saved palette")

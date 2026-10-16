@@ -1547,9 +1547,11 @@ impl LauncherApp {
         }
         let search_actions =
             trimmed_lc == APP_PREFIX || trimmed_lc.starts_with(&format!("{APP_PREFIX} "));
-        let action_query = search_actions
-            .then(|| trimmed.split_once(' ').map(|value| value.1).unwrap_or(""))
-            .unwrap_or("");
+        let action_query = if search_actions {
+            trimmed.split_once(' ').map(|value| value.1).unwrap_or("")
+        } else {
+            ""
+        };
         let mut scored = Vec::new();
         if !trimmed_lc.starts_with("g ") && search_actions {
             scored.extend(self.search_actions(action_query, &action_query.to_lowercase()));

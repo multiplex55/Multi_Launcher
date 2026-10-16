@@ -209,6 +209,7 @@ enum PendingConfirmation {
 
 /// The standalone crop dialog. It owns the reusable canvas and only performs
 /// writes after an explicit destination/source confirmation.
+#[derive(Default)]
 pub struct CropDialogState {
     open: bool,
     canvas: Option<CropCanvas>,
@@ -216,19 +217,6 @@ pub struct CropDialogState {
     suggested_name: String,
     pending_confirmation: Option<PendingConfirmation>,
     message: Option<String>,
-}
-
-impl Default for CropDialogState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            canvas: None,
-            context: None,
-            suggested_name: String::new(),
-            pending_confirmation: None,
-            message: None,
-        }
-    }
 }
 
 impl CropDialogState {

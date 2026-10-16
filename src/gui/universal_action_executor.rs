@@ -152,7 +152,7 @@ impl LauncherApp {
         {
             root.emit_acceptance_snapshot(
                 self,
-                &selected,
+                selected,
                 &context.history_query,
                 context.source,
                 request,
@@ -169,7 +169,7 @@ impl LauncherApp {
         {
             RadialRootState::capture(self).emit_acceptance_snapshot(
                 self,
-                &selected,
+                selected,
                 &context.history_query,
                 context.source,
                 request,

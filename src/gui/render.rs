@@ -2943,7 +2943,7 @@ impl LauncherApp {
 
         let track_c_enabled = frame_logic.track_c_enabled;
         let mut query_geometry_cause = frame_logic.query_geometry_cause;
-        let source_state_before_frame = frame_logic.source_state_before_frame.clone();
+        let source_state_before_frame = frame_logic.source_state_before_frame;
         let mut snippet_prompt_owns_input = frame_logic.snippet_prompt_owns_input;
         let just_became_visible = frame_logic.just_became_visible;
         let mut painted_root_generation = None;

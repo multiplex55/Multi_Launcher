@@ -394,14 +394,14 @@ impl TodoViewDialog {
                                 ui.vertical(|ui| {
                                     ui.horizontal_wrapped(|ui| {
                                         let label = ui.label("Text:");
-                                        let field = ui.add(
+                                        let _field = ui.add(
                                             egui::TextEdit::singleline(&mut self.editing_text)
                                                 .desired_width(
                                                     ui.available_width().min(260.0).max(72.0),
                                                 ),
                                         ).labelled_by(label.id);
                                         #[cfg(test)]
-                                        edit_fields.push(field.rect);
+                                        edit_fields.push(_field.rect);
                                     });
                                     ui.horizontal_wrapped(|ui| {
                                         let label = ui.label("Priority:");
@@ -413,14 +413,14 @@ impl TodoViewDialog {
                                     });
                                     ui.horizontal_wrapped(|ui| {
                                         let label = ui.label("Tags:");
-                                        let field = ui.add(
+                                        let _field = ui.add(
                                             egui::TextEdit::singleline(&mut self.editing_tags)
                                                 .desired_width(
                                                     ui.available_width().min(260.0).max(72.0),
                                                 ),
                                         ).labelled_by(label.id);
                                         #[cfg(test)]
-                                        edit_fields.push(field.rect);
+                                        edit_fields.push(_field.rect);
                                     });
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label("Link note:");
@@ -695,10 +695,8 @@ impl TodoViewDialog {
             window_open = false;
         }
         self.open = window_open || pinned;
-        if save_now {
-            if self.save(app, candidate_entries) {
-                self.editing_idx = None;
-            }
+        if save_now && self.save(app, candidate_entries) {
+            self.editing_idx = None;
         }
     }
 }

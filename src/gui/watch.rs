@@ -261,10 +261,9 @@ pub(super) fn watch_file_with_wake(
                     &ev,
                     &target,
                     target_is_directory,
-                ) {
-                    if tx.send(event.clone()).is_ok() {
-                        wake.wake();
-                    }
+                ) && tx.send(event.clone()).is_ok()
+                {
+                    wake.wake();
                 }
             }
             Err(e) => tracing::error!("watch error: {:?}", e),

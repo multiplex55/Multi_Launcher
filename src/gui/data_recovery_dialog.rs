@@ -428,10 +428,9 @@ impl DataRecoveryDialog {
             if ui
                 .add_enabled(!busy, egui::Button::new("Refresh"))
                 .clicked()
+                && let Err(error) = self.refresh_health()
             {
-                if let Err(error) = self.refresh_health() {
-                    self.service_error = Some(error);
-                }
+                self.service_error = Some(error);
             }
             if busy {
                 widgets::secondary_help(ui, "Checking storage…");
@@ -540,18 +539,16 @@ impl DataRecoveryDialog {
             if ui
                 .add_enabled(!backup_busy, egui::Button::new("Create backup"))
                 .clicked()
+                && let Err(error) = self.request_backup()
             {
-                if let Err(error) = self.request_backup() {
-                    self.service_error = Some(error);
-                }
+                self.service_error = Some(error);
             }
             if ui
                 .add_enabled(!list_busy, egui::Button::new("Refresh list"))
                 .clicked()
+                && let Err(error) = self.list_snapshots()
             {
-                if let Err(error) = self.list_snapshots() {
-                    self.service_error = Some(error);
-                }
+                self.service_error = Some(error);
             }
         });
         if backup_busy {

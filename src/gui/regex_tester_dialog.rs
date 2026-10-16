@@ -611,10 +611,10 @@ impl RegexTesterDialogState {
                         .hint_text("Type or paste text to test")
                         .show(ui);
                     highlighting::paint_markers(ui, &output, text, &view);
-                    if std::mem::take(&mut self.scroll_to_selected) {
-                        if let Some(caret) = highlighting::active_caret(&output, text, &view) {
-                            ui.scroll_to_rect(caret.expand(4.0), Some(egui::Align::Center));
-                        }
+                    if std::mem::take(&mut self.scroll_to_selected)
+                        && let Some(caret) = highlighting::active_caret(&output, text, &view)
+                    {
+                        ui.scroll_to_rect(caret.expand(4.0), Some(egui::Align::Center));
                     }
                     output.response.changed()
                 };

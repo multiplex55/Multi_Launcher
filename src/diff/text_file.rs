@@ -157,7 +157,9 @@ fn decode(bytes: &[u8]) -> (LoadedContent, Option<TextEncoding>, bool) {
             );
         }
         let units: Vec<u16> = rest
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|b| {
                 if le {
                     u16::from_le_bytes([b[0], b[1]])

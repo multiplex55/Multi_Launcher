@@ -532,7 +532,9 @@ impl CalendarEventEditor {
                     });
 
                 ui.separator();
+                #[cfg(test)]
                 let mut save_rect = egui::Rect::NOTHING;
+                #[cfg(test)]
                 let mut cancel_rect = egui::Rect::NOTHING;
                 ui.horizontal_wrapped(|ui| {
                     let save = ui.button("Save");
@@ -569,7 +571,7 @@ impl CalendarEventEditor {
                     test_layout.footer_reserved_height = footer_reserved_height;
                 }
                 #[cfg(not(test))]
-                let _ = (body_output, footer_reserved_height, save_rect, cancel_rect);
+                let _ = (body_output, footer_reserved_height);
             });
 
         #[cfg(test)]

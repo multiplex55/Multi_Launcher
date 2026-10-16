@@ -894,10 +894,9 @@ impl super::LauncherApp {
             state.generation().map(|generation| generation.get()),
             bridge_fallback,
             &SystemToolbarWindowBackend,
-        ) {
-            if let Err(error) = self.screen_draw_controller.set_toolbar_window(toolbar) {
-                self.report_error_message("screen_draw.toolbar", error.to_string());
-            }
+        ) && let Err(error) = self.screen_draw_controller.set_toolbar_window(toolbar)
+        {
+            self.report_error_message("screen_draw.toolbar", error.to_string());
         }
         if self.screen_draw_toolbar.native_bridge.resolution_pending() {
             // Bounded child-viewport creation retries; this stops as soon as
@@ -1015,10 +1014,10 @@ impl super::LauncherApp {
 
     fn clear_screen_draw_toolbar_native_bridge(&mut self) {
         self.screen_draw_toolbar.observation.close();
-        if self.screen_draw_toolbar.native_bridge.close_viewport() {
-            if let Err(error) = self.screen_draw_controller.set_toolbar_window(None) {
-                tracing::warn!(%error, "failed to clear Screen Draw toolbar native bridge");
-            }
+        if self.screen_draw_toolbar.native_bridge.close_viewport()
+            && let Err(error) = self.screen_draw_controller.set_toolbar_window(None)
+        {
+            tracing::warn!(%error, "failed to clear Screen Draw toolbar native bridge");
         }
         self.screen_draw_toolbar.last_physical_bounds = None;
         self.screen_draw_toolbar.last_observed_mode = None;

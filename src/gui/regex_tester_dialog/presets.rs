@@ -396,8 +396,9 @@ impl PresetState {
                 if ui.add_enabled(self.store.is_writable(), egui::Button::new("Save new preset")).clicked() {
                     action = Some(PresetAction::Save);
                 }
-                if let Some(id) = self.selected {
-                    if let Some(preset) = self.store.get(id) {
+                if let Some(id) = self.selected
+                    && let Some(preset) = self.store.get(id)
+                {
                         ui.separator();
                         ui.strong(format!("Selected: {}", preset.name));
                         ui.label(egui::RichText::new(super::utf8_prefix(&preset.pattern, 160)).monospace());
@@ -418,7 +419,6 @@ impl PresetState {
                                 if ui.button("Cancel").clicked() { action = Some(PresetAction::CancelDelete); }
                             });
                         }
-                    }
                 }
             });
         action

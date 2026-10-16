@@ -2106,12 +2106,13 @@ impl NotesDialog {
         if rebuild_idx {
             self.rebuild_index();
         }
-        if let Some(note) = note_to_save {
-            if self.save_note_draft(note, app) && save_edit {
-                self.edit_idx = None;
-                self.text.clear();
-                self.refresh_entries_from_notes();
-            }
+        if let Some(note) = note_to_save
+            && self.save_note_draft(note, app)
+            && save_edit
+        {
+            self.edit_idx = None;
+            self.text.clear();
+            self.refresh_entries_from_notes();
         }
         if close {
             window_open = false;
