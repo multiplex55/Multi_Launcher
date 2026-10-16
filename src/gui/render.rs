@@ -1,3 +1,5 @@
+#[cfg(feature = "qa-framebuffer-capture")]
+use super::qa_framebuffer::{RootListDiagnostic, VisibleRowDiagnostic};
 use super::*;
 
 use crate::radial::acceptance_trace::{
@@ -413,6 +415,39 @@ impl RootListGeometryCache {
 
     pub(super) fn result_generation(&self) -> u64 {
         self.result_generation
+    }
+
+    #[cfg(feature = "qa-framebuffer-capture")]
+    fn diagnostic_visible_rows(
+        &self,
+        visible_rows: &[usize],
+        is_grid: bool,
+        viewport: egui::Rect,
+    ) -> Vec<VisibleRowDiagnostic> {
+        visible_rows
+            .iter()
+            .filter_map(|&index| {
+                let top = *self.row_tops.get(index)?;
+                let bottom = top + *self.row_heights.get(index)?;
+                let (visual_top, visual_bottom) = if is_grid {
+                    (
+                        *self.grid_visual_row_tops.get(index).unwrap_or(&top),
+                        *self.grid_visual_row_bottoms.get(index).unwrap_or(&bottom),
+                    )
+                } else {
+                    (top, bottom)
+                };
+                Some(VisibleRowDiagnostic {
+                    index,
+                    top,
+                    bottom,
+                    visual_top,
+                    visual_bottom,
+                    intersects_viewport: visual_bottom > viewport.min.y
+                        && visual_top < viewport.max.y,
+                })
+            })
+            .collect()
     }
 
     #[cfg(test)]
@@ -880,6 +915,64 @@ impl RootListGeometryCache {
     fn clear_popup_owner(&mut self) {
         self.popup_owner = None;
         self.popup_response = None;
+    }
+}
+
+#[cfg(feature = "qa-framebuffer-capture")]
+fn root_render_diagnostic(
+    app: &LauncherApp,
+    ui: &egui::Ui,
+    viewport: egui::Rect,
+    mode: &'static str,
+    visible_rows: &[usize],
+    geometry_rebuilt: bool,
+) -> RootListDiagnostic {
+    use std::hash::{Hash, Hasher};
+
+    let cache = &app.root_list_geometry;
+    let resolved_theme = super::theme::resolved_for_current_context(ui.ctx());
+    let style_description = format!(
+        "theme={resolved_theme:?};visuals={:?};text_styles={:?};fonts={:?}",
+        ui.visuals(),
+        ui.style().text_styles,
+        cache
+            .key
+            .as_ref()
+            .map(|key| (&key.button_font, &key.secondary_font))
+    );
+    let mut style_hasher = std::collections::hash_map::DefaultHasher::new();
+    style_description.hash(&mut style_hasher);
+    let style_identity = format!("{:016x}", style_hasher.finish());
+    let rect = |rect: egui::Rect| [rect.min.x, rect.min.y, rect.max.x, rect.max.y];
+
+    RootListDiagnostic {
+        mode,
+        result_count: app.results.len(),
+        selected_index: app.selected.filter(|index| *index < app.results.len()),
+        scroll_viewport: rect(viewport),
+        content_clip: rect(ui.clip_rect()),
+        content_origin: [ui.max_rect().min.x, ui.max_rect().min.y],
+        scroll_inner_rect: [0.0; 4],
+        content_size: [0.0; 2],
+        scroll_offset: [0.0; 2],
+        total_content_height: cache.total_height,
+        visible_rows: cache.diagnostic_visible_rows(visible_rows, mode == "grid", viewport),
+        result_generation: cache.result_generation,
+        cache_key: cache
+            .key
+            .as_ref()
+            .map_or_else(|| "missing".to_owned(), |key| format!("{key:?}")),
+        geometry_rebuild_count: 0,
+        rebuilt_this_frame: geometry_rebuilt,
+        font_revision: super::font_revision::active_revision(ui.ctx()),
+        style_identity,
+        resolved_appearance: resolved_theme.map(|theme| format!("{:?}", theme.appearance)),
+        overall_text_scale: resolved_theme.map(|theme| theme.metrics.body_text_size / 14.0),
+        query_scale: app.query_scale,
+        list_scale: app.list_scale,
+        pixels_per_point: ui.ctx().pixels_per_point(),
+        native_pixels_per_point: ui.ctx().native_pixels_per_point(),
+        zoom_factor: ui.ctx().zoom_factor(),
     }
 }
 
@@ -3457,6 +3550,10 @@ impl LauncherApp {
                 let aligned_top = (top * pixels_per_point).ceil() / pixels_per_point;
                 ui.add_space((aligned_top - top).max(0.0));
                 let area_height = ui.available_height();
+                #[cfg(feature = "qa-framebuffer-capture")]
+                let root_diagnostics_enabled = self.qa_framebuffer_root_diagnostics_enabled();
+                #[cfg(feature = "qa-framebuffer-capture")]
+                let mut root_diagnostic = None;
                 let _root_scroll_output = ScrollArea::vertical()
                     .max_height(area_height)
                     .show_viewport(ui, |ui, viewport| {
@@ -3546,6 +3643,18 @@ impl LauncherApp {
                                     visible_rows.push(owner / cols);
                                     visible_rows.sort_unstable();
                                     visible_rows.dedup();
+                                }
+
+                                #[cfg(feature = "qa-framebuffer-capture")]
+                                if root_diagnostics_enabled {
+                                    root_diagnostic = Some(root_render_diagnostic(
+                                        self,
+                                        ui,
+                                        viewport,
+                                        "grid",
+                                        &visible_rows,
+                                        geometry_rebuilt,
+                                    ));
                                 }
 
                                 for row in visible_rows {
@@ -3682,6 +3791,18 @@ impl LauncherApp {
                                     visible_rows.push(owner);
                                     visible_rows.sort_unstable();
                                     visible_rows.dedup();
+                                }
+
+                                #[cfg(feature = "qa-framebuffer-capture")]
+                                if root_diagnostics_enabled {
+                                    root_diagnostic = Some(root_render_diagnostic(
+                                        self,
+                                        ui,
+                                        viewport,
+                                        "list",
+                                        &visible_rows,
+                                        geometry_rebuilt,
+                                    ));
                                 }
 
                                 let text_presentation = RootResultTextPresentation::new(ui);
@@ -3847,6 +3968,28 @@ impl LauncherApp {
                             }
                         });
                     });
+                #[cfg(feature = "qa-framebuffer-capture")]
+                if let Some(mut diagnostic) = root_diagnostic {
+                    diagnostic.scroll_inner_rect = [
+                        _root_scroll_output.inner_rect.min.x,
+                        _root_scroll_output.inner_rect.min.y,
+                        _root_scroll_output.inner_rect.max.x,
+                        _root_scroll_output.inner_rect.max.y,
+                    ];
+                    diagnostic.content_size = [
+                        _root_scroll_output.content_size.x,
+                        _root_scroll_output.content_size.y,
+                    ];
+                    diagnostic.scroll_offset = [
+                        _root_scroll_output.state.offset.x,
+                        _root_scroll_output.state.offset.y,
+                    ];
+                    let geometry_rebuilt = diagnostic.rebuilt_this_frame;
+                    self.qa_framebuffer_record_root_list_diagnostic(
+                        diagnostic,
+                        geometry_rebuilt,
+                    );
+                }
                 #[cfg(test)]
                 {
                     self.test_root_scroll_area_extent = Some((

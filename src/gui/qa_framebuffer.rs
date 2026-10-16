@@ -22,6 +22,7 @@ const RECEIPT_FILE_NAME: &str = "receipt.json";
 const SCREENSHOT_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 const QR_STARTUP_CAPTURE_TIMEOUT: Duration = Duration::from_secs(120);
 const WRITER_QUEUE_CAPACITY: usize = 2;
+const MAX_CAPTURE_COUNT: u8 = 16;
 
 fn selected_reply_timeout(target: CaptureTarget) -> Duration {
     match target {
@@ -81,12 +82,20 @@ struct RequestManifest {
     request_id: String,
     target: CaptureTarget,
     trigger: CaptureTrigger,
+    #[serde(default = "default_capture_count")]
+    capture_count: u8,
+    #[serde(default)]
+    diagnostics: bool,
     output_dir: PathBuf,
     fixture_manifest_sha256: String,
     build_receipt_identity: String,
 }
 
-/// A validated, single-use capture request prepared by the production GUI
+const fn default_capture_count() -> u8 {
+    1
+}
+
+/// A validated framebuffer-capture request prepared by the production GUI
 /// launcher. Test and benchmark constructors never load this from the process
 /// environment.
 pub struct QaFramebufferRequest {
@@ -191,6 +200,19 @@ fn validate_manifest(manifest: &RequestManifest) -> Result<(), String> {
     if manifest.target == CaptureTarget::Qr && manifest.trigger == CaptureTrigger::F11 {
         return Err("QR framebuffer capture supports the Startup trigger only".into());
     }
+    if !(1..=MAX_CAPTURE_COUNT).contains(&manifest.capture_count) {
+        return Err(format!(
+            "manifest capture_count must be between 1 and {MAX_CAPTURE_COUNT}"
+        ));
+    }
+    if manifest.capture_count > 1
+        && (manifest.target != CaptureTarget::Root || manifest.trigger != CaptureTrigger::F11)
+    {
+        return Err("multiple captures require the ROOT/F11 trigger".into());
+    }
+    if manifest.diagnostics && manifest.target != CaptureTarget::Root {
+        return Err("root geometry diagnostics require the ROOT capture target".into());
+    }
     if !is_sha256(&manifest.fixture_manifest_sha256) {
         return Err("manifest fixture_manifest_sha256 must be 64 hexadecimal characters".into());
     }
@@ -291,6 +313,7 @@ struct RetainedPassMarker {
     ui_pass_index: u32,
     eligibility: SurfaceEligibility,
     evidence: Option<FrameEvidence>,
+    root_list_diagnostic: Option<RootListDiagnostic>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -386,6 +409,8 @@ struct CompletionReceipt {
     request_id: String,
     target: CaptureTarget,
     trigger: CaptureTrigger,
+    capture_index: u8,
+    capture_count: u8,
     fixture_manifest_sha256: String,
     build_receipt_identity: String,
     manifest_sha256: String,
@@ -397,6 +422,8 @@ struct CompletionReceipt {
     dispatch_boundary_baseline: Option<QrRenderEvidence>,
     captured: Option<FrameEvidence>,
     screenshot_received: Option<ScreenshotReplyEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    root_list_diagnostic: Option<RootListDiagnostic>,
     saved: Option<SaveEvidence>,
     failure: Option<String>,
 }
@@ -411,6 +438,8 @@ impl CompletionReceipt {
             request_id: request.manifest.request_id.clone(),
             target: request.manifest.target,
             trigger: request.manifest.trigger,
+            capture_index: 1,
+            capture_count: request.manifest.capture_count,
             fixture_manifest_sha256: request.manifest.fixture_manifest_sha256.clone(),
             build_receipt_identity: request.manifest.build_receipt_identity.clone(),
             manifest_sha256: request.manifest_sha256.clone(),
@@ -421,15 +450,72 @@ impl CompletionReceipt {
             dispatch_boundary_baseline: None,
             captured: None,
             screenshot_received: None,
+            root_list_diagnostic: None,
             saved: None,
             failure: None,
         }
     }
+
+    fn for_capture(&self, capture_index: u8) -> Self {
+        let mut receipt = self.clone();
+        receipt.status = ReceiptStatus::Failed;
+        receipt.capture_index = capture_index;
+        receipt.issued = None;
+        receipt.dispatch_boundary_baseline = None;
+        receipt.captured = None;
+        receipt.screenshot_received = None;
+        receipt.root_list_diagnostic = None;
+        receipt.saved = None;
+        receipt.failure = None;
+        receipt
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct RootListDiagnostic {
+    pub(super) mode: &'static str,
+    pub(super) result_count: usize,
+    pub(super) selected_index: Option<usize>,
+    pub(super) scroll_viewport: [f32; 4],
+    pub(super) content_clip: [f32; 4],
+    pub(super) content_origin: [f32; 2],
+    pub(super) scroll_inner_rect: [f32; 4],
+    pub(super) content_size: [f32; 2],
+    pub(super) scroll_offset: [f32; 2],
+    pub(super) total_content_height: f32,
+    pub(super) visible_rows: Vec<VisibleRowDiagnostic>,
+    pub(super) result_generation: u64,
+    pub(super) cache_key: String,
+    pub(super) geometry_rebuild_count: u64,
+    pub(super) rebuilt_this_frame: bool,
+    pub(super) font_revision: u64,
+    pub(super) style_identity: String,
+    pub(super) resolved_appearance: Option<String>,
+    pub(super) overall_text_scale: Option<f32>,
+    pub(super) query_scale: f32,
+    pub(super) list_scale: f32,
+    pub(super) pixels_per_point: f32,
+    pub(super) native_pixels_per_point: Option<f32>,
+    pub(super) zoom_factor: f32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct VisibleRowDiagnostic {
+    pub(super) index: usize,
+    pub(super) top: f32,
+    pub(super) bottom: f32,
+    pub(super) visual_top: f32,
+    pub(super) visual_bottom: f32,
+    pub(super) intersects_viewport: bool,
 }
 
 pub(super) struct FramebufferProbe {
     token: UserData,
     target: CaptureTarget,
+    capture_count: u8,
+    diagnostics_enabled: bool,
+    geometry_rebuild_count: u64,
+    latest_root_list_diagnostic: Option<RootListDiagnostic>,
     phase: ProbePhase,
     logic_frame_id: u64,
     ui_pass_id: u64,
@@ -462,11 +548,17 @@ impl FramebufferProbe {
     ) -> Result<Self, String> {
         let (writer_tx, writer_rx) = spawn_writer(request.output_dir.clone(), ctx, reply_timeout)?;
         let target = request.manifest.target;
+        let capture_count = request.manifest.capture_count;
+        let diagnostics_enabled = request.manifest.diagnostics;
         let token = UserData::new(ScreenshotToken(1));
         let receipt = CompletionReceipt::new(&request, reply_timeout);
         let mut probe = Self {
             token,
             target,
+            capture_count,
+            diagnostics_enabled,
+            geometry_rebuild_count: 0,
+            latest_root_list_diagnostic: None,
             phase: ProbePhase::Armed,
             logic_frame_id: 0,
             ui_pass_id: 0,
@@ -495,6 +587,7 @@ impl FramebufferProbe {
         if !self.needs_root_logic() {
             return;
         }
+        let was_armed_at_entry = self.phase == ProbePhase::Armed;
         self.logic_frame_id = self.logic_frame_id.saturating_add(1);
         self.retained_pass = None;
         self.current_ui_pass_id = None;
@@ -527,6 +620,7 @@ impl FramebufferProbe {
 
         if self.target == CaptureTarget::Root
             && self.receipt.trigger == CaptureTrigger::F11
+            && was_armed_at_entry
             && self.phase == ProbePhase::Armed
             && let Some(eligibility) = eligibility
             && eligibility.eligible()
@@ -572,6 +666,29 @@ impl FramebufferProbe {
         self.current_ui_pass_id = Some(self.ui_pass_id);
         self.current_ui_pass_index = pass_index;
         self.retained_pass = None;
+        self.latest_root_list_diagnostic = None;
+    }
+
+    fn record_root_list_diagnostic(
+        &mut self,
+        mut diagnostic: RootListDiagnostic,
+        geometry_rebuilt: bool,
+    ) {
+        if !self.root_diagnostics_active() {
+            return;
+        }
+        if geometry_rebuilt {
+            self.geometry_rebuild_count = self.geometry_rebuild_count.saturating_add(1);
+        }
+        diagnostic.geometry_rebuild_count = self.geometry_rebuild_count;
+        diagnostic.rebuilt_this_frame = geometry_rebuilt;
+        self.latest_root_list_diagnostic = Some(diagnostic);
+    }
+
+    fn root_diagnostics_active(&self) -> bool {
+        self.diagnostics_enabled
+            && self.target == CaptureTarget::Root
+            && self.needs_retained_marker()
     }
 
     fn finish_ui_pass(&mut self, eligibility: SurfaceEligibility, evidence: Option<FrameEvidence>) {
@@ -589,6 +706,7 @@ impl FramebufferProbe {
             ui_pass_index: self.current_ui_pass_index,
             eligibility,
             evidence,
+            root_list_diagnostic: self.latest_root_list_diagnostic.take(),
         });
     }
 
@@ -806,6 +924,7 @@ impl FramebufferProbe {
                         debug_assert_eq!(captured.ui_pass_index, marker.ui_pass_index);
                         captured.evidence_stage = "expected_capture_frame_cpu_ui_completion";
                         self.receipt.captured = Some(captured);
+                        self.receipt.root_list_diagnostic = marker.root_list_diagnostic.clone();
                         self.capture_logic_frame_id = Some(marker.logic_frame_id);
                         self.expected_reply_logic_frame_id =
                             Some(marker.logic_frame_id.saturating_add(1));
@@ -929,14 +1048,32 @@ impl FramebufferProbe {
     fn poll_writer_outcome(&mut self) {
         match self.writer_rx.try_recv() {
             Ok(outcome) => {
-                self.phase = if outcome.status == ReceiptStatus::Saved && outcome.receipt_written {
-                    ProbePhase::Complete
+                let saved = outcome.status == ReceiptStatus::Saved && outcome.receipt_written;
+                if saved
+                    && outcome.capture_index == self.receipt.capture_index
+                    && outcome.capture_count == self.capture_count
+                {
+                    self.receipt.status = ReceiptStatus::Saved;
+                    if self.receipt.capture_index < self.capture_count {
+                        self.arm_next_capture();
+                    } else {
+                        self.phase = ProbePhase::Complete;
+                    }
                 } else {
-                    ProbePhase::Failed
-                };
-                self.receipt.status = outcome.status;
-                if let Some(error) = outcome.error {
-                    self.receipt.failure = Some(error);
+                    self.phase = ProbePhase::Failed;
+                    self.receipt.status = ReceiptStatus::Failed;
+                    self.receipt.failure = outcome.error.or_else(|| {
+                        (outcome.capture_index != self.receipt.capture_index
+                            || outcome.capture_count != self.capture_count)
+                            .then(|| {
+                                "QA framebuffer writer returned an out-of-sequence capture receipt"
+                                    .into()
+                            })
+                            .or_else(|| {
+                                (outcome.status == ReceiptStatus::Saved && !outcome.receipt_written)
+                                    .then(|| "QA framebuffer receipt was not saved".into())
+                            })
+                    });
                 }
             }
             Err(TryRecvError::Empty) => {}
@@ -948,6 +1085,23 @@ impl FramebufferProbe {
                 }
             }
         }
+    }
+
+    fn arm_next_capture(&mut self) {
+        let next_index = self.receipt.capture_index.saturating_add(1);
+        self.token = UserData::new(ScreenshotToken(u64::from(next_index)));
+        self.receipt = self.receipt.for_capture(next_index);
+        self.phase = ProbePhase::Armed;
+        self.issue_logic_frame_id = None;
+        self.capture_logic_frame_id = None;
+        self.expected_reply_logic_frame_id = None;
+        self.reply_wait_armed = false;
+        self.latest_qr_observation = None;
+        self.qr_acquired = false;
+        self.qr_capture_parent_logic_frame_id = None;
+        self.pending_reply = None;
+        self.retained_pass = None;
+        self.latest_root_list_diagnostic = None;
     }
 }
 
@@ -961,6 +1115,22 @@ impl LauncherApp {
         }
         self.qa_framebuffer = Some(FramebufferProbe::new(request, self.egui_ctx.clone())?);
         Ok(())
+    }
+
+    pub(super) fn qa_framebuffer_root_diagnostics_enabled(&self) -> bool {
+        self.qa_framebuffer
+            .as_ref()
+            .is_some_and(FramebufferProbe::root_diagnostics_active)
+    }
+
+    pub(super) fn qa_framebuffer_record_root_list_diagnostic(
+        &mut self,
+        diagnostic: RootListDiagnostic,
+        geometry_rebuilt: bool,
+    ) {
+        if let Some(probe) = self.qa_framebuffer.as_mut() {
+            probe.record_root_list_diagnostic(diagnostic, geometry_rebuilt);
+        }
     }
 
     pub(super) fn qa_framebuffer_begin_root_logic(&mut self, ctx: &egui::Context) {
@@ -1384,6 +1554,8 @@ struct WriterOutcome {
     status: ReceiptStatus,
     error: Option<String>,
     receipt_written: bool,
+    capture_index: u8,
+    capture_count: u8,
 }
 
 fn spawn_writer(
@@ -1396,7 +1568,7 @@ fn spawn_writer(
     thread::Builder::new()
         .name("qa-framebuffer-writer".into())
         .spawn(move || {
-            if let Ok(job) = job_rx.recv() {
+            while let Ok(job) = job_rx.recv() {
                 let job = match job {
                     WriterJob::AwaitReply(mut receipt) => {
                         match job_rx.recv_timeout(reply_timeout) {
@@ -1444,8 +1616,16 @@ fn spawn_writer(
                     job => job,
                 };
                 let outcome = write_job(&output_dir, job);
-                let _ = outcome_tx.send(outcome);
+                let continue_sequence = outcome.status == ReceiptStatus::Saved
+                    && outcome.receipt_written
+                    && outcome.capture_index < outcome.capture_count;
+                if outcome_tx.send(outcome).is_err() {
+                    break;
+                }
                 ctx.request_repaint_of(ViewportId::ROOT);
+                if !continue_sequence {
+                    break;
+                }
             }
         })
         .map_err(|error| format!("failed to start bounded QA framebuffer writer: {error}"))?;
@@ -1459,18 +1639,20 @@ fn write_job(output_dir: &Path, job: WriterJob) -> WriterOutcome {
             receipt
         }
         WriterJob::Save { mut receipt, image } => {
+            let (png_file_name, _) =
+                capture_artifact_names(receipt.capture_index, receipt.capture_count);
             let image_dimensions = image_dimensions(&image);
             match image_dimensions.and_then(|(width, height)| encode_png(&image, width, height)) {
                 Ok((width, height, png)) => {
                     let png_sha256 = sha256_bytes(&png);
-                    let png_path = output_dir.join(PNG_FILE_NAME);
+                    let png_path = output_dir.join(&png_file_name);
                     match write_new_file(&png_path, &png) {
                         Ok(()) => {
                             let capture_evidence = receipt.captured.as_ref();
                             receipt.status = ReceiptStatus::Saved;
                             receipt.saved = Some(SaveEvidence {
                                 completed_at_unix_ms: unix_millis(),
-                                png_file: PNG_FILE_NAME.into(),
+                                png_file: png_file_name,
                                 png_sha256,
                                 width,
                                 height,
@@ -1503,6 +1685,9 @@ fn write_job(output_dir: &Path, job: WriterJob) -> WriterOutcome {
 
     let error = receipt.failure.clone();
     let status = receipt.status;
+    let capture_index = receipt.capture_index;
+    let capture_count = receipt.capture_count;
+    let (_, receipt_file_name) = capture_artifact_names(capture_index, capture_count);
     receipt.failure = error.clone();
     let receipt_bytes = match serde_json::to_vec_pretty(&receipt) {
         Ok(bytes) => bytes,
@@ -1513,14 +1698,18 @@ fn write_job(output_dir: &Path, job: WriterJob) -> WriterOutcome {
                     "failed to serialize completion receipt: {serialize_error}"
                 )),
                 receipt_written: false,
+                capture_index,
+                capture_count,
             };
         }
     };
-    match write_new_file(&output_dir.join(RECEIPT_FILE_NAME), &receipt_bytes) {
+    match write_new_file(&output_dir.join(receipt_file_name), &receipt_bytes) {
         Ok(()) => WriterOutcome {
             status,
             error,
             receipt_written: true,
+            capture_index,
+            capture_count,
         },
         Err(write_error) => WriterOutcome {
             status: ReceiptStatus::Failed,
@@ -1528,7 +1717,20 @@ fn write_job(output_dir: &Path, job: WriterJob) -> WriterOutcome {
                 "failed to create completion receipt exclusively: {write_error}"
             )),
             receipt_written: false,
+            capture_index,
+            capture_count,
         },
+    }
+}
+
+fn capture_artifact_names(capture_index: u8, capture_count: u8) -> (String, String) {
+    if capture_count == 1 {
+        (PNG_FILE_NAME.into(), RECEIPT_FILE_NAME.into())
+    } else {
+        (
+            format!("framebuffer-{capture_index:03}.png"),
+            format!("receipt-{capture_index:03}.json"),
+        )
     }
 }
 
@@ -1644,6 +1846,8 @@ mod tests {
                 request_id: "test-request".into(),
                 target,
                 trigger,
+                capture_count: 1,
+                diagnostics: false,
                 output_dir: output_dir.clone(),
                 fixture_manifest_sha256: "a".repeat(64),
                 build_receipt_identity: "test-build".into(),
@@ -1717,13 +1921,30 @@ mod tests {
         Receiver<WriterJob>,
         SyncSender<WriterOutcome>,
     ) {
-        let request = test_request_for_target(target, trigger, PathBuf::from("unused"));
+        test_probe_with_capture_count(trigger, target, 1)
+    }
+
+    fn test_probe_with_capture_count(
+        trigger: CaptureTrigger,
+        target: CaptureTarget,
+        capture_count: u8,
+    ) -> (
+        FramebufferProbe,
+        Receiver<WriterJob>,
+        SyncSender<WriterOutcome>,
+    ) {
+        let mut request = test_request_for_target(target, trigger, PathBuf::from("unused"));
+        request.manifest.capture_count = capture_count;
         let token = UserData::new(ScreenshotToken(1));
         let (writer_tx, writer_rx) = mpsc::sync_channel(WRITER_QUEUE_CAPACITY);
         let (outcome_tx, outcome_rx) = mpsc::sync_channel(1);
         let mut probe = FramebufferProbe {
             token,
             target,
+            capture_count,
+            diagnostics_enabled: false,
+            geometry_rebuild_count: 0,
+            latest_root_list_diagnostic: None,
             phase: ProbePhase::Armed,
             logic_frame_id: 0,
             ui_pass_id: 0,
@@ -1810,6 +2031,7 @@ mod tests {
             ui_pass_index: 0,
             eligibility,
             evidence: Some(test_evidence(3, 3, 0)),
+            root_list_diagnostic: None,
         });
     }
 
@@ -2051,6 +2273,8 @@ mod tests {
             request_id: "test-request".into(),
             target: CaptureTarget::Qr,
             trigger: CaptureTrigger::F11,
+            capture_count: 1,
+            diagnostics: false,
             output_dir: PathBuf::from("output"),
             fixture_manifest_sha256: "a".repeat(64),
             build_receipt_identity: "test-build".into(),
@@ -2063,6 +2287,124 @@ mod tests {
     }
 
     #[test]
+    fn legacy_manifest_defaults_to_one_capture_and_diagnostics_off() {
+        let manifest: RequestManifest = serde_json::from_value(serde_json::json!({
+            "run_id": "legacy-run",
+            "request_id": "legacy-request",
+            "target": "ROOT",
+            "trigger": "f11",
+            "output_dir": "output",
+            "fixture_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "build_receipt_identity": "test-build"
+        }))
+        .unwrap();
+
+        assert_eq!(manifest.capture_count, 1);
+        assert!(!manifest.diagnostics);
+        validate_manifest(&manifest).unwrap();
+        assert_eq!(
+            capture_artifact_names(1, 1),
+            ("framebuffer.png".into(), "receipt.json".into())
+        );
+    }
+
+    #[test]
+    fn repeated_capture_manifest_is_bounded_to_root_f11() {
+        let manifest = |target, trigger, capture_count| RequestManifest {
+            run_id: "multi-run".into(),
+            request_id: "multi-request".into(),
+            target,
+            trigger,
+            capture_count,
+            diagnostics: false,
+            output_dir: PathBuf::from("output"),
+            fixture_manifest_sha256: "a".repeat(64),
+            build_receipt_identity: "test-build".into(),
+        };
+
+        validate_manifest(&manifest(CaptureTarget::Root, CaptureTrigger::F11, 16)).unwrap();
+        assert_eq!(
+            validate_manifest(&manifest(CaptureTarget::Root, CaptureTrigger::F11, 17)).unwrap_err(),
+            "manifest capture_count must be between 1 and 16"
+        );
+        assert_eq!(
+            validate_manifest(&manifest(CaptureTarget::Root, CaptureTrigger::Startup, 2))
+                .unwrap_err(),
+            "multiple captures require the ROOT/F11 trigger"
+        );
+        assert_eq!(
+            capture_artifact_names(3, 8),
+            ("framebuffer-003.png".into(), "receipt-003.json".into())
+        );
+    }
+
+    #[test]
+    fn f11_pressed_while_saving_is_not_reused_for_the_next_capture() {
+        let (mut probe, _writer_rx, outcome_tx) =
+            test_probe_with_capture_count(CaptureTrigger::F11, CaptureTarget::Root, 2);
+        probe.phase = ProbePhase::Saving;
+        let prior_token = probe.token.clone();
+        outcome_tx
+            .send(WriterOutcome {
+                status: ReceiptStatus::Saved,
+                error: None,
+                receipt_written: true,
+                capture_index: 1,
+                capture_count: 2,
+            })
+            .unwrap();
+
+        let ctx = egui::Context::default();
+        let f11_input = |pressed| {
+            let mut input = egui::RawInput {
+                events: vec![Event::Key {
+                    key: Key::F11,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            input.viewports.get_mut(&ViewportId::ROOT).unwrap().focused = Some(true);
+            input
+        };
+
+        ctx.begin_pass(f11_input(true));
+        probe.begin_root_logic(&ctx, Some(eligible_surface()));
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        assert_eq!(probe.receipt.capture_index, 2);
+        assert_ne!(probe.token, prior_token);
+        assert!(ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Key { key: Key::F11, .. }))
+        }));
+        ctx.end_pass().drop_without_applying_deltas();
+
+        ctx.begin_pass(f11_input(false));
+        probe.begin_root_logic(&ctx, Some(eligible_surface()));
+        assert_eq!(probe.phase, ProbePhase::Armed);
+        ctx.end_pass().drop_without_applying_deltas();
+
+        ctx.begin_pass(f11_input(true));
+        probe.begin_root_logic(&ctx, Some(eligible_surface()));
+        assert_eq!(probe.phase, ProbePhase::Ready);
+        assert!(!ctx.input(|input| {
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, Event::Key { key: Key::F11, .. }))
+        }));
+        assert_eq!(
+            probe.logic_frame_id, 3,
+            "frame ids remain monotonic across captures"
+        );
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
     fn qr_startup_wait_times_out_when_the_dialog_never_opens() {
         let output_dir = tempfile::tempdir().unwrap();
         let request = QaFramebufferRequest {
@@ -2071,6 +2413,8 @@ mod tests {
                 request_id: "unopened-qr-request".into(),
                 target: CaptureTarget::Qr,
                 trigger: CaptureTrigger::Startup,
+                capture_count: 1,
+                diagnostics: false,
                 output_dir: output_dir.path().to_path_buf(),
                 fixture_manifest_sha256: "a".repeat(64),
                 build_receipt_identity: "test-build".into(),
@@ -2249,6 +2593,69 @@ mod tests {
             3
         );
         assert!(matches!(writer_rx.try_recv(), Ok(WriterJob::Save { .. })));
+    }
+
+    #[test]
+    fn root_geometry_diagnostics_are_opt_in_and_retained_with_the_capture_pass() {
+        let (mut probe, _writer_rx, _outcome_tx) = test_probe(CaptureTrigger::Startup);
+        let diagnostic = || RootListDiagnostic {
+            mode: "list",
+            result_count: 8,
+            selected_index: Some(3),
+            scroll_viewport: [1.0, 2.0, 30.0, 40.0],
+            content_clip: [1.0, 2.0, 30.0, 40.0],
+            content_origin: [1.0, 2.0],
+            scroll_inner_rect: [0.0; 4],
+            content_size: [0.0; 2],
+            scroll_offset: [0.0; 2],
+            total_content_height: 100.0,
+            visible_rows: vec![VisibleRowDiagnostic {
+                index: 3,
+                top: 20.0,
+                bottom: 40.0,
+                visual_top: 20.0,
+                visual_bottom: 41.0,
+                intersects_viewport: true,
+            }],
+            result_generation: 7,
+            cache_key: "test-key".into(),
+            geometry_rebuild_count: 0,
+            rebuilt_this_frame: false,
+            font_revision: 2,
+            style_identity: "test-style".into(),
+            resolved_appearance: Some("dark".into()),
+            overall_text_scale: Some(1.0),
+            query_scale: 1.0,
+            list_scale: 1.0,
+            pixels_per_point: 1.0,
+            native_pixels_per_point: Some(1.0),
+            zoom_factor: 1.0,
+        };
+
+        probe.record_root_list_diagnostic(diagnostic(), true);
+        assert!(probe.latest_root_list_diagnostic.is_none());
+        assert_eq!(probe.geometry_rebuild_count, 0);
+
+        probe.diagnostics_enabled = true;
+        probe.start_ui_pass(0);
+        probe.record_root_list_diagnostic(diagnostic(), true);
+        probe.finish_ui_pass(eligible_surface(), None);
+        let retained = probe.retained_pass.as_ref().unwrap();
+        let retained_diagnostic = retained.root_list_diagnostic.as_ref().unwrap();
+        assert_eq!(retained_diagnostic.result_count, 8);
+        assert_eq!(retained_diagnostic.selected_index, Some(3));
+        assert_eq!(retained_diagnostic.result_generation, 7);
+        assert_eq!(retained_diagnostic.geometry_rebuild_count, 1);
+        assert!(retained_diagnostic.rebuilt_this_frame);
+        assert_eq!(retained_diagnostic.visible_rows[0].index, 3);
+
+        probe.phase = ProbePhase::Saving;
+        assert!(!probe.root_diagnostics_active());
+        probe.record_root_list_diagnostic(diagnostic(), true);
+        assert_eq!(probe.geometry_rebuild_count, 1);
+        assert!(probe.latest_root_list_diagnostic.is_none());
+        probe.phase = ProbePhase::Complete;
+        assert!(!probe.root_diagnostics_active());
     }
 
     #[test]
@@ -2526,6 +2933,8 @@ mod tests {
                 request_id: "test-request".into(),
                 target: CaptureTarget::Root,
                 trigger: CaptureTrigger::Startup,
+                capture_count: 1,
+                diagnostics: false,
                 output_dir: output_dir.clone(),
                 fixture_manifest_sha256: "a".repeat(64),
                 build_receipt_identity: "test-build".into(),
@@ -2556,5 +2965,46 @@ mod tests {
         assert!(outcome.receipt_written);
         assert_eq!(fs::read(&png_path).unwrap(), b"existing evidence");
         let _ = fs::remove_dir_all(output_dir);
+    }
+
+    #[test]
+    fn repeated_root_captures_reuse_the_writer_with_numbered_artifacts() {
+        let output_dir = tempfile::tempdir().unwrap();
+        let request = test_request_for_target(
+            CaptureTarget::Root,
+            CaptureTrigger::F11,
+            output_dir.path().to_path_buf(),
+        );
+        let (writer_tx, writer_rx) = spawn_writer(
+            output_dir.path().to_path_buf(),
+            egui::Context::default(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+
+        for capture_index in 1..=2 {
+            let mut receipt = CompletionReceipt::new(&request, SCREENSHOT_REPLY_TIMEOUT);
+            receipt.capture_index = capture_index;
+            receipt.capture_count = 2;
+            receipt.captured = Some(test_evidence(u64::from(capture_index), 1, 0));
+            writer_tx
+                .send(WriterJob::AwaitReply(receipt.clone()))
+                .unwrap();
+            writer_tx
+                .send(WriterJob::Save {
+                    receipt,
+                    image: test_image(egui::Color32::WHITE),
+                })
+                .unwrap();
+
+            let outcome = writer_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert_eq!(outcome.status, ReceiptStatus::Saved);
+            assert!(outcome.receipt_written);
+            assert_eq!(outcome.capture_index, capture_index);
+            assert_eq!(outcome.capture_count, 2);
+            let (png_name, receipt_name) = capture_artifact_names(capture_index, 2);
+            assert!(output_dir.path().join(png_name).is_file());
+            assert!(output_dir.path().join(receipt_name).is_file());
+        }
     }
 }
