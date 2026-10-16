@@ -48482,14 +48482,16 @@ mod tests {
             acceptance_id_digest("starter-root-favorites"),
             true
         ));
-        let mut surfaces = vec![
+        let surfaces = vec![
             window(101, 44, WindowRole::OtherChild, true),
             window(102, 44, WindowRole::OtherChild, true),
         ];
-        for surface in &mut surfaces {
-            surface.bounds = [1063, 0, 1379, 316];
-        }
-        let point = POINT { x: 1221, y: 47 };
+        assert_eq!(surfaces[0].bounds, surfaces[1].bounds);
+        let [left, top, right, bottom] = surfaces[0].bounds;
+        let point = POINT {
+            x: left + (right - left) / 2,
+            y: top + (bottom - top) / 2,
+        };
         assert!(hotkey_hover_delivery_is_current(
             &surfaces, &surfaces, 44, point, point
         ));

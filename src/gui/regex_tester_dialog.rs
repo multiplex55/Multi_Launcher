@@ -166,7 +166,7 @@ impl CoreLayout {
             // A stacked information area needs room below its section selector.
             // Validation already occupies extra space; retain editor room then.
             let info_fraction = if invalid_pattern { 0.3 } else { 0.5 };
-            let max_info_height = (content.height() - gap - 1.0).max(1.0);
+            let max_info_height = (content.height() - gap - 28.0).max(1.0);
             let info_height = (content.height() * info_fraction)
                 .min(160.0)
                 .min(max_info_height);

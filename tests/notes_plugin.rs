@@ -423,25 +423,30 @@ fn note_list_filters_by_multiple_tags() {
 #[test]
 fn missing_link_colored_red() {
     let _lock = TEST_MUTEX.lock().unwrap();
+    let _cwd = OwnedCwdGuard::new();
     let _tmp = setup();
     let ctx = egui::Context::default();
     let mut app = new_app(&ctx);
+    let error_color = std::cell::Cell::new(None);
     let output = ctx.run_ui(Default::default(), |ui| {
         egui::CentralPanel::default().show(ui, |ui| {
+            error_color.set(Some(ui.visuals().error_fg_color));
             show_wiki_link(ui, &mut app, "missing");
         });
     });
-    assert!(output.shapes.iter().any(|s| match &s.shape {
-        egui::epaint::Shape::Text(t) => {
-            t.galley
+    let rendered_with_error_color = error_color.get().is_some_and(|error_color| {
+        output.shapes.iter().any(|s| match &s.shape {
+            egui::epaint::Shape::Text(t) => t
+                .galley
                 .job
                 .sections
                 .iter()
-                .any(|sec| sec.format.color == egui::Color32::RED)
-        }
-        _ => false,
-    }));
+                .any(|sec| sec.format.color == error_color),
+            _ => false,
+        })
+    });
     output.drop_without_applying_deltas();
+    assert!(rendered_with_error_color);
 }
 
 #[test]

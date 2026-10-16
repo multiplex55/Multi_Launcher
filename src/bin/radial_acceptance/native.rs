@@ -13120,9 +13120,40 @@ mod tests {
                 return Err("focus anchor unexpectedly shares the caller thread".into());
             }
 
+            let mut outer = super::RECT::default();
+            unsafe { super::GetWindowRect(hwnd, &mut outer) }
+                .map_err(|error| format!("read focus-anchor window bounds: {error}"))?;
+            let width = outer.right.saturating_sub(outer.left);
+            let height = outer.bottom.saturating_sub(outer.top);
+            if width <= 0 || height <= 0 {
+                return Err(format!(
+                    "focus anchor has invalid outer size {width}x{height}"
+                ));
+            }
+            let displays = super::suite::native_display_bounds()?;
+            let positions = focus_anchor_candidate_positions(&displays, width, height);
+            let (left, top) = positions.first().copied().ok_or_else(|| {
+                format!(
+                    "no physical display can contain focus anchor size {width}x{height}; displays={displays:?}"
+                )
+            })?;
+
             send_command(FocusAnchorCommandKind::Raise)?;
-            send_command(FocusAnchorCommandKind::MoveTo { left: 64, top: 64 })?;
-            let hit = unsafe { super::WindowFromPoint(POINT { x: 224, y: 112 }) };
+            send_command(FocusAnchorCommandKind::MoveTo { left, top })?;
+            let mut client = super::RECT::default();
+            unsafe { super::GetClientRect(hwnd, &mut client) }
+                .map_err(|error| format!("read focus-anchor client bounds: {error}"))?;
+            if client.right <= client.left || client.bottom <= client.top {
+                return Err("focus anchor has empty client bounds".into());
+            }
+            let mut client_center = POINT {
+                x: client.left + (client.right - client.left) / 2,
+                y: client.top + (client.bottom - client.top) / 2,
+            };
+            if !unsafe { super::ClientToScreen(hwnd, &mut client_center) }.as_bool() {
+                return Err("convert focus-anchor client center to screen coordinates".into());
+            }
+            let hit = unsafe { super::WindowFromPoint(client_center) };
             if hit != hwnd {
                 return Err(format!(
                     "caller WindowFromPoint did not see the input-desktop anchor: hit={} expected={}",
