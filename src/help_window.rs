@@ -86,6 +86,14 @@ impl HelpWindow {
                                 "The existing app <query> catalog syntax and the file-search plugin's Global/Directory options are unchanged. Generic provider results without a specific category appear in Commands.",
                             );
                             ui.separator();
+                            ui.label(egui::RichText::new("Snippets").strong());
+                            ui.label(
+                                "Use cs to edit saved snippets. Tags are metadata; select multiple tag chips to require all of them. The editor's Test / Preview resolves a draft without saving or copying.",
+                            );
+                            ui.label(
+                                "Automatic values: {{sys.date}}, {{sys.time}}, {{sys.clipboard}}, {{sys.window_title}}. Date/time default to %Y-%m-%d and %H:%M:%S and accept :<format>; unavailable clipboard/title values are empty. {{date}} is still an ordinary prompted field.",
+                            );
+                            ui.separator();
                             ui.label(egui::RichText::new("Dashboard").strong());
                             let dashboard_guidance = ui.add(
                                 egui::Label::new(

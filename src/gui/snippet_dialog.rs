@@ -5,8 +5,9 @@ use crate::gui::theme::widgets::{
 };
 use crate::plugins::snippet_template::{TemplateError, parse_template};
 use crate::plugins::snippets::{
-    SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition, SnippetInputKind, SnippetPreparationError,
-    load_snippets, prepare_snippet_text, snippet_preview_text, update_snippets,
+    MAX_SNIPPET_TAG_CHARS, MAX_SNIPPET_TAGS, SNIPPETS_FILE, SnippetEntry, SnippetFieldDefinition,
+    SnippetInputKind, SnippetPreparationError, load_snippets, normalize_snippet_tags,
+    prepare_snippet_text, snippet_preview_text, update_snippets,
 };
 use eframe::egui;
 use egui_toast::{Toast, ToastKind, ToastOptions};
@@ -30,11 +31,13 @@ enum CommitRejection {
     DuplicateAlias,
     InvalidEditorState,
     InvalidTemplate,
+    InvalidTags,
 }
 
 #[derive(Debug)]
 enum EditorCandidateError {
     InvalidState(&'static str),
+    InvalidTags(&'static str),
     PromptedTemplate(SnippetPreparationError),
 }
 
@@ -56,9 +59,13 @@ pub struct SnippetDialog {
     body_revealed: bool,
     prompt_for_fields: bool,
     fields: Vec<SnippetFieldDefinition>,
+    tags: Vec<String>,
+    tag_input: String,
+    tag_error: Option<String>,
     discovered_field_keys: Vec<String>,
     template_error: Option<TemplateError>,
     filter: String,
+    selected_tag_filters: Vec<String>,
     load_error: Option<String>,
     inline_error: Option<String>,
     pending_removal: Option<PendingRemoval>,
@@ -75,14 +82,54 @@ fn matches_snippet_filter(entry: &SnippetEntry, filter: &str) -> bool {
     let lowered_filter = filter.to_lowercase();
     entry.alias.to_lowercase().contains(&lowered_filter)
         || entry.text.to_lowercase().contains(&lowered_filter)
+        || entry
+            .tags
+            .iter()
+            .any(|tag| tag.to_lowercase().contains(&lowered_filter))
 }
 
+#[cfg(test)]
 fn matching_snippet_indices(entries: &[SnippetEntry], filter: &str) -> Vec<usize> {
+    matching_snippet_indices_with_tags(entries, filter, &[])
+}
+
+fn matching_snippet_indices_with_tags(
+    entries: &[SnippetEntry],
+    filter: &str,
+    selected_tags: &[String],
+) -> Vec<usize> {
+    let selected_tags = selected_tags
+        .iter()
+        .map(|tag| tag.to_lowercase())
+        .collect::<Vec<_>>();
     entries
         .iter()
         .enumerate()
-        .filter_map(|(index, entry)| matches_snippet_filter(entry, filter).then_some(index))
+        .filter_map(|(index, entry)| {
+            let matches_tags = selected_tags
+                .iter()
+                .all(|selected| entry.tags.iter().any(|tag| tag.to_lowercase() == *selected));
+            (matches_snippet_filter(entry, filter) && matches_tags).then_some(index)
+        })
         .collect()
+}
+
+fn available_snippet_tags(entries: &[SnippetEntry], selected: &[String]) -> Vec<String> {
+    let mut tags = Vec::new();
+    for tag in entries
+        .iter()
+        .flat_map(|entry| entry.tags.iter())
+        .chain(selected.iter())
+    {
+        if !tags
+            .iter()
+            .any(|known: &String| known.to_lowercase() == tag.to_lowercase())
+        {
+            tags.push(tag.clone());
+        }
+    }
+    tags.sort_by_key(|tag| tag.to_lowercase());
+    tags
 }
 
 fn body_editor_id_source(session: u64) -> (&'static str, u64) {
@@ -225,6 +272,7 @@ impl SnippetDialog {
         self.open = true;
         self.reset_editor();
         self.filter.clear();
+        self.selected_tag_filters.clear();
         self.inline_error = None;
         self.pending_removal = None;
     }
@@ -243,6 +291,7 @@ impl SnippetDialog {
         self.open = false;
         self.reset_editor();
         self.filter.clear();
+        self.selected_tag_filters.clear();
         self.load_error = None;
         self.inline_error = None;
         self.pending_removal = None;
@@ -258,10 +307,12 @@ impl SnippetDialog {
         if self.load_from(path).is_err() {
             self.reset_editor();
             self.filter.clear();
+            self.selected_tag_filters.clear();
             self.open = true;
             return;
         }
         self.filter.clear();
+        self.selected_tag_filters.clear();
         if let Some(pos) = self.entries.iter().position(|e| e.alias == alias) {
             self.begin_existing(pos);
         } else {
@@ -283,6 +334,9 @@ impl SnippetDialog {
         self.body_revealed = !entry.hide_contents;
         self.prompt_for_fields = entry.prompt_for_fields;
         self.fields = entry.fields;
+        self.tags = entry.tags;
+        self.tag_input.clear();
+        self.tag_error = None;
         self.refresh_prompted_fields();
         self.open = true;
         true
@@ -299,6 +353,9 @@ impl SnippetDialog {
         self.body_revealed = true;
         self.prompt_for_fields = false;
         self.fields.clear();
+        self.tags.clear();
+        self.tag_input.clear();
+        self.tag_error = None;
         self.discovered_field_keys.clear();
         self.template_error = None;
         self.open = true;
@@ -312,8 +369,64 @@ impl SnippetDialog {
         self.body_revealed = false;
         self.prompt_for_fields = false;
         self.fields.clear();
+        self.tags.clear();
+        self.tag_input.clear();
+        self.tag_error = None;
         self.discovered_field_keys.clear();
         self.template_error = None;
+    }
+
+    fn add_editor_tag(&mut self) {
+        if self.tag_input.trim().is_empty() {
+            self.tag_input.clear();
+            self.tag_error = None;
+            return;
+        }
+        let tag = self.tag_input.clone();
+        match self.add_editor_tag_value(&tag) {
+            Ok(()) => self.tag_input.clear(),
+            Err(error) => self.tag_error = Some(error.to_owned()),
+        }
+    }
+
+    fn add_editor_tag_value(&mut self, tag: &str) -> Result<(), &'static str> {
+        let mut candidate = self.tags.clone();
+        candidate.push(tag.to_owned());
+        match normalize_snippet_tags(candidate) {
+            Ok(tags) => {
+                self.tags = tags;
+                self.tag_error = None;
+                self.inline_error = None;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn remove_editor_tag(&mut self, tag: &str) {
+        self.tags
+            .retain(|existing| existing.to_lowercase() != tag.to_lowercase());
+        self.tag_error = None;
+        self.inline_error = None;
+    }
+
+    fn toggle_tag_filter(&mut self, tag: &str) {
+        if let Some(index) = self
+            .selected_tag_filters
+            .iter()
+            .position(|selected| selected.to_lowercase() == tag.to_lowercase())
+        {
+            self.selected_tag_filters.remove(index);
+        } else {
+            self.selected_tag_filters.push(tag.to_owned());
+        }
+        self.filter_changed();
+    }
+
+    fn clear_filter_state(&mut self) {
+        self.filter.clear();
+        self.selected_tag_filters.clear();
+        self.filter_changed();
     }
 
     fn set_prompt_for_fields(&mut self, enabled: bool) {
@@ -481,14 +594,14 @@ impl SnippetDialog {
         };
         let expected = self.entries.clone();
         let mut candidate = expected.clone();
-        let draft = if index == candidate.len() {
+        let mut draft = if index == candidate.len() {
             SnippetEntry {
                 alias: self.alias.clone(),
                 text: self.text.clone(),
                 hide_contents: self.hide_contents,
                 prompt_for_fields: self.prompt_for_fields,
                 fields: self.fields.clone(),
-                tags: Vec::new(),
+                tags: self.tags.clone(),
             }
         } else if let Some(entry) = candidate.get(index) {
             let mut draft = entry.clone();
@@ -497,12 +610,15 @@ impl SnippetDialog {
             draft.hide_contents = self.hide_contents;
             draft.prompt_for_fields = self.prompt_for_fields;
             draft.fields = self.fields.clone();
+            draft.tags = self.tags.clone();
             draft
         } else {
             return Err(EditorCandidateError::InvalidState(
                 "The edited snippet no longer exists.",
             ));
         };
+        draft.tags = normalize_snippet_tags(std::mem::take(&mut draft.tags))
+            .map_err(EditorCandidateError::InvalidTags)?;
         let mut prepared = prepare_snippet_text(&draft, &self.text)
             .map_err(EditorCandidateError::PromptedTemplate)?;
         prepared.alias = self.alias.clone();
@@ -545,8 +661,7 @@ impl SnippetDialog {
         match crate::plugins::snippets::prepare_snippet_run(draft) {
             Ok(crate::plugins::snippets::SnippetRunMode::SystemOnly(_)) => true,
             Err(_) => {
-                crate::plugins::snippet_template::parse_plain_system_template(&draft.text)
-                    .is_err()
+                crate::plugins::snippet_template::parse_plain_system_template(&draft.text).is_err()
             }
             Ok(
                 crate::plugins::snippets::SnippetRunMode::Plain
@@ -568,6 +683,10 @@ impl SnippetDialog {
         let (expected, candidate, alias_validation) = match self.editor_candidate() {
             Ok(candidate) => candidate,
             Err(EditorCandidateError::InvalidState(error)) => {
+                self.inline_error = Some(error.to_owned());
+                return None;
+            }
+            Err(EditorCandidateError::InvalidTags(error)) => {
                 self.inline_error = Some(error.to_owned());
                 return None;
             }
@@ -619,6 +738,10 @@ impl SnippetDialog {
             Err(EditorCandidateError::InvalidState(error)) => {
                 self.inline_error = Some(error.to_owned());
                 return Err(CommitFailure::Rejected(CommitRejection::InvalidEditorState));
+            }
+            Err(EditorCandidateError::InvalidTags(error)) => {
+                self.inline_error = Some(error.to_owned());
+                return Err(CommitFailure::Rejected(CommitRejection::InvalidTags));
             }
             Err(EditorCandidateError::PromptedTemplate(error)) => {
                 self.inline_error = Some(error.to_string());
@@ -675,6 +798,7 @@ impl SnippetDialog {
                     CommitRejection::InvalidTemplate => {
                         "The prompted snippet template is invalid.".to_owned()
                     }
+                    CommitRejection::InvalidTags => "Snippet tags are invalid.".to_owned(),
                 });
                 Err(CommitFailure::Rejected(rejection))
             }
@@ -879,6 +1003,82 @@ impl SnippetDialog {
                     }
                     ui.small(r"Use {{field}} for an input; prefix with \{{...}} to keep braces literal.");
                     ui.small(r"Example: Hello {{name}}. {{date}} is an ordinary input, not a computed date.");
+                    compact_section_heading(
+                        ui,
+                        &format!("Tags ({}/{MAX_SNIPPET_TAGS})", self.tags.len()),
+                        Some("Tags are searchable labels; adding or removing them never changes snippet text."),
+                    );
+                    let mut add_tag = false;
+                    let mut tag_input_changed = false;
+                    ui.horizontal(|ui| {
+                        let button_width = 64.0;
+                        let spacing = ui.spacing().item_spacing.x;
+                        let input_width = (ui.available_width() - button_width - spacing).max(80.0);
+                        let input = ui.add_sized(
+                            [input_width, ui.spacing().interact_size.y],
+                            egui::TextEdit::singleline(&mut self.tag_input)
+                                .hint_text(format!("Add a tag (up to {MAX_SNIPPET_TAG_CHARS} characters)")),
+                        );
+                        tag_input_changed = input.changed();
+                        add_tag |= input.lost_focus()
+                            && ui.input(|events| events.key_pressed(egui::Key::Enter));
+                        add_tag |= ui
+                            .add_sized([button_width, ui.spacing().interact_size.y], egui::Button::new("Add tag"))
+                            .clicked();
+                    });
+                    if tag_input_changed {
+                        self.tag_error = None;
+                    }
+                    if add_tag {
+                        self.add_editor_tag();
+                    }
+                    if self.tags.is_empty() {
+                        secondary_help(ui, "No tags yet. Add up to 16 labels; spaces within a tag are normalized.");
+                    } else {
+                        ui.horizontal_wrapped(|ui| {
+                            for tag in self.tags.clone() {
+                                if ui
+                                    .selectable_label(true, format!("{tag}  ×"))
+                                    .on_hover_text("Remove this tag from the draft.")
+                                    .clicked()
+                                {
+                                    self.remove_editor_tag(&tag);
+                                }
+                            }
+                        });
+                    }
+                    let suggested_tags = available_snippet_tags(&self.entries, &[])
+                        .into_iter()
+                        .filter(|tag| {
+                            !self
+                                .tags
+                                .iter()
+                                .any(|current| current.to_lowercase() == tag.to_lowercase())
+                        })
+                        .collect::<Vec<_>>();
+                    let mut selected_tags_to_add = Vec::new();
+                    if !suggested_tags.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.small("Add existing:");
+                            for tag in suggested_tags {
+                                if ui.selectable_label(false, tag.as_str()).clicked() {
+                                    selected_tags_to_add.push(tag);
+                                }
+                            }
+                        });
+                    }
+                    for tag in selected_tags_to_add {
+                        if let Err(error) = self.add_editor_tag_value(&tag) {
+                            self.tag_error = Some(error.to_owned());
+                        }
+                    }
+                    if let Some(error) = &self.tag_error {
+                        semantic_status(ui, StatusTone::Error, "Tag could not be added", Some(error));
+                    }
+                    secondary_help(
+                        ui,
+                        "Automatic values: {{sys.date}}, {{sys.time}}, {{sys.clipboard}}, {{sys.window_title}}. Date/time default to %Y-%m-%d and %H:%M:%S; add :<format> to customize. Unavailable clipboard/title values are empty. {{date}} remains an ordinary prompted field.",
+                    );
                     compact_section_heading(ui, "Text", None);
                     let action_height = ui.spacing().interact_size.y
                         + ui.spacing().button_padding.y * 2.0
@@ -945,7 +1145,7 @@ impl SnippetDialog {
                     if !self.prompt_for_fields {
                         secondary_help(
                             ui,
-                            "Plain text stays literal; include an automatic value to preview a plain snippet.",
+                            "Plain text stays literal; include an automatic value to preview a plain snippet. Test / Preview resolves a draft without saving or copying.",
                         );
                     } else if !self.body_revealed {
                         secondary_help(ui, "Reveal contents before testing this prompted snippet.");
@@ -977,8 +1177,8 @@ impl SnippetDialog {
                         }
                         if ui
                             .add_enabled(
-                                !self.filter.is_empty(),
-                                egui::Button::new("Clear Filter").min_size(egui::vec2(
+                                !self.filter.is_empty() || !self.selected_tag_filters.is_empty(),
+                                egui::Button::new("Clear Filters").min_size(egui::vec2(
                                     clear_filter_width,
                                     ui.spacing().interact_size.y
                                         + ui.spacing().button_padding.y * 2.0,
@@ -986,24 +1186,48 @@ impl SnippetDialog {
                             )
                             .clicked()
                         {
-                            self.filter.clear();
-                            self.filter_changed();
+                            self.clear_filter_state();
                         }
                     });
-                    let matching_indices = matching_snippet_indices(&self.entries, &self.filter);
-                    secondary_help(
-                        ui,
-                        &format!(
-                            "{} of {} snippets",
+                    let tag_choices = available_snippet_tags(&self.entries, &self.selected_tag_filters);
+                    let mut toggled_tags = Vec::new();
+                    if !tag_choices.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Tags:");
+                            for tag in tag_choices {
+                                let selected = self
+                                    .selected_tag_filters
+                                    .iter()
+                                    .any(|current| current.to_lowercase() == tag.to_lowercase());
+                                if ui.selectable_label(selected, tag.as_str()).clicked() {
+                                    toggled_tags.push(tag);
+                                }
+                            }
+                        });
+                    }
+                    for tag in toggled_tags {
+                        self.toggle_tag_filter(&tag);
+                    }
+                    let matching_indices = matching_snippet_indices_with_tags(
+                        &self.entries,
+                        &self.filter,
+                        &self.selected_tag_filters,
+                    );
+                    let count_label = if self.selected_tag_filters.is_empty() {
+                        format!("{} of {} snippets", matching_indices.len(), self.entries.len())
+                    } else {
+                        format!(
+                            "{} of {} snippets · all selected tags required",
                             matching_indices.len(),
                             self.entries.len()
-                        ),
-                    );
+                        )
+                    };
+                    secondary_help(ui, &count_label);
                     if let Some(error) = &self.inline_error {
                         semantic_status(ui, StatusTone::Error, "Snippet could not be updated", Some(error));
                     }
                     if matching_indices.is_empty() {
-                        ui.label("No snippets match filter");
+                        ui.label("No snippets match the current filters");
                     } else {
                         let footer_height = (ui.spacing().interact_size.y
                             + ui.spacing().button_padding.y * 2.0
@@ -1112,6 +1336,14 @@ impl SnippetDialog {
                                             }
                                         }
                                     });
+                                    if !entry.tags.is_empty() {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.add_space(4.0);
+                                            for tag in &entry.tags {
+                                                ui.small(format!("#{tag}"));
+                                            }
+                                        });
+                                    }
                                 }
                             });
                     }
@@ -1136,7 +1368,8 @@ impl SnippetDialog {
 mod tests {
     use super::{
         AliasValidation, CommitFailure, CommitRejection, SnippetDialog, body_editor_id_source,
-        matches_snippet_filter, matching_snippet_indices, single_line_alias,
+        matches_snippet_filter, matching_snippet_indices, matching_snippet_indices_with_tags,
+        single_line_alias,
     };
     use crate::plugins::snippets::{
         SnippetEntry, SnippetFieldDefinition, SnippetInputKind, load_snippets, save_snippets,
@@ -1390,7 +1623,7 @@ mod tests {
             hide_contents: true,
             prompt_for_fields: false,
             fields: Vec::new(),
-            tags: Vec::new(),
+            tags: vec!["automation".into()],
         };
         save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
         let original_bytes = std::fs::read(&path).unwrap();
@@ -1416,9 +1649,14 @@ mod tests {
 
         app.snippet_dialog.reveal_contents();
         app.snippet_dialog.alias = "draft alias".into();
+        app.snippet_dialog.tags.push("draft".into());
         assert!(app.snippet_dialog.can_preview_editor_draft());
         let draft = app.snippet_dialog.preview_editor_draft().unwrap();
         assert_eq!(draft.text, "Draft {{sys.date}}");
+        assert_eq!(
+            draft.tags,
+            vec!["automation".to_owned(), "draft".to_owned()]
+        );
         app.begin_snippet_preview(draft.clone()).unwrap();
         let session = app.snippet_prompt_dialog.session().unwrap();
         assert!(app.snippet_prompt_dialog.is_preview_only());
@@ -1510,6 +1748,7 @@ mod tests {
                 .contains("exact alias already exists")
         );
 
+        app.snippet_dialog.alias = "draft alias".into();
         app.snippet_dialog.set_prompt_for_fields(false);
         app.snippet_dialog.text = "Literal {{unfinished".into();
         assert!(app.snippet_dialog.preview_editor_draft().is_none());
@@ -1525,7 +1764,7 @@ mod tests {
             !app.panel_stack
                 .contains(&crate::gui::Panel::SnippetPromptDialog)
         );
-        assert_eq!(app.snippet_dialog.alias, "duplicate");
+        assert_eq!(app.snippet_dialog.alias, "draft alias");
         assert_eq!(app.snippet_dialog.text, "Literal {{unfinished");
         assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
         assert_eq!(snippets_version(), version);
@@ -1784,6 +2023,86 @@ mod tests {
     }
 
     #[test]
+    fn selected_tag_filters_match_case_insensitively_with_and_semantics() {
+        let mut release = snippet("release", "deploy build");
+        release.tags = vec!["Work".into(), "High Priority".into()];
+        let mut work_only = snippet("work-only", "deploy build");
+        work_only.tags = vec!["work".into()];
+        let mut priority_only = snippet("priority-only", "deploy build");
+        priority_only.tags = vec!["high priority".into()];
+        let entries = vec![release, work_only, priority_only];
+        let selected = vec!["work".to_owned(), "HIGH PRIORITY".to_owned()];
+
+        assert_eq!(
+            matching_snippet_indices_with_tags(&entries, "deploy", &selected),
+            vec![0]
+        );
+        assert_eq!(
+            matching_snippet_indices_with_tags(&entries, "WORK", &[]),
+            vec![0, 1]
+        );
+        assert_eq!(
+            matching_snippet_indices_with_tags(&entries, "high", &[]),
+            vec![0, 2]
+        );
+        assert!(matching_snippet_indices_with_tags(&entries, "missing", &selected).is_empty());
+
+        let mut dialog = SnippetDialog {
+            entries,
+            selected_tag_filters: selected,
+            ..SnippetDialog::default()
+        };
+        dialog.request_removal(0);
+        dialog.toggle_tag_filter("work");
+        assert_eq!(
+            dialog.selected_tag_filters,
+            vec!["HIGH PRIORITY".to_owned()]
+        );
+        assert!(dialog.pending_removal.is_none());
+
+        dialog.filter = "deploy".into();
+        dialog.clear_filter_state();
+        assert!(dialog.filter.is_empty());
+        assert!(dialog.selected_tag_filters.is_empty());
+    }
+
+    #[test]
+    fn saved_list_shows_tag_chips_without_revealing_hidden_body_text() {
+        fn painted_text(output: &egui::FullOutput) -> String {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => Some(text.galley.job.text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let mut hidden = snippet("masked", "private body that must stay concealed");
+        hidden.hide_contents = true;
+        hidden.tags = vec!["release".into(), "high priority".into()];
+        let mut dialog = SnippetDialog {
+            open: true,
+            entries: vec![hidden],
+            ..SnippetDialog::default()
+        };
+        let ctx = egui::Context::default();
+        let mut output = dialog_frame(&ctx, &mut dialog, Vec::new());
+        for _ in 0..3 {
+            output.drop_without_applying_deltas();
+            output = dialog_frame(&ctx, &mut dialog, Vec::new());
+        }
+        let painted = painted_text(&output);
+        output.drop_without_applying_deltas();
+
+        assert!(painted.contains("release"));
+        assert!(painted.contains("high priority"));
+        assert!(!painted.contains("private body that must stay concealed"));
+    }
+
+    #[test]
     fn alias_preview_normalizes_control_whitespace_without_changing_alias() {
         let entry = snippet("private\nalias", "body");
 
@@ -1860,6 +2179,7 @@ mod tests {
         }
 
         let mut hidden = prompted_snippet("masked", "Private {{secret_key}}");
+        hidden.tags = vec!["safe-label".into()];
         hidden.fields[0].name = "secret_key".into();
         hidden.fields[0].label = "PRIVATE LABEL".into();
         hidden.fields[0].default_value = "PRIVATE DEFAULT".into();
@@ -1889,6 +2209,10 @@ mod tests {
         assert!(!painted.contains("secret_key"));
         assert!(!painted.contains("PRIVATE LABEL"));
         assert!(!painted.contains("PRIVATE DEFAULT"));
+        assert!(painted.contains("safe-label"));
+        assert!(!painted.contains("Private {{secret_key}}"));
+        assert!(painted.contains("Tags (1/16)"));
+        assert!(painted.contains("Add tag"));
 
         dialog.reveal_contents();
         for _ in 0..4 {
@@ -1899,6 +2223,9 @@ mod tests {
         assert!(editor_painted.contains("Use {{field}}"));
         assert!(editor_painted.contains("\\{{...}}"));
         assert!(editor_painted.contains("{{date}} is an ordinary input, not a computed date."));
+        assert!(editor_painted.contains("sys.clipboard"));
+        assert!(editor_painted.contains("%Y-%m-%d"));
+        assert!(editor_painted.contains("Unavailable clipboard/title values are empty."));
 
         let field_context = egui::Context::default();
         assert!(dialog.body_revealed);
@@ -2440,6 +2767,136 @@ mod tests {
     }
 
     #[test]
+    fn tag_editor_normalizes_drafts_and_preserves_save_cancel_reopen_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let mut original = prompted_snippet("saved", "Hello {{name}}");
+        original.tags = vec!["Work".into(), "high priority".into()];
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let version = snippets_version();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+        assert_eq!(dialog.tags, original.tags);
+
+        dialog.tag_input = "discarded tag".into();
+        dialog.add_editor_tag();
+        assert_eq!(
+            dialog.tags,
+            vec![
+                "Work".to_owned(),
+                "high priority".to_owned(),
+                "discarded tag".to_owned()
+            ]
+        );
+        dialog.cancel_editor();
+        assert!(dialog.tags.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
+
+        assert!(dialog.begin_existing(0));
+        assert_eq!(dialog.tags, original.tags);
+        let existing_tags = dialog.tags.clone();
+        dialog.tag_input = "x".repeat(65);
+        dialog.add_editor_tag();
+        assert_eq!(dialog.tags, existing_tags);
+        assert!(
+            dialog
+                .tag_error
+                .as_deref()
+                .unwrap()
+                .contains("64 characters")
+        );
+        assert_eq!(dialog.tag_input, "x".repeat(65));
+        dialog.tag_input.clear();
+        dialog.tag_error = None;
+        dialog.tag_input = " release   note ".into();
+        dialog.add_editor_tag();
+        dialog.tag_input = "WORK".into();
+        dialog.add_editor_tag();
+        assert_eq!(
+            dialog.tags,
+            vec![
+                "Work".to_owned(),
+                "high priority".to_owned(),
+                "release note".to_owned()
+            ]
+        );
+        let (_, candidate, _) = dialog.editor_candidate().unwrap();
+        assert_eq!(candidate[0].tags, dialog.tags);
+        assert_eq!(candidate[0].text, original.text);
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            saved[0].tags,
+            vec![
+                "Work".to_owned(),
+                "high priority".to_owned(),
+                "release note".to_owned()
+            ]
+        );
+        assert_eq!(saved[0].text, original.text);
+        assert_eq!(saved[0].fields, original.fields);
+        assert!(dialog.begin_existing(0));
+        assert_eq!(dialog.tags, saved[0].tags);
+
+        let saved_bytes = std::fs::read(&path).unwrap();
+        let saved_version = snippets_version();
+        dialog.tags.push("x".repeat(65));
+        assert!(matches!(
+            dialog.save_editor(path.to_str().unwrap()),
+            Err(CommitFailure::Rejected(CommitRejection::InvalidTags))
+        ));
+        assert!(dialog.edit_idx.is_some());
+        assert!(
+            dialog
+                .inline_error
+                .as_deref()
+                .unwrap()
+                .contains("64 characters")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), saved_bytes);
+        assert_eq!(snippets_version(), saved_version);
+
+        dialog.cancel_editor();
+        dialog.begin_new("fresh");
+        dialog.text = "fresh body".into();
+        dialog.tag_input = "New Tag".into();
+        dialog.add_editor_tag();
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved[1].tags, vec!["New Tag".to_owned()]);
+        assert_eq!(saved[1].text, "fresh body");
+    }
+
+    #[test]
+    fn hidden_metadata_only_edit_preserves_body_and_tags_without_reveal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let mut original = snippet("masked", "private body that remains hidden");
+        original.hide_contents = true;
+        original.tags = vec!["team".into(), "release".into()];
+        save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
+        let mut dialog = SnippetDialog::default();
+        dialog.load_from(path.to_str().unwrap()).unwrap();
+        assert!(dialog.begin_existing(0));
+        assert!(!dialog.body_revealed);
+
+        dialog.alias = "renamed masked".into();
+        dialog.set_hide_contents(false);
+        assert!(!dialog.body_revealed);
+        dialog.save_editor(path.to_str().unwrap()).unwrap();
+
+        let saved = load_snippets(path.to_str().unwrap()).unwrap();
+        assert_eq!(saved[0].alias, "renamed masked");
+        assert_eq!(saved[0].text, original.text);
+        assert_eq!(saved[0].tags, original.tags);
+        assert!(!saved[0].hide_contents);
+    }
+
+    #[test]
     fn prompted_editor_no_op_save_preserves_bytes_and_version() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("snippets.json");
@@ -2564,17 +3021,23 @@ mod tests {
         assert!(dialog.begin_existing(0));
         dialog.reveal_contents();
         dialog.text = "unsaved draft".to_owned();
+        dialog.filter = "original".into();
+        dialog.selected_tag_filters = vec!["work".into()];
         let external = vec![snippet("masked", "external update")];
         save_snippets(path.to_str().unwrap(), &external).unwrap();
 
         dialog.ensure_open_from(path.to_str().unwrap());
         assert!(dialog.open);
         assert_eq!(dialog.text, "unsaved draft");
+        assert_eq!(dialog.filter, "original");
+        assert_eq!(dialog.selected_tag_filters, vec!["work".to_owned()]);
         assert!(dialog.body_revealed);
         assert_eq!(dialog.entries[0].text, "original body");
 
         dialog.end_session();
         assert!(dialog.text.is_empty());
+        assert!(dialog.filter.is_empty());
+        assert!(dialog.selected_tag_filters.is_empty());
         assert!(!dialog.body_revealed);
         dialog.ensure_open_from(path.to_str().unwrap());
         assert!(dialog.open);

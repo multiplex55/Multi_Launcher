@@ -20,8 +20,8 @@ use std::sync::{
 };
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
-const MAX_SNIPPET_TAGS: usize = 16;
-const MAX_SNIPPET_TAG_CHARS: usize = 64;
+pub(crate) const MAX_SNIPPET_TAGS: usize = 16;
+pub(crate) const MAX_SNIPPET_TAG_CHARS: usize = 64;
 
 const SNIPPET_RUN_PREFIX: &str = "snippet:run:";
 
@@ -357,7 +357,7 @@ fn normalize_tag_whitespace(tag: &str) -> String {
     tag.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn normalize_snippet_tags(tags: Vec<String>) -> Result<Vec<String>, &'static str> {
+pub(crate) fn normalize_snippet_tags(tags: Vec<String>) -> Result<Vec<String>, &'static str> {
     let mut normalized = Vec::with_capacity(tags.len().min(MAX_SNIPPET_TAGS));
     let mut seen = HashSet::new();
 

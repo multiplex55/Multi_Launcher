@@ -470,6 +470,18 @@ Common commands:
   editor. `cs edit <alias> <text>` updates or creates that alias directly.
 - `cs rm <query>` finds matching snippets to remove.
 
+### Tags
+
+Tags are saved labels on a snippet; they do not change its body or action
+identity. Add or remove tags in the existing editor (up to 16 tags, 64
+characters each; whitespace is normalized and case-insensitive duplicates are
+collapsed). The saved list shows tag chips separately from the one-line body
+preview, including for hidden snippets.
+Select one or more chips to require every selected tag (AND matching); **Clear
+Filters** clears both the text search and selected tags. Changing a filter also
+cancels an outstanding Remove confirmation. Launcher searches accept explicit
+tag filters such as `cs tag:work tag:"high priority"`.
+
 ### Prompted fields
 
 Prompting is opt-in for each snippet and starts off. In the editor, enable
@@ -477,13 +489,15 @@ Prompting is opt-in for each snippet and starts off. In the editor, enable
 as `Hello {{name}}` asks for `name`; keys are case-sensitive ASCII identifiers
 starting with a letter or `_`, followed by letters, digits, or `_`. Each distinct
   key appears once in first-use order, and repeated occurrences use the same value.
-  `{{date}}` is an ordinary field. Automatic values use the namespaced tokens
-  `{{sys.date}}`, `{{sys.time}}`, `{{sys.clipboard}}`, and
-  `{{sys.window_title}}`; date and time default to `%Y-%m-%d` and `%H:%M:%S`,
-  and may use a validated chrono format after `:`. Values are captured once per
-  run before a prompted form takes focus. If clipboard text or the foreground
-  title is unavailable, its token resolves to empty text. Plain snippets preserve
-  all non-system brace text literally.
+`{{date}}` is an ordinary field. Automatic values use the namespaced tokens
+`{{sys.date}}`, `{{sys.time}}`, `{{sys.clipboard}}`, and
+`{{sys.window_title}}`; date and time default to `%Y-%m-%d` and `%H:%M:%S`,
+and may use a validated chrono format after `:`, for example
+`{{sys.date:%B %d, %Y}}` or `{{sys.time:%H:%M}}`. Values are captured once per
+run before a prompted form takes focus. If clipboard text or the foreground
+title is unavailable, its token resolves to empty text. Plain snippets preserve
+all non-system brace text literally. The editor's **Test / Preview** resolves
+an eligible draft without saving or copying it.
 
 The editor lets you set a field's display label, default, required status, and
 single-line or multiline input. Defaults populate a fresh form but are not
