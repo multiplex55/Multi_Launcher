@@ -1,6 +1,8 @@
 use crate::actions::Action;
 use crate::clipboard_modify::store::{SharedClipboardModifierCatalog, shared_default_catalog};
-use crate::common::query::{QueryFilters, apply_action_filters, split_action_filters};
+use crate::common::query::{
+    ActionFilterMetadata, QueryFilters, action_matches_filters, split_action_filters,
+};
 use crate::plugins::asciiart::AsciiArtPlugin;
 use crate::plugins::base_convert::BaseConvertPlugin;
 use crate::plugins::bookmarks::BookmarksPlugin;
@@ -39,6 +41,7 @@ use crate::plugins::network::NetworkPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::ocr::OcrPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
+use crate::search_scope::{LauncherSearchResult, SearchResultCategory};
 use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::qr::QrPlugin;
 use crate::plugins::radial::RadialPlugin;
@@ -98,6 +101,15 @@ pub enum PluginQueryPolicy {
 pub trait Plugin: Send + Sync {
     /// Return actions based on the query string
     fn search(&self, query: &str) -> Vec<Action>;
+    /// Return actions with transient launcher search provenance.
+    ///
+    /// Existing providers remain source compatible and default to Commands.
+    fn search_results(&self, query: &str) -> Vec<LauncherSearchResult> {
+        self.search(query)
+            .into_iter()
+            .map(LauncherSearchResult::command)
+            .collect()
+    }
     /// Name of the plugin
     fn name(&self) -> &str;
     /// Human readable description of the plugin
@@ -356,6 +368,7 @@ pub(crate) struct PluginSearchSnapshot {
 #[derive(Clone)]
 pub struct PluginSearchSnapshotResult {
     pub actions: Vec<Action>,
+    pub categories: Vec<SearchResultCategory>,
     pub pending: bool,
     pub start_revision: u64,
     pub provider_revision: u64,
@@ -497,7 +510,7 @@ impl PluginSearchSnapshot {
 
         // Do not hold read guards for every provider while calling a provider.
         // A hung plugin must not pin unrelated plugin/settings writes behind it.
-        let mut actions = Vec::new();
+        let mut results = Vec::new();
         let mut tickets = Vec::new();
         for slot in &self.plugins {
             let search_result = slot.plugin.read().ok().and_then(|plugin| {
@@ -511,7 +524,7 @@ impl PluginSearchSnapshot {
                 .then(|| {
                     (
                         query_plan.apply_action_filters,
-                        capture_search_refresh_tickets(|| plugin.search(query_plan.query)),
+                        capture_search_refresh_tickets(|| plugin.search_results(query_plan.query)),
                     )
                 })
             });
@@ -521,8 +534,8 @@ impl PluginSearchSnapshot {
             // of requiring another search or blocking the GUI writer.
             slot.apply_pending_enabled();
             if let Some((apply_filters, (mut found, mut found_tickets))) = search_result {
-                found = filter_plugin_results(found, &filters, apply_filters);
-                actions.append(&mut found);
+                found = filter_plugin_search_results(found, &filters, apply_filters);
+                results.append(&mut found);
                 tickets.append(&mut found_tickets);
             }
         }
@@ -530,8 +543,13 @@ impl PluginSearchSnapshot {
             .iter()
             .any(|(source, ticket)| !self.updates.ticket_resolved(source, *ticket));
         let catalog_versions = crate::radial::dynamic::MutableResultCatalogVersions::current();
+        let (actions, categories) = results
+            .into_iter()
+            .map(|result| (result.action, result.category))
+            .unzip();
         PluginSearchSnapshotResult {
             actions,
+            categories,
             pending,
             start_revision,
             provider_revision: self.updates.generation.load(Ordering::SeqCst),
@@ -685,6 +703,17 @@ impl PluginManager {
         })
     }
 
+    pub(crate) fn search_filtered_results_with_tickets(
+        &self,
+        query: &str,
+        enabled_plugins: Option<&HashSet<String>>,
+        enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ) -> (Vec<LauncherSearchResult>, Vec<(&'static str, u64)>) {
+        capture_search_refresh_tickets(|| {
+            self.search_filtered_results(query, enabled_plugins, enabled_caps)
+        })
+    }
+
     pub fn set_search_repaint_callback(&self, callback: Arc<dyn Fn() + Send + Sync>) {
         self.services.search_updates.set_repaint_callback(callback);
     }
@@ -768,6 +797,30 @@ impl PluginManager {
         plugin_settings: &std::collections::HashMap<String, Value>,
         actions: Arc<Vec<Action>>,
     ) {
+        let custom_len = actions.len();
+        self.reload_from_dirs_with_custom_len(
+            dirs,
+            clipboard_limit,
+            net_unit,
+            reset_alarm,
+            plugin_settings,
+            actions,
+            custom_len,
+        );
+    }
+
+    /// Reload built-in and dynamic providers with the launcher catalog's
+    /// custom-prefix boundary, used to preserve app/file provenance in Omni.
+    pub fn reload_from_dirs_with_custom_len(
+        &mut self,
+        dirs: &[String],
+        clipboard_limit: usize,
+        net_unit: NetUnit,
+        reset_alarm: bool,
+        plugin_settings: &std::collections::HashMap<String, Value>,
+        actions: Arc<Vec<Action>>,
+        custom_len: usize,
+    ) {
         self.clear_plugins();
         // Drop previously loaded dynamic libraries to avoid accumulating
         // duplicate handles when reloading plugins.
@@ -790,7 +843,10 @@ impl PluginManager {
         self.register_with_settings(FoldersPlugin::default(), plugin_settings);
         self.register_with_settings(FileSearchPlugin::default(), plugin_settings);
         self.register_with_settings(DiffPlugin::default(), plugin_settings);
-        self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings);
+        self.register_with_settings(
+            OmniSearchPlugin::new_with_custom_len(actions.clone(), custom_len),
+            plugin_settings,
+        );
         self.register_with_settings(SystemPlugin, plugin_settings);
         if self.services.system_data_runtime.is_none() {
             self.services.system_data_runtime = Some(SystemDataRuntime::start(Arc::clone(
@@ -1073,8 +1129,20 @@ impl PluginManager {
         enabled_plugins: Option<&HashSet<String>>,
         enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
     ) -> Vec<Action> {
+        self.search_filtered_results(query, enabled_plugins, enabled_caps)
+            .into_iter()
+            .map(LauncherSearchResult::into_action)
+            .collect()
+    }
+
+    pub(crate) fn search_filtered_results(
+        &self,
+        query: &str,
+        enabled_plugins: Option<&HashSet<String>>,
+        enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    ) -> Vec<LauncherSearchResult> {
         let guards = self.iter().collect::<Vec<_>>();
-        search_filtered_plugins(
+        search_filtered_result_plugins(
             guards.iter().map(|plugin| &***plugin),
             query,
             enabled_plugins,
@@ -1089,8 +1157,20 @@ fn search_filtered_plugins<'a>(
     enabled_plugins: Option<&HashSet<String>>,
     enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Vec<Action> {
+    search_filtered_result_plugins(plugins, query, enabled_plugins, enabled_caps)
+        .into_iter()
+        .map(LauncherSearchResult::into_action)
+        .collect()
+}
+
+fn search_filtered_result_plugins<'a>(
+    plugins: impl IntoIterator<Item = &'a dyn Plugin>,
+    query: &str,
+    enabled_plugins: Option<&HashSet<String>>,
+    enabled_caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+) -> Vec<LauncherSearchResult> {
     let (filtered_query, filters) = split_action_filters(query);
-    let mut actions = Vec::new();
+    let mut results = Vec::new();
     let perf_enabled = crate::performance::enabled();
     for plugin in plugins {
         let query_plan = plugin_query_plan(plugin, query, &filtered_query);
@@ -1099,15 +1179,15 @@ fn search_filtered_plugins<'a>(
         }
         let name = plugin.name();
         let timer = crate::performance::Timer::start_if(perf_enabled);
-        let found = plugin.search(query_plan.query);
+        let found = plugin.search_results(query_plan.query);
         timer.finish_plugin(name);
-        actions.extend(filter_plugin_results(
+        results.extend(filter_plugin_search_results(
             found,
             &filters,
             query_plan.apply_action_filters,
         ));
     }
-    actions
+    results
 }
 
 struct PluginQueryPlan<'a> {
@@ -1145,21 +1225,22 @@ fn query_head(query: &str) -> Option<&str> {
     query.split_whitespace().next()
 }
 
-fn filter_plugin_results(
-    actions: Vec<Action>,
+fn filter_plugin_search_results(
+    mut results: Vec<LauncherSearchResult>,
     filters: &QueryFilters,
     apply_filters: bool,
-) -> Vec<Action> {
+) -> Vec<LauncherSearchResult> {
     if apply_filters
         && (!filters.include_kinds.is_empty()
             || !filters.exclude_kinds.is_empty()
             || !filters.include_ids.is_empty()
             || !filters.exclude_ids.is_empty())
     {
-        apply_action_filters(actions, filters)
-    } else {
-        actions
+        results.retain(|result| {
+            action_matches_filters(&ActionFilterMetadata::from_action(&result.action), filters)
+        });
     }
+    results
 }
 
 fn plugin_matches_search(
@@ -1194,6 +1275,51 @@ fn plugin_matches_search(
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    struct UnlabelledProviderPlugin;
+
+    impl Plugin for UnlabelledProviderPlugin {
+        fn search(&self, query: &str) -> Vec<Action> {
+            if query.eq_ignore_ascii_case("unlabelled") {
+                vec![Action {
+                    label: "Provider result".into(),
+                    desc: "Opaque provider output".into(),
+                    action: "provider:opaque-result".into(),
+                    args: None,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn name(&self) -> &str {
+            "unlabelled_provider"
+        }
+
+        fn description(&self) -> &str {
+            "Test provider without a declared result category"
+        }
+
+        fn capabilities(&self) -> &[&str] {
+            &["search"]
+        }
+    }
+
+    #[test]
+    fn launcher_scope_unlabelled_provider_defaults_to_commands_on_both_paths() {
+        let mut manager = PluginManager::new();
+        manager.register(Box::new(UnlabelledProviderPlugin));
+
+        let actions = manager.search_filtered("unlabelled", None, None);
+        let synchronous = manager.search_filtered_results("unlabelled", None, None);
+        let snapshot = manager.search_snapshot(None, None).search("unlabelled");
+
+        assert_eq!(synchronous.len(), 1);
+        assert_eq!(synchronous[0].category, SearchResultCategory::Commands);
+        assert_eq!(synchronous[0].action, actions[0]);
+        assert_eq!(snapshot.actions, actions);
+        assert_eq!(snapshot.categories, [SearchResultCategory::Commands]);
+    }
 
     #[test]
     fn regex_tester_builtin_registration_and_filtered_routing() {

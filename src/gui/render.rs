@@ -24707,6 +24707,7 @@ mod tests {
         let local_only = app.search_read_only_outcome_with_plugin_snapshot(
             TRACK_C3A_QUERY,
             crate::plugin::PluginSearchSnapshotResult {
+                categories: Vec::new(),
                 actions: Vec::new(),
                 pending: false,
                 start_revision: provider_revision,

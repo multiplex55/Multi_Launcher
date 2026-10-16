@@ -3,6 +3,7 @@
 Plan: [approved master plan](multi_launcher_productivity_expansion_master_plan.md).
 Started 2026-10-16 on `big-changes`, HEAD `677f7ba0cb49104dbf0d8397a8f4eaa3703019b0`; initial working tree clean.
 Windows host, stable `x86_64-pc-windows-msvc`, rustc/cargo 1.99.0, Nextest 0.9.135 available.
+`cargo metadata --no-deps --format-version 1` confirms only `multi_launcher` is a workspace member; no vendored workspace exclusions currently required.
 Clippy is globally deferred to M13-D; no baseline or intermediate lint runs.
 
 ## Safety and evidence
@@ -10,7 +11,7 @@ Clippy is globally deferred to M13-D; no baseline or intermediate lint runs.
 - Single implementation writer; bounded planner and reviewer source passes per milestone.
 - File mutations use only disposable `tempfile` roots named for productivity fixtures.
 - Native smoke sessions are autonomous, owned-process-only, with isolated app data; no user-operated validation.
-- Evidence location: `artifacts/productivity_expansion/` (generated safe fixtures/screenshots only). Native control/capture availability is assessed before use.
+- Evidence location: `target/productivity_expansion/` (already Git-ignored; generated safe fixtures/screenshots only). Computer-use `@oai/sky` initialization and native window discovery succeeded; capture is assessed against the owned dev window.
 - Per checkpoint: at most two focused test slices, minimal compilation, and bounded repairs per approved plan.
 - Commit hashes are recorded at subsequent checkpoint boundaries to avoid self-referencing commits.
 
@@ -32,8 +33,9 @@ No baseline behavior is claimed tested by this inventory. Feature-specific inspe
 | Checkpoint | Status | Commit | Verification/evidence/issues |
 |---|---|---|---|
 | M0-A | complete | baseline above | Clean checkout, toolchain and owner inventory inspected; no Clippy |
-| M0-B | complete | this ledger commit | Plan read; fixture/evidence policy established |
-| M1-A/B/C | pending | — | Planner inspecting classification, session, cache and prefix seams |
+| M0-B | complete | `946a3006` | Plan read; fixture/evidence policy established |
+| M1-A | complete | this checkpoint commit | `cargo check --lib` passed; `cargo test --lib launcher_scope`: 3 passed; `cargo nextest run --test plugin_routing`: 17 passed. Reviewer reload-boundary and typed-command precedence findings fixed; diff checked. Native evidence belongs to M1-C. |
+| M1-B/C | pending | — | Bounded planner handoffs ready for session, cache, controls and prefix compatibility |
 | M2-A/B/C/D | pending | — | — |
 | M3-A/B/C/D/E | pending | — | — |
 | M4-A/B/C | pending | — | — |

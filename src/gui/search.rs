@@ -463,6 +463,7 @@ pub(super) enum ProviderSearchDeferral {
 pub(crate) struct LauncherSearchOutcome {
     pub state: LauncherSearchState,
     pub actions: Vec<Action>,
+    pub categories: Vec<crate::search_scope::SearchResultCategory>,
     pub provider_revision: u64,
     pub result_catalog_versions: Option<crate::radial::dynamic::MutableResultCatalogVersions>,
     pub result_catalog_versions_stable: bool,
@@ -600,7 +601,10 @@ impl LauncherApp {
             );
             self.actions
                 .iter()
-                .map(CachedSearchEntry::from_action)
+                .enumerate()
+                .map(|(index, action)| {
+                    CachedSearchEntry::from_catalog_action(action, index >= self.custom_len)
+                })
                 .collect::<Vec<_>>()
         };
         #[cfg(test)]
@@ -955,7 +959,11 @@ impl LauncherApp {
         }
     }
 
-    fn search_actions(&self, query: &str, _query_lc: &str) -> Vec<(Action, f32)> {
+    fn search_actions(
+        &self,
+        query: &str,
+        _query_lc: &str,
+    ) -> Vec<(crate::search_scope::LauncherSearchResult, f32)> {
         let telemetry_enabled = crate::performance::enabled();
         #[cfg(test)]
         let c2a_observer = c2a_search_observer::current();
@@ -996,7 +1004,13 @@ impl LauncherApp {
                             .saturating_add(c2a_search_observer::action_payload_strings(a));
                     }
                     let cloned = a.clone();
-                    res.push((cloned, 0.0));
+                    res.push((
+                        crate::search_scope::LauncherSearchResult::new(
+                            cloned,
+                            self.action_cache[i].category,
+                        ),
+                        0.0,
+                    ));
                 }
             }
         } else {
@@ -1037,7 +1051,13 @@ impl LauncherApp {
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
                         let cloned = a.clone();
-                        res.push((cloned, score));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(
+                                cloned,
+                                cached.category,
+                            ),
+                            score,
+                        ));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, query);
@@ -1052,7 +1072,13 @@ impl LauncherApp {
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
                         let cloned = a.clone();
-                        res.push((cloned, score as f32 * self.fuzzy_weight));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(
+                                cloned,
+                                cached.category,
+                            ),
+                            score as f32 * self.fuzzy_weight,
+                        ));
                     }
                 }
             }
@@ -1096,16 +1122,16 @@ impl LauncherApp {
         raw_query: &str,
         trimmed: &str,
         trimmed_lc: &str,
-    ) -> (Vec<(Action, f32)>, bool) {
+    ) -> (Vec<(crate::search_scope::LauncherSearchResult, f32)>, bool) {
         let (plugin_results, tickets) = if trimmed_lc.starts_with("g ") {
             let filter = std::collections::HashSet::from(["web_search".to_string()]);
-            self.plugins.search_filtered_with_tickets(
+            self.plugins.search_filtered_results_with_tickets(
                 raw_query,
                 Some(&filter),
                 self.enabled_capabilities.as_ref(),
             )
         } else {
-            self.plugins.search_filtered_with_tickets(
+            self.plugins.search_filtered_results_with_tickets(
                 raw_query,
                 self.enabled_plugins.as_ref(),
                 self.enabled_capabilities.as_ref(),
@@ -1122,9 +1148,9 @@ impl LauncherApp {
         raw_query: &str,
         trimmed: &str,
         trimmed_lc: &str,
-        plugin_results: Vec<Action>,
+        plugin_results: Vec<crate::search_scope::LauncherSearchResult>,
         pending: bool,
-    ) -> (Vec<(Action, f32)>, bool) {
+    ) -> (Vec<(crate::search_scope::LauncherSearchResult, f32)>, bool) {
         #[cfg(test)]
         let c2a_observer = c2a_search_observer::current();
         #[cfg(test)]
@@ -1144,7 +1170,9 @@ impl LauncherApp {
         let mut res = Vec::new();
         if trimmed_lc.starts_with("g ") {
             let query_term = trimmed_lc.split_once(' ').map(|x| x.1).unwrap_or("");
-            for a in plugin_results {
+            for result in plugin_results {
+                let category = result.category;
+                let a = result.action;
                 let cached = CachedSearchEntry::from_action(&a);
                 #[cfg(test)]
                 if c2a_observer.is_some() {
@@ -1161,11 +1189,17 @@ impl LauncherApp {
                         // returned concrete results (e.g. `note:new:*`, `note:open:*`).
                         // Re-filtering by label/desc text can hide valid plugin-resolved
                         // outputs, so keep them as-is in exact mode.
-                        res.push((a, 0.0));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(a, category),
+                            0.0,
+                        ));
                         continue;
                     }
                     if query_term.is_empty() {
-                        res.push((a, 0.0));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(a, category),
+                            0.0,
+                        ));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, query_term);
                         let label_match = Self::matches_exact_display_text(&cached, query_term);
@@ -1173,7 +1207,10 @@ impl LauncherApp {
                         let action_match = cached.action_lc.contains(query_term);
                         if label_match || desc_match || action_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
-                            res.push((a, score));
+                            res.push((
+                                crate::search_scope::LauncherSearchResult::new(a, category),
+                                score,
+                            ));
                         }
                     }
                 } else {
@@ -1186,7 +1223,10 @@ impl LauncherApp {
                             .unwrap_or(0) as f32
                             * self.fuzzy_weight
                     };
-                    res.push((a, score));
+                    res.push((
+                        crate::search_scope::LauncherSearchResult::new(a, category),
+                        score,
+                    ));
                 }
             }
             #[cfg(test)]
@@ -1239,7 +1279,13 @@ impl LauncherApp {
                             c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
-                        res.push((a.clone(), score));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(
+                                a.clone(),
+                                cached.category,
+                            ),
+                            score,
+                        ));
                     }
                 } else {
                     let s1 = self.matcher.fuzzy_match(&a.label, trimmed);
@@ -1255,7 +1301,13 @@ impl LauncherApp {
                             c2a_command_fallback_clone_strings = c2a_command_fallback_clone_strings
                                 .saturating_add(c2a_search_observer::action_payload_strings(a));
                         }
-                        res.push((a.clone(), score as f32 * self.fuzzy_weight));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(
+                                a.clone(),
+                                cached.category,
+                            ),
+                            score as f32 * self.fuzzy_weight,
+                        ));
                     }
                 }
             }
@@ -1271,7 +1323,9 @@ impl LauncherApp {
                 }
             }
             let query_term_lc = query_term.to_lowercase();
-            for a in plugin_results {
+            for result in plugin_results {
+                let category = result.category;
+                let a = result.action;
                 let cached = CachedSearchEntry::from_action(&a);
                 #[cfg(test)]
                 if c2a_observer.is_some() {
@@ -1287,11 +1341,17 @@ impl LauncherApp {
                         // Explicit plugin commands can resolve into result lists/artifacts.
                         // Preserve those resolved actions in exact mode instead of applying
                         // a second label/description exact filter in the launcher layer.
-                        res.push((a, 0.0));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(a, category),
+                            0.0,
+                        ));
                         continue;
                     }
                     if query_term_lc.is_empty() {
-                        res.push((a, 0.0));
+                        res.push((
+                            crate::search_scope::LauncherSearchResult::new(a, category),
+                            0.0,
+                        ));
                     } else {
                         let alias_match = self.alias_matches_lc(&a.action, &query_term_lc);
                         let label_match = Self::matches_exact_display_text(&cached, &query_term_lc);
@@ -1299,7 +1359,10 @@ impl LauncherApp {
                         let action_match = cached.action_lc.contains(&query_term_lc);
                         if label_match || desc_match || action_match || alias_match {
                             let score = if alias_match { 1.0 } else { 0.0 };
-                            res.push((a, score));
+                            res.push((
+                                crate::search_scope::LauncherSearchResult::new(a, category),
+                                score,
+                            ));
                         }
                     }
                 } else {
@@ -1312,7 +1375,10 @@ impl LauncherApp {
                             .unwrap_or(0) as f32
                             * self.fuzzy_weight
                     };
-                    res.push((a, score));
+                    res.push((
+                        crate::search_scope::LauncherSearchResult::new(a, category),
+                        score,
+                    ));
                 }
             }
         }
@@ -1378,6 +1444,12 @@ impl LauncherApp {
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
                 actions: results,
+                categories: self
+                    .command_cache
+                    .iter()
+                    .map(|_| crate::search_scope::SearchResultCategory::Commands)
+                    .chain(self.action_cache.iter().map(|entry| entry.category))
+                    .collect(),
                 provider_revision: self.plugins.search_generation(),
                 result_catalog_versions: Some(
                     crate::radial::dynamic::MutableResultCatalogVersions::current(),
@@ -1452,7 +1524,14 @@ impl LauncherApp {
             raw_query,
             trimmed,
             &trimmed_lc,
-            result.actions,
+            result
+                .actions
+                .into_iter()
+                .zip(result.categories)
+                .map(|(action, category)| {
+                    crate::search_scope::LauncherSearchResult::new(action, category)
+                })
+                .collect(),
             result.pending,
         );
         self.search_read_only_outcome_from_scored_plugins(
@@ -1469,7 +1548,7 @@ impl LauncherApp {
     fn search_read_only_outcome_from_scored_plugins(
         &self,
         raw_query: &str,
-        plugin_results: Vec<(Action, f32)>,
+        plugin_results: Vec<(crate::search_scope::LauncherSearchResult, f32)>,
         provider_pending: bool,
         start_revision: u64,
         provider_revision: u64,
@@ -1481,12 +1560,17 @@ impl LauncherApp {
         let trimmed = raw_query.trim();
         let trimmed_lc = trimmed.to_lowercase();
         if trimmed.is_empty() {
-            let mut results = self.command_cache.clone();
+            let mut results = self
+                .command_cache
+                .iter()
+                .cloned()
+                .map(crate::search_scope::LauncherSearchResult::command)
+                .collect::<Vec<_>>();
             #[cfg(test)]
             let mut c2a_catalog_bytes = 0_u64;
             #[cfg(test)]
             let mut c2a_catalog_strings = 0_u64;
-            results.extend(self.actions.iter().map(|action| {
+            results.extend(self.actions.iter().enumerate().map(|(index, action)| {
                 #[cfg(test)]
                 if c2a_observer.is_some() {
                     c2a_catalog_bytes = c2a_catalog_bytes
@@ -1495,12 +1579,15 @@ impl LauncherApp {
                     c2a_catalog_strings = c2a_catalog_strings
                         .saturating_add(c2a_search_observer::action_payload_strings(action));
                 }
-                Action {
-                    label: format!("app {}", action.label),
-                    desc: action.desc.clone(),
-                    action: action.action.clone(),
-                    args: action.args.clone(),
-                }
+                crate::search_scope::LauncherSearchResult::new(
+                    Action {
+                        label: format!("app {}", action.label),
+                        desc: action.desc.clone(),
+                        action: action.action.clone(),
+                        args: action.args.clone(),
+                    },
+                    self.action_cache[index].category,
+                )
             }));
             #[cfg(test)]
             if let Some(observer) = c2a_observer {
@@ -1538,7 +1625,11 @@ impl LauncherApp {
             }
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
-                actions: results,
+                categories: results.iter().map(|result| result.category).collect(),
+                actions: results
+                    .into_iter()
+                    .map(crate::search_scope::LauncherSearchResult::into_action)
+                    .collect(),
                 provider_revision,
                 result_catalog_versions,
                 result_catalog_versions_stable: catalog_versions_stable,
@@ -1576,10 +1667,13 @@ impl LauncherApp {
             crate::performance::track_c::Phase::SearchMoveResults,
         );
         let materialized = scored.len();
-        let actions = scored
+        let (actions, categories): (
+            Vec<Action>,
+            Vec<crate::search_scope::SearchResultCategory>,
+        ) = scored
             .into_iter()
-            .map(|(action, _)| action)
-            .collect::<Vec<_>>();
+            .map(|(result, _)| (result.action, result.category))
+            .unzip();
         materialize_timer.set_work_units(materialized);
         materialize_timer.finish(crate::performance::track_c::Outcome::Completed);
         let state = if provider_pending
@@ -1628,6 +1722,7 @@ impl LauncherApp {
         LauncherSearchOutcome {
             state,
             actions,
+            categories,
             provider_revision,
             result_catalog_versions,
             result_catalog_versions_stable: catalog_versions_stable,
@@ -1640,9 +1735,17 @@ impl LauncherApp {
         self.search_read_only_outcome(raw_query).actions
     }
 
-    fn apply_usage_weight(&self, res: &mut Vec<(Action, f32)>) {
-        for (a, score) in res.iter_mut() {
-            *score += self.usage.get(&a.action).cloned().unwrap_or(0) as f32 * self.usage_weight;
+    fn apply_usage_weight(
+        &self,
+        res: &mut Vec<(crate::search_scope::LauncherSearchResult, f32)>,
+    ) {
+        for (result, score) in res.iter_mut() {
+            *score += self
+                .usage
+                .get(&result.action.action)
+                .cloned()
+                .unwrap_or(0) as f32
+                * self.usage_weight;
         }
     }
 }
@@ -1716,6 +1819,7 @@ mod tests {
         catalog_versions: crate::radial::dynamic::MutableResultCatalogVersions,
     ) -> crate::plugin::PluginSearchSnapshotResult {
         crate::plugin::PluginSearchSnapshotResult {
+            categories: vec![crate::search_scope::SearchResultCategory::Commands; actions.len()],
             actions,
             pending,
             start_revision,
@@ -1905,6 +2009,12 @@ mod tests {
             }));
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
+                categories: app
+                    .command_cache
+                    .iter()
+                    .map(|_| crate::search_scope::SearchResultCategory::Commands)
+                    .chain(app.action_cache.iter().map(|entry| entry.category))
+                    .collect(),
                 actions,
                 provider_revision: provider.provider_revision,
                 result_catalog_versions: Some(provider.catalog_versions),
@@ -1931,28 +2041,41 @@ mod tests {
                 .is_some_and(|alias| alias.contains(term))
         };
 
-        let mut scored = Vec::<(Action, f32)>::new();
+        let mut scored = Vec::<(Action, f32, crate::search_scope::SearchResultCategory)>::new();
         if !trimmed_lc.starts_with("g ") && searches_app {
-            for (action, metadata) in app.actions.iter().zip(app.action_filter_metadata.iter()) {
+            for ((action, metadata), cached) in app
+                .actions
+                .iter()
+                .zip(app.action_filter_metadata.iter())
+                .zip(app.action_cache.iter())
+            {
                 if !action_matches_filters(metadata, &filters) {
                     continue;
                 }
                 if local_text_lc.is_empty() {
-                    scored.push((action.clone(), 0.0));
+                    scored.push((action.clone(), 0.0, cached.category));
                 } else if exact_mode {
                     let alias = alias_for(&action.action, &local_text_lc);
                     let label = action.label.to_lowercase().contains(&local_text_lc);
                     let desc = action.desc.to_lowercase().contains(&local_text_lc);
                     let id = action.action.to_lowercase().contains(&local_text_lc);
                     if label || desc || id || alias {
-                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                        scored.push((
+                            action.clone(),
+                            if alias { 1.0 } else { 0.0 },
+                            cached.category,
+                        ));
                     }
                 } else if let Some(score) = app
                     .matcher
                     .fuzzy_match(&action.label, local_text)
                     .max(app.matcher.fuzzy_match(&action.desc, local_text))
                 {
-                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
+                    scored.push((
+                        action.clone(),
+                        score as f32 * app.fuzzy_weight,
+                        cached.category,
+                    ));
                 }
             }
         }
@@ -1962,21 +2085,21 @@ mod tests {
                 .split_once(' ')
                 .map(|value| value.1)
                 .unwrap_or("");
-            for action in &provider.actions {
+            for (action, category) in provider.actions.iter().zip(provider.categories.iter()) {
                 if exact_mode {
                     if LauncherApp::should_bypass_exact_post_filter(trimmed, &action.action) {
-                        scored.push((action.clone(), 0.0));
+                        scored.push((action.clone(), 0.0, *category));
                     } else if query_term.is_empty() {
                         // Empty terms match every provider row at neutral
                         // score; an empty alias must not promote them.
-                        scored.push((action.clone(), 0.0));
+                        scored.push((action.clone(), 0.0, *category));
                     } else if action.label.to_lowercase().contains(query_term.trim())
                         || action.desc.to_lowercase().contains(query_term)
                         || action.action.to_lowercase().contains(query_term)
                         || alias_for(&action.action, query_term)
                     {
                         let alias = alias_for(&action.action, query_term);
-                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }, *category));
                     }
                 } else {
                     let score = if raw_query.is_empty() {
@@ -1988,7 +2111,7 @@ mod tests {
                             .unwrap_or(0) as f32
                             * app.fuzzy_weight
                     };
-                    scored.push((action.clone(), score));
+                    scored.push((action.clone(), score, *category));
                 }
             }
         } else if provider.actions.is_empty() {
@@ -1999,14 +2122,22 @@ mod tests {
                     let desc = action.desc.to_lowercase().contains(&trimmed_lc);
                     let id = action.action.to_lowercase().contains(&trimmed_lc);
                     if label || desc || id || alias {
-                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                        scored.push((
+                            action.clone(),
+                            if alias { 1.0 } else { 0.0 },
+                            crate::search_scope::SearchResultCategory::Commands,
+                        ));
                     }
                 } else if let Some(score) = app
                     .matcher
                     .fuzzy_match(&action.label, trimmed)
                     .max(app.matcher.fuzzy_match(&action.desc, trimmed))
                 {
-                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
+                    scored.push((
+                        action.clone(),
+                        score as f32 * app.fuzzy_weight,
+                        crate::search_scope::SearchResultCategory::Commands,
+                    ));
                 }
             }
         } else {
@@ -2024,19 +2155,19 @@ mod tests {
                 }
             }
             let provider_term = provider_term.to_lowercase();
-            for action in &provider.actions {
+            for (action, category) in provider.actions.iter().zip(provider.categories.iter()) {
                 if exact_mode {
                     if LauncherApp::should_bypass_exact_post_filter(trimmed, &action.action) {
-                        scored.push((action.clone(), 0.0));
+                        scored.push((action.clone(), 0.0, *category));
                     } else if provider_term.is_empty() {
-                        scored.push((action.clone(), 0.0));
+                        scored.push((action.clone(), 0.0, *category));
                     } else if action.label.to_lowercase().contains(provider_term.trim())
                         || action.desc.to_lowercase().contains(&provider_term)
                         || action.action.to_lowercase().contains(&provider_term)
                         || alias_for(&action.action, &provider_term)
                     {
                         let alias = alias_for(&action.action, &provider_term);
-                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }, *category));
                     }
                 } else {
                     let score = app
@@ -2045,12 +2176,12 @@ mod tests {
                         .max(app.matcher.fuzzy_match(&action.desc, raw_query))
                         .unwrap_or(0) as f32
                         * app.fuzzy_weight;
-                    scored.push((action.clone(), score));
+                    scored.push((action.clone(), score, *category));
                 }
             }
         }
 
-        for (action, score) in &mut scored {
+        for (action, score, _) in &mut scored {
             *score += app.usage.get(&action.action).copied().unwrap_or(0) as f32 * app.usage_weight;
         }
         scored.sort_by(|left, right| {
@@ -2059,10 +2190,13 @@ mod tests {
                 .partial_cmp(&left.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let actions = scored
+        let (actions, categories): (
+            Vec<Action>,
+            Vec<crate::search_scope::SearchResultCategory>,
+        ) = scored
             .into_iter()
-            .map(|(action, _)| action)
-            .collect::<Vec<_>>();
+            .map(|(action, _, category)| (action, category))
+            .unzip();
         let state = if provider.pending
             || provider.start_revision != provider.provider_revision
             || !catalog_versions_stable
@@ -2076,6 +2210,7 @@ mod tests {
         LauncherSearchOutcome {
             state,
             actions,
+            categories,
             provider_revision: provider.provider_revision,
             result_catalog_versions: Some(provider.catalog_versions),
             result_catalog_versions_stable: catalog_versions_stable,
@@ -2760,6 +2895,12 @@ mod tests {
             }));
             return LauncherSearchOutcome {
                 state: LauncherSearchState::Results,
+                categories: app
+                    .command_cache
+                    .iter()
+                    .map(|_| crate::search_scope::SearchResultCategory::Commands)
+                    .chain(app.action_cache.iter().map(|entry| entry.category))
+                    .collect(),
                 actions,
                 provider_revision: provider.provider_revision,
                 result_catalog_versions: Some(provider.catalog_versions),
@@ -2783,38 +2924,46 @@ mod tests {
                 .and_then(Option::as_ref)
                 .is_some_and(|alias| alias.contains(&query_term))
         };
-        let mut scored = Vec::new();
+        let mut scored = Vec::<(Action, f32, crate::search_scope::SearchResultCategory)>::new();
         if searches_app {
-            for action in app.actions.iter() {
+            for (action, cached) in app.actions.iter().zip(app.action_cache.iter()) {
                 // Production's app-action path treats an empty app term as a
                 // score-zero catalog browse before alias matching.
                 if query_term.is_empty() {
-                    scored.push((action.clone(), 0.0));
+                    scored.push((action.clone(), 0.0, cached.category));
                 } else if exact_mode {
                     let alias = alias_matches(&action.action);
                     let label = action.label.to_lowercase().contains(&query_term);
                     let desc = action.desc.to_lowercase().contains(&query_term);
                     let id = action.action.to_lowercase().contains(&query_term);
                     if alias || label || desc || id {
-                        scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                        scored.push((
+                            action.clone(),
+                            if alias { 1.0 } else { 0.0 },
+                            cached.category,
+                        ));
                     }
                 } else if let Some(score) = app
                     .matcher
                     .fuzzy_match(&action.label, action_query)
                     .max(app.matcher.fuzzy_match(&action.desc, action_query))
                 {
-                    scored.push((action.clone(), score as f32 * app.fuzzy_weight));
+                    scored.push((
+                        action.clone(),
+                        score as f32 * app.fuzzy_weight,
+                        cached.category,
+                    ));
                 }
             }
         }
-        for action in &provider.actions {
+        for (action, category) in provider.actions.iter().zip(provider.categories.iter()) {
             if exact_mode {
                 let alias = alias_matches(&action.action);
                 let label = action.label.to_lowercase().contains(&query_term);
                 let desc = action.desc.to_lowercase().contains(&query_term);
                 let id = action.action.to_lowercase().contains(&query_term);
                 if query_term.is_empty() || alias || label || desc || id {
-                    scored.push((action.clone(), if alias { 1.0 } else { 0.0 }));
+                    scored.push((action.clone(), if alias { 1.0 } else { 0.0 }, *category));
                 }
             } else {
                 let score = app
@@ -2823,10 +2972,10 @@ mod tests {
                     .max(app.matcher.fuzzy_match(&action.desc, raw_query))
                     .unwrap_or(0) as f32
                     * app.fuzzy_weight;
-                scored.push((action.clone(), score));
+                scored.push((action.clone(), score, *category));
             }
         }
-        for (action, score) in &mut scored {
+        for (action, score, _) in &mut scored {
             *score += app.usage.get(&action.action).copied().unwrap_or(0) as f32 * app.usage_weight;
         }
         scored.sort_by(|left, right| {
@@ -2835,10 +2984,13 @@ mod tests {
                 .partial_cmp(&left.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let actions = scored
+        let (actions, categories): (
+            Vec<Action>,
+            Vec<crate::search_scope::SearchResultCategory>,
+        ) = scored
             .into_iter()
-            .map(|(action, _)| action)
-            .collect::<Vec<_>>();
+            .map(|(action, _, category)| (action, category))
+            .unzip();
         let stable = provider.catalog_versions_at_start == provider.catalog_versions;
         let state =
             if provider.pending || provider.start_revision != provider.provider_revision || !stable
@@ -2852,6 +3004,7 @@ mod tests {
         LauncherSearchOutcome {
             state,
             actions,
+            categories,
             provider_revision: provider.provider_revision,
             result_catalog_versions: Some(provider.catalog_versions),
             result_catalog_versions_stable: stable,

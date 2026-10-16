@@ -151,13 +151,14 @@ impl SettingsEditor {
                 new_settings.note.templates_enabled,
             ),
         );
-        app.plugins.reload_from_dirs(
+        app.plugins.reload_from_dirs_with_custom_len(
             &dirs,
             app.clipboard_limit,
             app.net_unit,
             false,
             &plugin_settings,
             actions_arc,
+            app.custom_len,
         );
         if let Some(val) = new_settings.plugin_settings.get("file_search")
             && let Ok(cfg) = serde_json::from_value::<

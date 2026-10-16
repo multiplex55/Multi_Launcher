@@ -304,6 +304,18 @@ impl Plugin for FoldersPlugin {
         self.list_entries(filter)
     }
 
+    fn search_results(&self, query: &str) -> Vec<crate::search_scope::LauncherSearchResult> {
+        self.search(query)
+            .into_iter()
+            .map(|action| {
+                crate::search_scope::LauncherSearchResult::new(
+                    action,
+                    crate::search_scope::SearchResultCategory::Files,
+                )
+            })
+            .collect()
+    }
+
     fn name(&self) -> &str {
         "folders"
     }

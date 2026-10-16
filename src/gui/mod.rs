@@ -1114,6 +1114,7 @@ struct CachedSearchEntry {
     label_lc: String,
     desc_lc: String,
     action_lc: String,
+    category: crate::search_scope::SearchResultCategory,
 }
 
 impl CachedSearchEntry {
@@ -1122,6 +1123,16 @@ impl CachedSearchEntry {
             label_lc: action.label.to_lowercase(),
             desc_lc: action.desc.to_lowercase(),
             action_lc: action.action.to_lowercase(),
+            category: crate::search_scope::SearchResultCategory::Commands,
+        }
+    }
+
+    fn from_catalog_action(action: &Action, indexed_tail: bool) -> Self {
+        Self {
+            label_lc: action.label.to_lowercase(),
+            desc_lc: action.desc.to_lowercase(),
+            action_lc: action.action.to_lowercase(),
+            category: crate::search_scope::catalog_action_category(action, indexed_tail),
         }
     }
 }
@@ -6407,6 +6418,7 @@ mod tests {
             label_lc: "testingeve123".into(),
             desc_lc: String::new(),
             action_lc: String::new(),
+            category: crate::search_scope::SearchResultCategory::Commands,
         };
         assert!(LauncherApp::matches_exact_display_text(
             &cached,
