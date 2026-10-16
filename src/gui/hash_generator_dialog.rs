@@ -221,6 +221,17 @@ impl HashGeneratorDialogState {
     }
 
     pub fn calculate(&mut self, repaint: Arc<dyn Fn() + Send + Sync>) -> Result<(), String> {
+        self.calculate_with_start(repaint, HashJob::start)
+    }
+
+    fn calculate_with_start(
+        &mut self,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+        start_job: impl FnOnce(
+            HashRequest,
+            Arc<dyn Fn() + Send + Sync>,
+        ) -> Result<HashJob, crate::hash_generator::HashError>,
+    ) -> Result<(), String> {
         if self.job.is_some() {
             return Err("Wait for the cancelled hash worker to finish before starting another".into());
         }
@@ -239,7 +250,7 @@ impl HashGeneratorDialogState {
         };
         let request = HashRequest::new(self.algorithm, input, None).map_err(|error| error.to_string())?;
         let request_id = request.request_id();
-        let job = HashJob::start(request, repaint).map_err(|error| error.to_string())?;
+        let job = start_job(request, repaint).map_err(|error| error.to_string())?;
         self.result = None;
         self.error = None;
         self.clipboard_feedback = None;
@@ -534,6 +545,7 @@ mod tests {
 
     struct FakeClipboard {
         read: Result<String, ClipboardError>,
+        write_error: Option<String>,
         writes: Mutex<Vec<String>>,
     }
 
@@ -541,6 +553,7 @@ mod tests {
         fn default() -> Self {
             Self {
                 read: Ok(String::new()),
+                write_error: None,
                 writes: Mutex::new(Vec::new()),
             }
         }
@@ -552,9 +565,36 @@ mod tests {
         }
 
         fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
+            if let Some(error) = &self.write_error {
+                return Err(ClipboardError::Permanent(error.clone()));
+            }
             self.writes.lock().unwrap().push(text.to_owned());
             Ok(())
         }
+    }
+
+    fn calculate_deferred(dialog: &mut HashGeneratorDialogState) -> Box<dyn FnOnce() + Send> {
+        let worker_slot = Arc::new(Mutex::new(None));
+        let worker_slot_for_start = worker_slot.clone();
+        dialog
+            .calculate_with_start(Arc::new(|| {}), move |request, repaint| {
+                let (job, run_worker) =
+                    HashJob::start_deferred_for_test(request, repaint)?;
+                *worker_slot_for_start
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_worker);
+                Ok(job)
+            })
+            .expect("deferred hash calculation starts");
+
+        Box::new(move || {
+            let run_worker = worker_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("deferred worker is available");
+            run_worker();
+        })
     }
 
     fn wait_for_terminal(dialog: &mut HashGeneratorDialogState) {
@@ -649,5 +689,135 @@ mod tests {
         assert!(dialog.calculate(Arc::new(|| {})).is_err());
         wait_for_terminal(&mut dialog);
         assert!(dialog.result().is_none());
+    }
+
+    #[test]
+    fn hash_generator_lifecycle_rejects_deferred_results_after_edits_and_allows_reruns() {
+        for edit in ["source", "algorithm", "mode"] {
+            let mut dialog = HashGeneratorDialogState::default();
+            dialog.ensure_open();
+            dialog.set_text("before edit".into());
+
+            let finish_old_worker = calculate_deferred(&mut dialog);
+            let old_request_id = dialog.current_request_id().unwrap();
+            finish_old_worker();
+
+            match edit {
+                "source" => dialog.set_text("after edit".into()),
+                "algorithm" => dialog.set_algorithm(HashAlgorithm::Sha512),
+                "mode" => dialog.load_clipboard(&FakeClipboard {
+                    read: Ok("clipboard snapshot".into()),
+                    ..Default::default()
+                }),
+                _ => unreachable!(),
+            }
+            assert!(dialog.poll());
+            assert!(dialog.result().is_none(), "stale {edit} result was published");
+            assert!(dialog.error.is_none(), "stale {edit} error was published");
+            assert!(!dialog.can_copy_digest());
+
+            let finish_current_worker = calculate_deferred(&mut dialog);
+            let current_request_id = dialog.current_request_id().unwrap();
+            assert_ne!(current_request_id, old_request_id);
+            finish_current_worker();
+            assert!(dialog.poll());
+            let result = dialog.result().expect("current result is published");
+            assert_eq!(result.request_id, current_request_id);
+            assert_eq!(result.input_mode, dialog.mode());
+            assert_eq!(result.algorithm, dialog.algorithm());
+            assert!(dialog.can_copy_digest());
+        }
+    }
+
+    #[test]
+    fn hash_generator_lifecycle_cancel_close_reopen_hidden_poll_and_shutdown_are_nonblocking() {
+        let context = egui::Context::default();
+        let mut dialog = HashGeneratorDialogState::default();
+        dialog.ensure_open();
+        dialog.set_text("cancelled".into());
+
+        let finish_cancelled = calculate_deferred(&mut dialog);
+        dialog.cancel();
+        assert!(dialog.is_stopping_stale_job());
+        assert!(dialog.calculate(Arc::new(|| {})).is_err());
+        dialog.open = false;
+        dialog.show(&context);
+        assert!(dialog.has_job(), "polling must not run or join the deferred worker");
+        finish_cancelled();
+        dialog.show(&context);
+        assert!(!dialog.has_job());
+        assert!(dialog.result().is_none());
+
+        let finish_closed = calculate_deferred(&mut dialog);
+        dialog.end_session();
+        dialog.ensure_open();
+        assert!(dialog.is_stopping_stale_job());
+        assert!(dialog.calculate(Arc::new(|| {})).is_err());
+        dialog.open = false;
+        dialog.show(&context);
+        assert!(dialog.has_job(), "hidden polling must remain nonblocking");
+        finish_closed();
+        dialog.show(&context);
+        assert!(!dialog.has_job());
+        assert!(dialog.result().is_none());
+
+        dialog.ensure_open();
+        let finish_shutdown = calculate_deferred(&mut dialog);
+        dialog.shutdown();
+        assert!(!dialog.open);
+        assert!(dialog.is_stopping_stale_job());
+        finish_shutdown();
+        dialog.show(&context);
+        assert!(!dialog.has_job());
+        assert!(dialog.result().is_none());
+    }
+
+    #[test]
+    fn hash_generator_lifecycle_file_invocation_keeps_path_mode_and_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("selected-report.csv");
+        std::fs::write(&path, "id,value\r\n1,λ\n").unwrap();
+
+        let mut dialog = HashGeneratorDialogState::default();
+        dialog.ensure_open();
+        dialog.set_text("old text invocation".into());
+        let finish_old_worker = calculate_deferred(&mut dialog);
+        let old_generation = dialog.generation;
+        finish_old_worker();
+
+        dialog.open_with_file(path.clone());
+        assert!(dialog.generation > old_generation);
+        assert_eq!(dialog.mode(), HashInputMode::File);
+        assert_eq!(dialog.file_path(), Some(path.as_path()));
+        assert!(dialog.poll(), "the prior invocation is retired");
+        assert!(dialog.result().is_none());
+
+        dialog
+            .calculate(Arc::new(|| {}))
+            .expect("selected file calculation starts");
+        wait_for_terminal(&mut dialog);
+        let result = dialog.result().expect("file digest is available");
+        assert_eq!(result.input_mode, HashInputMode::File);
+        assert_eq!(result.bytes_processed, std::fs::metadata(&path).unwrap().len());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "id,value\r\n1,λ\n");
+    }
+
+    #[test]
+    fn hash_generator_lifecycle_copy_failure_keeps_digest_and_reports_error() {
+        let mut dialog = HashGeneratorDialogState::default();
+        dialog.ensure_open();
+        dialog.set_text("abc".into());
+        dialog.calculate(Arc::new(|| {})).unwrap();
+        wait_for_terminal(&mut dialog);
+        let digest = dialog.result().unwrap().digest.clone();
+        let clipboard = FakeClipboard {
+            write_error: Some("clipboard busy".into()),
+            ..Default::default()
+        };
+
+        assert!(!dialog.copy_digest(&clipboard));
+        assert!(dialog.error.as_deref().unwrap().contains("clipboard busy"));
+        assert_eq!(dialog.result().unwrap().digest, digest);
+        assert!(clipboard.writes.lock().unwrap().is_empty());
     }
 }

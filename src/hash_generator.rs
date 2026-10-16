@@ -528,6 +528,33 @@ impl HashJob {
         })
     }
 
+    /// Builds a worker whose execution is controlled by the test. This lets
+    /// GUI-state tests arrange terminal completion before polling without
+    /// relying on scheduler timing or large synthetic inputs.
+    #[cfg(test)]
+    pub(crate) fn start_deferred_for_test(
+        request: HashRequest,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<(Self, Box<dyn FnOnce() + Send>), HashError> {
+        let deferred = Arc::new(Mutex::new(None));
+        let deferred_slot = deferred.clone();
+        let job = Self::start_with_spawn(request, repaint, move |worker| {
+            *deferred_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(worker);
+            Ok(())
+        })?;
+        let run_worker = Box::new(move || {
+            let worker = deferred
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+                .expect("deferred test worker is available");
+            worker();
+        });
+        Ok((job, run_worker))
+    }
+
     pub const fn request_id(&self) -> HashRequestId {
         self.request_id
     }
@@ -902,6 +929,79 @@ mod tests {
         assert_eq!(result.digest, expected);
         assert_eq!(result.input_mode, HashInputMode::File);
         assert_eq!(result.bytes_processed, contents.len() as u64);
+    }
+
+    #[test]
+    fn hash_generator_lifecycle_file_errors_and_success_are_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing.bin");
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        for path in [&missing, &directory] {
+            assert!(matches!(
+                hash_request(
+                    request(HashAlgorithm::Sha256, HashInput::File(path.clone()), None),
+                    &HashCancellationToken::new(),
+                    |_| {},
+                ),
+                Err(HashError::Io(_))
+            ));
+        }
+
+        let path = root.path().join("source.bin");
+        let contents = b"hash fixture\r\n\xce\xbb\n";
+        std::fs::write(&path, contents).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        let before_modified = before.modified().unwrap();
+        let before_len = before.len();
+        let before_entries = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let result = hash_request(
+            request(HashAlgorithm::Sha256, HashInput::File(path.clone()), None),
+            &HashCancellationToken::new(),
+            |_| {},
+        )
+        .unwrap();
+
+        let after = std::fs::metadata(&path).unwrap();
+        let after_entries = std::fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(result.input_mode, HashInputMode::File);
+        assert_eq!(result.bytes_processed, contents.len() as u64);
+        assert_eq!(result.digest, hex::encode(Sha256::digest(contents)));
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+        assert_eq!(after.len(), before_len);
+        assert_eq!(after.modified().unwrap(), before_modified);
+        assert_eq!(after_entries, before_entries);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hash_generator_lifecycle_exclusive_file_lock_returns_read_error() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("locked.bin");
+        std::fs::write(&path, b"locked fixture").unwrap();
+        let _exclusive_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        assert!(matches!(
+            hash_request(
+                request(HashAlgorithm::Sha256, HashInput::File(path), None),
+                &HashCancellationToken::new(),
+                |_| {},
+            ),
+            Err(HashError::Io(_))
+        ));
     }
 
     fn terminal(job: &mut HashJob) -> HashJobEvent {
