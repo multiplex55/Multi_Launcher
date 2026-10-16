@@ -2833,7 +2833,7 @@ mod tests {
                 state,
                 Some(observation_runtime(mode)),
                 open,
-                observation_owner(&state),
+                observation_owner(state),
                 now,
                 |_| panic!("stale rendered frame must be rejected before inspecting"),
                 |_| panic!("stale frame published"),

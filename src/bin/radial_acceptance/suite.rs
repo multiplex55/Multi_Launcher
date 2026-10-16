@@ -28759,7 +28759,7 @@ fn run_tap_case(
             require_visible(&root)
                 .map_err(|error| CaseFailure::new(FailureStage::NativeRootState, error))?;
             child
-                .focus_window(root)
+                .focus_window(&root)
                 .map_err(|error| CaseFailure::new(FailureStage::InputInjection, error))?;
         } else {
             require_hidden(&root)

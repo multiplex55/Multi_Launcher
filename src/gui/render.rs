@@ -7478,7 +7478,7 @@ mod tests {
     fn root_list_action(index: usize) -> Action {
         Action {
             label: format!("Launcher result {index}"),
-            desc: if index % 7 == 0 {
+            desc: if index.is_multiple_of(7) {
                 format!("A longer description for row {index} with some wrapped words")
             } else {
                 "Synthetic root row".into()

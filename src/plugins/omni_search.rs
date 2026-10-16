@@ -466,7 +466,7 @@ mod tests {
                     action.label.to_lowercase().contains(&query)
                         || action.desc.to_lowercase().contains(&query)
                 })
-                .map(|action| action.clone()),
+                .cloned(),
         )
     }
 

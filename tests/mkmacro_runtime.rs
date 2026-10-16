@@ -30,7 +30,7 @@ fn wait(rt: &MacroRuntime, state: RuntimeState) -> RuntimeSnapshot {
             "state {:?}, wanted {:?}, failure: {:?}",
             x.state,
             state,
-            &x.latest_failure,
+            x.latest_failure,
         );
         thread::sleep(Duration::from_millis(2))
     }

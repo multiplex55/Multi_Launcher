@@ -11,12 +11,14 @@ fn semantic_steps(
     next_id: u64,
     record_window_context: bool,
 ) -> Vec<MkStep> {
-    let mut settings = MkRecorderSettings::default();
-    settings.record_window_context = record_window_context;
-    settings.smart_keyboard_cleanup = false;
-    settings.smart_mouse_cleanup = false;
-    settings.minimum_idle_delay_ms = 0;
-    settings.delay_rounding_ms = 1;
+    let settings = MkRecorderSettings {
+        record_window_context,
+        smart_keyboard_cleanup: false,
+        smart_mouse_cleanup: false,
+        minimum_idle_delay_ms: 0,
+        delay_rounding_ms: 1,
+        ..MkRecorderSettings::default()
+    };
     let enriched = enrich_keyboard(items, &mut NoTextTranslation);
     materialize_plan(&build_recording_plan(&enriched, &settings), next_id)
 }
@@ -85,8 +87,10 @@ fn mouse(timestamp_us: u64, message: MouseMessage, x: i32, y: i32) -> RecordingB
 
 #[test]
 fn normalized_timed_move_and_drag_keep_final_row_count_and_stable_ids() {
-    let mut cfg = NormalizationConfig::default();
-    cfg.movement_mode = MovementMode::DetailedMovement;
+    let cfg = NormalizationConfig {
+        movement_mode: MovementMode::DetailedMovement,
+        ..NormalizationConfig::default()
+    };
     let normalized = normalize(
         &[
             mouse(0, MouseMessage::Move, 1, 1),
@@ -308,8 +312,10 @@ fn context_precedence_drag_signed_coordinates_fallback_and_activation_suppressio
         context(explorer(), Some(notepad())),
     ));
     input.extend(click(12_000, 145, 260, e));
-    let mut cfg = NormalizationConfig::default();
-    cfg.movement_mode = MovementMode::DetailedMovement;
+    let cfg = NormalizationConfig {
+        movement_mode: MovementMode::DetailedMovement,
+        ..NormalizationConfig::default()
+    };
     let rows = semantic_steps(&normalize(&input, &cfg, None), 0, true);
     let activations = rows
         .iter()
@@ -422,9 +428,11 @@ fn context_opt_out_preserves_screen_targets_delays_and_matching_primary_keys() {
         keyboard(43_000, KeyTransition::Up, 0x78, c.clone()),
         keyboard(44_000, KeyTransition::Down, 66, c),
     ];
-    let mut cfg = NormalizationConfig::default();
-    cfg.record_window_context = false;
-    cfg.movement_mode = MovementMode::DetailedMovement;
+    let cfg = NormalizationConfig {
+        record_window_context: false,
+        movement_mode: MovementMode::DetailedMovement,
+        ..NormalizationConfig::default()
+    };
     let normalized = normalize(&input, &cfg, None);
     let rows = semantic_steps(&normalized, 0, false);
     assert!(
