@@ -7,6 +7,7 @@ use crate::diff::query::DiffOpenPayload;
 use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
 use crate::persistence::{PersistentStoreId, RecoveryTarget};
+use crate::paste_sequence::SequenceId;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +20,7 @@ pub enum ActivationSource {
     RadialRelease,
     RadialShortcut,
     RadialHotstring,
+    Hotkey,
 }
 
 impl ActivationSource {
@@ -32,6 +34,7 @@ impl ActivationSource {
             Self::RadialRelease => "radial_release",
             Self::RadialShortcut => "radial_shortcut",
             Self::RadialHotstring => "radial_hotstring",
+            Self::Hotkey => "hotkey",
         }
     }
 }
@@ -86,6 +89,7 @@ pub enum Command {
     ColorPick(ColorPickCommand),
     Ocr(OcrCommand),
     Data(DataCommand),
+    PasteSequence(PasteSequenceCommand),
     VirtualDesktop(VirtualDesktopCommand),
     External(ExternalCommand),
 }
@@ -124,6 +128,7 @@ impl Command {
             Self::ColorPick(_) => "color_pick",
             Self::Ocr(_) => "ocr",
             Self::Data(_) => "data",
+            Self::PasteSequence(_) => "paste_sequence",
             Self::VirtualDesktop(_) => "virtual_desktop",
             Self::External(_) => "external",
         }
@@ -161,6 +166,7 @@ impl Command {
             Self::ColorPick(v) => v.kind_name(),
             Self::Ocr(v) => v.kind_name(),
             Self::Data(v) => v.kind_name(),
+            Self::PasteSequence(v) => v.kind_name(),
             Self::VirtualDesktop(v) => v.kind_name(),
             Self::External(v) => v.kind_name(),
         }
@@ -869,3 +875,21 @@ pub enum OcrCommand {
     Start,
 }
 kinds!(OcrCommand, Self::Start => "start");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PasteSequenceCommand {
+    Open,
+    Run(SequenceId),
+    Start,
+    Next,
+    Cancel,
+    InvalidRun,
+}
+kinds!(PasteSequenceCommand,
+    Self::Open => "open",
+    Self::Run(_) => "run",
+    Self::Start => "start",
+    Self::Next => "next",
+    Self::Cancel => "cancel",
+    Self::InvalidRun => "invalid_run"
+);

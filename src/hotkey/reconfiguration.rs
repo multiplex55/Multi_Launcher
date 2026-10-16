@@ -139,12 +139,14 @@ enum RuntimeCommand {
     Prepare {
         request_id: HotkeyReconfigurationId,
         settings: Box<Settings>,
+        sequence_hotkey_bindings: Option<Vec<crate::paste_sequence::SequenceHotkeyBinding>>,
         completion: Sender<Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError>>,
     },
     Apply {
         request_id: HotkeyReconfigurationId,
         generation: HotkeyRuntimeGeneration,
         settings: Box<Settings>,
+        sequence_hotkey_bindings: Option<Vec<crate::paste_sequence::SequenceHotkeyBinding>>,
         completion: Sender<HotkeyTerminalDisposition>,
     },
     Cancel {
@@ -172,6 +174,7 @@ pub struct HotkeyReconfigurationTicket {
     terminal: Receiver<HotkeyTerminalDisposition>,
     terminal_sender: Sender<HotkeyTerminalDisposition>,
     client: HotkeyReconfigurationClient,
+    sequence_hotkey_bindings: Option<Vec<crate::paste_sequence::SequenceHotkeyBinding>>,
     prepared_generation: Option<HotkeyRuntimeGeneration>,
     apply_sent: bool,
     completed: bool,
@@ -261,6 +264,7 @@ impl HotkeyReconfigurationTicket {
                 self.request_id,
                 generation,
                 settings,
+                self.sequence_hotkey_bindings.clone(),
                 self.terminal_sender.clone(),
             )
             .map_err(HotkeyApplySubmissionError::NotEnqueued)?;
@@ -384,6 +388,14 @@ impl HotkeyReconfigurationClient {
         &self,
         settings: Settings,
     ) -> Result<HotkeyReconfigurationTicket, HotkeyReconfigurationError> {
+        self.prepare_with_sequence_hotkey_bindings(settings, None)
+    }
+
+    pub fn prepare_with_sequence_hotkey_bindings(
+        &self,
+        settings: Settings,
+        sequence_hotkey_bindings: Option<Vec<crate::paste_sequence::SequenceHotkeyBinding>>,
+    ) -> Result<HotkeyReconfigurationTicket, HotkeyReconfigurationError> {
         let request_id = self.next_request_id()?;
         let (completion_tx, completion_rx) = mpsc::channel();
         let (terminal_tx, terminal_rx) = mpsc::channel();
@@ -392,6 +404,7 @@ impl HotkeyReconfigurationClient {
             .send(RuntimeCommand::Prepare {
                 request_id,
                 settings: Box::new(settings),
+                sequence_hotkey_bindings: sequence_hotkey_bindings.clone(),
                 completion: completion_tx,
             })
             .map_err(|_| HotkeyReconfigurationError::Disconnected)?;
@@ -402,6 +415,7 @@ impl HotkeyReconfigurationClient {
             terminal: terminal_rx,
             terminal_sender: terminal_tx,
             client: self.clone(),
+            sequence_hotkey_bindings,
             prepared_generation: None,
             apply_sent: false,
             completed: false,
@@ -430,6 +444,7 @@ impl HotkeyReconfigurationClient {
         request_id: HotkeyReconfigurationId,
         generation: HotkeyRuntimeGeneration,
         settings: Settings,
+        sequence_hotkey_bindings: Option<Vec<crate::paste_sequence::SequenceHotkeyBinding>>,
         completion: Sender<HotkeyTerminalDisposition>,
     ) -> Result<(), HotkeyReconfigurationError> {
         if self
@@ -439,6 +454,7 @@ impl HotkeyReconfigurationClient {
                 request_id,
                 generation,
                 settings: Box::new(settings),
+                sequence_hotkey_bindings,
                 completion,
             })
             .is_err()
@@ -484,6 +500,7 @@ pub enum HotkeyRuntimeMessage {
 pub struct HotkeyPreparationRequest {
     request_id: HotkeyReconfigurationId,
     settings: Box<Settings>,
+    sequence_hotkey_bindings: Option<Vec<crate::paste_sequence::SequenceHotkeyBinding>>,
     completion: Option<Sender<Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError>>>,
 }
 
@@ -491,6 +508,7 @@ pub struct HotkeyApplicationRequest {
     request_id: HotkeyReconfigurationId,
     generation: HotkeyRuntimeGeneration,
     settings: Box<Settings>,
+    sequence_hotkey_bindings: Option<Vec<crate::paste_sequence::SequenceHotkeyBinding>>,
     completion: Option<Sender<HotkeyTerminalDisposition>>,
 }
 
@@ -505,6 +523,12 @@ impl HotkeyApplicationRequest {
 
     pub fn settings(&self) -> &Settings {
         self.settings.as_ref()
+    }
+
+    pub fn sequence_hotkey_bindings(
+        &self,
+    ) -> Option<&[crate::paste_sequence::SequenceHotkeyBinding]> {
+        self.sequence_hotkey_bindings.as_deref()
     }
 
     pub fn complete_applied(
@@ -618,6 +642,12 @@ impl HotkeyPreparationRequest {
         self.settings.as_ref()
     }
 
+    pub fn sequence_hotkey_bindings(
+        &self,
+    ) -> Option<&[crate::paste_sequence::SequenceHotkeyBinding]> {
+        self.sequence_hotkey_bindings.as_deref()
+    }
+
     pub fn complete(
         mut self,
         result: Result<PreparedHotkeyReconfiguration, HotkeyReconfigurationError>,
@@ -652,11 +682,13 @@ impl HotkeyReconfigurationReceiver {
             Ok(RuntimeCommand::Prepare {
                 request_id,
                 settings,
+                sequence_hotkey_bindings,
                 completion,
             }) => Ok(Some(HotkeyRuntimeMessage::Prepare(
                 HotkeyPreparationRequest {
                     request_id,
                     settings,
+                    sequence_hotkey_bindings,
                     completion: Some(completion),
                 },
             ))),
@@ -664,12 +696,14 @@ impl HotkeyReconfigurationReceiver {
                 request_id,
                 generation,
                 settings,
+                sequence_hotkey_bindings,
                 completion,
             }) => Ok(Some(HotkeyRuntimeMessage::Apply(
                 HotkeyApplicationRequest {
                     request_id,
                     generation,
                     settings,
+                    sequence_hotkey_bindings,
                     completion: Some(completion),
                 },
             ))),
@@ -753,6 +787,21 @@ pub fn prepare_hotkey_reconfiguration(
     client.prepare(settings)
 }
 
+/// Requests preparation using a prospective, payload-free set of saved
+/// sequence hotkeys. The caller persists that candidate only after the main
+/// runtime acknowledges this preparation.
+pub fn prepare_hotkey_reconfiguration_with_sequence_bindings(
+    settings: Settings,
+    sequence_hotkey_bindings: Vec<crate::paste_sequence::SequenceHotkeyBinding>,
+) -> Result<HotkeyReconfigurationTicket, HotkeyReconfigurationError> {
+    let client = client_slot()
+        .read()
+        .map_err(|_| HotkeyReconfigurationError::RuntimeUnavailable)?
+        .clone()
+        .ok_or(HotkeyReconfigurationError::RuntimeUnavailable)?;
+    client.prepare_with_sequence_hotkey_bindings(settings, Some(sequence_hotkey_bindings))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -811,6 +860,61 @@ mod tests {
             ticket.try_terminal_disposition(),
             Some(Ok(HotkeyTerminalDisposition::Applied(applied)))
         );
+    }
+
+    #[test]
+    fn paste_sequence_hotkey_bindings_survive_prepare_and_apply_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::paste_sequence::SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft {
+                id: None,
+                name: "Prospective".into(),
+                hotkey: Some(crate::paste_sequence::HotkeyChord::new("Ctrl+F8").unwrap()),
+                mode: crate::paste_sequence::PlaybackMode::Automatic,
+                delay_ms: 0,
+                steps: vec![crate::paste_sequence::Step::LiteralText {
+                    text: "private body".into(),
+                }],
+            })
+            .unwrap();
+        let bindings = snapshot.hotkey_bindings();
+        let (client, receiver, _wake_rx) = test_runtime();
+        let mut ticket = client
+            .prepare_with_sequence_hotkey_bindings(Settings::default(), Some(bindings.clone()))
+            .unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare request")
+        };
+        assert_eq!(request.sequence_hotkey_bindings().unwrap()[0].id(), id);
+        assert!(!format!("{:?}", bindings[0]).contains("private body"));
+        let prepared = PreparedHotkeyReconfiguration {
+            request_id: request.request_id(),
+            generation: HotkeyRuntimeGeneration(21),
+            shared_invocation: false,
+        };
+        request.complete(Ok(prepared)).unwrap();
+        ticket.wait_prepared(Duration::from_secs(1)).unwrap();
+        ticket.apply(Settings::default()).unwrap();
+        let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected apply request")
+        };
+        assert_eq!(request.sequence_hotkey_bindings().unwrap()[0].id(), id);
+        request
+            .complete_applied(AppliedHotkeyReconfiguration {
+                request_id: ticket.request_id(),
+                generation: prepared.generation,
+            })
+            .unwrap();
+        assert!(matches!(
+            ticket.wait_terminal_disposition(Duration::from_secs(1)),
+            Ok(HotkeyTerminalDisposition::Applied(_))
+        ));
     }
 
     #[test]

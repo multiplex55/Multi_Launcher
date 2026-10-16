@@ -817,6 +817,8 @@ pub(super) mod tests {
             ("shell:dialog", Panel::ShellCmdDialog),
             ("bookmark:dialog", Panel::AddBookmarkDialog),
             ("snippet:dialog", Panel::SnippetDialog),
+            ("paste", Panel::PasteSequenceDialog),
+            ("paste:open", Panel::PasteSequenceDialog),
             ("snippet:edit:sample", Panel::SnippetDialog),
             ("fav:dialog:", Panel::FavDialog),
             ("macro:dialog", Panel::MacroDialog),

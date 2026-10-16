@@ -62,6 +62,21 @@ pub trait DialogCommandHost {
     fn open_shell_dialog(&mut self);
     fn open_bookmark_dialog(&mut self);
     fn open_snippet_dialog(&mut self);
+    fn open_paste_sequence_dialog(&mut self) {}
+    fn run_paste_sequence(
+        &mut self,
+        _id: crate::paste_sequence::SequenceId,
+        _source: super::ActivationSource,
+    ) -> Result<(), String> {
+        Err("paste sequences require the launcher interface".into())
+    }
+    fn start_paste_sequence(&mut self) -> Result<(), String> {
+        Err("paste sequences require the launcher interface".into())
+    }
+    fn next_paste_sequence(&mut self) -> Result<(), String> {
+        Err("paste sequences require the launcher interface".into())
+    }
+    fn cancel_paste_sequence(&mut self) {}
     fn open_snippet_editor(&mut self, alias: &str);
     fn open_favorite_dialog(&mut self, label: &str);
     fn open_legacy_macro_dialog(&mut self);

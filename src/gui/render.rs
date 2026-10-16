@@ -4390,6 +4390,9 @@ impl LauncherApp {
                 }
             }
         }
+        let mut paste_sequence_dlg = std::mem::take(&mut self.paste_sequence_dialog);
+        paste_sequence_dlg.ui(&ctx, self);
+        self.paste_sequence_dialog = paste_sequence_dlg;
         let mut macro_dlg = std::mem::take(&mut self.macro_dialog);
         macro_dlg.ui(&ctx, self);
         self.macro_dialog = macro_dlg;
@@ -4927,12 +4930,16 @@ impl eframe::App for LauncherApp {
         if let Some(plan) = self
             .sequence_playback
             .take_shutdown_restore_plan(std::time::Instant::now())
-            && let Err(error) = crate::paste_sequence::NativeSequencePlaybackPlatform::restore_after_shutdown(
-                plan,
-                self.launcher_hwnd,
-            )
+            && let Err(error) =
+                crate::paste_sequence::NativeSequencePlaybackPlatform::restore_after_shutdown(
+                    plan,
+                    self.launcher_hwnd,
+                )
         {
-            tracing::warn!(reason = error.message(), "paste-sequence clipboard cleanup failed");
+            tracing::warn!(
+                reason = error.message(),
+                "paste-sequence clipboard cleanup failed"
+            );
         }
         if let Err(error) = self.shutdown_indexing() {
             self.report_error_message("index.shutdown", error.to_string());

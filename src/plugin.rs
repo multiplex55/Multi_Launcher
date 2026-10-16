@@ -41,6 +41,7 @@ use crate::plugins::network::NetworkPlugin;
 use crate::plugins::note::NotePlugin;
 use crate::plugins::ocr::OcrPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
+use crate::plugins::paste_sequence::PasteSequencePlugin;
 use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::qr::QrPlugin;
 use crate::plugins::radial::RadialPlugin;
@@ -868,6 +869,7 @@ impl PluginManager {
         self.register_with_settings(TodoPlugin::default(), plugin_settings);
         self.register_with_settings(CalendarPlugin, plugin_settings);
         self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
+        self.register_with_settings(PasteSequencePlugin::default(), plugin_settings);
         self.register_with_settings(MacrosPlugin::default(), plugin_settings);
         self.register_with_settings(
             MkMacroPlugin::new(Arc::clone(&self.services.mkmacro_store)),

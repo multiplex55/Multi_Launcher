@@ -14,6 +14,19 @@ use crate::commands::{
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
 use crate::performance::track_c::EventOrigin;
 
+fn sequence_source_requirements(sequence: &crate::paste_sequence::Sequence) -> (bool, bool) {
+    let mut snippets = false;
+    let mut history = false;
+    for step in &sequence.steps {
+        match step {
+            crate::paste_sequence::Step::SnippetRef { .. } => snippets = true,
+            crate::paste_sequence::Step::ClipboardSnapshotOrRef { .. } => history = true,
+            crate::paste_sequence::Step::LiteralText { .. } => {}
+        }
+    }
+    (snippets, history)
+}
+
 impl LauncherCommandHost for LauncherApp {
     fn launcher_is_visible(&self) -> bool {
         self.visible_flag.load(Ordering::SeqCst)
@@ -195,6 +208,77 @@ impl DialogCommandHost for LauncherApp {
         self.snippet_dialog.open();
     }
 
+    fn open_paste_sequence_dialog(&mut self) {
+        let context = self.capture_sequence_context(crate::commands::ActivationSource::Click);
+        self.paste_sequence_dialog.open_with_context(context);
+        self.focus_panel(super::Panel::PasteSequenceDialog);
+    }
+
+    fn run_paste_sequence(
+        &mut self,
+        id: crate::paste_sequence::SequenceId,
+        source: crate::commands::ActivationSource,
+    ) -> Result<(), String> {
+        let snapshot =
+            crate::paste_sequence::SequenceStore::new(crate::paste_sequence::PASTE_SEQUENCES_FILE)
+                .load()
+                .map_err(|error| format!("Saved sequence could not be loaded: {error}"))?;
+        let sequence = snapshot
+            .sequence(id)
+            .cloned()
+            .ok_or_else(|| "Saved sequence no longer exists.".to_owned())?;
+        let (requires_snippets, requires_history) = sequence_source_requirements(&sequence);
+        let snippets = if requires_snippets {
+            match crate::plugins::snippets::load_snippets_for_reload(
+                crate::plugins::snippets::SNIPPETS_FILE,
+            )
+            .map_err(|_| "Snippet catalog could not be read.".to_owned())?
+            {
+                crate::common::persistence::LoadState::Missing
+                | crate::common::persistence::LoadState::Empty => Vec::new(),
+                crate::common::persistence::LoadState::Loaded(entries) => entries,
+            }
+        } else {
+            Vec::new()
+        };
+        let history = if requires_history {
+            crate::plugins::clipboard::load_history(crate::plugins::clipboard::CLIPBOARD_FILE)
+                .map_err(|_| "Clipboard history could not be read.".to_owned())?
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        self.paste_sequence_dialog.set_autostart_when_ready(true);
+        if let Err(error) =
+            self.begin_paste_sequence_preflight(sequence, &snippets, &history, source)
+        {
+            self.paste_sequence_dialog.set_autostart_when_ready(false);
+            return Err(format!("Paste sequence could not be prepared: {error:?}"));
+        }
+        if !self.snippet_prompt_dialog.is_open() {
+            self.paste_sequence_dialog.set_autostart_when_ready(false);
+            self.start_sequence_playback()
+                .map_err(|error| error.message().to_owned())?;
+        }
+        Ok(())
+    }
+
+    fn start_paste_sequence(&mut self) -> Result<(), String> {
+        self.start_sequence_playback()
+            .map_err(|error| error.message().to_owned())
+    }
+
+    fn next_paste_sequence(&mut self) -> Result<(), String> {
+        self.next_sequence_playback()
+            .map_err(|error| error.message().to_owned())
+    }
+
+    fn cancel_paste_sequence(&mut self) {
+        self.cancel_active_paste_sequence();
+        self.paste_sequence_dialog.set_autostart_when_ready(false);
+    }
+
     fn open_snippet_editor(&mut self, alias: &str) {
         self.snippet_dialog.open_edit(alias);
     }
@@ -255,6 +339,36 @@ impl DialogCommandHost for LauncherApp {
 
     fn open_cpu_list_dialog(&mut self, count: usize) {
         self.cpu_list_dialog.open(count);
+    }
+}
+
+impl LauncherApp {
+    pub(crate) fn handle_paste_sequence_hotkey(
+        &mut self,
+        action: crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction,
+    ) {
+        use crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction as HotkeyAction;
+        use crate::paste_sequence::SequencePlaybackStatus as Status;
+
+        match action {
+            HotkeyAction::Start(id) => {
+                if let Err(error) =
+                    self.run_paste_sequence(id, crate::commands::ActivationSource::Hotkey)
+                {
+                    self.report_error_message("paste_sequence.hotkey", error);
+                }
+            }
+            HotkeyAction::Next if self.sequence_playback.status() == Status::AwaitAdvance => {
+                if let Err(error) = self.next_sequence_playback() {
+                    self.report_error_message("paste_sequence.hotkey", error.message());
+                }
+            }
+            HotkeyAction::Next => {}
+            HotkeyAction::Cancel => {
+                self.cancel_active_paste_sequence();
+                self.paste_sequence_dialog.set_autostart_when_ready(false);
+            }
+        }
     }
 }
 
@@ -933,6 +1047,7 @@ fn select_sequence_origin_window(
                     crate::commands::ActivationSource::Click
                         | crate::commands::ActivationSource::Enter
                         | crate::commands::ActivationSource::Dashboard
+                        | crate::commands::ActivationSource::Hotkey
                 ) =>
         {
             cached
@@ -959,10 +1074,27 @@ fn command_accepts_query_override(command: &Command) -> bool {
 }
 
 impl LauncherApp {
+    pub(crate) fn cancel_active_paste_sequence(&mut self) -> bool {
+        use crate::paste_sequence::SequencePlaybackStatus as Status;
+
+        if self.snippet_prompt_dialog.is_sequence_preflight() {
+            let _ = self.cancel_snippet_prompt();
+            return true;
+        }
+        if matches!(
+            self.sequence_playback.status(),
+            Status::Preparing | Status::Ready | Status::Running | Status::AwaitAdvance
+        ) {
+            self.cancel_sequence_playback();
+            return true;
+        }
+        false
+    }
+
     /// Capture every invocation input before the sequence prompt or preflight
     /// panel takes focus. The external HWND/PID/thread identity is mandatory,
     /// even when no snippet uses `sys.window_title`.
-    fn capture_sequence_context(
+    pub(crate) fn capture_sequence_context(
         &mut self,
         source: crate::commands::ActivationSource,
     ) -> Result<
@@ -1043,6 +1175,65 @@ impl LauncherApp {
                 return Err(error);
             }
         };
+        self.finish_paste_sequence_preflight(preflight, snippets, history)
+    }
+
+    pub(crate) fn begin_paste_sequence_preflight_with_context(
+        &mut self,
+        sequence: crate::paste_sequence::Sequence,
+        snippets: &[crate::plugins::snippets::SnippetEntry],
+        history: &[String],
+        context: crate::paste_sequence::SequenceInvocationContext,
+    ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
+        if self.snippet_prompt_dialog.is_open() {
+            return Err(crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive);
+        }
+        self.sequence_playback
+            .begin_preparing()
+            .map_err(|_| crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive)?;
+        let preflight = match crate::paste_sequence::SequencePreflight::begin(
+            sequence, snippets, history, context,
+        ) {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.sequence_playback.preparation_failed();
+                return Err(error);
+            }
+        };
+        self.finish_paste_sequence_preflight(preflight, snippets, history)
+    }
+
+    pub(crate) fn begin_paste_sequence_draft_preflight_with_context(
+        &mut self,
+        draft: crate::paste_sequence::SequenceDraft,
+        snippets: &[crate::plugins::snippets::SnippetEntry],
+        history: &[String],
+        context: crate::paste_sequence::SequenceInvocationContext,
+    ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
+        if self.snippet_prompt_dialog.is_open() {
+            return Err(crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive);
+        }
+        self.sequence_playback
+            .begin_preparing()
+            .map_err(|_| crate::paste_sequence::SequencePreflightError::SequenceAlreadyActive)?;
+        let preflight = match crate::paste_sequence::SequencePreflight::begin_draft(
+            draft, snippets, history, context,
+        ) {
+            Ok(preflight) => preflight,
+            Err(error) => {
+                self.sequence_playback.preparation_failed();
+                return Err(error);
+            }
+        };
+        self.finish_paste_sequence_preflight(preflight, snippets, history)
+    }
+
+    fn finish_paste_sequence_preflight(
+        &mut self,
+        preflight: crate::paste_sequence::SequencePreflight,
+        snippets: &[crate::plugins::snippets::SnippetEntry],
+        history: &[String],
+    ) -> Result<(), crate::paste_sequence::SequencePreflightError> {
         if preflight.current_prompt().is_some() {
             if self
                 .snippet_prompt_dialog
@@ -1133,9 +1324,14 @@ impl LauncherApp {
             self.panel_states.snippet_prompt_dialog = false;
             self.panel_stack
                 .retain(|panel| *panel != super::Panel::SnippetPromptDialog);
-            self.sequence_playback
-                .set_ready(run)
-                .map_err(|_| super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightFailed)?;
+            self.sequence_playback.set_ready(run).map_err(|_| {
+                super::snippet_prompt_dialog::SnippetPromptError::SequencePreflightFailed
+            })?;
+            if self.paste_sequence_dialog.take_autostart_when_ready()
+                && let Err(error) = self.start_sequence_playback()
+            {
+                self.report_error_message("paste_sequence.playback", error.message());
+            }
         }
         Ok(())
     }
@@ -1529,6 +1725,113 @@ fn allow_radial_queryexec_activation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paste_sequence_source_loading_is_reference_driven() {
+        let literal_only = crate::paste_sequence::Sequence {
+            id: crate::paste_sequence::SequenceId::from_raw(1).unwrap(),
+            name: "Literal only".into(),
+            hotkey: None,
+            mode: crate::paste_sequence::PlaybackMode::Automatic,
+            delay_ms: 0,
+            steps: vec![crate::paste_sequence::Step::LiteralText {
+                text: "temporary".into(),
+            }],
+        };
+        assert_eq!(sequence_source_requirements(&literal_only), (false, false));
+
+        let referenced = crate::paste_sequence::Sequence {
+            id: crate::paste_sequence::SequenceId::from_raw(2).unwrap(),
+            name: "Referenced sources".into(),
+            hotkey: None,
+            mode: crate::paste_sequence::PlaybackMode::Automatic,
+            delay_ms: 0,
+            steps: vec![
+                crate::paste_sequence::Step::SnippetRef {
+                    alias: "greeting".into(),
+                },
+                crate::paste_sequence::Step::clipboard_history_reference("history payload"),
+            ],
+        };
+        assert_eq!(sequence_source_requirements(&referenced), (true, true));
+    }
+
+    #[test]
+    fn paste_sequence_cancel_only_closes_sequence_owned_snippet_prompts() {
+        use crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut ordinary_app = inert_test_app(directory.path());
+        crate::commands::HeadlessCommandHost::request_snippet_prompt(
+            &mut ordinary_app,
+            prompt_intent(prompted_entry()),
+        )
+        .unwrap();
+        ordinary_app.handle_paste_sequence_hotkey(PasteSequenceHotkeyAction::Cancel);
+        assert!(ordinary_app.snippet_prompt_dialog.is_open());
+        assert!(!ordinary_app.snippet_prompt_dialog.is_sequence_preflight());
+
+        let store = crate::paste_sequence::SequenceStore::new(
+            directory
+                .path()
+                .join(crate::paste_sequence::PASTE_SEQUENCES_FILE),
+        );
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot
+            .upsert(crate::paste_sequence::SequenceDraft::new(
+                "Prompted run",
+                vec![crate::paste_sequence::Step::SnippetRef {
+                    alias: "ticketreply".into(),
+                }],
+            ))
+            .unwrap();
+        let context = crate::paste_sequence::SequenceInvocationContext::new(
+            chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+02:00").unwrap(),
+            None,
+            crate::paste_sequence::SequenceTarget::from_external_window(
+                external_window(10, "origin"),
+                std::process::id(),
+            )
+            .unwrap(),
+        );
+        let mut sequence_app = inert_test_app(directory.path());
+        sequence_app
+            .begin_paste_sequence_preflight_with_context(
+                snapshot.sequence(id).unwrap().clone(),
+                &[prompted_entry()],
+                &[],
+                context,
+            )
+            .unwrap();
+        assert!(sequence_app.snippet_prompt_dialog.is_sequence_preflight());
+        sequence_app.handle_paste_sequence_hotkey(PasteSequenceHotkeyAction::Cancel);
+        assert!(!sequence_app.snippet_prompt_dialog.is_open());
+        assert_eq!(
+            sequence_app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn paste_sequence_titlebar_close_ends_the_taken_dialog_before_restore() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = inert_test_app(directory.path());
+        app.paste_sequence_dialog.open = true;
+        app.panel_states.paste_sequence_dialog = true;
+        app.panel_stack
+            .push(super::super::Panel::PasteSequenceDialog);
+
+        let mut local_dialog = std::mem::take(&mut app.paste_sequence_dialog);
+        local_dialog.close_from_window(&mut app);
+        app.paste_sequence_dialog = local_dialog;
+
+        assert!(!app.paste_sequence_dialog.open);
+        assert!(!app.panel_states.paste_sequence_dialog);
+        assert!(
+            !app.panel_stack
+                .contains(&super::super::Panel::PasteSequenceDialog)
+        );
+    }
 
     fn inert_test_app(root: &std::path::Path) -> LauncherApp {
         let ctx = eframe::egui::Context::default();

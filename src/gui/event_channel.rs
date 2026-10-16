@@ -137,7 +137,7 @@ fn class_of(event: &WatchEvent) -> EventClass {
         | WatchEvent::Favorites
         | WatchEvent::Gestures => EventClass::FileReload,
         WatchEvent::IndexReady => EventClass::IndexCompletion,
-        WatchEvent::ExecuteAction(_) => EventClass::Action,
+        WatchEvent::ExecuteAction(_) | WatchEvent::PasteSequenceHotkey(_) => EventClass::Action,
         WatchEvent::RadialDispatch(_)
         | WatchEvent::RadialPrepare(_)
         | WatchEvent::RadialResolveDeferred(_)

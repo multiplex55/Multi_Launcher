@@ -553,6 +553,25 @@ literal clipboard action with the current snippet action, or use the dynamic
 Current alias-aware snippet actions follow later changes between plain and
 prompted mode; headless activation reports that prompting requires the GUI.
 
+## Paste Sequences
+
+Use `paste` to open the Paste Sequences editor. Add ordered snippet, clipboard
+history, or temporary text steps; review the explicit preview, then choose
+**Run Once** to prepare a memory-only draft or **Save** to keep a sequence in
+`paste_sequences.json`. Saved literal text is stored as plaintext. Clipboard
+steps store a content digest rather than the clipboard body and can expire when
+the corresponding history item is removed.
+
+`paste <query>` searches saved sequence names, and activating a result runs the
+sequence. `paste:run:<id>` is the payload-free stable-ID action used by saved
+results. `paste:start`, `paste:next`, and `paste:cancel` control a prepared or
+active run. Sequence hotkeys use the application's existing chord syntax; the
+default controls are **Ctrl+Alt+Shift+PageDown** for Next and
+**Ctrl+Alt+Shift+End** for Cancel. The editor shows the captured destination
+before start. The destination is captured before the editor takes focus, and
+the launcher stops if that exact external window is no longer available or
+focused when a step is pasted.
+
 ## JSON and screen color utilities
 
 `json` opens a compact, local JSON editor. `json format` and `json pretty` prefer

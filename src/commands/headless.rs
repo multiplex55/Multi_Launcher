@@ -160,6 +160,9 @@ fn execute_with_external(
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
+        Command::PasteSequence(_) => {
+            anyhow::bail!("paste sequence commands require the launcher interface")
+        }
         Command::ColorPick(_) => {
             anyhow::bail!("screen color picking requires the launcher interface")
         }

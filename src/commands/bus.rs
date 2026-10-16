@@ -3,7 +3,8 @@ use crate::commands::handlers::{
     handle_calendar, handle_clipboard_modify_with_history_query, handle_color_pick,
     handle_coordinate_tool, handle_crop, handle_data, handle_diff, handle_file_search,
     handle_headless_gui_with_history_query, handle_json_utility, handle_launcher, handle_link,
-    handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr, handle_query,
+    handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence,
+    handle_query,
     handle_radial, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run,
     handle_todo,
 };
@@ -61,6 +62,9 @@ impl CommandBus {
                 captured_history_query,
             )),
             Command::Data(command) => handle_data(host, command),
+            Command::PasteSequence(command) => {
+                handle_paste_sequence(host, *command, invocation.source)
+            }
             Command::Storage(
                 super::StorageCommand::SnippetRun(_) | super::StorageCommand::InvalidSnippetRun,
             ) => handle_snippet_run(host, invocation, captured_history_query),

@@ -43,6 +43,7 @@ mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
 mod ocr_view;
+mod paste_sequence_dialog;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;
@@ -125,6 +126,7 @@ pub use note_panel::{
     spawn_external,
 };
 pub use notes_dialog::NotesDialog;
+pub(crate) use paste_sequence_dialog::PasteSequenceDialog;
 #[cfg(feature = "qa-framebuffer-capture")]
 pub use qa_framebuffer::QaFramebufferRequest;
 pub use qr_dialog::QrDialogState;
@@ -606,6 +608,7 @@ pub enum Panel {
     CompletionDialog,
     ShellCmdDialog,
     SnippetDialog,
+    PasteSequenceDialog,
     SnippetPromptDialog,
     MacroDialog,
     MkMacroDialog,
@@ -660,6 +663,7 @@ impl Panel {
             Self::CompletionDialog => "Completion",
             Self::ShellCmdDialog => "Shell Commands",
             Self::SnippetDialog => "Snippets",
+            Self::PasteSequenceDialog => "Paste Sequences",
             Self::SnippetPromptDialog => "Snippet Prompt",
             Self::MacroDialog => "Macros",
             Self::MkMacroDialog => "MKMacro",
@@ -715,6 +719,7 @@ struct PanelStates {
     completion_dialog: bool,
     shell_cmd_dialog: bool,
     snippet_dialog: bool,
+    paste_sequence_dialog: bool,
     snippet_prompt_dialog: bool,
     macro_dialog: bool,
     mkmacro_dialog: bool,
@@ -945,6 +950,7 @@ pub struct LauncherApp {
     completion_dialog: TimerCompletionDialog,
     shell_cmd_dialog: ShellCmdDialog,
     snippet_dialog: SnippetDialog,
+    paste_sequence_dialog: PasteSequenceDialog,
     snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog,
     macro_dialog: MacroDialog,
     pub mkmacro_dialog: MkMacroDialog,
@@ -1788,6 +1794,29 @@ impl LauncherApp {
             self.close_theme_settings_dialog();
         }
     }
+    fn apply_enabled_plugin_selection(&mut self, enabled_plugins: Option<HashSet<String>>) {
+        let paste_sequence_was_enabled = self
+            .enabled_plugins
+            .as_ref()
+            .is_none_or(|plugins| plugins.contains("paste_sequence"));
+        let paste_sequence_will_be_enabled = enabled_plugins
+            .as_ref()
+            .is_none_or(|plugins| plugins.contains("paste_sequence"));
+        self.enabled_plugins = enabled_plugins;
+
+        if paste_sequence_was_enabled && !paste_sequence_will_be_enabled {
+            self.cancel_active_paste_sequence();
+            self.close_paste_sequence_dialog();
+        }
+
+        // Keep the mouse-gesture runtime and all indexed actions in lockstep
+        // with the plugin selection committed by Settings.
+        crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
+        self.plugins
+            .sync_enabled_plugins(self.enabled_plugins.as_ref());
+        self.update_command_cache();
+    }
+
     pub fn update_paths(
         &mut self,
         plugin_dirs: Option<Vec<String>>,
@@ -1832,13 +1861,7 @@ impl LauncherApp {
         show_dashboard_diagnostics: Option<bool>,
     ) {
         self.plugin_dirs = plugin_dirs;
-        self.enabled_plugins = enabled_plugins;
-
-        // Keep MG hook in lockstep with whether the plugin is enabled in the UI/settings.
-        crate::plugins::mouse_gestures::sync_enabled_plugins(self.enabled_plugins.as_ref());
-        self.plugins
-            .sync_enabled_plugins(self.enabled_plugins.as_ref());
-        self.update_command_cache();
+        self.apply_enabled_plugin_selection(enabled_plugins);
         self.enabled_capabilities = enabled_capabilities;
         if let Some((x, y)) = offscreen_pos {
             self.offscreen_pos = (x as f32, y as f32);
@@ -2518,6 +2541,7 @@ impl LauncherApp {
             completion_dialog: TimerCompletionDialog::default(),
             shell_cmd_dialog: ShellCmdDialog::default(),
             snippet_dialog: SnippetDialog::default(),
+            paste_sequence_dialog: PasteSequenceDialog::default(),
             snippet_prompt_dialog: snippet_prompt_dialog::SnippetPromptDialog::default(),
             macro_dialog: MacroDialog::default(),
             mkmacro_dialog,
@@ -3215,7 +3239,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 49] = [
+    const TRACKED_PANELS: [Panel; 50] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -3227,6 +3251,7 @@ impl LauncherApp {
         Panel::CompletionDialog,
         Panel::ShellCmdDialog,
         Panel::SnippetDialog,
+        Panel::PasteSequenceDialog,
         Panel::SnippetPromptDialog,
         Panel::MacroDialog,
         Panel::MkMacroDialog,
@@ -3280,6 +3305,7 @@ impl LauncherApp {
             Panel::CompletionDialog => self.completion_dialog.open,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.open,
             Panel::SnippetDialog => self.snippet_dialog.open,
+            Panel::PasteSequenceDialog => self.paste_sequence_dialog.open,
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.is_open(),
             Panel::MacroDialog => self.macro_dialog.open,
             Panel::MkMacroDialog => self.mkmacro_dialog.open,
@@ -3425,6 +3451,10 @@ impl LauncherApp {
             Panel::SnippetDialog => {
                 self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
+            }
+            Panel::PasteSequenceDialog => {
+                self.paste_sequence_dialog.end_session();
+                self.panel_states.paste_sequence_dialog = false;
             }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
@@ -3600,6 +3630,13 @@ impl LauncherApp {
         true
     }
 
+    pub(crate) fn close_paste_sequence_dialog(&mut self) {
+        self.paste_sequence_dialog.end_session();
+        self.panel_states.paste_sequence_dialog = false;
+        self.panel_stack
+            .retain(|panel| *panel != Panel::PasteSequenceDialog);
+    }
+
     fn force_close_panel(&mut self, panel: Panel) {
         match panel {
             Panel::AliasDialog => {
@@ -3645,6 +3682,10 @@ impl LauncherApp {
             Panel::SnippetDialog => {
                 self.snippet_dialog.end_session();
                 self.panel_states.snippet_dialog = false;
+            }
+            Panel::PasteSequenceDialog => {
+                self.paste_sequence_dialog.end_session();
+                self.panel_states.paste_sequence_dialog = false;
             }
             Panel::SnippetPromptDialog => {
                 let _ = self.cancel_snippet_prompt();
@@ -3826,6 +3867,11 @@ impl LauncherApp {
             Panel::CompletionDialog => self.completion_dialog.open = true,
             Panel::ShellCmdDialog => self.shell_cmd_dialog.ensure_open(),
             Panel::SnippetDialog => self.snippet_dialog.ensure_open(),
+            Panel::PasteSequenceDialog => {
+                let context =
+                    self.capture_sequence_context(crate::commands::ActivationSource::Click);
+                self.paste_sequence_dialog.open_with_context(context);
+            }
             Panel::SnippetPromptDialog => self.snippet_prompt_dialog.ensure_open(),
             Panel::MacroDialog => self.macro_dialog.ensure_open(),
             Panel::MkMacroDialog => self.mkmacro_dialog.open(),
@@ -3970,6 +4016,7 @@ impl LauncherApp {
         check!(completion_dialog, Panel::CompletionDialog);
         check!(shell_cmd_dialog, Panel::ShellCmdDialog);
         check!(snippet_dialog, Panel::SnippetDialog);
+        check!(paste_sequence_dialog, Panel::PasteSequenceDialog);
         check!(snippet_prompt_dialog, Panel::SnippetPromptDialog);
         check!(macro_dialog, Panel::MacroDialog);
         check!(mkmacro_dialog, Panel::MkMacroDialog);
@@ -4386,7 +4433,8 @@ pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
             | WatchEvent::RadialPlacementActionResult { .. }
             | WatchEvent::RadialMigrationNotice(_)
             | WatchEvent::RadialMigrationState { .. }
-            | WatchEvent::ScreenDrawStart => {
+            | WatchEvent::ScreenDrawStart
+            | WatchEvent::PasteSequenceHotkey(_) => {
                 continue;
             }
             WatchEvent::ScreenDrawRecover(_) | WatchEvent::ScreenDrawEmergency(_) => {
@@ -4474,6 +4522,51 @@ mod tests {
         registry.sinks.clear();
         registry.pending_before_owner.clear();
         registry.owner_registered = false;
+    }
+
+    #[test]
+    fn disabling_paste_sequence_cancels_pending_preflight_and_closes_editor() {
+        let directory = tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.sequence_playback.begin_preparing().unwrap();
+        app.paste_sequence_dialog.open = true;
+
+        app.apply_enabled_plugin_selection(Some(HashSet::new()));
+
+        assert_eq!(
+            app.sequence_playback.status(),
+            crate::paste_sequence::SequencePlaybackStatus::Cancelled
+        );
+        assert!(!app.paste_sequence_dialog.open);
     }
 
     fn new_app(ctx: &egui::Context) -> LauncherApp {

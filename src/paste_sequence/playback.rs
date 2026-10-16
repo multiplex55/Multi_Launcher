@@ -260,6 +260,17 @@ impl SequencePlaybackController {
         self.status
     }
 
+    pub(crate) fn prepared_preview(&self) -> Option<super::PreparedSequencePreview> {
+        self.prepared.as_ref().map(PreparedSequenceRun::preview)
+    }
+
+    pub(crate) fn current_step_number(&self) -> Option<(usize, usize)> {
+        self.session.as_ref().map(|session| {
+            let current = session.next_step.min(session.run.step_count()).saturating_add(1);
+            (current.min(session.run.step_count()), session.run.step_count())
+        })
+    }
+
     pub(crate) fn is_preparing(&self) -> bool {
         self.status == SequencePlaybackStatus::Preparing
     }

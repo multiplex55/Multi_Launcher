@@ -135,6 +135,15 @@ pub enum RelatedAction {
     ScreenDrawLaunch,
     ScreenDrawEmergency,
     DirectMenu { trigger_id: String, menu_id: MenuId },
+    PasteSequence(PasteSequenceHotkeyAction),
+}
+
+/// A payload-free command produced by a main-owned Paste Sequence shortcut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PasteSequenceHotkeyAction {
+    Start(crate::paste_sequence::SequenceId),
+    Next,
+    Cancel,
 }
 #[derive(Clone, Debug)]
 pub struct RelatedBinding {
@@ -833,6 +842,7 @@ fn related_priority(action: &RelatedAction) -> u8 {
         RelatedAction::ScreenDrawLaunch => 2,
         RelatedAction::Help => 3,
         RelatedAction::DirectMenu { .. } => 4,
+        RelatedAction::PasteSequence(_) => 5,
     }
 }
 

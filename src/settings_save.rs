@@ -506,7 +506,7 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
-    fn spawn(&self, run: impl FnOnce() + Send + 'static) -> Result<(), std::io::Error> {
+    pub(crate) fn spawn(&self, run: impl FnOnce() + Send + 'static) -> Result<(), std::io::Error> {
         let mut state = self
             .0
             .lock()

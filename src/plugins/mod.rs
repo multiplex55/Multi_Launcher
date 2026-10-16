@@ -39,6 +39,7 @@ pub mod network;
 pub mod note;
 pub mod ocr;
 pub mod omni_search;
+pub mod paste_sequence;
 pub mod processes;
 pub mod qr;
 pub mod radial;

@@ -254,6 +254,10 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         return parse_radial(rest).map(Command::Radial);
     }
 
+    if let Some(command) = parse_paste_sequence(s) {
+        return Ok(Command::PasteSequence(command));
+    }
+
     if s.starts_with("vd:") {
         return Ok(Command::VirtualDesktop(parse_virtual_desktop(action)));
     }
@@ -369,6 +373,23 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
         _ => return parse_prefixed(action),
     };
     Ok(command)
+}
+
+fn parse_paste_sequence(raw: &str) -> Option<PasteSequenceCommand> {
+    Some(match raw {
+        "paste" | "paste:open" => PasteSequenceCommand::Open,
+        "paste:start" => PasteSequenceCommand::Start,
+        "paste:next" => PasteSequenceCommand::Next,
+        "paste:cancel" => PasteSequenceCommand::Cancel,
+        _ if raw.starts_with("paste:run:") => raw[10..]
+            .parse::<u64>()
+            .ok()
+            .and_then(crate::paste_sequence::SequenceId::from_raw)
+            .map(PasteSequenceCommand::Run)
+            .unwrap_or(PasteSequenceCommand::InvalidRun),
+        _ if raw.starts_with("paste:") => return None,
+        _ => return None,
+    })
 }
 
 fn parse_radial(input: &str) -> Result<RadialCommand, CommandError> {
@@ -2511,5 +2532,49 @@ mod mouse_command_parser_tests {
             assert!(error.contains("mouse crosshair gap"), "{error}");
             assert!(error.contains("0..128"), "{error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod paste_sequence_parser_tests {
+    use super::*;
+
+    fn action(raw: &str) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn paste_sequence_commands_are_typed_and_run_actions_carry_only_ids() {
+        assert_eq!(
+            parse_action(&action("paste")).unwrap(),
+            Command::PasteSequence(PasteSequenceCommand::Open)
+        );
+        assert_eq!(
+            parse_action(&action("paste:next")).unwrap(),
+            Command::PasteSequence(PasteSequenceCommand::Next)
+        );
+        assert_eq!(
+            parse_action(&action("paste:cancel")).unwrap(),
+            Command::PasteSequence(PasteSequenceCommand::Cancel)
+        );
+        assert_eq!(
+            parse_action(&action("paste:run:42")).unwrap(),
+            Command::PasteSequence(PasteSequenceCommand::Run(
+                crate::paste_sequence::SequenceId::from_raw(42).unwrap()
+            ))
+        );
+        assert_eq!(
+            parse_action(&action("paste:run:0")).unwrap(),
+            Command::PasteSequence(PasteSequenceCommand::InvalidRun)
+        );
+        assert_eq!(
+            parse_action(&action("paste:run:not-an-id")).unwrap(),
+            Command::PasteSequence(PasteSequenceCommand::InvalidRun)
+        );
     }
 }

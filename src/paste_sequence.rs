@@ -51,6 +51,11 @@ impl SequenceId {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    /// Parse a stable ID carried by a payload-free launcher action.
+    pub const fn from_raw(raw: u64) -> Option<Self> {
+        if raw == 0 { None } else { Some(Self(raw)) }
+    }
 }
 
 impl fmt::Debug for SequenceId {
@@ -90,6 +95,34 @@ impl HotkeyChord {
             return Err(SequenceValidationError::InvalidHotkey);
         }
         Ok(())
+    }
+}
+
+/// Payload-free routing data for the saved sequences' start hotkeys. This can
+/// cross the hotkey preparation boundary without exposing step contents.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SequenceHotkeyBinding {
+    id: SequenceId,
+    chord: HotkeyChord,
+}
+
+impl SequenceHotkeyBinding {
+    pub const fn id(&self) -> SequenceId {
+        self.id
+    }
+
+    pub fn chord(&self) -> &str {
+        self.chord.as_str()
+    }
+}
+
+impl fmt::Debug for SequenceHotkeyBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SequenceHotkeyBinding")
+            .field("id", &self.id)
+            .field("chord", &"[redacted]")
+            .finish()
     }
 }
 
@@ -219,6 +252,42 @@ impl SequenceDraft {
     }
 }
 
+#[derive(Clone)]
+struct SequenceCandidate {
+    id: Option<SequenceId>,
+    name: String,
+    hotkey: Option<HotkeyChord>,
+    mode: PlaybackMode,
+    delay_ms: u32,
+    steps: Vec<Step>,
+}
+
+impl From<Sequence> for SequenceCandidate {
+    fn from(sequence: Sequence) -> Self {
+        Self {
+            id: Some(sequence.id),
+            name: sequence.name,
+            hotkey: sequence.hotkey,
+            mode: sequence.mode,
+            delay_ms: sequence.delay_ms,
+            steps: sequence.steps,
+        }
+    }
+}
+
+impl From<SequenceDraft> for SequenceCandidate {
+    fn from(draft: SequenceDraft) -> Self {
+        Self {
+            id: draft.id,
+            name: draft.name,
+            hotkey: draft.hotkey,
+            mode: draft.mode,
+            delay_ms: draft.delay_ms,
+            steps: draft.steps,
+        }
+    }
+}
+
 impl fmt::Debug for SequenceDraft {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -334,6 +403,21 @@ impl SequenceSnapshot {
 
     pub const fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    /// Returns only saved sequence identifiers and optional start hotkeys;
+    /// step payloads never leave the store boundary during route preparation.
+    pub fn hotkey_bindings(&self) -> Vec<SequenceHotkeyBinding> {
+        self.document
+            .sequences
+            .iter()
+            .filter_map(|sequence| {
+                sequence.hotkey.clone().map(|chord| SequenceHotkeyBinding {
+                    id: sequence.id,
+                    chord,
+                })
+            })
+            .collect()
     }
 
     /// Add a new draft or replace a draft's existing stable identifier.
@@ -605,6 +689,38 @@ impl SequenceStore {
         snapshot.dirty = false;
         Ok(())
     }
+
+    /// Restore a previously loaded snapshot only while the committed
+    /// candidate is still the current document. A concurrent edit wins and is
+    /// never overwritten by rollback. The identifier counter remains
+    /// monotonic even when a newly allocated candidate is removed.
+    pub fn rollback_if_revision(
+        &self,
+        expected_revision: u64,
+        previous: &SequenceSnapshot,
+    ) -> Result<(), SequenceStoreError> {
+        let _transaction = SEQUENCE_FILE_TRANSACTION
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = load_document(&self.path)?;
+        if current.revision != expected_revision {
+            return Err(SequenceStoreError::StaleSnapshot {
+                expected: expected_revision,
+                actual: current.revision,
+            });
+        }
+
+        let revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(SequenceStoreError::RevisionExhausted)?;
+        let mut restored = previous.document.clone();
+        restored.revision = revision;
+        restored.next_id = restored.next_id.max(current.next_id);
+        restored.validate()?;
+        save_json_atomic(&self.path, &restored)?;
+        Ok(())
+    }
 }
 
 fn load_document(path: &Path) -> Result<SequenceDocument, SequenceStoreError> {
@@ -793,7 +909,7 @@ struct ResolvedSequenceStep {
 /// history digests until all prompts and snapshot checks have succeeded.
 #[derive(Clone)]
 pub(crate) struct SequencePreflight {
-    sequence: Sequence,
+    sequence: SequenceCandidate,
     context: SequenceInvocationContext,
     snippets: Vec<(String, SnippetEntry)>,
     prompts: Vec<PendingSequencePrompt>,
@@ -809,7 +925,29 @@ impl SequencePreflight {
         history: &[String],
         context: SequenceInvocationContext,
     ) -> Result<Self, SequencePreflightError> {
-        if sequence.id.0 == 0
+        Self::begin_inner(sequence.into(), snippets, history, context, false)
+    }
+
+    /// Prepare a memory-only draft for Run Once. ID zero is never valid in a
+    /// saved document and cannot escape through the persistence API.
+    pub(crate) fn begin_draft(
+        draft: SequenceDraft,
+        snippets: &[SnippetEntry],
+        history: &[String],
+        context: SequenceInvocationContext,
+    ) -> Result<Self, SequencePreflightError> {
+        Self::begin_inner(draft.into(), snippets, history, context, true)
+    }
+
+    fn begin_inner(
+        sequence: SequenceCandidate,
+        snippets: &[SnippetEntry],
+        history: &[String],
+        context: SequenceInvocationContext,
+        allow_memory_only_id: bool,
+    ) -> Result<Self, SequencePreflightError> {
+        if (!allow_memory_only_id && sequence.id.is_none())
+            || sequence.id.is_some_and(|id| id.0 == 0)
             || validate_sequence_fields(
                 &sequence.name,
                 sequence.hotkey.as_ref(),
@@ -1046,7 +1184,7 @@ fn map_template_error(error: TemplateRenderError) -> SequencePreflightError {
 /// Final immutable, ordered sequence text. It has no Debug implementation and
 /// exposes payloads only to the playback owner after every preflight check.
 pub(crate) struct PreparedSequenceRun {
-    sequence_id: SequenceId,
+    sequence_id: Option<SequenceId>,
     name: String,
     mode: PlaybackMode,
     delay_ms: u32,
@@ -1055,7 +1193,7 @@ pub(crate) struct PreparedSequenceRun {
 }
 
 impl PreparedSequenceRun {
-    pub(crate) fn sequence_id(&self) -> SequenceId {
+    pub(crate) fn sequence_id(&self) -> Option<SequenceId> {
         self.sequence_id
     }
 

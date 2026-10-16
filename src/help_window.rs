@@ -94,6 +94,17 @@ impl HelpWindow {
                                 "Automatic values: {{sys.date}}, {{sys.time}}, {{sys.clipboard}}, {{sys.window_title}}. Date/time default to %Y-%m-%d and %H:%M:%S and accept :<format>; unavailable clipboard/title values are empty. {{date}} is still an ordinary prompted field.",
                             );
                             ui.separator();
+                            ui.label(egui::RichText::new("Paste Sequences").strong());
+                            ui.label(
+                                "Use paste to open the editor. Run Once keeps a draft in memory; Save stores authored literal text as plaintext and clipboard steps as expiring history references.",
+                            );
+                            ui.label(
+                                "Commands: paste <query>, paste:run:<id>, paste:start, paste:next, paste:cancel. Saved sequence shortcuts use the application's chord syntax.",
+                            );
+                            ui.label(
+                                "Ctrl+Alt+Shift+PageDown advances a sequence; Ctrl+Alt+Shift+End cancels it. Both chords are checked against existing launcher, radial, and macro routes.",
+                            );
+                            ui.separator();
                             ui.label(egui::RichText::new("Dashboard").strong());
                             let dashboard_guidance = ui.add(
                                 egui::Label::new(

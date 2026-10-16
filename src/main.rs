@@ -8,8 +8,9 @@ use multi_launcher::gui::LauncherApp;
 #[cfg(feature = "qa-framebuffer-capture")]
 use multi_launcher::gui::QaFramebufferRequest;
 use multi_launcher::hotkey::launcher_invocation::{
-    InvocationConfig, LauncherInvocationService, PriorityOwner, RelatedAction, RelatedBinding,
-    RouteHandoff, ServiceNotice, exclusive_owners, install_exclusive_wake,
+    InvocationConfig, LauncherInvocationService, PasteSequenceHotkeyAction, PriorityOwner,
+    RelatedAction, RelatedBinding, RouteHandoff, ServiceNotice, exclusive_owners,
+    install_exclusive_wake,
 };
 use multi_launcher::hotkey::{HotkeyListener, HotkeyTrigger, parse_hotkey};
 use multi_launcher::logging;
@@ -99,6 +100,72 @@ fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::Vie
     viewport
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PasteSequenceHotkeyRoute {
+    hotkey: multi_launcher::hotkey::Hotkey,
+    chord: String,
+    action: PasteSequenceHotkeyAction,
+}
+
+fn paste_sequence_hotkey_routes(
+    settings: &Settings,
+) -> Result<Vec<PasteSequenceHotkeyRoute>, String> {
+    if settings
+        .enabled_plugins
+        .as_ref()
+        .is_some_and(|plugins| !plugins.contains("paste_sequence"))
+    {
+        return Ok(Vec::new());
+    }
+    let snapshot = multi_launcher::paste_sequence::SequenceStore::new(
+        multi_launcher::paste_sequence::PASTE_SEQUENCES_FILE,
+    )
+    .load()
+    .map_err(|error| format!("Paste Sequence shortcuts could not be loaded: {error}"))?;
+    paste_sequence_hotkey_routes_from_snapshot(settings, &snapshot)
+}
+
+fn paste_sequence_hotkey_routes_from_snapshot(
+    settings: &Settings,
+    snapshot: &multi_launcher::paste_sequence::SequenceSnapshot,
+) -> Result<Vec<PasteSequenceHotkeyRoute>, String> {
+    paste_sequence_hotkey_routes_from_bindings(settings, &snapshot.hotkey_bindings())
+}
+
+fn paste_sequence_hotkey_routes_from_bindings(
+    settings: &Settings,
+    bindings: &[multi_launcher::paste_sequence::SequenceHotkeyBinding],
+) -> Result<Vec<PasteSequenceHotkeyRoute>, String> {
+    if settings
+        .enabled_plugins
+        .as_ref()
+        .is_some_and(|plugins| !plugins.contains("paste_sequence"))
+    {
+        return Ok(Vec::new());
+    }
+    let mut routes = Vec::new();
+    for (chord, action) in [
+        ("Ctrl+Alt+Shift+PageDown", PasteSequenceHotkeyAction::Next),
+        ("Ctrl+Alt+Shift+End", PasteSequenceHotkeyAction::Cancel),
+    ] {
+        routes.push(PasteSequenceHotkeyRoute {
+            hotkey: parse_hotkey(chord).expect("fixed Paste Sequence chord is valid"),
+            chord: chord.into(),
+            action,
+        });
+    }
+    for binding in bindings {
+        let hotkey = parse_hotkey(binding.chord())
+            .ok_or_else(|| format!("sequence {} has an invalid shortcut", binding.id().get()))?;
+        routes.push(PasteSequenceHotkeyRoute {
+            hotkey,
+            chord: binding.chord().to_owned(),
+            action: PasteSequenceHotkeyAction::Start(binding.id()),
+        });
+    }
+    Ok(routes)
+}
+
 fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
     let mut reserved = Vec::new();
     let launcher = settings
@@ -126,6 +193,18 @@ fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
     }
     if let Ok(Some(hotkey)) = screen_draw_emergency_hotkey_text(settings) {
         reserved.push(("Screen Draw emergency".into(), hotkey));
+    }
+    if let Ok(routes) = paste_sequence_hotkey_routes(settings) {
+        for route in routes {
+            let name = match route.action {
+                PasteSequenceHotkeyAction::Start(id) => {
+                    format!("Paste Sequence {}", id.get())
+                }
+                PasteSequenceHotkeyAction::Next => "Paste Sequence Next".into(),
+                PasteSequenceHotkeyAction::Cancel => "Paste Sequence Cancel".into(),
+            };
+            reserved.push((name, route.chord));
+        }
     }
     reserved
 }
@@ -254,6 +333,23 @@ fn radial_global_hotkey_reservations(
     document: &RadialDocument,
 ) -> Vec<(String, String)> {
     let mut owned = Vec::new();
+    if settings.radial.enabled {
+        owned.extend(
+            document
+                .custom_triggers
+                .iter()
+                .filter(|trigger| {
+                    trigger.scope == multi_launcher::radial::model::TriggerScope::Global
+                        && parse_hotkey(&trigger.chord).is_some()
+                })
+                .map(|trigger| {
+                    (
+                        format!("radial trigger {}", trigger.id.as_str()),
+                        trigger.chord.clone(),
+                    )
+                }),
+        );
+    }
     if settings.radial.global_item_inputs {
         for menu in &document.menus {
             for shortcut in menu
@@ -388,6 +484,27 @@ fn related_launcher_bindings(
     document: &RadialDocument,
     include_process_hotkeys: bool,
 ) -> Vec<RelatedBinding> {
+    let sequence_routes = match paste_sequence_hotkey_routes(settings) {
+        Ok(routes) => routes,
+        Err(error) => {
+            tracing::warn!(%error, "Paste Sequence shortcuts are unavailable");
+            Vec::new()
+        }
+    };
+    related_launcher_bindings_with_sequences(
+        settings,
+        document,
+        include_process_hotkeys,
+        &sequence_routes,
+    )
+}
+
+fn related_launcher_bindings_with_sequences(
+    settings: &Settings,
+    document: &RadialDocument,
+    include_process_hotkeys: bool,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+) -> Vec<RelatedBinding> {
     let mut bindings = Vec::new();
     if include_process_hotkeys && let Some(hotkey) = settings.quit_hotkey() {
         bindings.push(RelatedBinding {
@@ -434,14 +551,25 @@ fn related_launcher_bindings(
             })
         }
     }
+    if settings
+        .enabled_plugins
+        .as_ref()
+        .is_none_or(|plugins| plugins.contains("paste_sequence"))
+    {
+        bindings.extend(sequence_routes.iter().map(|route| RelatedBinding {
+            hotkey: route.hotkey,
+            action: RelatedAction::PasteSequence(route.action.clone()),
+        }));
+    }
     bindings
 }
 
 fn shared_drain_control_bindings(
     settings: &Settings,
     document: &RadialDocument,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
 ) -> Vec<RelatedBinding> {
-    related_launcher_bindings(settings, document, true)
+    related_launcher_bindings_with_sequences(settings, document, true, sequence_routes)
         .into_iter()
         .filter(|binding| {
             matches!(
@@ -450,6 +578,7 @@ fn shared_drain_control_bindings(
                     | RelatedAction::Help
                     | RelatedAction::ScreenDrawLaunch
                     | RelatedAction::ScreenDrawEmergency
+                    | RelatedAction::PasteSequence(_)
             )
         })
         .collect()
@@ -474,13 +603,31 @@ fn reject_radial_opens_while_exclusive(
     }
 }
 
-fn legacy_listener_triggers(
+type PasteSequenceHotkeyTrigger = (Arc<HotkeyTrigger>, PasteSequenceHotkeyAction);
+
+fn sequence_hotkey_triggers_from_routes(
+    routes: &[PasteSequenceHotkeyRoute],
+) -> Vec<PasteSequenceHotkeyTrigger> {
+    routes
+        .iter()
+        .into_iter()
+        .map(|route| {
+            (
+                Arc::new(HotkeyTrigger::new(route.hotkey)),
+                route.action.clone(),
+            )
+        })
+        .collect()
+}
+
+fn legacy_listener_triggers_with_sequences(
     shared_invocation: bool,
     launcher: &Arc<HotkeyTrigger>,
     quit: Option<&Arc<HotkeyTrigger>>,
     help: Option<&Arc<HotkeyTrigger>>,
     screen_draw: Option<&Arc<HotkeyTrigger>>,
     emergency: Option<&Arc<HotkeyTrigger>>,
+    sequence_triggers: &[PasteSequenceHotkeyTrigger],
 ) -> Vec<Arc<HotkeyTrigger>> {
     if shared_invocation {
         return Vec::new();
@@ -490,7 +637,29 @@ fn legacy_listener_triggers(
     watched.extend(help.cloned());
     watched.extend(screen_draw.cloned());
     watched.extend(emergency.cloned());
+    watched.extend(
+        sequence_triggers
+            .iter()
+            .map(|(trigger, _)| Arc::clone(trigger)),
+    );
     watched
+}
+
+fn take_paste_sequence_trigger_actions(
+    triggers: &[PasteSequenceHotkeyTrigger],
+) -> Vec<PasteSequenceHotkeyAction> {
+    triggers
+        .iter()
+        .filter_map(|(trigger, action)| {
+            trigger.open.lock().ok().and_then(|mut open| {
+                if std::mem::take(&mut *open) {
+                    Some(action.clone())
+                } else {
+                    None
+                }
+            })
+        })
+        .collect()
 }
 
 struct PendingLauncherRoute {
@@ -610,6 +779,12 @@ fn apply_service_related_action(
         RelatedAction::ScreenDrawLaunch => screen_draw,
         RelatedAction::ScreenDrawEmergency => emergency,
         RelatedAction::DirectMenu { .. } => None,
+        RelatedAction::PasteSequence(action) => {
+            multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::PasteSequenceHotkey(
+                action,
+            ));
+            None
+        }
     };
     if let Some(trigger) = trigger
         && let Ok(mut flag) = trigger.open.lock()
@@ -628,6 +803,8 @@ struct PreparedHotkeyRoute {
     help: Option<Arc<HotkeyTrigger>>,
     screen_draw: Option<Arc<HotkeyTrigger>>,
     emergency: Option<Arc<HotkeyTrigger>>,
+    sequence_routes: Vec<PasteSequenceHotkeyRoute>,
+    sequence_triggers: Vec<PasteSequenceHotkeyTrigger>,
     staged_service: Option<LauncherInvocationService>,
 }
 
@@ -639,6 +816,8 @@ struct PreparedLegacyHotkeyFallback {
     help: Option<Arc<HotkeyTrigger>>,
     screen_draw: Option<Arc<HotkeyTrigger>>,
     emergency: Option<Arc<HotkeyTrigger>>,
+    sequence_routes: Vec<PasteSequenceHotkeyRoute>,
+    sequence_triggers: Vec<PasteSequenceHotkeyTrigger>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -649,12 +828,14 @@ struct HotkeyRouteDependencies {
     screen_draw_launch: Option<multi_launcher::hotkey::Hotkey>,
     screen_draw_emergency: Option<multi_launcher::hotkey::Hotkey>,
     radial: multi_launcher::radial::model::RadialFeatureSettings,
+    paste_sequence: Vec<(multi_launcher::hotkey::Hotkey, PasteSequenceHotkeyAction)>,
 }
 
 impl HotkeyRouteDependencies {
     fn from_routes(
         settings: &Settings,
         routes: &multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
+        sequence_routes: &[PasteSequenceHotkeyRoute],
     ) -> Self {
         Self {
             launcher: routes.launcher,
@@ -663,6 +844,10 @@ impl HotkeyRouteDependencies {
             screen_draw_launch: routes.screen_draw_launch,
             screen_draw_emergency: routes.screen_draw_emergency,
             radial: settings.radial.clone(),
+            paste_sequence: sequence_routes
+                .iter()
+                .map(|route| (route.hotkey, route.action.clone()))
+                .collect(),
         }
     }
 }
@@ -674,9 +859,20 @@ fn validate_hotkey_route_candidate(
     multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
     multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
 > {
+    validate_hotkey_route_candidate_with_sequence_bindings(settings, radial_document, None)
+}
+
+fn validate_hotkey_route_candidate_with_sequence_bindings(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> Result<
+    multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
+    multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
+> {
     let macro_document = multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
         .map_err(multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Validation)?;
-    multi_launcher::hotkey::validation::validate_hotkey_routes(
+    let routes = multi_launcher::hotkey::validation::validate_hotkey_routes(
         settings,
         radial_document,
         macro_document.as_deref(),
@@ -689,12 +885,122 @@ fn validate_hotkey_route_candidate(
                 .collect::<Vec<_>>()
                 .join("; "),
         )
-    })
+    })?;
+    validate_paste_sequence_hotkeys_with_bindings(
+        settings,
+        radial_document,
+        macro_document.as_deref(),
+        &routes,
+        sequence_bindings,
+    )?;
+    Ok(routes)
+}
+
+fn validate_paste_sequence_hotkeys_with_bindings(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+    routes: &multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> Result<(), multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError> {
+    use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError as Error;
+
+    let sequence_routes = paste_sequence_hotkey_routes_for_candidate(settings, sequence_bindings)
+        .map_err(Error::Validation)?;
+    validate_paste_sequence_hotkey_routes(
+        settings,
+        radial_document,
+        macro_document,
+        routes,
+        &sequence_routes,
+    )
+}
+
+fn paste_sequence_hotkey_routes_for_candidate(
+    settings: &Settings,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> Result<Vec<PasteSequenceHotkeyRoute>, String> {
+    if let Some(bindings) = sequence_bindings {
+        paste_sequence_hotkey_routes_from_bindings(settings, bindings)
+    } else {
+        paste_sequence_hotkey_routes(settings)
+    }
+}
+
+fn validate_paste_sequence_hotkey_routes(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+    routes: &multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+) -> Result<(), multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError> {
+    use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError as Error;
+
+    let mut issues = Vec::new();
+    let mut protected = vec![("launcher".to_owned(), routes.launcher)];
+    protected.extend(routes.quit.map(|hotkey| ("quit".to_owned(), hotkey)));
+    protected.extend(routes.help.map(|hotkey| ("help".to_owned(), hotkey)));
+    protected.extend(
+        routes
+            .screen_draw_launch
+            .map(|hotkey| ("Screen Draw launch".to_owned(), hotkey)),
+    );
+    protected.extend(
+        routes
+            .screen_draw_emergency
+            .map(|hotkey| ("Screen Draw emergency".to_owned(), hotkey)),
+    );
+    for (index, route) in sequence_routes.iter().enumerate() {
+        for (name, hotkey) in &protected {
+            if hotkeys_can_cofire(route.hotkey, *hotkey) {
+                issues.push(format!("Paste Sequence shortcut can co-fire with {name}"));
+            }
+        }
+        for other in sequence_routes.iter().take(index) {
+            if hotkeys_can_cofire(route.hotkey, other.hotkey) {
+                issues.push("Paste Sequence shortcuts can co-fire with one another".into());
+            }
+        }
+        if settings.radial.enabled {
+            for (name, chord) in radial_global_hotkey_reservations(settings, radial_document) {
+                if parse_hotkey(&chord)
+                    .is_some_and(|hotkey| hotkeys_can_cofire(route.hotkey, hotkey))
+                {
+                    issues.push(format!("Paste Sequence shortcut can co-fire with {name}"));
+                }
+            }
+        }
+    }
+
+    if let Some(document) = macro_document {
+        let reserved = sequence_routes
+            .iter()
+            .map(|route| ("Paste Sequence shortcut", route.chord.as_str()))
+            .collect::<Vec<_>>();
+        for diagnostic in multi_launcher::mkmacro::hotkeys::validate_hotkeys(document, &reserved) {
+            if diagnostic.severity
+                == multi_launcher::mkmacro::hotkeys::HotkeyDiagnosticSeverity::Error
+                && diagnostic.message.starts_with("hotkey conflicts with ")
+            {
+                issues.push(format!(
+                    "macro {} {}",
+                    diagnostic.macro_id, diagnostic.message
+                ));
+            }
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::Validation(issues.join("; ")))
+    }
 }
 
 fn prepare_legacy_hotkey_fallback(
     old_settings: &Settings,
     radial_document: &RadialDocument,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
     event_tx: &Sender<()>,
 ) -> Result<PreparedLegacyHotkeyFallback, String> {
     let mut settings = old_settings.clone();
@@ -714,14 +1020,16 @@ fn prepare_legacy_hotkey_fallback(
     let emergency = routes
         .screen_draw_emergency
         .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
+    let sequence_triggers = sequence_hotkey_triggers_from_routes(sequence_routes);
     let listener = HotkeyTrigger::prepare_listener(
-        legacy_listener_triggers(
+        legacy_listener_triggers_with_sequences(
             false,
             &launcher,
             quit.as_ref(),
             help.as_ref(),
             screen_draw.as_ref(),
             emergency.as_ref(),
+            &sequence_triggers,
         ),
         "hotkey-owner-failure-fallback",
         event_tx.clone(),
@@ -734,6 +1042,8 @@ fn prepare_legacy_hotkey_fallback(
         help,
         screen_draw,
         emergency,
+        sequence_routes: sequence_routes.to_vec(),
+        sequence_triggers,
     })
 }
 
@@ -751,6 +1061,7 @@ struct PendingHotkeyApplication {
     old_generation: u64,
     candidate_generation: u64,
     old_service_existed: bool,
+    old_sequence_routes: Vec<PasteSequenceHotkeyRoute>,
     old_listener_stopped: bool,
     fallback_listener: Option<HotkeyListener>,
     phase: HotkeyApplyPhase,
@@ -938,11 +1249,26 @@ fn radial_route_plan(
     document: &RadialDocument,
     generation: u64,
 ) -> RadialRoutePlan {
+    let sequences = paste_sequence_hotkey_routes(settings).unwrap_or_default();
+    radial_route_plan_with_sequences(settings, document, generation, &sequences)
+}
+
+fn radial_route_plan_with_sequences(
+    settings: &Settings,
+    document: &RadialDocument,
+    generation: u64,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+) -> RadialRoutePlan {
     let shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     RadialRoutePlan {
         config: radial_invocation_config(settings, document, shared_invocation, generation),
         related: if settings.radial.enabled {
-            related_launcher_bindings(settings, document, shared_invocation)
+            related_launcher_bindings_with_sequences(
+                settings,
+                document,
+                shared_invocation,
+                sequence_routes,
+            )
         } else {
             Vec::new()
         },
@@ -988,6 +1314,7 @@ fn fail_closed_radial_route(
     help: Option<&Arc<HotkeyTrigger>>,
     screen_draw: Option<&Arc<HotkeyTrigger>>,
     emergency: Option<&Arc<HotkeyTrigger>>,
+    sequence_triggers: &[PasteSequenceHotkeyTrigger],
     event_tx: &Sender<()>,
 ) {
     settings.radial.enabled = false;
@@ -1001,7 +1328,15 @@ fn fail_closed_radial_route(
     }
     listener.stop();
     *listener = HotkeyTrigger::start_listener(
-        legacy_listener_triggers(false, launcher, quit, help, screen_draw, emergency),
+        legacy_listener_triggers_with_sequences(
+            false,
+            launcher,
+            quit,
+            help,
+            screen_draw,
+            emergency,
+            sequence_triggers,
+        ),
         "main",
         event_tx.clone(),
     );
@@ -1119,8 +1454,20 @@ fn prepare_hotkey_runtime_message(
     let request_id = request.request_id();
     let preparation = (|| {
         let settings = request.settings().clone();
-        let routes = validate_hotkey_route_candidate(&settings, radial_document)?;
-        let dependencies = HotkeyRouteDependencies::from_routes(&settings, &routes);
+        let sequence_bindings = request
+            .sequence_hotkey_bindings()
+            .map(|bindings| bindings.to_vec());
+        let routes = validate_hotkey_route_candidate_with_sequence_bindings(
+            &settings,
+            radial_document,
+            sequence_bindings.as_deref(),
+        )?;
+        let sequence_routes =
+            paste_sequence_hotkey_routes_for_candidate(&settings, sequence_bindings.as_deref())
+                .map_err(HotkeyReconfigurationError::Validation)?;
+        let sequence_triggers = sequence_hotkey_triggers_from_routes(&sequence_routes);
+        let dependencies =
+            HotkeyRouteDependencies::from_routes(&settings, &routes, &sequence_routes);
         let generation =
             HotkeyRuntimeGeneration(settings_generation.checked_add(1).ok_or_else(|| {
                 HotkeyReconfigurationError::RuntimeTransition(
@@ -1140,13 +1487,14 @@ fn prepare_hotkey_runtime_message(
         let emergency = routes
             .screen_draw_emergency
             .map(|hotkey| Arc::new(HotkeyTrigger::new(hotkey)));
-        let triggers = legacy_listener_triggers(
+        let triggers = legacy_listener_triggers_with_sequences(
             routes.shared_invocation,
             &launcher,
             quit.as_ref(),
             help.as_ref(),
             screen_draw.as_ref(),
             emergency.as_ref(),
+            &sequence_triggers,
         );
         let listener = HotkeyTrigger::prepare_listener(triggers, "prepared", event_tx.clone())
             .map_err(HotkeyReconfigurationError::ListenerPreparation)?;
@@ -1179,6 +1527,8 @@ fn prepare_hotkey_runtime_message(
                 help,
                 screen_draw,
                 emergency,
+                sequence_routes,
+                sequence_triggers,
                 staged_service,
             },
         ))
@@ -1239,6 +1589,7 @@ struct HotkeyApplicationStart<'a> {
     >,
     settings: &'a Settings,
     settings_generation: u64,
+    sequence_routes: &'a mut Vec<PasteSequenceHotkeyRoute>,
     radial_document: &'a RadialDocument,
     event_tx: &'a Sender<()>,
     listener: &'a mut HotkeyListener,
@@ -1252,6 +1603,7 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
         prepared_routes,
         settings,
         settings_generation,
+        sequence_routes,
         radial_document,
         event_tx,
         listener,
@@ -1277,15 +1629,35 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
         return;
     };
     let candidate = request.settings().clone();
-    let candidate_routes = match validate_hotkey_route_candidate(&candidate, radial_document) {
+    let candidate_sequence_bindings = request
+        .sequence_hotkey_bindings()
+        .map(|bindings| bindings.to_vec());
+    let candidate_routes = match validate_hotkey_route_candidate_with_sequence_bindings(
+        &candidate,
+        radial_document,
+        candidate_sequence_bindings.as_deref(),
+    ) {
         Ok(routes) => routes,
         Err(error) => {
             application_error(request, error);
             return;
         }
     };
-    let candidate_dependencies =
-        HotkeyRouteDependencies::from_routes(&candidate, &candidate_routes);
+    let candidate_sequence_routes = match paste_sequence_hotkey_routes_for_candidate(
+        &candidate,
+        candidate_sequence_bindings.as_deref(),
+    ) {
+        Ok(routes) => routes,
+        Err(error) => {
+            application_error(request, HotkeyReconfigurationError::Validation(error));
+            return;
+        }
+    };
+    let candidate_dependencies = HotkeyRouteDependencies::from_routes(
+        &candidate,
+        &candidate_routes,
+        &candidate_sequence_routes,
+    );
     if prepared.generation != HotkeyRuntimeGeneration(expected_generation)
         || request.generation() != prepared.generation
         || prepared.dependencies != candidate_dependencies
@@ -1297,6 +1669,7 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
     // those latest values while reusing only resources whose route dependencies
     // still match and whose candidate remains valid against current inputs.
     prepared.settings = candidate;
+    prepared.sequence_routes = candidate_sequence_routes;
     if pending_launcher_route.is_some() {
         application_error(
             request,
@@ -1341,6 +1714,7 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
         old_generation: settings_generation,
         candidate_generation: expected_generation,
         old_service_existed,
+        old_sequence_routes: sequence_routes.clone(),
         old_listener_stopped: false,
         fallback_listener: Some(fallback_listener),
         phase: if old_service_existed {
@@ -1363,15 +1737,20 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
                     radial_document,
                     application.candidate_generation,
                 ),
-                shared_drain_control_bindings(&application.old_settings, radial_document),
+                shared_drain_control_bindings(
+                    &application.old_settings,
+                    radial_document,
+                    &application.old_sequence_routes,
+                ),
                 LifecycleCancellation::SettingsReload,
             )
     } else if application.prepared.settings.radial.enabled {
         install_candidate_hotkey_listener(&mut application, listener);
-        let plan = radial_route_plan(
+        let plan = radial_route_plan_with_sequences(
             &application.prepared.settings,
             radial_document,
             application.candidate_generation,
+            &application.prepared.sequence_routes,
         );
         application
             .prepared
@@ -1485,10 +1864,11 @@ fn begin_hotkey_route_rollback(
         return;
     };
     let (restore_config, restore_related) = if application.old_service_existed {
-        let old_plan = radial_route_plan(
+        let old_plan = radial_route_plan_with_sequences(
             &application.old_settings,
             radial_document,
             restore_generation,
+            &application.old_sequence_routes,
         );
         (old_plan.config, old_plan.related)
     } else {
@@ -1498,7 +1878,11 @@ fn begin_hotkey_route_rollback(
                 radial_document,
                 restore_generation,
             ),
-            shared_drain_control_bindings(&application.old_settings, radial_document),
+            shared_drain_control_bindings(
+                &application.old_settings,
+                radial_document,
+                &application.old_sequence_routes,
+            ),
         )
     };
     match handoff_issuer.begin(
@@ -1571,6 +1955,8 @@ struct HotkeyRuntimeCommitContext<'a> {
     radial_document: &'a RadialDocument,
     authoring_reply_tx: &'a multi_launcher::radial::authoring::AuthoringReplySender,
     event_tx: &'a Sender<()>,
+    sequence_routes: &'a mut Vec<PasteSequenceHotkeyRoute>,
+    sequence_triggers: &'a mut Vec<PasteSequenceHotkeyTrigger>,
 }
 
 impl HotkeyRuntimeCommitContext<'_> {
@@ -1583,6 +1969,7 @@ impl HotkeyRuntimeCommitContext<'_> {
         let fallback = prepare_legacy_hotkey_fallback(
             &application.old_settings,
             self.radial_document,
+            &application.old_sequence_routes,
             self.event_tx,
         );
         *self.settings = application.old_settings.clone();
@@ -1601,6 +1988,8 @@ impl HotkeyRuntimeCommitContext<'_> {
                 *self.help_trigger = fallback.help;
                 *self.screen_draw_trigger = fallback.screen_draw;
                 *self.emergency_trigger = fallback.emergency;
+                *self.sequence_routes = fallback.sequence_routes;
+                *self.sequence_triggers = fallback.sequence_triggers;
                 self.listener.stop();
                 fallback.listener.activate();
                 *self.listener = fallback.listener;
@@ -1644,6 +2033,8 @@ impl HotkeyRuntimeCommitContext<'_> {
         *self.help_trigger = application.prepared.help.clone();
         *self.screen_draw_trigger = application.prepared.screen_draw.clone();
         *self.emergency_trigger = application.prepared.emergency.clone();
+        *self.sequence_routes = application.prepared.sequence_routes.clone();
+        *self.sequence_triggers = application.prepared.sequence_triggers.clone();
         *self.settings = candidate;
         *self.settings_generation = application.candidate_generation;
         if self.settings.radial.enabled {
@@ -1825,10 +2216,11 @@ fn complete_hotkey_route_step(
             }
             Ok(()) if application.prepared.settings.radial.enabled => {
                 install_candidate_hotkey_listener(&mut application, context.runtime.listener);
-                let plan = radial_route_plan(
+                let plan = radial_route_plan_with_sequences(
                     &application.prepared.settings,
                     context.runtime.radial_document,
                     application.candidate_generation,
+                    &application.prepared.sequence_routes,
                 );
                 let route_service = if application.old_service_existed {
                     context.runtime.invocation_service.as_ref()
@@ -2240,13 +2632,16 @@ fn main() -> anyhow::Result<()> {
 
     let mut shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     let mut settings_generation = 1u64;
-    let watched = legacy_listener_triggers(
+    let mut paste_sequence_routes = Vec::new();
+    let mut paste_sequence_triggers = Vec::new();
+    let watched = legacy_listener_triggers_with_sequences(
         shared_invocation,
         &trigger,
         quit_trigger.as_ref(),
         help_trigger.as_ref(),
         screen_draw_trigger.as_ref(),
         emergency_trigger.as_ref(),
+        &paste_sequence_triggers,
     );
 
     let mut listener = HotkeyTrigger::start_listener(watched, "main", event_tx.clone());
@@ -2295,13 +2690,14 @@ fn main() -> anyhow::Result<()> {
         shared_invocation = false;
         listener.stop();
         listener = HotkeyTrigger::start_listener(
-            legacy_listener_triggers(
+            legacy_listener_triggers_with_sequences(
                 false,
                 &trigger,
                 quit_trigger.as_ref(),
                 help_trigger.as_ref(),
                 screen_draw_trigger.as_ref(),
                 emergency_trigger.as_ref(),
+                &paste_sequence_triggers,
             ),
             "main",
             event_tx.clone(),
@@ -2310,6 +2706,34 @@ fn main() -> anyhow::Result<()> {
             tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings at startup; radial runtime disabled fail-closed");
         }
     }
+    paste_sequence_routes = match paste_sequence_hotkey_routes(&settings) {
+        Ok(routes) => routes,
+        Err(error) => {
+            tracing::warn!(%error, "Paste Sequence shortcut routes are unavailable at startup");
+            Vec::new()
+        }
+    };
+    if !paste_sequence_routes.is_empty()
+        && let Err(error) = validate_hotkey_route_candidate(&settings, &radial_document)
+    {
+        tracing::error!(%error, "invalid Paste Sequence shortcut routes at startup; sequence hotkeys disabled fail-closed");
+        paste_sequence_routes.clear();
+    }
+    paste_sequence_triggers = sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
+    listener.stop();
+    listener = HotkeyTrigger::start_listener(
+        legacy_listener_triggers_with_sequences(
+            shared_invocation,
+            &trigger,
+            quit_trigger.as_ref(),
+            help_trigger.as_ref(),
+            screen_draw_trigger.as_ref(),
+            emergency_trigger.as_ref(),
+            &paste_sequence_triggers,
+        ),
+        "main",
+        event_tx.clone(),
+    );
     multi_launcher::gui::install_radial_published_document(Arc::clone(&radial_document));
     let authoring_wake = event_tx.clone();
     let (authoring_client, authoring_endpoint) =
@@ -2371,7 +2795,12 @@ fn main() -> anyhow::Result<()> {
                 shared_invocation,
                 settings_generation,
             ),
-            related_launcher_bindings(&settings, &radial_document, shared_invocation),
+            related_launcher_bindings_with_sequences(
+                &settings,
+                &radial_document,
+                shared_invocation,
+                &paste_sequence_routes,
+            ),
             Arc::new(move || {
                 if let Some(lifetime) = owner_bridge.active_lifetime() {
                     PriorityOwner::ScreenDrawRecovery(lifetime)
@@ -2397,6 +2826,7 @@ fn main() -> anyhow::Result<()> {
                     help_trigger.as_ref(),
                     screen_draw_trigger.as_ref(),
                     emergency_trigger.as_ref(),
+                    &paste_sequence_triggers,
                     &event_tx,
                 );
                 radial_resources.set_runtime_enabled(false);
@@ -2433,6 +2863,7 @@ fn main() -> anyhow::Result<()> {
     let mut pending_launcher_route: Option<PendingLauncherRoute> = None;
     let mut prepared_hotkey_routes: HashMap<_, PreparedHotkeyRoute> = HashMap::new();
     let mut deferred_service_notices = VecDeque::new();
+    let mut deferred_paste_sequence_actions = VecDeque::new();
     let mut deferred_notices_follow_hotkey_failure = false;
     let mut hotkey_handoff_issuer = NativeHotkeyRouteHandoffIssuer;
     let hotkey_service_owner = invocation_priority_owner(Arc::clone(&screen_draw_recovery_bridge));
@@ -2525,8 +2956,12 @@ fn main() -> anyhow::Result<()> {
                             );
                         }
                     }
-                    let route_plan =
-                        radial_route_plan(&settings, &radial_document, settings_generation);
+                    let route_plan = radial_route_plan_with_sequences(
+                        &settings,
+                        &radial_document,
+                        settings_generation,
+                        &paste_sequence_routes,
+                    );
                     if let Some(service) = invocation_service.as_ref() {
                         match service.begin_route_handoff(
                             route_plan.config,
@@ -2557,6 +2992,7 @@ fn main() -> anyhow::Result<()> {
                                     help_trigger.as_ref(),
                                     screen_draw_trigger.as_ref(),
                                     emergency_trigger.as_ref(),
+                                    &paste_sequence_triggers,
                                     &event_tx,
                                 );
                             }
@@ -2591,6 +3027,7 @@ fn main() -> anyhow::Result<()> {
                                     help_trigger.as_ref(),
                                     screen_draw_trigger.as_ref(),
                                     emergency_trigger.as_ref(),
+                                    &paste_sequence_triggers,
                                     &event_tx,
                                 );
                             }
@@ -2598,13 +3035,14 @@ fn main() -> anyhow::Result<()> {
                     } else {
                         listener.stop();
                         listener = HotkeyTrigger::start_listener(
-                            legacy_listener_triggers(
+                            legacy_listener_triggers_with_sequences(
                                 false,
                                 &trigger,
                                 quit_trigger.as_ref(),
                                 help_trigger.as_ref(),
                                 screen_draw_trigger.as_ref(),
                                 emergency_trigger.as_ref(),
+                                &paste_sequence_triggers,
                             ),
                             "main",
                             event_tx.clone(),
@@ -2670,6 +3108,7 @@ fn main() -> anyhow::Result<()> {
                         prepared_routes: &mut prepared_hotkey_routes,
                         settings: &settings,
                         settings_generation,
+                        sequence_routes: &mut paste_sequence_routes,
                         radial_document: &radial_document,
                         event_tx: &event_tx,
                         listener: &mut listener,
@@ -2943,8 +3382,12 @@ fn main() -> anyhow::Result<()> {
                             radial_controller.invalidate_resources();
                             refresh_macro_hotkey_reservations(&settings, &radial_document);
                             settings_generation = settings_generation.checked_add(1).unwrap_or(1);
-                            let route_plan =
-                                radial_route_plan(&settings, &radial_document, settings_generation);
+                            let route_plan = radial_route_plan_with_sequences(
+                                &settings,
+                                &radial_document,
+                                settings_generation,
+                                &paste_sequence_routes,
+                            );
                             if let Some(service) = invocation_service.as_ref() {
                                 match service.begin_route_handoff(
                                     route_plan.config,
@@ -2972,13 +3415,14 @@ fn main() -> anyhow::Result<()> {
                                         }
                                         listener.stop();
                                         listener = HotkeyTrigger::start_listener(
-                                            legacy_listener_triggers(
+                                            legacy_listener_triggers_with_sequences(
                                                 false,
                                                 &trigger,
                                                 quit_trigger.as_ref(),
                                                 help_trigger.as_ref(),
                                                 screen_draw_trigger.as_ref(),
                                                 emergency_trigger.as_ref(),
+                                                &paste_sequence_triggers,
                                             ),
                                             "main",
                                             event_tx.clone(),
@@ -3085,8 +3529,12 @@ fn main() -> anyhow::Result<()> {
                             radial_controller.invalidate_resources();
                             refresh_macro_hotkey_reservations(&settings, &radial_document);
                             settings_generation = settings_generation.checked_add(1).unwrap_or(1);
-                            let route_plan =
-                                radial_route_plan(&settings, &radial_document, settings_generation);
+                            let route_plan = radial_route_plan_with_sequences(
+                                &settings,
+                                &radial_document,
+                                settings_generation,
+                                &paste_sequence_routes,
+                            );
                             if let Some(service) = invocation_service.as_ref() {
                                 match service.begin_route_handoff(
                                     route_plan.config,
@@ -3114,13 +3562,14 @@ fn main() -> anyhow::Result<()> {
                                         }
                                         listener.stop();
                                         listener = HotkeyTrigger::start_listener(
-                                            legacy_listener_triggers(
+                                            legacy_listener_triggers_with_sequences(
                                                 false,
                                                 &trigger,
                                                 quit_trigger.as_ref(),
                                                 help_trigger.as_ref(),
                                                 screen_draw_trigger.as_ref(),
                                                 emergency_trigger.as_ref(),
+                                                &paste_sequence_triggers,
                                             ),
                                             "main",
                                             event_tx.clone(),
@@ -3393,13 +3842,14 @@ fn main() -> anyhow::Result<()> {
                         if start_legacy {
                             listener.stop();
                             listener = HotkeyTrigger::start_listener(
-                                legacy_listener_triggers(
+                                legacy_listener_triggers_with_sequences(
                                     false,
                                     &trigger,
                                     quit_trigger.as_ref(),
                                     help_trigger.as_ref(),
                                     screen_draw_trigger.as_ref(),
                                     emergency_trigger.as_ref(),
+                                    &paste_sequence_triggers,
                                 ),
                                 "main",
                                 event_tx.clone(),
@@ -3416,13 +3866,14 @@ fn main() -> anyhow::Result<()> {
                         }
                         listener.stop();
                         listener = HotkeyTrigger::start_listener(
-                            legacy_listener_triggers(
+                            legacy_listener_triggers_with_sequences(
                                 false,
                                 &trigger,
                                 quit_trigger.as_ref(),
                                 help_trigger.as_ref(),
                                 screen_draw_trigger.as_ref(),
                                 emergency_trigger.as_ref(),
+                                &paste_sequence_triggers,
                             ),
                             "main",
                             event_tx.clone(),
@@ -3455,6 +3906,8 @@ fn main() -> anyhow::Result<()> {
                             radial_document: &radial_document,
                             authoring_reply_tx: &authoring_endpoint.reply_tx,
                             event_tx: &event_tx,
+                            sequence_routes: &mut paste_sequence_routes,
+                            sequence_triggers: &mut paste_sequence_triggers,
                         },
                         pending_route: &mut pending_launcher_route,
                         deferred_notices_follow_failure:
@@ -3750,6 +4203,16 @@ fn main() -> anyhow::Result<()> {
             }
             deferred_notices_follow_hotkey_failure = false;
         }
+        deferred_paste_sequence_actions.extend(take_paste_sequence_trigger_actions(
+            &paste_sequence_triggers,
+        ));
+        if !settings_hotkey_route_is_pending(&pending_launcher_route) {
+            for action in deferred_paste_sequence_actions.drain(..) {
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::PasteSequenceHotkey(action),
+                );
+            }
+        }
         let screen_draw_actions = if !settings_hotkey_route_is_pending(&pending_launcher_route)
             || transition_process_controls_are_live(&pending_launcher_route)
         {
@@ -4031,6 +4494,8 @@ fn main() -> anyhow::Result<()> {
                     radial_document: &radial_document,
                     authoring_reply_tx: &authoring_endpoint.reply_tx,
                     event_tx: &event_tx,
+                    sequence_routes: &mut paste_sequence_routes,
+                    sequence_triggers: &mut paste_sequence_triggers,
                 };
                 runtime.finish_after_authoritative_hook_failure(*application);
             } else {
@@ -4051,6 +4516,7 @@ fn main() -> anyhow::Result<()> {
                     help_trigger.as_ref(),
                     screen_draw_trigger.as_ref(),
                     emergency_trigger.as_ref(),
+                    &paste_sequence_triggers,
                     &event_tx,
                 );
             }
@@ -4416,6 +4882,8 @@ mod tests {
         help_trigger: Option<Arc<HotkeyTrigger>>,
         screen_draw_trigger: Option<Arc<HotkeyTrigger>>,
         emergency_trigger: Option<Arc<HotkeyTrigger>>,
+        sequence_routes: Vec<PasteSequenceHotkeyRoute>,
+        sequence_triggers: Vec<PasteSequenceHotkeyTrigger>,
         listener: HotkeyListener,
         invocation_service: Option<LauncherInvocationService>,
         radial_control_endpoint: RadialControlMainEndpoint,
@@ -4467,6 +4935,8 @@ mod tests {
                 help_trigger: None,
                 screen_draw_trigger: None,
                 emergency_trigger: None,
+                sequence_routes: Vec::new(),
+                sequence_triggers: Vec::new(),
                 listener,
                 invocation_service: None,
                 radial_control_endpoint,
@@ -4502,6 +4972,8 @@ mod tests {
                     radial_document: &self.radial_document,
                     authoring_reply_tx: &self.authoring_endpoint.reply_tx,
                     event_tx: &self.event_tx,
+                    sequence_routes: &mut self.sequence_routes,
+                    sequence_triggers: &mut self.sequence_triggers,
                 },
                 pending_route: &mut self.pending_route,
                 deferred_notices_follow_failure: &mut self.deferred_notices_follow_failure,
@@ -5474,6 +5946,7 @@ mod tests {
             None,
             None,
             None,
+            &[],
             &event_tx,
         );
 
@@ -5523,6 +5996,164 @@ mod tests {
     }
 
     #[test]
+    fn paste_sequence_routes_are_stable_id_only_and_disabled_with_the_plugin() {
+        use multi_launcher::hotkey::launcher_invocation::{
+            PasteSequenceHotkeyAction, RelatedAction,
+        };
+        use multi_launcher::paste_sequence::{PlaybackMode, SequenceDraft, SequenceStore, Step};
+
+        let directory = tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join("paste_sequences.json"));
+        let mut snapshot = store.load().unwrap();
+        let id = snapshot
+            .upsert(SequenceDraft {
+                id: None,
+                name: "Private sequence title".into(),
+                hotkey: Some(multi_launcher::paste_sequence::HotkeyChord::new("Ctrl+F7").unwrap()),
+                mode: PlaybackMode::Automatic,
+                delay_ms: 0,
+                steps: vec![Step::LiteralText {
+                    text: "private sequence body".into(),
+                }],
+            })
+            .unwrap();
+        let settings = Settings::default();
+        let routes = paste_sequence_hotkey_routes_from_snapshot(&settings, &snapshot).unwrap();
+        assert_eq!(routes.len(), 3);
+        assert!(routes.iter().any(|route| {
+            route.chord == "Ctrl+Alt+Shift+PageDown"
+                && route.action == PasteSequenceHotkeyAction::Next
+        }));
+        assert!(routes.iter().any(|route| {
+            route.chord == "Ctrl+Alt+Shift+End" && route.action == PasteSequenceHotkeyAction::Cancel
+        }));
+        let start = routes
+            .iter()
+            .find(|route| route.chord == "Ctrl+F7")
+            .expect("saved sequence shortcut is routed");
+        assert_eq!(start.action, PasteSequenceHotkeyAction::Start(id));
+        assert!(!format!("{:?}", start.action).contains("private sequence body"));
+        let bindings = related_launcher_bindings_with_sequences(
+            &settings,
+            &RadialDocument::starter(),
+            true,
+            &routes,
+        );
+        assert!(bindings.iter().any(|binding| {
+            binding.hotkey == start.hotkey
+                && binding.action
+                    == RelatedAction::PasteSequence(PasteSequenceHotkeyAction::Start(id))
+        }));
+        let draining_bindings =
+            shared_drain_control_bindings(&settings, &RadialDocument::starter(), &routes);
+        assert!(draining_bindings.iter().any(|binding| {
+            binding.hotkey == start.hotkey
+                && binding.action
+                    == RelatedAction::PasteSequence(PasteSequenceHotkeyAction::Start(id))
+        }));
+
+        let mut disabled = settings.clone();
+        disabled.enabled_plugins = Some(std::collections::HashSet::new());
+        assert!(
+            paste_sequence_hotkey_routes_from_snapshot(&disabled, &snapshot)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            related_launcher_bindings_with_sequences(
+                &disabled,
+                &RadialDocument::starter(),
+                true,
+                &routes,
+            )
+            .iter()
+            .all(|binding| !matches!(binding.action, RelatedAction::PasteSequence(_)))
+        );
+    }
+
+    #[test]
+    fn paste_sequence_hotkey_conflicts_with_existing_launcher_routes() {
+        use multi_launcher::paste_sequence::{PlaybackMode, SequenceDraft, SequenceStore, Step};
+
+        let directory = tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join("paste_sequences.json"));
+        let mut snapshot = store.load().unwrap();
+        snapshot
+            .upsert(SequenceDraft {
+                id: None,
+                name: "Conflicting sequence".into(),
+                hotkey: Some(multi_launcher::paste_sequence::HotkeyChord::new("F2").unwrap()),
+                mode: PlaybackMode::Automatic,
+                delay_ms: 0,
+                steps: vec![Step::LiteralText { text: "x".into() }],
+            })
+            .unwrap();
+        let settings = Settings::default();
+        let document = RadialDocument::starter();
+        let routes =
+            multi_launcher::hotkey::validation::validate_hotkey_routes(&settings, &document, None)
+                .unwrap();
+        let sequence_routes =
+            paste_sequence_hotkey_routes_from_snapshot(&settings, &snapshot).unwrap();
+        let error = validate_paste_sequence_hotkey_routes(
+            &settings,
+            &document,
+            None,
+            &routes,
+            &sequence_routes,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Paste Sequence shortcut can co-fire with launcher")
+        );
+    }
+
+    #[test]
+    fn paste_sequence_candidate_routes_validate_before_the_candidate_is_persisted() {
+        use multi_launcher::paste_sequence::{
+            HotkeyChord, PlaybackMode, SequenceDraft, SequenceStore, Step,
+        };
+
+        let directory = tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join("paste_sequences.json"));
+        let mut candidate = store.load().unwrap();
+        candidate
+            .upsert(SequenceDraft {
+                id: None,
+                name: "Prospective conflict".into(),
+                hotkey: Some(HotkeyChord::new("F2").unwrap()),
+                mode: PlaybackMode::Automatic,
+                delay_ms: 0,
+                steps: vec![Step::LiteralText {
+                    text: "payload".into(),
+                }],
+            })
+            .unwrap();
+        let bindings = candidate.hotkey_bindings();
+        let settings = Settings::default();
+        let document = RadialDocument::starter();
+        let base_routes =
+            multi_launcher::hotkey::validation::validate_hotkey_routes(&settings, &document, None)
+                .unwrap();
+        let candidate_routes =
+            paste_sequence_hotkey_routes_from_bindings(&settings, &bindings).unwrap();
+        assert!(candidate_routes.iter().any(|route| route.chord == "F2"));
+        assert!(
+            validate_paste_sequence_hotkey_routes(
+                &settings,
+                &document,
+                None,
+                &base_routes,
+                &candidate_routes,
+            )
+            .is_err()
+        );
+        assert!(store.load().unwrap().sequences().is_empty());
+    }
+
+    #[test]
     fn shared_route_drain_keeps_old_process_controls_without_direct_radial_admission() {
         let mut settings = Settings {
             quit_hotkey: Some("Ctrl+Q".into()),
@@ -5537,7 +6168,7 @@ mod tests {
             }),
         );
 
-        let bindings = shared_drain_control_bindings(&settings, &RadialDocument::starter());
+        let bindings = shared_drain_control_bindings(&settings, &RadialDocument::starter(), &[]);
         assert!(
             bindings
                 .iter()
@@ -5780,12 +6411,14 @@ mod tests {
         };
         let mut pending_launcher_route = None;
         let mut invocation_service = None;
+        let mut sequence_routes = Vec::new();
         let mut route_handoff_issuer = NativeHotkeyRouteHandoffIssuer;
         begin_hotkey_application(HotkeyApplicationStart {
             request,
             prepared_routes: &mut prepared_routes,
             settings: &settings,
             settings_generation: 4,
+            sequence_routes: &mut sequence_routes,
             radial_document: &radial_document,
             event_tx: &wake_tx,
             listener: &mut existing_listener,
@@ -5907,11 +6540,13 @@ mod tests {
         let mut emergency_trigger = None;
         let mut invocation_service = None;
         let mut pending_launcher_route = None;
+        let mut sequence_routes = Vec::new();
         begin_hotkey_application(HotkeyApplicationStart {
             request,
             prepared_routes: &mut prepared_routes,
             settings: &settings,
             settings_generation,
+            sequence_routes: &mut sequence_routes,
             radial_document: &radial_document,
             event_tx: &wake_tx,
             listener: &mut listener,
@@ -5963,6 +6598,8 @@ mod tests {
                 preview_wake,
                 workspace.path().to_path_buf(),
             );
+        let mut sequence_routes = Vec::new();
+        let mut sequence_triggers = Vec::new();
         let commit_context = HotkeyRuntimeCommitContext {
             settings: &mut settings,
             settings_generation: &mut settings_generation,
@@ -5980,6 +6617,8 @@ mod tests {
             radial_document: &radial_document,
             authoring_reply_tx: &authoring_endpoint.reply_tx,
             event_tx: &wake_tx,
+            sequence_routes: &mut sequence_routes,
+            sequence_triggers: &mut sequence_triggers,
         };
         let mut deferred_notices_follow_failure = false;
         let mut completion_context = HotkeyRouteCompletionContext {
@@ -6057,11 +6696,13 @@ mod tests {
         let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
             panic!("expected stale apply request")
         };
+        let mut sequence_routes = Vec::new();
         begin_hotkey_application(HotkeyApplicationStart {
             request,
             prepared_routes: &mut prepared_routes,
             settings: &settings,
             settings_generation,
+            sequence_routes: &mut sequence_routes,
             radial_document: &radial_document,
             event_tx: &wake_tx,
             listener: &mut listener,
@@ -6178,6 +6819,7 @@ mod tests {
                     old_generation: 19,
                     candidate_generation: 20,
                     old_service_existed: true,
+                    old_sequence_routes: Vec::new(),
                     old_listener_stopped: false,
                     fallback_listener: Some(fallback_listener),
                     phase: HotkeyApplyPhase::DrainOldRoute,
@@ -6418,6 +7060,7 @@ mod tests {
             old_generation: 31,
             candidate_generation: 32,
             old_service_existed: true,
+            old_sequence_routes: Vec::new(),
             old_listener_stopped: false,
             fallback_listener: Some(fallback_listener),
             phase: HotkeyApplyPhase::DrainOldRoute,
@@ -6478,7 +7121,7 @@ mod tests {
         assert!(routes.shared_invocation);
 
         let (event_tx, _event_rx) = channel();
-        assert!(prepare_legacy_hotkey_fallback(&settings, &document, &event_tx).is_err());
+        assert!(prepare_legacy_hotkey_fallback(&settings, &document, &[], &event_tx).is_err());
     }
 
     #[test]

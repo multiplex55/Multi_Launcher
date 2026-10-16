@@ -221,6 +221,7 @@ mod track_c3c_dispatch_receipt {
             WatchEvent::ScreenDrawStart => "screen_draw_start",
             WatchEvent::ScreenDrawRecover(_) => "screen_draw_recover",
             WatchEvent::ScreenDrawEmergency(_) => "screen_draw_emergency",
+            WatchEvent::PasteSequenceHotkey(_) => "paste_sequence_hotkey",
             WatchEvent::ClipboardModify(_) => "clipboard_modify",
             WatchEvent::VirtualDesktop(_) => "virtual_desktop",
         }
@@ -625,6 +626,9 @@ impl LauncherApp {
                 }
                 WatchEvent::ScreenDrawEmergency(intent) => {
                     self.recover_screen_draw(intent);
+                }
+                WatchEvent::PasteSequenceHotkey(action) => {
+                    self.handle_paste_sequence_hotkey(action);
                 }
                 WatchEvent::ClipboardModify(ev) => {
                     self.handle_clipboard_modify_gui_event(ev);
