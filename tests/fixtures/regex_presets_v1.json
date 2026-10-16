@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "next_id": 43,
+  "presets": [
+    {
+      "id": 41,
+      "name": "Legacy Unicode",
+      "pattern": "(?P<word>é)",
+      "flags": { "case_insensitive": true },
+      "sample_text": "legacy é sample",
+      "replacement": "${word}-saved"
+    },
+    {
+      "id": 42,
+      "name": "Legacy sparse",
+      "pattern": "^βeta$",
+      "flags": { "multi_line": true },
+      "sample_text": null,
+      "replacement": null
+    }
+  ]
+}

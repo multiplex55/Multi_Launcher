@@ -21,6 +21,242 @@ mod tests {
     use super::*;
 
     #[test]
+    fn regex_test_cases_preset_workflow_migrates_runs_edits_and_reopens() {
+        use crate::gui::regex_tester_dialog::RegexTesterDialogState;
+        use crate::regex_tester::session::EVALUATION_DEBOUNCE;
+        use crate::regex_tester::{RegexTestCaseExpectation, RegexTestCaseStatus, RegexTestCases};
+        use std::time::Instant;
+
+        let directory = tempfile::tempdir().unwrap();
+        let history_path = directory.path().join("history.json");
+        let preset_path = directory.path().join("presets.json");
+        let legacy = include_bytes!("../../../tests/fixtures/regex_presets_v1.json");
+        std::fs::write(&preset_path, legacy).unwrap();
+
+        let mut dialog = RegexTesterDialogState::with_storage_paths(&history_path, &preset_path);
+        let presets = dialog.presets.as_ref().unwrap();
+        assert_eq!(presets.store.entries().len(), 2);
+        let legacy_with_content = &presets.store.entries()[0];
+        let legacy_with_content_id = legacy_with_content.id;
+        assert_eq!(legacy_with_content.id.value(), 41);
+        assert_eq!(legacy_with_content.name, "Legacy Unicode");
+        assert_eq!(legacy_with_content.pattern, "(?P<word>é)");
+        assert!(legacy_with_content.flags.case_insensitive);
+        assert_eq!(
+            legacy_with_content.sample_text.as_deref(),
+            Some("legacy é sample")
+        );
+        assert_eq!(
+            legacy_with_content.replacement.as_deref(),
+            Some("${word}-saved")
+        );
+        assert!(legacy_with_content.test_cases.is_empty());
+
+        dialog.session.draft.test_text = "current sample buffer".into();
+        dialog.session.draft.replacement = "current replacement buffer".into();
+        dialog
+            .session
+            .draft
+            .test_cases
+            .add(
+                Some("temporary".into()),
+                "will be replaced by legacy preset".into(),
+                RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
+        dialog.preset_action(PresetAction::Load(legacy_with_content_id));
+        assert_eq!(dialog.session.draft.pattern, "(?P<word>é)");
+        assert!(dialog.session.draft.flags.case_insensitive);
+        assert_eq!(dialog.session.draft.test_text, "legacy é sample");
+        assert_eq!(dialog.session.draft.replacement, "${word}-saved");
+        assert!(dialog.session.draft.test_cases.is_empty());
+        assert_eq!(std::fs::read(&preset_path).unwrap(), legacy);
+
+        let legacy_sparse_id = dialog.presets.as_ref().unwrap().store.entries()[1].id;
+        dialog.session.draft.test_text = "keep this sample".into();
+        dialog.session.draft.replacement = "keep this replacement".into();
+        dialog
+            .session
+            .draft
+            .test_cases
+            .add(
+                None,
+                "will also be replaced".into(),
+                RegexTestCaseExpectation::NoMatch,
+            )
+            .unwrap();
+        dialog.preset_action(PresetAction::Load(legacy_sparse_id));
+        assert_eq!(dialog.session.draft.pattern, "^βeta$");
+        assert!(dialog.session.draft.flags.multi_line);
+        assert_eq!(dialog.session.draft.test_text, "keep this sample");
+        assert_eq!(dialog.session.draft.replacement, "keep this replacement");
+        assert!(dialog.session.draft.test_cases.is_empty());
+        assert_eq!(std::fs::read(&preset_path).unwrap(), legacy);
+
+        dialog.session.draft.pattern = "^βeta".into();
+        dialog.session.draft.flags = crate::regex_tester::RegexFlags {
+            multi_line: true,
+            ..Default::default()
+        };
+        dialog.session.draft.test_text = "main sample remains separate".into();
+        dialog.session.draft.replacement = "main replacement remains separate".into();
+        let mut authored = RegexTestCases::default();
+        authored
+            .add(
+                Some("Unicode line matches".into()),
+                "before\nβeta\nafter".into(),
+                RegexTestCaseExpectation::Match,
+            )
+            .unwrap();
+        authored
+            .add(
+                None,
+                "before\nomega\nafter".into(),
+                RegexTestCaseExpectation::NoMatch,
+            )
+            .unwrap();
+        authored
+            .add(
+                Some("substring makes this fail".into()),
+                "before\nβeta suffix\nafter".into(),
+                RegexTestCaseExpectation::NoMatch,
+            )
+            .unwrap();
+        dialog.session.draft.test_cases = authored.clone();
+        let now = Instant::now();
+        dialog.session.mark_test_cases_changed(now);
+        assert!(dialog.session.tick_test_cases(now + EVALUATION_DEBOUNCE));
+        let evaluation = dialog.session.test_case_evaluation().unwrap();
+        assert_eq!(evaluation.summary.passed, 2);
+        assert_eq!(evaluation.summary.failed, 1);
+        assert_eq!(
+            evaluation
+                .results
+                .iter()
+                .map(|result| result.status.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                RegexTestCaseStatus::Pass,
+                RegexTestCaseStatus::Pass,
+                RegexTestCaseStatus::Fail,
+            ]
+        );
+
+        let state = dialog.presets.as_mut().unwrap();
+        state.name = "Unicode cases".into();
+        state.include_sample = true;
+        state.include_replacement = true;
+        dialog.preset_action(PresetAction::Save);
+        let case_preset_id = dialog.presets.as_ref().unwrap().selected.unwrap();
+        assert_eq!(case_preset_id.value(), 43);
+        dialog.preset_action(PresetAction::Load(case_preset_id));
+        assert_eq!(dialog.session.draft.test_cases, authored);
+        let saved_bytes = std::fs::read(&preset_path).unwrap();
+
+        let first_case_id = dialog.session.draft.test_cases.as_slice()[0].id;
+        dialog
+            .session
+            .draft
+            .test_cases
+            .get_mut(first_case_id)
+            .unwrap()
+            .label = Some("edited only in memory".into());
+        let edited_cases = dialog.session.draft.test_cases.clone();
+        dialog.session.mark_test_cases_changed(Instant::now());
+        assert_eq!(std::fs::read(&preset_path).unwrap(), saved_bytes);
+
+        let draft_before_management = dialog.session.draft.clone();
+        {
+            let state = dialog.presets.as_mut().unwrap();
+            state.name = "Renamed preset".into();
+        }
+        dialog.preset_action(PresetAction::Rename(case_preset_id));
+        assert_eq!(dialog.session.draft, draft_before_management);
+        dialog.preset_action(PresetAction::Reload);
+        assert_eq!(dialog.session.draft, draft_before_management);
+
+        dialog.preset_action(PresetAction::Update(case_preset_id));
+        let updated = dialog
+            .presets
+            .as_ref()
+            .unwrap()
+            .store
+            .get(case_preset_id)
+            .unwrap();
+        assert_eq!(updated.name, "Renamed preset");
+        assert_eq!(updated.pattern, "^βeta");
+        assert!(updated.flags.multi_line);
+        assert_eq!(
+            updated.sample_text.as_deref(),
+            Some("main sample remains separate")
+        );
+        assert_eq!(
+            updated.replacement.as_deref(),
+            Some("main replacement remains separate")
+        );
+        assert_eq!(updated.test_cases, edited_cases);
+
+        drop(dialog);
+        let mut reopened = RegexTesterDialogState::with_storage_paths(&history_path, &preset_path);
+        let reopened_preset = reopened
+            .presets
+            .as_ref()
+            .unwrap()
+            .store
+            .get(case_preset_id)
+            .unwrap();
+        assert_eq!(reopened_preset.test_cases, edited_cases);
+        reopened.preset_action(PresetAction::Load(case_preset_id));
+        let now = Instant::now();
+        assert!(reopened.session.tick_test_cases(now + EVALUATION_DEBOUNCE));
+        let reopened_evaluation = reopened.session.test_case_evaluation().unwrap();
+        assert_eq!(reopened_evaluation.summary.passed, 2);
+        assert_eq!(reopened_evaluation.summary.failed, 1);
+        assert_eq!(
+            reopened_evaluation.results[0].case_id,
+            edited_cases.as_slice()[0].id
+        );
+        assert_eq!(
+            reopened_evaluation.results[0].status,
+            RegexTestCaseStatus::Pass
+        );
+        assert_eq!(
+            reopened_evaluation.results[1].status,
+            RegexTestCaseStatus::Pass
+        );
+        assert_eq!(
+            reopened_evaluation.results[2].status,
+            RegexTestCaseStatus::Fail
+        );
+
+        reopened.session.draft.pattern = "[".into();
+        reopened.session.mark_changed(now + EVALUATION_DEBOUNCE);
+        assert!(
+            reopened
+                .session
+                .tick_test_cases(now + 2 * EVALUATION_DEBOUNCE)
+        );
+        let invalid = reopened.session.test_case_evaluation().unwrap();
+        assert_eq!(invalid.summary.pattern_errors, edited_cases.len());
+        assert_eq!(invalid.summary.passed, 0);
+        assert!(
+            invalid
+                .results
+                .iter()
+                .all(|result| matches!(&result.status, RegexTestCaseStatus::PatternError(_)))
+        );
+        reopened.session.draft.pattern = "^βeta".into();
+        reopened.session.mark_changed(now + 2 * EVALUATION_DEBOUNCE);
+        assert!(
+            reopened
+                .session
+                .tick_test_cases(now + 3 * EVALUATION_DEBOUNCE)
+        );
+        assert_eq!(reopened.session.test_case_summary().unwrap().passed, 2);
+        assert_eq!(reopened.session.test_case_summary().unwrap().failed, 1);
+    }
+
+    #[test]
     fn configured_data_root_writes_private_profile_stores_and_reconstructs_dialog() {
         use crate::gui::regex_tester_dialog::RegexTesterDialogState;
         use crate::platform::app_data::AppDataRoot;

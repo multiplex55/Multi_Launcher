@@ -734,9 +734,11 @@ navigation, capture inspection, substitution previews, explanations, searchable
 reference material, examples, recent history, and saved presets. It uses Rust's
 `regex` engine; look-around and traditional backreferences are unsupported.
 Test cases check whether each input contains any substring match; use `^…$` anchors
-when the whole input must match. Case labels and plaintext inputs are included only when
-you explicitly save the collection in a preset. Clipboard writes require an explicit
-copy action. See [Regex Tester](docs/regex_tester.md)
+when the whole input must match. Case labels and plaintext inputs are stored only when
+you explicitly save or update a preset. Presets use schema version 2; version 1 presets
+load without test cases and keep their original file bytes until an explicit preset
+change writes the migrated version. Clipboard writes require an explicit copy action.
+See [Regex Tester](docs/regex_tester.md)
 for flags, shortcuts, storage, and interactive limits.
 
 ## Screen region OCR
