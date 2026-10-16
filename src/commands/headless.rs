@@ -225,6 +225,7 @@ mod snippet_headless_tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         };
         assert_eq!(headless_snippet_text(&plain).unwrap(), plain.text);
 
@@ -234,6 +235,7 @@ mod snippet_headless_tests {
             hide_contents: true,
             prompt_for_fields: true,
             fields: vec![SnippetFieldDefinition::new("name")],
+            tags: Vec::new(),
         };
         let error = headless_snippet_text(&prompted).unwrap_err();
         assert!(error.contains("require the launcher interface"));

@@ -440,6 +440,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         };
         let prompted = SnippetEntry {
             alias: "ticket:current".into(),
@@ -447,6 +448,7 @@ mod tests {
             hide_contents: true,
             prompt_for_fields: true,
             fields: vec![SnippetFieldDefinition::new("name")],
+            tags: Vec::new(),
         };
         let path = write_test_snippets(&directory, &[plain, prompted]);
         let invocation = history_launch(ActivationSource::Dashboard);
@@ -507,6 +509,7 @@ mod tests {
                 hide_contents: false,
                 prompt_for_fields: false,
                 fields: Vec::new(),
+                tags: Vec::new(),
             }],
         );
         let invocation = history_launch(ActivationSource::Enter);

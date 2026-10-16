@@ -488,6 +488,7 @@ impl SnippetDialog {
                 hide_contents: self.hide_contents,
                 prompt_for_fields: self.prompt_for_fields,
                 fields: self.fields.clone(),
+                tags: Vec::new(),
             }
         } else if let Some(entry) = candidate.get(index) {
             let mut draft = entry.clone();
@@ -1151,6 +1152,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -1167,6 +1169,7 @@ mod tests {
                 required: false,
                 input_kind: SnippetInputKind::Multiline,
             }],
+            tags: Vec::new(),
         }
     }
 
@@ -1387,6 +1390,7 @@ mod tests {
             hide_contents: true,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         };
         save_snippets(path.to_str().unwrap(), std::slice::from_ref(&original)).unwrap();
         let original_bytes = std::fs::read(&path).unwrap();

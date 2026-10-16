@@ -597,6 +597,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }]);
         let mut current = Arc::clone(&initial);
         publish_loaded_or_retain(
@@ -612,6 +613,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }];
         publish_loaded_or_retain(&mut current, Ok(recovered.clone()), "snippets");
         assert_eq!(current.as_ref(), &recovered);

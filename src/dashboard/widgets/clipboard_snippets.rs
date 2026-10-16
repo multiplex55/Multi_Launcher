@@ -233,6 +233,7 @@ mod tests {
             hide_contents,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }
     }
 

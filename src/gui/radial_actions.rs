@@ -3157,6 +3157,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         };
 
         assert_eq!(

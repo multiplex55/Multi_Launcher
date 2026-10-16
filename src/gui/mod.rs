@@ -5246,6 +5246,7 @@ mod tests {
                 hide_contents: false,
                 prompt_for_fields: false,
                 fields: Vec::new(),
+                tags: Vec::new(),
             },
             crate::plugins::snippets::SnippetEntry {
                 alias: "second".into(),
@@ -5255,6 +5256,7 @@ mod tests {
                 fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
                     "body",
                 )],
+                tags: Vec::new(),
             },
         ];
         let mut snapshot = crate::dashboard::data_cache::DashboardDataSnapshot::default();

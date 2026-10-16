@@ -684,6 +684,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -1094,6 +1095,7 @@ mod tests {
                 hide_contents: false,
                 prompt_for_fields: false,
                 fields: Vec::new(),
+                tags: Vec::new(),
             },
             crate::plugins::snippets::SnippetEntry {
                 alias: "second".into(),
@@ -1103,6 +1105,7 @@ mod tests {
                 fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
                     "literal",
                 )],
+                tags: Vec::new(),
             },
         ]);
         data_cache.set_snapshot_for_test(snapshot);
@@ -1340,6 +1343,7 @@ mod tests {
             fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
                 "name",
             )],
+            tags: Vec::new(),
         }]);
         let known_snippet = crate::plugins::snippets::snippet_run_action("prompted");
         let missing_snippet = crate::plugins::snippets::snippet_run_action("removed");
@@ -1456,6 +1460,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }]);
 
         let commands = vec![action("Plugin wins", "plugin:collision", Some("x"))];
@@ -2004,6 +2009,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }]);
         cache.set_snapshot_for_test(snapshot);
         let plugins = PluginManager::new_inert_for_test();

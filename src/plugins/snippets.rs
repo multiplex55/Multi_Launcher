@@ -5,6 +5,7 @@ use crate::actions::Action;
 use crate::common::json_watch::{JsonWatcher, watch_json};
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
 use crate::plugin::Plugin;
+use anyhow::Context as _;
 use fuzzy_matcher::FuzzyMatcher;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use once_cell::sync::Lazy;
@@ -19,6 +20,8 @@ use std::sync::{
 };
 
 pub const SNIPPETS_FILE: &str = "snippets.json";
+const MAX_SNIPPET_TAGS: usize = 16;
+const MAX_SNIPPET_TAG_CHARS: usize = 64;
 
 const SNIPPET_RUN_PREFIX: &str = "snippet:run:";
 
@@ -342,6 +345,146 @@ pub struct SnippetEntry {
     pub prompt_for_fields: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<SnippetFieldDefinition>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_snippet_tags",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub tags: Vec<String>,
+}
+
+fn normalize_tag_whitespace(tag: &str) -> String {
+    tag.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_snippet_tags(tags: Vec<String>) -> Result<Vec<String>, &'static str> {
+    let mut normalized = Vec::with_capacity(tags.len().min(MAX_SNIPPET_TAGS));
+    let mut seen = HashSet::new();
+
+    for tag in tags {
+        let tag = normalize_tag_whitespace(&tag);
+        if tag.is_empty() {
+            continue;
+        }
+        if tag.chars().count() > MAX_SNIPPET_TAG_CHARS {
+            return Err("snippet tags cannot exceed 64 characters");
+        }
+        if seen.insert(tag.to_lowercase()) {
+            normalized.push(tag);
+            if normalized.len() > MAX_SNIPPET_TAGS {
+                return Err("a snippet cannot have more than 16 tags");
+            }
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn deserialize_snippet_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let tags = Vec::<String>::deserialize(deserializer)?;
+    normalize_snippet_tags(tags).map_err(serde::de::Error::custom)
+}
+
+fn normalize_snippet_entries(snippets: &mut [SnippetEntry]) -> anyhow::Result<()> {
+    for snippet in snippets {
+        snippet.tags = normalize_snippet_tags(std::mem::take(&mut snippet.tags))
+            .map_err(anyhow::Error::msg)
+            .with_context(|| format!("invalid tags for snippet alias {:?}", snippet.alias))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SnippetQueryFilters {
+    text: String,
+    include_tags: Vec<String>,
+    exclude_tags: Vec<String>,
+}
+
+fn parse_snippet_query_filters(input: &str) -> SnippetQueryFilters {
+    let tokens = crate::common::query::tokenize_query_with_raw(input);
+    let mut filters = SnippetQueryFilters::default();
+    let mut remaining = Vec::with_capacity(tokens.len());
+    let mut has_tag_token = false;
+
+    for token in tokens {
+        let raw = token.raw.strip_prefix('!').unwrap_or(&token.raw);
+        let is_tag_token = raw
+            .get(..4)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tag:"));
+        let (value, excluded) = token
+            .value
+            .strip_prefix('!')
+            .map_or((token.value.as_str(), false), |value| (value, true));
+        if is_tag_token {
+            has_tag_token = true;
+            let tag = normalize_tag_whitespace(value.get(4..).unwrap_or_default());
+            if !tag.is_empty() {
+                if excluded {
+                    filters.exclude_tags.push(tag.to_lowercase());
+                } else {
+                    filters.include_tags.push(tag.to_lowercase());
+                }
+                continue;
+            }
+        }
+        remaining.push(token.raw);
+    }
+
+    // Keep ordinary snippets' established fuzzy query byte-for-byte whenever
+    // no explicit tag filter was supplied. When tag filters are mixed in,
+    // retain the original spelling and quoting of all remaining tokens.
+    filters.text = if has_tag_token {
+        remaining.join(" ")
+    } else {
+        input.to_owned()
+    };
+    filters
+}
+
+fn snippet_matches_query(
+    matcher: &SkimMatcherV2,
+    snippet: &SnippetEntry,
+    filters: &SnippetQueryFilters,
+) -> bool {
+    let tag_matches = |requested: &str| {
+        let requested = normalize_tag_whitespace(requested).to_lowercase();
+        snippet
+            .tags
+            .iter()
+            .any(|tag| tag.to_lowercase().contains(&requested))
+    };
+    if !filters.include_tags.iter().all(|tag| tag_matches(tag))
+        || filters.exclude_tags.iter().any(|tag| tag_matches(tag))
+    {
+        return false;
+    }
+
+    let text_filter = filters.text.trim();
+    if text_filter.is_empty() {
+        return true;
+    }
+    let text_matches = matcher.fuzzy_match(&snippet.alias, &text_filter).is_some()
+        || matcher.fuzzy_match(&snippet.text, &text_filter).is_some()
+        || snippet
+            .tags
+            .iter()
+            .any(|tag| matcher.fuzzy_match(tag, &text_filter).is_some());
+    text_matches
+}
+
+fn starts_with_tag_filter(input: &str) -> bool {
+    crate::common::query::tokenize_query_with_raw(input)
+        .first()
+        .is_some_and(|first| {
+            let first = first.raw.strip_prefix('!').unwrap_or(&first.raw);
+            first
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tag:"))
+        })
 }
 
 /// Rebuild a canonical snippet action from its encoded alias when that alias
@@ -444,6 +587,7 @@ fn update_snippets_with_save(
     let _transaction = snippets_transaction_guard();
     let mut snippets = load_snippets(path)?;
     if mutate(&mut snippets)? {
+        normalize_snippet_entries(&mut snippets)?;
         save(path, &snippets)?;
         LIVE_SNIPPETS.publish(path, &snippets);
         record_versioned_snippets(path, &snippets);
@@ -475,6 +619,7 @@ pub fn append_snippet(path: &str, alias: &str, text: &str) -> anyhow::Result<()>
                 hide_contents: false,
                 prompt_for_fields: false,
                 fields: Vec::new(),
+                tags: Vec::new(),
             });
         }
         Ok(true)
@@ -616,17 +761,14 @@ impl Plugin for SnippetsPlugin {
         }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs rm") {
             let filter = rest.trim();
+            let filters = parse_snippet_query_filters(filter);
             let guard = match self.data.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             return guard
                 .iter()
-                .filter(|s| {
-                    filter.is_empty()
-                        || self.matcher.fuzzy_match(&s.alias, filter).is_some()
-                        || self.matcher.fuzzy_match(&s.text, filter).is_some()
-                })
+                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
                 .map(|s| Action {
                     label: format!("Remove snippet {}", s.alias.clone()),
                     desc: "Snippet".into(),
@@ -652,7 +794,9 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs edit") {
             let rest = rest.trim();
-            if let Some((alias, text)) = rest.split_once(' ') {
+            if let Some((alias, text)) = rest.split_once(' ')
+                && !starts_with_tag_filter(rest)
+            {
                 let alias = alias.trim();
                 let text = text.trim();
                 if !alias.is_empty() && !text.is_empty() {
@@ -665,17 +809,14 @@ impl Plugin for SnippetsPlugin {
                 }
             }
             let filter = rest;
+            let filters = parse_snippet_query_filters(filter);
             let guard = match self.data.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             return guard
                 .iter()
-                .filter(|s| {
-                    filter.is_empty()
-                        || self.matcher.fuzzy_match(&s.alias, filter).is_some()
-                        || self.matcher.fuzzy_match(&s.text, filter).is_some()
-                })
+                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
                 .map(|s| Action {
                     label: format!("Edit snippet {}", s.alias.clone()),
                     desc: "Snippet".into(),
@@ -687,16 +828,14 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "cs list") {
             let filter = rest.trim();
+            let filters = parse_snippet_query_filters(filter);
             let guard = match self.data.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             return guard
                 .iter()
-                .filter(|s| {
-                    self.matcher.fuzzy_match(&s.alias, filter).is_some()
-                        || self.matcher.fuzzy_match(&s.text, filter).is_some()
-                })
+                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
                 .map(|s| Action {
                     label: s.alias.clone(),
                     desc: "Snippet".into(),
@@ -708,16 +847,14 @@ impl Plugin for SnippetsPlugin {
 
         if let Some(filter) = crate::common::strip_prefix_ci(trimmed, "cs") {
             let filter = filter.trim();
+            let filters = parse_snippet_query_filters(filter);
             let guard = match self.data.lock() {
                 Ok(g) => g,
                 Err(_) => return Vec::new(),
             };
             return guard
                 .iter()
-                .filter(|s| {
-                    self.matcher.fuzzy_match(&s.alias, filter).is_some()
-                        || self.matcher.fuzzy_match(&s.text, filter).is_some()
-                })
+                .filter(|snippet| snippet_matches_query(&self.matcher, snippet, &filters))
                 .map(|s| Action {
                     label: s.alias.clone(),
                     desc: "Snippet".into(),
@@ -802,6 +939,7 @@ mod persistence_tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -818,6 +956,7 @@ mod persistence_tests {
                 required: false,
                 input_kind: SnippetInputKind::Multiline,
             }],
+            tags: Vec::new(),
         }
     }
 
@@ -838,10 +977,8 @@ mod persistence_tests {
         let mut manager = crate::plugin::PluginManager::new_inert_for_test();
         manager.register(Box::new(plugin));
         let enabled = HashSet::from(["snippets".to_owned()]);
-        let capabilities = std::collections::HashMap::from([(
-            "snippets".to_owned(),
-            vec!["search".to_owned()],
-        )]);
+        let capabilities =
+            std::collections::HashMap::from([("snippets".to_owned(), vec!["search".to_owned()])]);
         assert!(manager.has_enabled_query_prefix(
             " \tCS   add example text",
             Some(&enabled),
@@ -852,18 +989,14 @@ mod persistence_tests {
             Some(&enabled),
             Some(&capabilities),
         ));
-        assert!(!manager.has_enabled_query_prefix(
-            "csfoo",
-            Some(&enabled),
-            Some(&capabilities),
-        ));
-        let legacy_adjacent_prefix = manager.search_filtered_results(
-            "csfoo",
-            Some(&enabled),
-            Some(&capabilities),
-        );
+        assert!(!manager.has_enabled_query_prefix("csfoo", Some(&enabled), Some(&capabilities),));
+        let legacy_adjacent_prefix =
+            manager.search_filtered_results("csfoo", Some(&enabled), Some(&capabilities));
         assert_eq!(legacy_adjacent_prefix.len(), 1);
-        assert_eq!(legacy_adjacent_prefix[0].action.action, snippet_run_action("foo"));
+        assert_eq!(
+            legacy_adjacent_prefix[0].action.action,
+            snippet_run_action("foo")
+        );
         drop(manager);
         drop(directory);
     }
@@ -876,10 +1009,62 @@ mod persistence_tests {
             hide_contents: true,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         };
 
         assert_eq!(snippet_preview_text(&entry), "******");
         assert_eq!(entry.text, "private body\n秘密 🧪");
+    }
+
+    #[test]
+    fn snippet_tag_normalization_is_bounded_and_case_insensitive() {
+        let normalized = normalize_snippet_tags(vec![
+            "  High\t Priority  ".into(),
+            "high   priority".into(),
+            "  ".into(),
+            "Work".into(),
+        ])
+        .unwrap();
+        assert_eq!(normalized, ["High Priority", "Work"]);
+
+        assert!(normalize_snippet_tags(vec!["x".repeat(MAX_SNIPPET_TAG_CHARS)]).is_ok());
+        assert!(normalize_snippet_tags(vec!["x".repeat(MAX_SNIPPET_TAG_CHARS + 1)]).is_err());
+        assert!(
+            normalize_snippet_tags(
+                (0..MAX_SNIPPET_TAGS)
+                    .map(|index| format!("tag-{index}"))
+                    .collect()
+            )
+            .is_ok()
+        );
+        assert!(
+            normalize_snippet_tags(
+                (0..=MAX_SNIPPET_TAGS)
+                    .map(|index| format!("tag-{index}"))
+                    .collect()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn snippet_tag_query_parsing_preserves_other_query_syntax() {
+        let input = r#"kind:todo C:\Tools\next.txt tag:"High   Priority" !tag:obsolete"#;
+        let filters = parse_snippet_query_filters(input);
+        assert_eq!(filters.text, r#"kind:todo C:\Tools\next.txt"#);
+        assert_eq!(filters.include_tags, ["high priority"]);
+        assert_eq!(filters.exclude_tags, ["obsolete"]);
+
+        let ordinary_query = r#"kind:todo C:\Tools\next.txt"#;
+        assert_eq!(
+            parse_snippet_query_filters(ordinary_query).text,
+            ordinary_query
+        );
+        let quoted_plain_text = r#""tag:work""#;
+        let plain_filters = parse_snippet_query_filters(quoted_plain_text);
+        assert_eq!(plain_filters.text, quoted_plain_text);
+        assert!(plain_filters.include_tags.is_empty());
+        assert!(!starts_with_tag_filter(quoted_plain_text));
     }
 
     #[test]
@@ -1074,6 +1259,7 @@ mod persistence_tests {
         assert_eq!(loaded, vec![snippet("a", "first")]);
         assert!(!loaded[0].prompt_for_fields);
         assert!(loaded[0].fields.is_empty());
+        assert!(loaded[0].tags.is_empty());
         assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes);
 
         let opt_out = directory.path().join("opt-out.json");
@@ -1095,6 +1281,96 @@ mod persistence_tests {
             load_snippets(saved_opt_out.to_str().unwrap()).unwrap(),
             loaded_opt_out
         );
+        let saved_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(saved_opt_out).unwrap()).unwrap();
+        assert!(saved_json[0].get("tags").is_none());
+    }
+
+    #[test]
+    fn snippet_tags_normalize_on_save_and_invalid_mutation_is_atomic() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path = path.to_str().unwrap();
+        let mut configured = snippet("saved", "body");
+        configured.tags = vec![
+            "  High\t Priority ".into(),
+            "high priority".into(),
+            "Work".into(),
+            " ".into(),
+        ];
+
+        save_snippets(path, &[configured]).unwrap();
+
+        let saved = load_snippets(path).unwrap();
+        assert_eq!(saved[0].tags, ["High Priority", "Work"]);
+        let saved_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(
+            saved_json[0]["tags"],
+            serde_json::json!(["High Priority", "Work"])
+        );
+
+        let original_bytes = std::fs::read(path).unwrap();
+        let version = snippets_version();
+        let mut invalid = snippet("invalid", "body");
+        invalid.tags = vec!["x".repeat(MAX_SNIPPET_TAG_CHARS + 1)];
+        let error = save_snippets(path, &[invalid]).unwrap_err();
+        assert!(error.to_string().contains("invalid tags for snippet alias"));
+        assert_eq!(std::fs::read(path).unwrap(), original_bytes);
+        assert_eq!(snippets_version(), version);
+    }
+
+    #[test]
+    fn invalid_persisted_tag_bounds_retain_last_good_watcher_snapshot() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snippets.json");
+        let path_text = path.to_string_lossy().into_owned();
+        let initial = snippet("initial", "body");
+        let data = Arc::new(Mutex::new(vec![initial]));
+
+        let external = snippet("external", "updated");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&[external.clone()]).unwrap(),
+        )
+        .unwrap();
+        reload_snippet_snapshot(&path_text, &data).unwrap();
+        assert_eq!(*data.lock().unwrap(), [external]);
+
+        let version = snippets_version();
+        let oversized_tags = (0..=MAX_SNIPPET_TAGS)
+            .map(|index| format!("tag-{index}"))
+            .collect::<Vec<_>>();
+        let invalid = serde_json::json!([{
+            "alias": "invalid",
+            "text": "body",
+            "tags": oversized_tags,
+        }]);
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+
+        let error = reload_snippet_snapshot(&path_text, &data).unwrap_err();
+
+        assert!(error.to_string().contains(&path_text));
+        assert!(error.to_string().contains("16 tags"));
+        assert_eq!(*data.lock().unwrap(), [snippet("external", "updated")]);
+        assert_eq!(snippets_version(), version);
+
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!([{
+                "alias": "long",
+                "text": "body",
+                "tags": ["x".repeat(MAX_SNIPPET_TAG_CHARS + 1)],
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = reload_snippet_snapshot(&path_text, &data).unwrap_err();
+        assert!(error.to_string().contains("64 characters"));
+        assert_eq!(*data.lock().unwrap(), [snippet("external", "updated")]);
+        assert_eq!(snippets_version(), version);
     }
 
     #[test]
@@ -1300,6 +1576,7 @@ mod persistence_tests {
                 configured_name.clone(),
                 SnippetFieldDefinition::new("removed"),
             ],
+            tags: Vec::new(),
         };
         save_snippets(path, std::slice::from_ref(&original)).unwrap();
         let original_bytes = std::fs::read(path).unwrap();
@@ -1396,6 +1673,7 @@ mod persistence_tests {
             hide_contents: true,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }];
 
         save_snippets(path.to_str().unwrap(), &expected).unwrap();

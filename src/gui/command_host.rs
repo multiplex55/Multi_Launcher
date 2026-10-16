@@ -1378,6 +1378,7 @@ mod tests {
             fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
                 "name",
             )],
+            tags: Vec::new(),
         }
     }
 

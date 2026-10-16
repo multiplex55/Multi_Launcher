@@ -880,6 +880,7 @@ mod tests {
                     input_kind: SnippetInputKind::Multiline,
                 },
             ],
+            tags: Vec::new(),
         }
     }
 

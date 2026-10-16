@@ -1439,6 +1439,7 @@ mod tests {
             fields: vec![crate::plugins::snippets::SnippetFieldDefinition::new(
                 "name",
             )],
+            tags: Vec::new(),
         };
         let history_text = "Clipboard history {{name}}";
         let plain_alias = "literal row";
@@ -1448,6 +1449,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         };
         let mut dashboard = DashboardDataSnapshot::default();
         dashboard.clipboard_history = std::sync::Arc::new(vec![history_text.into()]);

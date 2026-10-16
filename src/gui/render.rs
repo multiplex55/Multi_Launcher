@@ -21857,6 +21857,7 @@ mod tests {
                 crate::plugins::snippets::SnippetFieldDefinition::new("name"),
                 message,
             ],
+            tags: Vec::new(),
         }
     }
 
@@ -22098,6 +22099,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: true,
             fields,
+            tags: Vec::new(),
         };
         request_test_prompt(&mut app, entry);
         let feedback = app

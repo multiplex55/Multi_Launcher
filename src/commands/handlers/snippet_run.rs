@@ -218,6 +218,7 @@ mod tests {
             hide_contents: false,
             prompt_for_fields: false,
             fields: Vec::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -243,6 +244,7 @@ mod tests {
                     input_kind: SnippetInputKind::SingleLine,
                 },
             ],
+            tags: Vec::new(),
         }
     }
 
