@@ -16,6 +16,8 @@ struct DialogLayout {
     window: egui::Rect,
     body: egui::Rect,
     body_content: egui::Vec2,
+    body_id: Option<egui::Id>,
+    body_offset: f32,
     steps: egui::Rect,
     steps_content: egui::Vec2,
     steps_id: Option<egui::Id>,
@@ -30,6 +32,8 @@ impl Default for DialogLayout {
             window: egui::Rect::NOTHING,
             body: egui::Rect::NOTHING,
             body_content: egui::Vec2::ZERO,
+            body_id: None,
+            body_offset: 0.0,
             steps: egui::Rect::NOTHING,
             steps_content: egui::Vec2::ZERO,
             steps_id: None,
@@ -70,6 +74,7 @@ pub(crate) struct PasteSequenceDialog {
     draft: SequenceDraft,
     selected_id: Option<SequenceId>,
     selected_step: Option<usize>,
+    reveal_step: Option<usize>,
     remove_confirmation: Option<SequenceId>,
     snippets: Vec<SnippetEntry>,
     history: Vec<String>,
@@ -94,6 +99,7 @@ impl Default for PasteSequenceDialog {
             draft: SequenceDraft::new("New sequence", Vec::new()),
             selected_id: None,
             selected_step: None,
+            reveal_step: None,
             remove_confirmation: None,
             snippets: Vec::new(),
             history: Vec::new(),
@@ -145,6 +151,7 @@ impl PasteSequenceDialog {
         self.draft = SequenceDraft::new("New sequence", Vec::new());
         self.selected_id = None;
         self.selected_step = None;
+        self.reveal_step = None;
         self.remove_confirmation = None;
         self.hotkey_text.clear();
         self.inline_error = store_error;
@@ -185,6 +192,7 @@ impl PasteSequenceDialog {
         self.draft = SequenceDraft::new("New sequence", Vec::new());
         self.selected_id = None;
         self.selected_step = None;
+        self.reveal_step = None;
         self.remove_confirmation = None;
         self.snippets.clear();
         self.history.clear();
@@ -246,6 +254,7 @@ impl PasteSequenceDialog {
                             if ui.button("New").clicked() {
                                 self.selected_id = None;
                                 self.selected_step = None;
+                                self.reveal_step = None;
                                 self.remove_confirmation = None;
                                 self.draft = SequenceDraft::new("New sequence", Vec::new());
                                 self.hotkey_text.clear();
@@ -270,6 +279,8 @@ impl PasteSequenceDialog {
                 {
                     self.layout.body = body.inner_rect;
                     self.layout.body_content = body.content_size;
+                    self.layout.body_id = Some(body.id);
+                    self.layout.body_offset = body.state.offset.y;
                 }
                 #[cfg(not(test))]
                 let _ = body;
@@ -318,6 +329,7 @@ impl PasteSequenceDialog {
                         self.draft = SequenceDraft::from_sequence(&sequence);
                         self.selected_id = Some(sequence.id);
                         self.selected_step = None;
+                        self.reveal_step = None;
                         self.remove_confirmation = None;
                         self.hotkey_text = sequence
                             .hotkey
@@ -446,6 +458,8 @@ impl PasteSequenceDialog {
                         self.draft.steps.push(Step::SnippetRef {
                             alias: snippet.alias.clone(),
                         });
+                        self.selected_step = self.draft.steps.len().checked_sub(1);
+                        self.reveal_step = self.selected_step;
                         ui.close();
                     }
                 }
@@ -468,6 +482,8 @@ impl PasteSequenceDialog {
                         self.status = Some(
                             "Clipboard steps refer to history and can expire before a run.".into(),
                         );
+                        self.selected_step = self.draft.steps.len().checked_sub(1);
+                        self.reveal_step = self.selected_step;
                         ui.close();
                     }
                 }
@@ -476,6 +492,8 @@ impl PasteSequenceDialog {
                 self.draft.steps.push(Step::LiteralText {
                     text: String::new(),
                 });
+                self.selected_step = self.draft.steps.len().checked_sub(1);
+                self.reveal_step = self.selected_step;
             }
             if ui.button("Move Up").clicked()
                 && let Some(index) = self.selected_step
@@ -483,6 +501,7 @@ impl PasteSequenceDialog {
             {
                 self.draft.steps.swap(index, index - 1);
                 self.selected_step = Some(index - 1);
+                self.reveal_step = self.selected_step;
             }
             if ui.button("Move Down").clicked()
                 && let Some(index) = self.selected_step
@@ -490,6 +509,7 @@ impl PasteSequenceDialog {
             {
                 self.draft.steps.swap(index, index + 1);
                 self.selected_step = Some(index + 1);
+                self.reveal_step = self.selected_step;
             }
             if ui
                 .add_enabled(self.selected_step.is_some(), egui::Button::new("Remove"))
@@ -604,16 +624,17 @@ impl PasteSequenceDialog {
 
     fn step_editor(&mut self, ui: &mut egui::Ui, max_height: f32) {
         let mut remove = None;
-        let steps =
-            egui::ScrollArea::vertical()
-                .id_salt("paste_sequence_step_editor")
-                // The outer body owns overflow from the preceding controls. Reserve
-                // this viewport rather than letting their remaining height collapse it.
-                .min_scrolled_height(max_height)
-                .max_height(max_height)
-                .show(ui, |ui| {
-                    for (index, step) in self.draft.steps.iter_mut().enumerate() {
-                        let selected = self.selected_step == Some(index);
+        let reveal = self.reveal_step.take();
+        let steps = egui::ScrollArea::vertical()
+            .id_salt("paste_sequence_step_editor")
+            // The outer body owns overflow from the preceding controls. Reserve
+            // this viewport rather than letting their remaining height collapse it.
+            .min_scrolled_height(max_height)
+            .max_height(max_height)
+            .show(ui, |ui| {
+                for (index, step) in self.draft.steps.iter_mut().enumerate() {
+                    let selected = self.selected_step == Some(index);
+                    let row =
                         ui.group(|ui| {
                             ui.set_max_width(ui.available_width());
                             ui.horizontal_wrapped(|ui| {
@@ -662,8 +683,23 @@ impl PasteSequenceDialog {
                                 );
                             }
                         });
+                    if reveal == Some(index) {
+                        row.response.scroll_to_me_animation(
+                            Some(egui::Align::Center),
+                            egui::style::ScrollAnimation::none(),
+                        );
                     }
-                });
+                }
+            });
+        if reveal.is_some() {
+            // The row request belongs to the inner list. Separately reveal that
+            // viewport in the body when controls above it have scrolled out of view.
+            ui.scroll_to_rect_animation(
+                steps.inner_rect,
+                Some(egui::Align::BOTTOM),
+                egui::style::ScrollAnimation::none(),
+            );
+        }
         #[cfg(test)]
         {
             self.layout.steps = steps.inner_rect;
@@ -677,6 +713,7 @@ impl PasteSequenceDialog {
             self.draft.steps.remove(index);
             if self.selected_step == Some(index) {
                 self.selected_step = None;
+                self.reveal_step = None;
             } else if self.selected_step.is_some_and(|selected| selected > index) {
                 self.selected_step = self.selected_step.map(|selected| selected - 1);
             }
@@ -699,11 +736,13 @@ impl PasteSequenceDialog {
             Status::Completed => "Completed".into(),
             Status::Failed(error) => format!("Failed: {}", error.message()),
         };
-        if let Some((current, total)) = app.sequence_playback.current_step_number() {
-            ui.add(egui::Label::new(format!("{label} · step {current} of {total}")).truncate());
+        let message = if let Some((current, total)) = app.sequence_playback.current_step_number() {
+            format!("{label} \u{00b7} step {current} of {total}")
         } else {
-            ui.add(egui::Label::new(format!("Run status: {label}")).truncate());
-        }
+            format!("Run status: {label}")
+        };
+        ui.add(egui::Label::new(&message).truncate())
+            .on_hover_text(&message);
     }
 
     fn show_preview(&self, ui: &mut egui::Ui, preview: &PreparedSequencePreview) {
@@ -1190,6 +1229,332 @@ mod tests {
                 assert_eq!(dialog.selected_step, Some(count - 1));
             }
         }
+    }
+
+    // Text paint rectangles let this focused fixture drive the production controls
+    // without a second implementation of their actions or a general widget harness.
+    fn editor_event_frame(
+        dialog: &mut PasteSequenceDialog,
+        ctx: &egui::Context,
+        app: &mut super::super::LauncherApp,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Rect)> {
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            events,
+            ..Default::default()
+        });
+        dialog.ui(ctx, app);
+        let output = ctx.end_pass();
+        fn collect(
+            shape: &egui::epaint::Shape,
+            clip: egui::Rect,
+            out: &mut Vec<(String, egui::Rect)>,
+        ) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    let rect = text
+                        .galley
+                        .rect
+                        .translate(text.pos.to_vec2())
+                        .intersect(clip);
+                    if rect.is_positive() {
+                        out.push((text.galley.text().to_owned(), rect));
+                    }
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, clip, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut text = Vec::new();
+        for shape in &output.shapes {
+            collect(&shape.shape, shape.clip_rect, &mut text);
+        }
+        output.drop_without_applying_deltas();
+        text
+    }
+
+    fn editor_click(
+        dialog: &mut PasteSequenceDialog,
+        ctx: &egui::Context,
+        app: &mut super::super::LauncherApp,
+        size: egui::Vec2,
+        label: &str,
+    ) {
+        let text = editor_event_frame(dialog, ctx, app, size, Vec::new());
+        let rect = text
+            .iter()
+            .find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing visible {label:?}: {text:?}"))
+            .1;
+        let pos = rect.center();
+        editor_event_frame(dialog, ctx, app, size, vec![egui::Event::PointerMoved(pos)]);
+        editor_event_frame(
+            dialog,
+            ctx,
+            app,
+            size,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        editor_event_frame(
+            dialog,
+            ctx,
+            app,
+            size,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        for _ in 0..2 {
+            editor_event_frame(dialog, ctx, app, size, Vec::new());
+        }
+    }
+
+    fn editor_reveal_toolbar(
+        dialog: &mut PasteSequenceDialog,
+        ctx: &egui::Context,
+        app: &mut super::super::LauncherApp,
+        size: egui::Vec2,
+    ) {
+        let layout = dialog.layout;
+        let mut state = egui::scroll_area::State::load(ctx, layout.body_id.unwrap()).unwrap();
+        state.offset.y += layout.steps.top() - layout.body.center().y - 80.0;
+        state.store(ctx, layout.body_id.unwrap());
+        for _ in 0..2 {
+            editor_event_frame(dialog, ctx, app, size, Vec::new());
+        }
+    }
+
+    #[test]
+    fn ordered_steps_editor_events_preserve_rows_scroll_and_lifecycle() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = layout_app(&ctx, directory.path());
+        let size = egui::vec2(900.0, 760.0);
+        let store_path = directory.path().join(PASTE_SEQUENCES_FILE);
+        let store = SequenceStore::new(&store_path);
+        let mut snapshot = store.load().unwrap();
+        let saved = SequenceDraft::new(
+            "Owned saved fixture",
+            vec![Step::LiteralText {
+                text: "persisted fixture".into(),
+            }],
+        );
+        snapshot.upsert(saved.clone()).unwrap();
+        store.commit(&mut snapshot).unwrap();
+        let original_store = std::fs::read(&store_path).unwrap();
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            store_path,
+            snapshot: Some(snapshot),
+            ..Default::default()
+        };
+        dialog.snippets = vec![SnippetEntry {
+            alias: "fixture_snippet".into(),
+            text: "dummy hidden payload".into(),
+            hide_contents: true,
+            prompt_for_fields: false,
+            fields: Vec::new(),
+            tags: Vec::new(),
+        }];
+        dialog.history = vec!["owned dummy history".into()];
+        dialog.draft.steps = (0..50)
+            .map(|index| Step::LiteralText {
+                text: format!("fixture {index}"),
+            })
+            .collect();
+        for _ in 0..4 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        editor_click(&mut dialog, &ctx, &mut app, size, "1.");
+        assert_eq!(dialog.selected_step, Some(0));
+        editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Add Temporary Text");
+        assert_eq!(dialog.selected_step, Some(50));
+        assert!(dialog.reveal_step.is_none());
+        let visible = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        assert!(visible.iter().any(|(text, _)| text == "51."));
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "Text pasted only when the run starts",
+        );
+        editor_event_frame(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            vec![egui::Event::Text("edited owned text".into())],
+        );
+        assert_eq!(
+            dialog.draft.steps[50],
+            Step::LiteralText {
+                text: "edited owned text".into()
+            }
+        );
+        let focused = ctx.memory(|memory| memory.focused());
+        assert!(focused.is_some());
+        editor_event_frame(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_ne!(ctx.memory(|memory| memory.focused()), focused);
+        for (button, selected) in [("Move Up", 49), ("Move Down", 50), ("Move Up", 49)] {
+            editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+            editor_click(&mut dialog, &ctx, &mut app, size, button);
+            assert_eq!(dialog.selected_step, Some(selected));
+            assert_eq!(
+                dialog.draft.steps[selected],
+                Step::LiteralText {
+                    text: "edited owned text".into()
+                }
+            );
+            let text = editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+            assert!(text.iter().any(|(text, _)| text == "edited owned text"));
+        }
+        editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Remove");
+        assert_eq!(dialog.draft.steps.len(), 50);
+        assert_eq!(
+            dialog.draft.steps[49],
+            Step::LiteralText {
+                text: "fixture 49".into()
+            }
+        );
+        for (menu, item) in [
+            ("Add Snippet", "fixture_snippet  \u{00b7}  hidden"),
+            ("Add Clipboard Item", "History item 1"),
+        ] {
+            editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+            editor_click(&mut dialog, &ctx, &mut app, size, menu);
+            editor_click(&mut dialog, &ctx, &mut app, size, item);
+        }
+        assert_eq!(dialog.selected_step, Some(51));
+        assert_eq!(
+            dialog.draft.steps[50],
+            Step::SnippetRef {
+                alias: "fixture_snippet".into()
+            }
+        );
+        assert_eq!(
+            dialog.draft.steps[51],
+            Step::clipboard_history_reference("owned dummy history")
+        );
+        editor_click(&mut dialog, &ctx, &mut app, size, "51.");
+        assert_eq!(dialog.selected_step, Some(50));
+        editor_reveal_toolbar(&mut dialog, &ctx, &mut app, size);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Remove");
+        assert_eq!(
+            dialog.draft.steps[50],
+            Step::clipboard_history_reference("owned dummy history")
+        );
+        let expected_steps = dialog.draft.steps.clone();
+        // Put both regions away from their upper boundaries before checking routing.
+        let layout = dialog.layout;
+        let mut state = egui::scroll_area::State::load(&ctx, layout.body_id.unwrap()).unwrap();
+        state.offset.y = layout.body_content.y - layout.body.height();
+        state.store(&ctx, layout.body_id.unwrap());
+        for _ in 0..2 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        // Scroll the real nested regions with pointer-positioned wheel events.
+        for (inside_steps, outside_window) in [(true, false), (false, false), (false, true)] {
+            let before = dialog.layout;
+            let pos = if outside_window {
+                egui::pos2(899.0, 759.0)
+            } else if inside_steps {
+                before.steps.intersect(before.body).center()
+            } else {
+                before.body.min + egui::vec2(5.0, 5.0)
+            };
+            editor_event_frame(
+                &mut dialog,
+                &ctx,
+                &mut app,
+                size,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, 40.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            for _ in 0..30 {
+                editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+            }
+            let after = dialog.layout;
+            if inside_steps {
+                assert!(
+                    after.steps_offset < before.steps_offset,
+                    "inner wheel: {before:?} -> {after:?}"
+                );
+                assert_eq!(after.body_offset, before.body_offset);
+            } else {
+                assert_eq!(after.steps_offset, before.steps_offset);
+                if outside_window {
+                    assert_eq!(after.body_offset, before.body_offset);
+                } else {
+                    assert!(
+                        after.body_offset < before.body_offset,
+                        "body wheel: {before:?} -> {after:?}"
+                    );
+                }
+            }
+        }
+        for viewport in [egui::vec2(600.0, 420.0), size] {
+            for _ in 0..4 {
+                editor_event_frame(&mut dialog, &ctx, &mut app, viewport, Vec::new());
+            }
+            assert!(dialog.layout.footer.bottom() <= viewport.y + 1.0);
+            assert_eq!(dialog.draft.steps, expected_steps);
+        }
+        assert_eq!(std::fs::read(&dialog.store_path).unwrap(), original_store);
+        editor_click(&mut dialog, &ctx, &mut app, size, "Cancel Editor");
+        assert!(!dialog.open);
+        assert!(dialog.draft.steps.is_empty());
+        assert_eq!(std::fs::read(&dialog.store_path).unwrap(), original_store);
+        // Reopen with the owned catalog rather than reading real snippet/history files.
+        dialog.open = true;
+        dialog.snapshot = Some(store.load().unwrap());
+        for _ in 0..3 {
+            editor_event_frame(&mut dialog, &ctx, &mut app, size, Vec::new());
+        }
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            size,
+            "Owned saved fixture  \u{00b7}  1 steps",
+        );
+        assert_eq!(dialog.draft.steps, saved.steps);
+        assert_eq!(std::fs::read(&dialog.store_path).unwrap(), original_store);
     }
 
     fn hotkey_draft(name: &str) -> SequenceDraft {
