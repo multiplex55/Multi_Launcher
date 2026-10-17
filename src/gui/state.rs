@@ -51,6 +51,7 @@ pub enum WatchEvent {
     RadialInvalidate,
     RadialConfigDiagnostic(Option<String>),
     RadialRuntimeDiagnostic(String),
+    PasteSequenceRuntimeDiagnostic(String),
     RadialDiagnostic(crate::radial::diagnostics::RadialDiagnostic),
     RadialSubmenuPlacementFailure(RadialPlacementFailureNotice),
     RadialPlacementActionResult {
@@ -380,7 +381,8 @@ impl From<WatchEvent> for TestWatchEvent {
             WatchEvent::AuthoringProviderCapacityAvailable => TestWatchEvent::Actions,
             WatchEvent::RadialInvalidate => TestWatchEvent::Actions,
             WatchEvent::RadialConfigDiagnostic(_) => TestWatchEvent::Actions,
-            WatchEvent::RadialRuntimeDiagnostic(_) => TestWatchEvent::Actions,
+            WatchEvent::RadialRuntimeDiagnostic(_)
+            | WatchEvent::PasteSequenceRuntimeDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialDiagnostic(_) => TestWatchEvent::Actions,
             WatchEvent::RadialSubmenuPlacementFailure(_) => TestWatchEvent::Actions,
             WatchEvent::RadialPlacementActionResult { .. } => TestWatchEvent::Actions,

@@ -35,6 +35,7 @@ pub enum StoreError {
         supported: u32,
     },
     Validation(ValidationErrors),
+    PublicationRejected(String),
     RevisionConflict {
         expected: ConfigRevision,
         actual: ConfigRevision,
@@ -77,6 +78,9 @@ impl std::fmt::Display for StoreError {
                 "radial schema {found} is newer than supported schema {supported}"
             ),
             Self::Validation(error) => error.fmt(f),
+            Self::PublicationRejected(reason) => {
+                write!(f, "radial runtime routes rejected publication: {reason}")
+            }
             Self::RevisionConflict { expected, actual } => write!(
                 f,
                 "radial revision conflict: expected {}, current {}",
@@ -582,7 +586,7 @@ impl RadialStore {
     /// the main owner to close active UI and publish one monotonic generation.
     pub fn reload_external_with(
         &self,
-        before_publish: impl FnOnce(&RadialDocument),
+        before_publish: impl FnOnce(&RadialDocument) -> Result<(), String>,
     ) -> Result<ExternalReloadOutcome, StoreError> {
         let _transaction = self
             .transaction
@@ -635,7 +639,7 @@ impl RadialStore {
             },
         )?);
         validate(&candidate)?;
-        before_publish(&candidate);
+        before_publish(&candidate).map_err(StoreError::PublicationRejected)?;
         let candidate = Arc::new(candidate);
         *self
             .published
@@ -1391,6 +1395,7 @@ mod tests {
                 hook_calls.set(hook_calls.get() + 1);
                 assert_eq!(candidate.revision.0, saved.revision.0 + 1);
                 assert_eq!(store.snapshot().unwrap().menus[0].name, saved.menus[0].name);
+                Ok(())
             })
             .unwrap();
         let ExternalReloadOutcome::Published(published) = outcome else {

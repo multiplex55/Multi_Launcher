@@ -213,6 +213,7 @@ mod track_c3c_dispatch_receipt {
             WatchEvent::RadialInvalidate => "radial_invalidate",
             WatchEvent::RadialConfigDiagnostic(_) => "radial_config_diagnostic",
             WatchEvent::RadialRuntimeDiagnostic(_) => "radial_runtime_diagnostic",
+            WatchEvent::PasteSequenceRuntimeDiagnostic(_) => "paste_sequence_runtime_diagnostic",
             WatchEvent::RadialDiagnostic(_) => "radial_diagnostic",
             WatchEvent::RadialSubmenuPlacementFailure(_) => "radial_submenu_placement_failure",
             WatchEvent::RadialPlacementActionResult { .. } => "radial_placement_action_result",
@@ -352,6 +353,9 @@ impl LauncherApp {
                             format!("Radial menu configuration was not reloaded: {diagnostic}"),
                         );
                     }
+                }
+                WatchEvent::PasteSequenceRuntimeDiagnostic(diagnostic) => {
+                    self.report_error_message("paste_sequence.hotkeys", diagnostic);
                 }
                 WatchEvent::RadialRuntimeDiagnostic(diagnostic) => {
                     self.report_error_message("radial.runtime", diagnostic);

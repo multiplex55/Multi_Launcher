@@ -4983,6 +4983,7 @@ pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
             | WatchEvent::RadialInvalidate
             | WatchEvent::RadialConfigDiagnostic(_)
             | WatchEvent::RadialRuntimeDiagnostic(_)
+            | WatchEvent::PasteSequenceRuntimeDiagnostic(_)
             | WatchEvent::RadialDiagnostic(_)
             | WatchEvent::RadialSubmenuPlacementFailure(_)
             | WatchEvent::RadialPlacementActionResult { .. }

@@ -178,7 +178,15 @@ fn paste_sequence_hotkey_routes_from_bindings(
     Ok(routes)
 }
 
+#[cfg(test)]
 fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
+    reserved_launcher_hotkeys_with_sequences(settings, &[])
+}
+
+fn reserved_launcher_hotkeys_with_sequences(
+    settings: &Settings,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+) -> Vec<(String, String)> {
     let mut reserved = Vec::new();
     let launcher = settings
         .hotkey
@@ -206,17 +214,15 @@ fn reserved_launcher_hotkeys(settings: &Settings) -> Vec<(String, String)> {
     if let Ok(Some(hotkey)) = screen_draw_emergency_hotkey_text(settings) {
         reserved.push(("Screen Draw emergency".into(), hotkey));
     }
-    if let Ok(routes) = paste_sequence_hotkey_routes(settings) {
-        for route in routes {
-            let name = match route.action {
-                PasteSequenceHotkeyAction::Start(id) => {
-                    format!("Paste Sequence {}", id.get())
-                }
-                PasteSequenceHotkeyAction::Next => "Paste Sequence Next".into(),
-                PasteSequenceHotkeyAction::Cancel => "Paste Sequence Cancel".into(),
-            };
-            reserved.push((name, route.chord));
-        }
+    for route in sequence_routes {
+        let name = match route.action {
+            PasteSequenceHotkeyAction::Start(id) => {
+                format!("Paste Sequence {}", id.get())
+            }
+            PasteSequenceHotkeyAction::Next => "Paste Sequence Next".into(),
+            PasteSequenceHotkeyAction::Cancel => "Paste Sequence Cancel".into(),
+        };
+        reserved.push((name, route.chord.clone()));
     }
     reserved
 }
@@ -384,8 +390,12 @@ fn radial_global_hotkey_reservations(
     owned
 }
 
-fn refresh_macro_hotkey_reservations(settings: &Settings, document: &RadialDocument) {
-    let mut owned = reserved_launcher_hotkeys(settings);
+fn refresh_macro_hotkey_reservations(
+    settings: &Settings,
+    document: &RadialDocument,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
+) {
+    let mut owned = reserved_launcher_hotkeys_with_sequences(settings, sequence_routes);
     owned.extend(radial_global_hotkey_reservations(settings, document));
     let borrowed = owned
         .iter()
@@ -401,8 +411,9 @@ fn refresh_macro_hotkey_reservations(settings: &Settings, document: &RadialDocum
 fn radial_item_inputs(
     settings: &Settings,
     document: &RadialDocument,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
 ) -> Vec<multi_launcher::radial::item_input::ItemInputBinding> {
-    let reserved = reserved_launcher_hotkeys(settings)
+    let reserved = reserved_launcher_hotkeys_with_sequences(settings, sequence_routes)
         .into_iter()
         .filter_map(|(_, chord)| parse_hotkey(&chord))
         .collect::<Vec<_>>();
@@ -414,6 +425,7 @@ fn radial_invocation_config(
     document: &RadialDocument,
     shared_invocation: bool,
     generation: u64,
+    sequence_routes: &[PasteSequenceHotkeyRoute],
 ) -> InvocationConfig {
     let default_menu_id = settings.radial.effective_default_menu_id(document);
     InvocationConfig {
@@ -430,7 +442,7 @@ fn radial_invocation_config(
             .find(|menu| menu.id == default_menu_id)
             .map_or(settings.radial.default_interaction, |menu| menu.interaction),
         accept_external_injected: true,
-        item_inputs: radial_item_inputs(settings, document),
+        item_inputs: radial_item_inputs(settings, document, sequence_routes),
     }
 }
 
@@ -564,10 +576,11 @@ fn related_launcher_bindings_with_sequences(
             })
         }
     }
-    if settings
-        .enabled_plugins
-        .as_ref()
-        .is_none_or(|plugins| plugins.contains("paste_sequence"))
+    if include_process_hotkeys
+        && settings
+            .enabled_plugins
+            .as_ref()
+            .is_none_or(|plugins| plugins.contains("paste_sequence"))
     {
         bindings.extend(sequence_routes.iter().map(|route| RelatedBinding {
             hotkey: route.hotkey,
@@ -582,19 +595,24 @@ fn shared_drain_control_bindings(
     document: &RadialDocument,
     sequence_routes: &[PasteSequenceHotkeyRoute],
 ) -> Vec<RelatedBinding> {
-    related_launcher_bindings_with_sequences(settings, document, true, sequence_routes)
-        .into_iter()
-        .filter(|binding| {
-            matches!(
-                binding.action,
-                RelatedAction::Quit
-                    | RelatedAction::Help
-                    | RelatedAction::ScreenDrawLaunch
-                    | RelatedAction::ScreenDrawEmergency
-                    | RelatedAction::PasteSequence(_)
-            )
-        })
-        .collect()
+    related_launcher_bindings_with_sequences(
+        settings,
+        document,
+        settings.radial.enabled && settings.radial.shared_tap_hold,
+        sequence_routes,
+    )
+    .into_iter()
+    .filter(|binding| {
+        matches!(
+            binding.action,
+            RelatedAction::Quit
+                | RelatedAction::Help
+                | RelatedAction::ScreenDrawLaunch
+                | RelatedAction::ScreenDrawEmergency
+                | RelatedAction::PasteSequence(_)
+        )
+    })
+    .collect()
 }
 
 fn reject_radial_opens_while_exclusive(
@@ -816,6 +834,7 @@ struct PreparedHotkeyRoute {
     screen_draw: Option<Arc<HotkeyTrigger>>,
     emergency: Option<Arc<HotkeyTrigger>>,
     sequence_routes: Vec<PasteSequenceHotkeyRoute>,
+    sequence_omissions: Vec<String>,
     sequence_triggers: Vec<PasteSequenceHotkeyTrigger>,
     staged_service: Option<LauncherInvocationService>,
 }
@@ -882,15 +901,51 @@ fn validate_hotkey_route_candidate_with_sequence_bindings(
     multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
     multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
 > {
+    resolve_hotkey_route_candidate(settings, radial_document, sequence_bindings)
+        .map(|resolved| resolved.base)
+}
+
+struct ResolvedHotkeyRouteCandidate {
+    base: multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
+    sequences: Vec<PasteSequenceHotkeyRoute>,
+    omissions: Vec<String>,
+}
+
+fn resolve_hotkey_route_candidate(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> Result<
+    ResolvedHotkeyRouteCandidate,
+    multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
+> {
     let macro_document = multi_launcher::mkmacro::runtime::shared_hotkey_document_snapshot()
         .map_err(multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Validation)?;
-    let routes = multi_launcher::hotkey::validation::validate_hotkey_routes(
+    resolve_hotkey_route_candidate_with_macro(
         settings,
         radial_document,
         macro_document.as_deref(),
+        sequence_bindings,
+    )
+}
+
+fn resolve_hotkey_route_candidate_with_macro(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> Result<
+    ResolvedHotkeyRouteCandidate,
+    multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
+> {
+    use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError as Error;
+    let base = multi_launcher::hotkey::validation::validate_hotkey_routes(
+        settings,
+        radial_document,
+        macro_document,
     )
     .map_err(|issues| {
-        multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError::Validation(
+        Error::Validation(
             issues
                 .into_iter()
                 .map(|issue| format!("{}: {}", issue.field, issue.message))
@@ -898,34 +953,62 @@ fn validate_hotkey_route_candidate_with_sequence_bindings(
                 .join("; "),
         )
     })?;
-    validate_paste_sequence_hotkeys_with_bindings(
-        settings,
-        radial_document,
-        macro_document.as_deref(),
-        &routes,
-        sequence_bindings,
-    )?;
-    Ok(routes)
-}
-
-fn validate_paste_sequence_hotkeys_with_bindings(
-    settings: &Settings,
-    radial_document: &RadialDocument,
-    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
-    routes: &multi_launcher::hotkey::validation::ValidatedHotkeyRoutes,
-    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
-) -> Result<(), multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError> {
-    use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError as Error;
-
-    let sequence_routes = paste_sequence_hotkey_routes_for_candidate(settings, sequence_bindings)
+    let raw = paste_sequence_hotkey_routes_for_candidate(settings, sequence_bindings)
         .map_err(Error::Validation)?;
+    // Saved starts have priority over optional built-in playback controls.
+    let mut sequences = raw
+        .iter()
+        .filter(|route| matches!(route.action, PasteSequenceHotkeyAction::Start(_)))
+        .cloned()
+        .collect::<Vec<_>>();
     validate_paste_sequence_hotkey_routes(
         settings,
         radial_document,
         macro_document,
-        routes,
-        &sequence_routes,
-    )
+        &base,
+        &sequences,
+    )?;
+    let defaults = multi_launcher::settings::PasteSequencePreferences::default();
+    let mut omissions = Vec::new();
+    for route in raw
+        .into_iter()
+        .filter(|route| !matches!(route.action, PasteSequenceHotkeyAction::Start(_)))
+    {
+        sequences.push(route.clone());
+        if let Err(error) = validate_paste_sequence_hotkey_routes(
+            settings,
+            radial_document,
+            macro_document,
+            &base,
+            &sequences,
+        ) {
+            let default = match route.action {
+                PasteSequenceHotkeyAction::Next => defaults.next_hotkey.as_deref(),
+                PasteSequenceHotkeyAction::Cancel => defaults.cancel_hotkey.as_deref(),
+                PasteSequenceHotkeyAction::Start(_) => unreachable!(),
+            }
+            .and_then(parse_hotkey);
+            if default != Some(route.hotkey) {
+                return Err(error);
+            }
+            sequences.pop();
+            omissions.push(format!("Paste Sequence {:?} ({}) is inactive: {error}. Choose a different shortcut in Settings > Paste Sequences.", route.action, route.chord));
+        }
+    }
+    Ok(ResolvedHotkeyRouteCandidate {
+        base,
+        sequences,
+        omissions,
+    })
+}
+
+fn report_paste_sequence_route_omissions(omissions: &[String]) {
+    for omission in omissions {
+        tracing::warn!(%omission, "optional Paste Sequence shortcut omitted");
+        multi_launcher::gui::send_event(
+            multi_launcher::gui::WatchEvent::PasteSequenceRuntimeDiagnostic(omission.clone()),
+        );
+    }
 }
 
 fn paste_sequence_hotkey_routes_for_candidate(
@@ -1274,7 +1357,13 @@ fn radial_route_plan_with_sequences(
 ) -> RadialRoutePlan {
     let shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     RadialRoutePlan {
-        config: radial_invocation_config(settings, document, shared_invocation, generation),
+        config: radial_invocation_config(
+            settings,
+            document,
+            shared_invocation,
+            generation,
+            sequence_routes,
+        ),
         related: if settings.radial.enabled {
             related_launcher_bindings_with_sequences(
                 settings,
@@ -1295,7 +1384,7 @@ fn inert_invocation_config(
     document: &RadialDocument,
     generation: u64,
 ) -> InvocationConfig {
-    let mut config = radial_invocation_config(settings, document, false, generation);
+    let mut config = radial_invocation_config(settings, document, false, generation, &[]);
     config.launcher_enabled = false;
     config.item_inputs.clear();
     config
@@ -1470,14 +1559,13 @@ fn prepare_hotkey_runtime_message(
         let sequence_bindings = request
             .sequence_hotkey_bindings()
             .map(|bindings| bindings.to_vec());
-        let routes = validate_hotkey_route_candidate_with_sequence_bindings(
+        let resolved = resolve_hotkey_route_candidate(
             &settings,
             radial_document,
             sequence_bindings.as_deref(),
         )?;
-        let sequence_routes =
-            paste_sequence_hotkey_routes_for_candidate(&settings, sequence_bindings.as_deref())
-                .map_err(HotkeyReconfigurationError::Validation)?;
+        let routes = resolved.base;
+        let sequence_routes = resolved.sequences;
         let sequence_triggers = sequence_hotkey_triggers_from_routes(&sequence_routes);
         let dependencies =
             HotkeyRouteDependencies::from_routes(&settings, &routes, &sequence_routes);
@@ -1541,6 +1629,7 @@ fn prepare_hotkey_runtime_message(
                 screen_draw,
                 emergency,
                 sequence_routes,
+                sequence_omissions: resolved.omissions,
                 sequence_triggers,
                 staged_service,
             },
@@ -1645,7 +1734,7 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
     let candidate_sequence_bindings = request
         .sequence_hotkey_bindings()
         .map(|bindings| bindings.to_vec());
-    let candidate_routes = match validate_hotkey_route_candidate_with_sequence_bindings(
+    let resolved = match resolve_hotkey_route_candidate(
         &candidate,
         radial_document,
         candidate_sequence_bindings.as_deref(),
@@ -1656,16 +1745,8 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
             return;
         }
     };
-    let candidate_sequence_routes = match paste_sequence_hotkey_routes_for_candidate(
-        &candidate,
-        candidate_sequence_bindings.as_deref(),
-    ) {
-        Ok(routes) => routes,
-        Err(error) => {
-            application_error(request, HotkeyReconfigurationError::Validation(error));
-            return;
-        }
-    };
+    let candidate_routes = resolved.base;
+    let candidate_sequence_routes = resolved.sequences;
     let candidate_dependencies = HotkeyRouteDependencies::from_routes(
         &candidate,
         &candidate_routes,
@@ -1683,6 +1764,7 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
     // still match and whose candidate remains valid against current inputs.
     prepared.settings = candidate;
     prepared.sequence_routes = candidate_sequence_routes;
+    prepared.sequence_omissions = resolved.omissions;
     if pending_launcher_route.is_some() {
         application_error(
             request,
@@ -2130,7 +2212,12 @@ impl HotkeyRuntimeCommitContext<'_> {
             multi_launcher::radial::native::CloseReason::SettingsReload,
             None,
         );
-        refresh_macro_hotkey_reservations(self.settings, self.radial_document);
+        refresh_macro_hotkey_reservations(
+            self.settings,
+            self.radial_document,
+            self.sequence_routes,
+        );
+        report_paste_sequence_route_omissions(&application.prepared.sequence_omissions);
         multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
 
         if let Some(request) = application.request.take() {
@@ -2385,7 +2472,7 @@ fn spawn_gui(
     startup_indexing: Option<StartupIndexingTransfer>,
     settings: Settings,
     settings_path: String,
-    radial_hotkey_reservations: Vec<(String, String)>,
+    mut plugins: PluginManager,
     startup_services: GuiStartupServices,
 ) -> (
     GuiWorker,
@@ -2414,15 +2501,6 @@ fn spawn_gui(
         }
     };
     let custom_len_for_window = custom_len;
-    let mut reserved_launcher_hotkeys = reserved_launcher_hotkeys(&settings);
-    reserved_launcher_hotkeys.extend(radial_hotkey_reservations);
-    let reserved_launcher_hotkey_refs = reserved_launcher_hotkeys
-        .iter()
-        .map(|(name, hotkey)| (name.as_str(), hotkey.as_str()))
-        .collect::<Vec<_>>();
-    let manager_timer = multi_launcher::performance::Timer::start();
-    let mut plugins = PluginManager::new_with_reserved_hotkeys(&reserved_launcher_hotkey_refs);
-    manager_timer.finish("startup.plugin_manager");
     let empty_dirs = Vec::new();
     let dirs = settings.plugin_dirs.as_ref().unwrap_or(&empty_dirs);
     let mut plugin_settings = settings.plugin_settings.clone();
@@ -2691,10 +2769,25 @@ fn main() -> anyhow::Result<()> {
         receipt: settings.radial_submenu_migration.clone(),
         default_submenu_presentation: settings.radial.default_submenu_presentation,
     });
+    // Initialize the existing macro owner before resolving Paste priorities.
+    // No Paste routes are active yet; reserve process/radial routes while the
+    // macro runtime loads, then install the selected Paste reservations below.
+    let mut startup_reservations = reserved_launcher_hotkeys_with_sequences(&settings, &[]);
+    startup_reservations.extend(radial_global_hotkey_reservations(
+        &settings,
+        &radial_document,
+    ));
+    let startup_reservation_refs = startup_reservations
+        .iter()
+        .map(|(name, chord)| (name.as_str(), chord.as_str()))
+        .collect::<Vec<_>>();
+    let manager_timer = multi_launcher::performance::Timer::start();
+    let plugins = PluginManager::new_with_reserved_hotkeys(&startup_reservation_refs);
+    manager_timer.finish("startup.plugin_manager");
     let startup_radial_issues = multi_launcher::radial::settings::validate(
         &settings.radial,
         &radial_document,
-        &reserved_launcher_hotkeys(&settings),
+        &reserved_launcher_hotkeys_with_sequences(&settings, &[]),
     );
     if !startup_radial_issues.is_empty() {
         settings.radial.enabled = false;
@@ -2717,19 +2810,22 @@ fn main() -> anyhow::Result<()> {
             tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings at startup; radial runtime disabled fail-closed");
         }
     }
-    let mut paste_sequence_routes = match paste_sequence_hotkey_routes(&settings) {
-        Ok(routes) => routes,
-        Err(error) => {
-            tracing::warn!(%error, "Paste Sequence shortcut routes are unavailable at startup");
-            Vec::new()
-        }
-    };
-    if !paste_sequence_routes.is_empty()
-        && let Err(error) = validate_hotkey_route_candidate(&settings, &radial_document)
-    {
-        tracing::error!(%error, "invalid Paste Sequence shortcut routes at startup; sequence hotkeys disabled fail-closed");
-        paste_sequence_routes.clear();
-    }
+    let mut paste_sequence_routes =
+        match resolve_hotkey_route_candidate(&settings, &radial_document, None) {
+            Ok(resolved) => {
+                report_paste_sequence_route_omissions(&resolved.omissions);
+                resolved.sequences
+            }
+            Err(error) => {
+                multi_launcher::gui::send_event(
+                    multi_launcher::gui::WatchEvent::PasteSequenceRuntimeDiagnostic(format!(
+                        "Paste Sequence shortcuts are inactive: {error}"
+                    )),
+                );
+                Vec::new()
+            }
+        };
+    refresh_macro_hotkey_reservations(&settings, &radial_document, &paste_sequence_routes);
     paste_sequence_triggers = sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
     listener.stop();
     listener = HotkeyTrigger::start_listener(
@@ -2805,6 +2901,7 @@ fn main() -> anyhow::Result<()> {
                 &radial_document,
                 shared_invocation,
                 settings_generation,
+                &paste_sequence_routes,
             ),
             related_launcher_bindings_with_sequences(
                 &settings,
@@ -2866,7 +2963,7 @@ fn main() -> anyhow::Result<()> {
         startup_indexing,
         settings.clone(),
         "settings.json".to_string(),
-        radial_global_hotkey_reservations(&settings, &radial_document),
+        plugins,
         startup_services,
     );
     let mut queued_visibility: Option<bool> = None;
@@ -2915,18 +3012,51 @@ fn main() -> anyhow::Result<()> {
         };
         let mut radial_generation_replaced = false;
         if radial_changes.document {
-            let reload = radial_store.reload_external_with(|_| {
+            let mut admitted_routes = None;
+            let reload = radial_store.reload_external_with(|candidate| {
+                admitted_routes = Some(
+                    resolve_hotkey_route_candidate(&settings, candidate, None)
+                        .map_err(|error| error.to_string())?,
+                );
                 multi_launcher::gui::send_event(multi_launcher::gui::WatchEvent::RadialInvalidate);
                 radial_controller.close(
                     multi_launcher::radial::native::CloseReason::SettingsReload,
                     None,
                 );
+                Ok(())
             });
             match reload {
                 Ok(ExternalReloadOutcome::Unchanged) => {
                     tracing::debug!("ignored radial document self-save/unchanged echo");
                 }
                 Ok(ExternalReloadOutcome::Published(document)) => {
+                    let Some(resolved) = admitted_routes.take() else {
+                        // Published requires successful owner admission under the store lock.
+                        tracing::error!("radial reload published without admitted routes");
+                        continue;
+                    };
+                    paste_sequence_routes = resolved.sequences;
+                    paste_sequence_triggers =
+                        sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
+                    report_paste_sequence_route_omissions(&resolved.omissions);
+                    // The shared owner changes at its acknowledged handoff. In
+                    // fallback mode Paste belongs only to the polling listener.
+                    if !settings.radial.shared_tap_hold {
+                        listener.stop();
+                        listener = HotkeyTrigger::start_listener(
+                            legacy_listener_triggers_with_sequences(
+                                false,
+                                &trigger,
+                                quit_trigger.as_ref(),
+                                help_trigger.as_ref(),
+                                screen_draw_trigger.as_ref(),
+                                emergency_trigger.as_ref(),
+                                &paste_sequence_triggers,
+                            ),
+                            "main",
+                            event_tx.clone(),
+                        );
+                    }
                     native_preview.cancel_all();
                     if let Some(service) = &gallery_service {
                         service.invalidate_resources();
@@ -2948,12 +3078,19 @@ fn main() -> anyhow::Result<()> {
                                 });
                     }
                     radial_controller.replace_document(Arc::clone(&radial_document));
-                    refresh_macro_hotkey_reservations(&settings, &radial_document);
+                    refresh_macro_hotkey_reservations(
+                        &settings,
+                        &radial_document,
+                        &paste_sequence_routes,
+                    );
                     settings_generation = settings_generation.checked_add(1).unwrap_or(1);
                     let issues = multi_launcher::radial::settings::validate(
                         &settings.radial,
                         &radial_document,
-                        &reserved_launcher_hotkeys(&settings),
+                        &reserved_launcher_hotkeys_with_sequences(
+                            &settings,
+                            &paste_sequence_routes,
+                        ),
                     );
                     if !issues.is_empty() {
                         settings.radial.enabled = false;
@@ -3366,17 +3503,42 @@ fn main() -> anyhow::Result<()> {
                     {
                         Err(issue.message)
                     } else {
-                        radial_store
-                            .replace_package_with_backup(
-                                plan,
-                                expected_revision,
-                                expected_disk_sha256.0,
-                                backup_path.clone(),
-                            )
+                        resolve_hotkey_route_candidate(&settings, &plan.document, None)
                             .map_err(|error| error.to_string())
+                            .and_then(|resolved| {
+                                radial_store
+                                    .replace_package_with_backup(
+                                        plan,
+                                        expected_revision,
+                                        expected_disk_sha256.0,
+                                        backup_path.clone(),
+                                    )
+                                    .map(|published| (published, resolved))
+                                    .map_err(|error| error.to_string())
+                            })
                     };
                     match result {
-                        Ok(published) => {
+                        Ok((published, resolved)) => {
+                            paste_sequence_routes = resolved.sequences;
+                            paste_sequence_triggers =
+                                sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
+                            report_paste_sequence_route_omissions(&resolved.omissions);
+                            if !settings.radial.shared_tap_hold {
+                                listener.stop();
+                                listener = HotkeyTrigger::start_listener(
+                                    legacy_listener_triggers_with_sequences(
+                                        false,
+                                        &trigger,
+                                        quit_trigger.as_ref(),
+                                        help_trigger.as_ref(),
+                                        screen_draw_trigger.as_ref(),
+                                        emergency_trigger.as_ref(),
+                                        &paste_sequence_triggers,
+                                    ),
+                                    "main",
+                                    event_tx.clone(),
+                                );
+                            }
                             authoring_preview_document = None;
                             radial_document = published;
                             multi_launcher::gui::install_radial_published_document(Arc::clone(
@@ -3391,7 +3553,11 @@ fn main() -> anyhow::Result<()> {
                             );
                             radial_controller.replace_document(Arc::clone(&radial_document));
                             radial_controller.invalidate_resources();
-                            refresh_macro_hotkey_reservations(&settings, &radial_document);
+                            refresh_macro_hotkey_reservations(
+                                &settings,
+                                &radial_document,
+                                &paste_sequence_routes,
+                            );
                             settings_generation = settings_generation.checked_add(1).unwrap_or(1);
                             let route_plan = radial_route_plan_with_sequences(
                                 &settings,
@@ -3513,6 +3679,10 @@ fn main() -> anyhow::Result<()> {
                     )
                     .map_err(|issue| issue.message)
                     .and_then(|()| {
+                        resolve_hotkey_route_candidate(&settings, &candidate, None)
+                            .map_err(|error| error.to_string())
+                    })
+                    .and_then(|resolved| {
                         radial_store
                             .commit_authoring(
                                 expected_revision,
@@ -3520,10 +3690,31 @@ fn main() -> anyhow::Result<()> {
                                 candidate,
                                 assets,
                             )
+                            .map(|published| (published, resolved))
                             .map_err(|error| error.to_string())
                     });
                     match result {
-                        Ok(published) => {
+                        Ok((published, resolved)) => {
+                            paste_sequence_routes = resolved.sequences;
+                            paste_sequence_triggers =
+                                sequence_hotkey_triggers_from_routes(&paste_sequence_routes);
+                            report_paste_sequence_route_omissions(&resolved.omissions);
+                            if !settings.radial.shared_tap_hold {
+                                listener.stop();
+                                listener = HotkeyTrigger::start_listener(
+                                    legacy_listener_triggers_with_sequences(
+                                        false,
+                                        &trigger,
+                                        quit_trigger.as_ref(),
+                                        help_trigger.as_ref(),
+                                        screen_draw_trigger.as_ref(),
+                                        emergency_trigger.as_ref(),
+                                        &paste_sequence_triggers,
+                                    ),
+                                    "main",
+                                    event_tx.clone(),
+                                );
+                            }
                             authoring_preview_document = None;
                             radial_document = Arc::clone(&published.snapshot.document);
                             multi_launcher::gui::install_radial_published_document(Arc::clone(
@@ -3538,7 +3729,11 @@ fn main() -> anyhow::Result<()> {
                             );
                             radial_controller.replace_document(Arc::clone(&radial_document));
                             radial_controller.invalidate_resources();
-                            refresh_macro_hotkey_reservations(&settings, &radial_document);
+                            refresh_macro_hotkey_reservations(
+                                &settings,
+                                &radial_document,
+                                &paste_sequence_routes,
+                            );
                             settings_generation = settings_generation.checked_add(1).unwrap_or(1);
                             let route_plan = radial_route_plan_with_sequences(
                                 &settings,
@@ -5983,7 +6178,7 @@ mod tests {
         document.menus.push(second);
         let mut settings = Settings::default();
         settings.radial.default_menu_id = Some(multi_launcher::radial::model::MenuId::new("work"));
-        let config = radial_invocation_config(&settings, &document, true, 9);
+        let config = radial_invocation_config(&settings, &document, true, 9, &[]);
         assert_eq!(config.menu_id.as_str(), "work");
         assert_eq!(config.interaction, InteractionMode::ReleaseToSelect);
     }
@@ -6004,6 +6199,392 @@ mod tests {
                 .contains(&("launch Screen Draw".into(), "Ctrl+Shift+D".into()))
         );
         assert!(screen_draw_launch_trigger(&settings).is_some());
+    }
+
+    fn paste_route_test_snapshot(chord: &str) -> multi_launcher::paste_sequence::SequenceSnapshot {
+        use multi_launcher::paste_sequence::{
+            HotkeyChord, PlaybackMode, SequenceDraft, SequenceStore, Step,
+        };
+        let directory = tempdir().unwrap();
+        let mut snapshot = SequenceStore::new(directory.path().join("sequences.json"))
+            .load()
+            .unwrap();
+        snapshot
+            .upsert(SequenceDraft {
+                id: None,
+                name: "Start fixture".into(),
+                hotkey: Some(HotkeyChord::new(chord).unwrap()),
+                mode: PlaybackMode::Automatic,
+                delay_ms: 0,
+                steps: vec![Step::LiteralText {
+                    text: "fixture".into(),
+                }],
+            })
+            .unwrap();
+        snapshot
+    }
+
+    #[test]
+    fn paste_routes_default_cancel_loses_to_launcher_without_losing_next_or_start() {
+        let settings = Settings {
+            hotkey: Some("Shift+Alt+Win+End".into()),
+            ..Settings::default()
+        };
+        let before = settings.clone();
+        let document = RadialDocument::starter();
+        let snapshot = paste_route_test_snapshot("Ctrl+F8");
+        let resolved = resolve_hotkey_route_candidate_with_macro(
+            &settings,
+            &document,
+            None,
+            Some(&snapshot.hotkey_bindings()),
+        )
+        .unwrap();
+        assert_eq!(resolved.sequences.len(), 2);
+        assert!(
+            resolved
+                .sequences
+                .iter()
+                .any(|route| route.action == PasteSequenceHotkeyAction::Next)
+        );
+        assert!(
+            resolved
+                .sequences
+                .iter()
+                .any(|route| matches!(route.action, PasteSequenceHotkeyAction::Start(_)))
+        );
+        assert!(
+            !resolved
+                .sequences
+                .iter()
+                .any(|route| route.action == PasteSequenceHotkeyAction::Cancel)
+        );
+        assert_eq!(resolved.omissions.len(), 1);
+        assert!(resolved.omissions[0].contains("Cancel"));
+        assert!(resolved.omissions[0].contains("launcher"));
+        assert!(resolved.omissions[0].contains("Settings > Paste Sequences"));
+        assert_eq!(settings.hotkey, before.hotkey);
+        assert_eq!(settings.paste_sequence, before.paste_sequence);
+        let reserved = reserved_launcher_hotkeys_with_sequences(&settings, &resolved.sequences);
+        assert!(
+            !reserved
+                .iter()
+                .any(|(name, _)| name == "Paste Sequence Cancel")
+        );
+        assert!(
+            reserved
+                .iter()
+                .any(|(name, _)| name == "Paste Sequence Next")
+        );
+        let triggers = sequence_hotkey_triggers_from_routes(&resolved.sequences);
+        assert_eq!(triggers.len(), 2);
+        let plan = radial_route_plan_with_sequences(&settings, &document, 11, &resolved.sequences);
+        assert_eq!(
+            plan.related
+                .iter()
+                .filter(|binding| matches!(binding.action, RelatedAction::PasteSequence(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn paste_routes_defaults_lose_to_saved_starts_radial_and_macro_routes() {
+        use multi_launcher::radial::model::{TriggerDefinition, TriggerId, TriggerScope};
+        let settings = Settings::default();
+        let mut document = RadialDocument::starter();
+        let snapshot = paste_route_test_snapshot("Alt+PageDown");
+        let resolved = resolve_hotkey_route_candidate_with_macro(
+            &settings,
+            &document,
+            None,
+            Some(&snapshot.hotkey_bindings()),
+        )
+        .unwrap();
+        assert!(
+            resolved
+                .sequences
+                .iter()
+                .any(|route| matches!(route.action, PasteSequenceHotkeyAction::Start(_)))
+        );
+        assert!(
+            !resolved
+                .sequences
+                .iter()
+                .any(|route| route.action == PasteSequenceHotkeyAction::Next)
+        );
+        assert!(resolved.omissions[0].contains("one another"));
+        document.custom_triggers.push(TriggerDefinition {
+            id: TriggerId::new("end-route"),
+            chord: "Alt+End".into(),
+            menu_id: document.default_menu_id.clone(),
+            scope: TriggerScope::Global,
+        });
+        let resolved =
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&[]))
+                .unwrap();
+        assert_eq!(resolved.sequences.len(), 1);
+        assert_eq!(
+            resolved.sequences[0].action,
+            PasteSequenceHotkeyAction::Next
+        );
+        assert!(resolved.omissions[0].contains("end-route"));
+        assert!(
+            !reserved_launcher_hotkeys_with_sequences(&settings, &resolved.sequences)
+                .iter()
+                .any(|(name, _)| name == "Paste Sequence Cancel")
+        );
+        // An omitted default must not filter the valid radial binding from its
+        // own compiled item-input view either.
+        document.custom_triggers.clear();
+        let macros: multi_launcher::mkmacro::MkMacroDocument = serde_json::from_value(serde_json::json!({"macros": [{"id": 73, "name": "Next-key owner", "hotkey": {"key": "page_down", "modifiers": []}}]})).unwrap();
+        let resolved = resolve_hotkey_route_candidate_with_macro(
+            &settings,
+            &document,
+            Some(&macros),
+            Some(&[]),
+        )
+        .unwrap();
+        assert_eq!(resolved.sequences.len(), 1);
+        assert_eq!(
+            resolved.sequences[0].action,
+            PasteSequenceHotkeyAction::Cancel
+        );
+        assert!(resolved.omissions[0].contains("macro 73"));
+        assert!(
+            !reserved_launcher_hotkeys_with_sequences(&settings, &resolved.sequences)
+                .iter()
+                .any(|(name, _)| name == "Paste Sequence Next")
+        );
+    }
+
+    #[test]
+    fn paste_routes_custom_conflicts_reject_and_disabled_preferences_reserve_nothing() {
+        let mut settings = Settings::default();
+        let document = RadialDocument::starter();
+        settings.paste_sequence.next_hotkey = Some("Alt+F2".into());
+        let error =
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&[]))
+                .err()
+                .unwrap();
+        assert!(error.to_string().contains("launcher"));
+        settings.paste_sequence.next_hotkey = Some("not a shortcut".into());
+        assert!(
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&[]))
+                .is_err()
+        );
+        settings.paste_sequence.next_hotkey = Some("  ".into());
+        settings.paste_sequence.cancel_hotkey = None;
+        let resolved =
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&[]))
+                .unwrap();
+        assert!(resolved.sequences.is_empty());
+        assert!(resolved.omissions.is_empty());
+        assert!(
+            !reserved_launcher_hotkeys_with_sequences(&settings, &resolved.sequences)
+                .iter()
+                .any(|(name, _)| name.starts_with("Paste Sequence"))
+        );
+    }
+
+    #[test]
+    fn paste_routes_prepare_omits_defaults_and_rejects_custom_without_replacing_listener() {
+        use multi_launcher::hotkey::reconfiguration::{
+            HotkeyRuntimeMessage, prepare_hotkey_reconfiguration,
+        };
+        let (wake_tx, _wake_rx) = channel();
+        let receiver =
+            multi_launcher::hotkey::reconfiguration::install_main_runtime(wake_tx.clone()).unwrap();
+        let mut settings = Settings {
+            hotkey: Some("Shift+Alt+Win+End".into()),
+            ..Settings::default()
+        };
+        settings.radial.enabled = false;
+        let document = RadialDocument::starter();
+        let existing = Arc::new(HotkeyTrigger::new(settings.hotkey()));
+        let mut listener = HotkeyTrigger::start_listener(
+            vec![existing.clone()],
+            "paste-route-test",
+            wake_tx.clone(),
+        );
+        let mut prepared_routes = HashMap::new();
+        let mut ticket = prepare_hotkey_reconfiguration(settings.clone()).unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare")
+        };
+        prepare_hotkey_runtime_message(
+            request,
+            &document,
+            1,
+            &wake_tx,
+            false,
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            &mut prepared_routes,
+        );
+        ticket.wait_prepared(Duration::from_secs(1)).unwrap();
+        let prepared = prepared_routes.get(&ticket.request_id()).unwrap();
+        assert_eq!(prepared.sequence_routes.len(), 1);
+        assert_eq!(
+            prepared.sequence_routes[0].action,
+            PasteSequenceHotkeyAction::Next
+        );
+        assert!(!prepared.sequence_omissions.is_empty());
+        assert!(listener.is_active());
+        let before = settings.hotkey.clone();
+        settings.paste_sequence.next_hotkey = Some("Ctrl+End".into());
+        let mut rejected = prepare_hotkey_reconfiguration(settings).unwrap();
+        let HotkeyRuntimeMessage::Prepare(request) = receiver.try_recv().unwrap().unwrap() else {
+            panic!("expected prepare")
+        };
+        prepare_hotkey_runtime_message(
+            request,
+            &document,
+            1,
+            &wake_tx,
+            false,
+            invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
+            &mut prepared_routes,
+        );
+        assert!(rejected.wait_prepared(Duration::from_secs(1)).is_err());
+        assert!(!prepared_routes.contains_key(&rejected.request_id()));
+        assert_eq!(
+            existing._key,
+            parse_hotkey(before.as_deref().unwrap()).unwrap().key
+        );
+        assert!(listener.is_active());
+        listener.stop();
+    }
+
+    #[test]
+    fn paste_routes_external_reload_rejection_preserves_store_identity_and_allows_retry() {
+        use multi_launcher::radial::model::{
+            RADIAL_FILE, TriggerDefinition, TriggerId, TriggerScope,
+        };
+        let directory = tempdir().unwrap();
+        let root = AppDataRoot::from_settings_path(directory.path().join("settings.json")).unwrap();
+        let store = RadialStore::new(&root).unwrap();
+        let initial = store.snapshot().unwrap();
+        let saved = store.save(initial.revision, (*initial).clone()).unwrap();
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = Some("Ctrl+F9".into());
+        let old_routes =
+            resolve_hotkey_route_candidate_with_macro(&settings, &saved, None, Some(&[]))
+                .unwrap()
+                .sequences;
+        let mut external = (*saved).clone();
+        external.custom_triggers.push(TriggerDefinition {
+            id: TriggerId::new("external"),
+            chord: "Alt+F9".into(),
+            menu_id: external.default_menu_id.clone(),
+            scope: TriggerScope::Global,
+        });
+        let path = directory.path().join(RADIAL_FILE);
+        let bytes = serde_json::to_vec_pretty(&external).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let mut calls = 0;
+        for _ in 0..2 {
+            let rejected = store.reload_external_with(|candidate| {
+                calls += 1;
+                resolve_hotkey_route_candidate_with_macro(&settings, candidate, None, Some(&[]))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+            assert!(matches!(
+                rejected,
+                Err(multi_launcher::radial::store::StoreError::PublicationRejected(_))
+            ));
+            assert_eq!(store.snapshot().unwrap(), saved);
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                resolve_hotkey_route_candidate_with_macro(
+                    &settings,
+                    &store.snapshot().unwrap(),
+                    None,
+                    Some(&[])
+                )
+                .unwrap()
+                .sequences,
+                old_routes
+            );
+        }
+        assert_eq!(
+            calls, 2,
+            "rejection must not remember disk bytes as an unchanged echo"
+        );
+        external.custom_triggers[0].chord = "Alt+F10".into();
+        std::fs::write(&path, serde_json::to_vec_pretty(&external).unwrap()).unwrap();
+        let mut admitted = None;
+        let outcome = store
+            .reload_external_with(|candidate| {
+                admitted = Some(
+                    resolve_hotkey_route_candidate_with_macro(
+                        &settings,
+                        candidate,
+                        None,
+                        Some(&[]),
+                    )
+                    .map_err(|error| error.to_string())?,
+                );
+                Ok(())
+            })
+            .unwrap();
+        let ExternalReloadOutcome::Published(published) = outcome else {
+            panic!("valid retry must publish")
+        };
+        assert_eq!(published.revision.0, saved.revision.0 + 1);
+        assert_eq!(admitted.unwrap().sequences, old_routes);
+        assert_eq!(
+            store
+                .reload_external_with(|_| panic!("successful identity must be remembered"))
+                .unwrap(),
+            ExternalReloadOutcome::Unchanged
+        );
+    }
+
+    #[test]
+    fn paste_routes_selected_slice_has_one_owner_in_shared_and_fallback_modes() {
+        let mut settings = Settings::default();
+        let document = RadialDocument::starter();
+        let resolved =
+            resolve_hotkey_route_candidate_with_macro(&settings, &document, None, Some(&[]))
+                .unwrap();
+        for shared in [true, false] {
+            settings.radial.shared_tap_hold = shared;
+            let plan =
+                radial_route_plan_with_sequences(&settings, &document, 9, &resolved.sequences);
+            let hook_count = plan
+                .related
+                .iter()
+                .filter(|binding| matches!(binding.action, RelatedAction::PasteSequence(_)))
+                .count();
+            assert_eq!(hook_count, if shared { 2 } else { 0 });
+            let draining = shared_drain_control_bindings(&settings, &document, &resolved.sequences);
+            assert_eq!(
+                draining
+                    .iter()
+                    .filter(|binding| matches!(binding.action, RelatedAction::PasteSequence(_)))
+                    .count(),
+                if shared { 2 } else { 0 }
+            );
+            if !shared {
+                assert!(
+                    draining.is_empty(),
+                    "fallback controls must stay with the polling owner during drain"
+                );
+            }
+            let launcher = Arc::new(HotkeyTrigger::new(settings.hotkey()));
+            let sequence_triggers = sequence_hotkey_triggers_from_routes(&resolved.sequences);
+            let polling = legacy_listener_triggers_with_sequences(
+                shared,
+                &launcher,
+                None,
+                None,
+                None,
+                None,
+                &sequence_triggers,
+            );
+            assert_eq!(polling.len(), if shared { 0 } else { 3 });
+        }
     }
 
     #[test]
@@ -6795,7 +7376,7 @@ mod tests {
             &mut prepared_routes,
         );
         stale_ticket.wait_prepared(Duration::from_secs(1)).unwrap();
-        route_candidate.hotkey = Some("Ctrl+F5".into());
+        route_candidate.paste_sequence.next_hotkey = Some("Ctrl+F5".into());
         stale_ticket.apply(route_candidate).unwrap();
         assert_eq!(wake_rx.try_recv(), Ok(()));
         let HotkeyRuntimeMessage::Apply(request) = receiver.try_recv().unwrap().unwrap() else {
