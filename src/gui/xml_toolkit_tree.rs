@@ -54,6 +54,7 @@ pub(crate) struct XmlToolkitTreeViewState {
     next_detail_request: u64,
     latest_detail_request: Option<XmlNodeDetailRequest>,
     latest_copy_request: Option<XmlNodeDetailRequest>,
+    pending_scroll_to: Option<XmlNodeId>,
     #[cfg(test)]
     visible_rows_rebuilds: usize,
     #[cfg(test)]
@@ -111,6 +112,7 @@ impl XmlToolkitTreeViewState {
         self.visible_rows.clear();
         self.latest_detail_request = None;
         self.latest_copy_request = None;
+        self.pending_scroll_to = None;
     }
 
     pub(crate) fn projection(&self) -> Option<&Arc<XmlTreeProjection>> {
@@ -119,6 +121,78 @@ impl XmlToolkitTreeViewState {
 
     pub(crate) fn selected(&self) -> Option<XmlNodeSelection> {
         self.selected
+    }
+
+    /// Revoke any pending or ready copy authorization while keeping the
+    /// current tree selection and expansion state intact.
+    pub(crate) fn revoke_copy_authority(&mut self) {
+        self.latest_copy_request = None;
+        if self
+            .latest_detail_request
+            .is_some_and(|request| request.intent == XmlDetailIntent::Copy)
+        {
+            self.latest_detail_request = None;
+        }
+    }
+
+    /// Select a projected node, open its ancestors, and request scrolling to
+    /// its stable identity. Returns `None` for nodes outside the bounded tree
+    /// projection so callers can present an honest navigation refusal.
+    pub(crate) fn reveal_node(&mut self, node: XmlNodeId) -> Option<XmlToolkitTreeIntents> {
+        self.prepare_reveal(node)?;
+        let selection = self.select_node(node)?;
+        let detail = default_detail_kind(
+            self.projection
+                .as_ref()?
+                .node(node)
+                .map(|snapshot| snapshot.kind),
+        )
+        .and_then(|kind| self.request_detail(kind, XmlDetailIntent::Inspect));
+        Some(XmlToolkitTreeIntents {
+            selection: Some(selection),
+            detail,
+        })
+    }
+
+    /// Route an explicit query-result copy through the same selection and
+    /// detail guard used by the tree's own copy buttons.
+    pub(crate) fn request_node_copy(
+        &mut self,
+        node: XmlNodeId,
+        kind: XmlNodeDetailKind,
+    ) -> Option<XmlToolkitTreeIntents> {
+        self.prepare_reveal(node)?;
+        let selection = self.select_node(node)?;
+        let detail = self.request_detail(kind, XmlDetailIntent::Copy)?;
+        Some(XmlToolkitTreeIntents {
+            selection: Some(selection),
+            detail: Some(detail),
+        })
+    }
+
+    fn prepare_reveal(&mut self, node: XmlNodeId) -> Option<()> {
+        self.revoke_copy_authority();
+        let projection = self.projection.as_ref()?;
+        projection.node(node)?;
+        let mut ancestor = Some(node);
+        let mut opened = false;
+        let mut traversed = 0usize;
+        while let Some(id) = ancestor {
+            traversed = traversed.saturating_add(1);
+            if traversed > projection.nodes.len() {
+                return None;
+            }
+            let snapshot = projection.node(id)?;
+            if id != node {
+                opened |= self.expanded.insert(id);
+            }
+            ancestor = snapshot.parent;
+        }
+        if opened {
+            self.rebuild_visible_rows();
+        }
+        self.pending_scroll_to = Some(node);
+        Some(())
     }
 
     pub(crate) fn select_node(&mut self, node: XmlNodeId) -> Option<XmlNodeSelection> {
@@ -344,70 +418,91 @@ impl XmlToolkitTreeViewState {
             .min(available_height);
         let tree_height =
             (available_height - details_height - ui.spacing().item_spacing.y).max(0.0);
-        egui::ScrollArea::both()
+        let scroll_target = if first_pass {
+            self.pending_scroll_to.take()
+        } else {
+            None
+        };
+        let scroll_row = scroll_target.and_then(|target| {
+            self.visible_rows
+                .iter()
+                .position(|row| row.node == Some(target))
+        });
+        let row_spacing = ui.spacing().item_spacing.y;
+        let viewport_height = tree_height;
+        let mut tree_scroll = egui::ScrollArea::both()
             .id_salt("xml_toolkit_tree_scroll")
             .auto_shrink([false, false])
             .min_scrolled_height(0.0)
-            .max_height(tree_height)
-            .show_rows(ui, row_height, self.visible_rows.len(), |ui, range| {
-                #[cfg(test)]
-                let mut rendered_rows = 0usize;
-                for index in range {
-                    #[cfg(test)]
-                    {
-                        rendered_rows += 1;
-                    }
-                    let row = self.visible_rows[index];
-                    ui.push_id(("xml_tree_row", row.identity), |ui| {
-                        ui.horizontal(|ui| {
-                            ui.add_space(row.depth as f32 * 12.0);
-                            let Some(node_id) = row.node else {
-                                let marker = match row.identity {
-                                    TreeRowIdentity::MoreAttributes(_) => {
-                                        "… attributes omitted by projection limit"
-                                    }
-                                    TreeRowIdentity::MoreChildren(_) => {
-                                        "… child nodes omitted by projection limit"
-                                    }
-                                    TreeRowIdentity::Node(_) => "… omitted by projection limit",
-                                };
-                                ui.weak(marker);
-                                return;
-                            };
-                            let Some(node) = projection.node(node_id) else {
-                                return;
-                            };
-                            let can_expand = !node.attributes.is_empty()
-                                || !node.children.is_empty()
-                                || node.has_more_attributes
-                                || node.has_more_children;
-                            let expanded = self.expanded.contains(&node_id);
-                            if can_expand {
-                                if ui.small_button(if expanded { "▾" } else { "▸" }).clicked() {
-                                    toggle = Some(node_id);
-                                }
-                            } else {
-                                ui.add_space(ui.spacing().interact_size.x);
-                            }
-                            let label = tree_node_label(node);
-                            if ui
-                                .selectable_label(
-                                    self.selected
-                                        .is_some_and(|selected| selected.node == node_id),
-                                    egui::RichText::new(label).monospace(),
-                                )
-                                .clicked()
-                            {
-                                selection = Some(node_id);
-                            }
-                        });
-                    });
-                }
+            .max_height(tree_height);
+        if let Some(row) = scroll_row {
+            tree_scroll = tree_scroll.vertical_scroll_offset(tree_row_scroll_offset(
+                row,
+                row_height,
+                row_spacing,
+                viewport_height,
+                self.visible_rows.len(),
+            ));
+        }
+        tree_scroll.show_rows(ui, row_height, self.visible_rows.len(), |ui, range| {
+            #[cfg(test)]
+            let mut rendered_rows = 0usize;
+            for index in range {
                 #[cfg(test)]
                 {
-                    self.rendered_rows += rendered_rows;
+                    rendered_rows += 1;
                 }
-            });
+                let row = self.visible_rows[index];
+                ui.push_id(("xml_tree_row", row.identity), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add_space(row.depth as f32 * 12.0);
+                        let Some(node_id) = row.node else {
+                            let marker = match row.identity {
+                                TreeRowIdentity::MoreAttributes(_) => {
+                                    "… attributes omitted by projection limit"
+                                }
+                                TreeRowIdentity::MoreChildren(_) => {
+                                    "… child nodes omitted by projection limit"
+                                }
+                                TreeRowIdentity::Node(_) => "… omitted by projection limit",
+                            };
+                            ui.weak(marker);
+                            return;
+                        };
+                        let Some(node) = projection.node(node_id) else {
+                            return;
+                        };
+                        let can_expand = !node.attributes.is_empty()
+                            || !node.children.is_empty()
+                            || node.has_more_attributes
+                            || node.has_more_children;
+                        let expanded = self.expanded.contains(&node_id);
+                        if can_expand {
+                            if ui.small_button(if expanded { "▾" } else { "▸" }).clicked() {
+                                toggle = Some(node_id);
+                            }
+                        } else {
+                            ui.add_space(ui.spacing().interact_size.x);
+                        }
+                        let label = tree_node_label(node);
+                        if ui
+                            .selectable_label(
+                                self.selected
+                                    .is_some_and(|selected| selected.node == node_id),
+                                egui::RichText::new(label).monospace(),
+                            )
+                            .clicked()
+                        {
+                            selection = Some(node_id);
+                        }
+                    });
+                });
+            }
+            #[cfg(test)]
+            {
+                self.rendered_rows += rendered_rows;
+            }
+        });
 
         if projection.truncated.is_some() {
             ui.weak(match projection.truncated {
@@ -561,6 +656,16 @@ impl XmlToolkitTreeViewState {
     fn visible_rows(&self) -> &[VisibleTreeRow] {
         &self.visible_rows
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_expanded_for_test(&self, node: XmlNodeId) -> bool {
+        self.expanded.contains(&node)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_scroll_for_test(&self) -> Option<XmlNodeId> {
+        self.pending_scroll_to
+    }
 }
 
 fn tree_node_label(node: &XmlTreeNodeSnapshot) -> String {
@@ -646,12 +751,27 @@ fn xml_escaped_display(value: &str, max_chars: usize) -> String {
     display
 }
 
+fn tree_row_scroll_offset(
+    row: usize,
+    row_height: f32,
+    row_spacing: f32,
+    viewport_height: f32,
+    total_rows: usize,
+) -> f32 {
+    let stride = row_height + row_spacing;
+    let content_height = (stride * total_rows as f32 - row_spacing).max(0.0);
+    let max_scroll = (content_height - viewport_height).max(0.0);
+    let row_center = row as f32 * stride + row_height * 0.5;
+    (row_center - viewport_height * 0.5).clamp(0.0, max_scroll)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::xml_toolkit_engine::{XmlDocumentId, XmlTreeNodeSnapshot, XmlTreeProjection};
     use crate::xml_toolkit_session::{
         XmlDetailStatus, XmlOutputStatus, XmlParseStatus, XmlSessionSnapshot, XmlTreeStatus,
+        XmlXPathStatus,
     };
 
     fn fixture(document_number: u64) -> (Arc<XmlTreeProjection>, XmlNodeId, XmlNodeId) {
@@ -744,6 +864,7 @@ mod tests {
             output: XmlOutputStatus::Empty,
             tree,
             detail: XmlDetailStatus::Empty,
+            xpath: XmlXPathStatus::NotRun,
         }
     }
 

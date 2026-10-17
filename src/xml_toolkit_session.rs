@@ -7,8 +7,10 @@
 //! into their editor source.
 
 use crate::xml_toolkit_engine::{
-    MAX_XML_INPUT_BYTES, XmlDocumentId, XmlEngineError, XmlFormatMode, XmlNodeDetailKind,
-    XmlNodeId, XmlTreeProjection,
+    MAX_XML_INPUT_BYTES, MAX_XPATH_EXPRESSION_BYTES, MAX_XPATH_NAMESPACE_BYTES, XmlDocumentId,
+    XmlEngineError, XmlFormatMode,
+    XmlNodeDetailKind, XmlNodeId, XmlNodeSnapshot, XmlTreeProjection, XmlXPathResult,
+    validate_xpath_namespaces,
 };
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(windows, test))]
@@ -43,6 +45,24 @@ impl XmlDetailRequestId {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct XmlXPathRequestId(u64);
+
+impl XmlXPathRequestId {
+    pub(crate) fn from_counter(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct XmlNamespaceContextRevision(u64);
+
+impl XmlNamespaceContextRevision {
+    pub(crate) const fn from_counter(value: u64) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XmlDetailIntent {
     Inspect,
@@ -70,6 +90,18 @@ pub struct XmlNodeDetailRequest {
     pub detail_request: XmlDetailRequestId,
     pub kind: XmlNodeDetailKind,
     pub intent: XmlDetailIntent,
+}
+
+/// A single XPath evaluation is bound to the parsed source, document,
+/// expression generation, and complete namespace mapping used for it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlXPathQueryRequest {
+    pub revision: XmlSourceRevision,
+    pub document: XmlDocumentId,
+    pub request: XmlXPathRequestId,
+    pub expression: String,
+    pub namespace_context_revision: XmlNamespaceContextRevision,
+    pub namespaces: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,12 +163,35 @@ pub enum XmlDetailStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum XmlXPathStatus {
+    Empty,
+    NotRun,
+    Pending(XmlXPathQueryRequest),
+    Nodes {
+        request: XmlXPathQueryRequest,
+        nodes: Arc<Vec<XmlNodeSnapshot>>,
+    },
+    /// MSXML returns scalar XPath 1.0 values through an internal XSLT and
+    /// exposes their lexical text only. Keep that honest instead of guessing
+    /// whether values such as `false` or `0` are booleans or numbers.
+    ScalarText {
+        request: XmlXPathQueryRequest,
+        text: Arc<str>,
+    },
+    Failed {
+        request: XmlXPathQueryRequest,
+        error: XmlEngineError,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct XmlSessionSnapshot {
     pub revision: Option<XmlSourceRevision>,
     pub parse: XmlParseStatus,
     pub output: XmlOutputStatus,
     pub tree: XmlTreeStatus,
     pub detail: XmlDetailStatus,
+    pub xpath: XmlXPathStatus,
 }
 
 impl Default for XmlSessionSnapshot {
@@ -147,6 +202,7 @@ impl Default for XmlSessionSnapshot {
             output: XmlOutputStatus::Empty,
             tree: XmlTreeStatus::Empty,
             detail: XmlDetailStatus::Empty,
+            xpath: XmlXPathStatus::Empty,
         }
     }
 }
@@ -164,6 +220,7 @@ struct Mailbox {
     pending_source: Option<SourceJob>,
     pending_format: Option<FormatJob>,
     pending_detail: Option<XmlNodeDetailRequest>,
+    pending_xpath: Option<XmlXPathQueryRequest>,
     stopped: bool,
 }
 
@@ -213,6 +270,12 @@ trait SessionEngine: Send + 'static {
         node: XmlNodeId,
         kind: XmlNodeDetailKind,
     ) -> Result<String, XmlEngineError>;
+    fn query(
+        &mut self,
+        document: Self::Document,
+        expression: &str,
+        namespaces: &[(String, String)],
+    ) -> Result<XmlXPathResult, XmlEngineError>;
     fn close(&mut self, document: Self::Document);
 }
 
@@ -247,6 +310,20 @@ impl SessionEngine for crate::xml_toolkit_engine::XmlEngineWorker {
     fn close(&mut self, document: Self::Document) {
         let _ = crate::xml_toolkit_engine::XmlEngineWorker::close_document(self, document);
     }
+
+    fn query(
+        &mut self,
+        document: Self::Document,
+        expression: &str,
+        namespaces: &[(String, String)],
+    ) -> Result<XmlXPathResult, XmlEngineError> {
+        crate::xml_toolkit_engine::XmlEngineWorker::query(
+            self,
+            document,
+            expression.to_owned(),
+            namespaces.to_vec(),
+        )
+    }
 }
 
 impl XmlEngineSession {
@@ -272,6 +349,7 @@ impl XmlEngineSession {
                 pending_source: None,
                 pending_format: None,
                 pending_detail: None,
+                pending_xpath: None,
                 stopped: false,
             }),
             wake: Condvar::new(),
@@ -293,6 +371,7 @@ impl XmlEngineSession {
         if mailbox.stopped {
             return Err(XmlSessionError::Stopped);
         }
+        let source_empty = source.is_empty();
         let revision = mailbox.snapshot.revision.map_or(Ok(1), |revision| {
             revision
                 .0
@@ -323,10 +402,16 @@ impl XmlEngineSession {
             output: XmlOutputStatus::Empty,
             tree,
             detail: XmlDetailStatus::Empty,
+            xpath: if source_empty {
+                XmlXPathStatus::Empty
+            } else {
+                XmlXPathStatus::NotRun
+            },
         });
         mailbox.pending_source = Some(SourceJob { revision, input });
         mailbox.pending_format = None;
         mailbox.pending_detail = None;
+        mailbox.pending_xpath = None;
         self.shared.wake.notify_one();
         Ok(revision)
     }
@@ -360,10 +445,7 @@ impl XmlEngineSession {
     /// New detail requests replace older pending requests. The returned value
     /// is never copied automatically; callers must revalidate the request
     /// against their current selection before publishing it to a clipboard.
-    pub fn request_detail(
-        &self,
-        request: XmlNodeDetailRequest,
-    ) -> Result<(), XmlSessionError> {
+    pub fn request_detail(&self, request: XmlNodeDetailRequest) -> Result<(), XmlSessionError> {
         let mut mailbox = lock(&self.shared.mailbox);
         if mailbox.stopped {
             return Err(XmlSessionError::Stopped);
@@ -387,6 +469,65 @@ impl XmlEngineSession {
         snapshot.detail = XmlDetailStatus::Pending(request);
         mailbox.snapshot = Arc::new(snapshot);
         mailbox.pending_detail = Some(request);
+        self.shared.wake.notify_one();
+        Ok(())
+    }
+
+    /// Immediately revokes the visible result and any queued query after an
+    /// expression or namespace-map edit. In-flight COM work is discarded
+    /// when it returns because publication requires the exact pending request.
+    /// MSXML calls cannot be interrupted mid-call; the single owner remains
+    /// retained until the worker reaches a terminal state and can be reaped.
+    pub fn invalidate_xpath(&self, revision: XmlSourceRevision) -> Result<(), XmlSessionError> {
+        let mut mailbox = lock(&self.shared.mailbox);
+        if mailbox.stopped {
+            return Err(XmlSessionError::Stopped);
+        }
+        if mailbox.snapshot.revision != Some(revision) {
+            return Err(XmlSessionError::StaleRevision);
+        }
+        let mut snapshot = (*mailbox.snapshot).clone();
+        snapshot.xpath = if snapshot.parse == XmlParseStatus::Empty {
+            XmlXPathStatus::Empty
+        } else {
+            XmlXPathStatus::NotRun
+        };
+        mailbox.snapshot = Arc::new(snapshot);
+        mailbox.pending_xpath = None;
+        self.shared.wake.notify_one();
+        Ok(())
+    }
+
+    /// Coalesces XPath work into one pending slot. The request is a complete
+    /// immutable snapshot of the expression and namespace context used by
+    /// this evaluation.
+    pub fn request_xpath(&self, request: XmlXPathQueryRequest) -> Result<(), XmlSessionError> {
+        let mut mailbox = lock(&self.shared.mailbox);
+        if mailbox.stopped {
+            return Err(XmlSessionError::Stopped);
+        }
+        if request.expression.len() > MAX_XPATH_EXPRESSION_BYTES {
+            return Err(XmlSessionError::Engine(XmlEngineError::XPath(
+                "expression exceeds the size limit".into(),
+            )));
+        }
+        validate_xpath_namespaces(&request.namespaces).map_err(XmlSessionError::Engine)?;
+        if mailbox.snapshot.revision != Some(request.revision) {
+            return Err(XmlSessionError::StaleRevision);
+        }
+        if mailbox.snapshot.parse != XmlParseStatus::Ready {
+            return Err(XmlSessionError::SourceNotReady);
+        }
+        let XmlTreeStatus::Ready(projection) = &mailbox.snapshot.tree else {
+            return Err(XmlSessionError::SourceNotReady);
+        };
+        if projection.document != request.document {
+            return Err(XmlSessionError::SelectionUnavailable);
+        }
+        let mut snapshot = (*mailbox.snapshot).clone();
+        snapshot.xpath = XmlXPathStatus::Pending(request.clone());
+        mailbox.snapshot = Arc::new(snapshot);
+        mailbox.pending_xpath = Some(request);
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -441,6 +582,7 @@ impl XmlEngineSession {
         mailbox.pending_source = None;
         mailbox.pending_format = None;
         mailbox.pending_detail = None;
+        mailbox.pending_xpath = None;
         mailbox.snapshot = Arc::new(XmlSessionSnapshot::default());
         self.shared.wake.notify_one();
     }
@@ -472,6 +614,9 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 }
                 if let Some(request) = mailbox.pending_detail.take() {
                     break Some(SessionAction::Detail(DetailJob { request }));
+                }
+                if let Some(request) = mailbox.pending_xpath.take() {
+                    break Some(SessionAction::XPath(request));
                 }
                 mailbox = shared
                     .wake
@@ -563,11 +708,39 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 }
                 let mut snapshot = (*mailbox.snapshot).clone();
                 snapshot.detail = match result {
-                    Ok(value) => XmlDetailStatus::Ready(Arc::new(XmlNodeDetailOutput {
-                        request,
-                        value,
-                    })),
+                    Ok(value) => {
+                        XmlDetailStatus::Ready(Arc::new(XmlNodeDetailOutput { request, value }))
+                    }
                     Err(error) => XmlDetailStatus::Failed { request, error },
+                };
+                mailbox.snapshot = Arc::new(snapshot);
+            }
+            SessionAction::XPath(request) => {
+                let Some((revision, document, document_id)) = current_document else {
+                    continue;
+                };
+                if revision != request.revision || document_id != request.document {
+                    continue;
+                }
+                let result = engine.query(document, &request.expression, &request.namespaces);
+                let mut mailbox = lock(&shared.mailbox);
+                if mailbox.stopped
+                    || mailbox.snapshot.revision != Some(request.revision)
+                    || mailbox.snapshot.xpath != XmlXPathStatus::Pending(request.clone())
+                {
+                    continue;
+                }
+                let mut snapshot = (*mailbox.snapshot).clone();
+                snapshot.xpath = match result {
+                    Ok(XmlXPathResult::Nodes(nodes)) => XmlXPathStatus::Nodes {
+                        request,
+                        nodes: Arc::new(nodes),
+                    },
+                    Ok(XmlXPathResult::ScalarText(text)) => XmlXPathStatus::ScalarText {
+                        request,
+                        text: Arc::from(text),
+                    },
+                    Err(error) => XmlXPathStatus::Failed { request, error },
                 };
                 mailbox.snapshot = Arc::new(snapshot);
             }
@@ -584,6 +757,7 @@ enum SessionAction {
     Source(SourceJob),
     Format(FormatJob),
     Detail(DetailJob),
+    XPath(XmlXPathQueryRequest),
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -609,6 +783,9 @@ mod tests {
         blocked_detail_node: Option<XmlNodeId>,
         detail_started: Option<Sender<()>>,
         detail_release: Option<Receiver<()>>,
+        blocked_query_expression: Option<String>,
+        query_started: Option<Sender<()>>,
+        query_release: Option<Receiver<()>>,
     }
 
     impl SessionEngine for FakeEngine {
@@ -669,6 +846,38 @@ mod tests {
             Ok(format!("full-{document}-{kind:?}"))
         }
 
+        fn query(
+            &mut self,
+            document: Self::Document,
+            expression: &str,
+            _namespaces: &[(String, String)],
+        ) -> Result<XmlXPathResult, XmlEngineError> {
+            if self.blocked_query_expression.as_deref() == Some(expression) {
+                if let Some(started) = self.query_started.take() {
+                    let _ = started.send(());
+                }
+                if let Some(release) = self.query_release.take() {
+                    let _ = release.recv();
+                }
+            }
+            if expression == "nodes:zero" {
+                return Ok(XmlXPathResult::Nodes(Vec::new()));
+            }
+            if let Some(value) = expression.strip_prefix("scalar:") {
+                return Ok(XmlXPathResult::ScalarText(value.to_owned()));
+            }
+            if let Some(message) = expression.strip_prefix("error:") {
+                return Err(XmlEngineError::XPath(message.to_owned()));
+            }
+            let document_id = XmlDocumentId::for_test(document);
+            Ok(XmlXPathResult::Nodes(vec![XmlNodeSnapshot {
+                id: XmlNodeId::for_test(document_id, 2),
+                kind: crate::xml_toolkit_engine::XmlTreeNodeKind::Element,
+                qualified_name: "item".into(),
+                value: expression.to_owned(),
+            }]))
+        }
+
         fn close(&mut self, document: Self::Document) {
             self.closed_documents
                 .lock()
@@ -712,6 +921,9 @@ mod tests {
             blocked_detail_node: None,
             detail_started: None,
             detail_release: None,
+            blocked_query_expression: None,
+            query_started: None,
+            query_release: None,
         }
     }
 
@@ -772,6 +984,28 @@ mod tests {
             ],
             None,
         ))
+    }
+
+    fn xpath_request(
+        snapshot: &XmlSessionSnapshot,
+        request_id: u64,
+        expression: &str,
+        namespaces: Vec<(String, String)>,
+        namespace_context_revision: u64,
+    ) -> XmlXPathQueryRequest {
+        let XmlTreeStatus::Ready(projection) = &snapshot.tree else {
+            panic!("XPath requests require an accepted tree projection");
+        };
+        XmlXPathQueryRequest {
+            revision: snapshot.revision.expect("parsed source has a revision"),
+            document: projection.document,
+            request: XmlXPathRequestId::from_counter(request_id),
+            expression: expression.to_owned(),
+            namespace_context_revision: XmlNamespaceContextRevision::from_counter(
+                namespace_context_revision,
+            ),
+            namespaces,
+        }
     }
 
     #[test]
@@ -1006,7 +1240,10 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
         {
-            assert!(Instant::now() < deadline, "stale source owner was not closed");
+            assert!(
+                Instant::now() < deadline,
+                "stale source owner was not closed"
+            );
             thread::yield_now();
         }
         assert_eq!(session.snapshot().detail, XmlDetailStatus::Empty);
@@ -1064,7 +1301,10 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(3);
         while !session.try_reap().unwrap() {
-            assert!(Instant::now() < deadline, "closed session worker was not reapable");
+            assert!(
+                Instant::now() < deadline,
+                "closed session worker was not reapable"
+            );
             thread::yield_now();
         }
         assert_eq!(
@@ -1073,6 +1313,177 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             vec![1]
         );
+    }
+
+    #[test]
+    fn m7d_query_statuses_preserve_zero_scalar_and_failure_distinctions() {
+        let parsed_sources = Arc::new(Mutex::new(Vec::new()));
+        let closed_documents = Arc::new(Mutex::new(Vec::new()));
+        let session = XmlEngineSession::start_with_engine(fake_engine(
+            parsed_sources,
+            closed_documents,
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+        let revision = session.replace_source("valid".into()).unwrap();
+        let parsed = wait_for(&session, |snapshot| {
+            snapshot.revision == Some(revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+        let XmlTreeStatus::Ready(projection) = &parsed.tree else {
+            panic!("successful parse publishes its actual tree");
+        };
+        let item_id = projection.nodes[1].id;
+
+        let oversized_expression = xpath_request(
+            &parsed,
+            99,
+            &"x".repeat(MAX_XPATH_EXPRESSION_BYTES + 1),
+            vec![],
+            1,
+        );
+        assert!(matches!(
+            session.request_xpath(oversized_expression),
+            Err(XmlSessionError::Engine(XmlEngineError::XPath(message)))
+                if message.contains("size limit")
+        ));
+        let oversized_mapping = xpath_request(
+            &parsed,
+            100,
+            "items",
+            vec![("p".into(), "u".repeat(MAX_XPATH_NAMESPACE_BYTES))],
+            1,
+        );
+        assert!(matches!(
+            session.request_xpath(oversized_mapping),
+            Err(XmlSessionError::Engine(XmlEngineError::XPath(message)))
+                if message.contains("size limit")
+        ));
+        assert_eq!(session.snapshot().xpath, XmlXPathStatus::NotRun);
+
+        let node_request = xpath_request(&parsed, 1, "items", vec![], 1);
+        session.request_xpath(node_request.clone()).unwrap();
+        assert_eq!(
+            session.snapshot().xpath,
+            XmlXPathStatus::Pending(node_request.clone())
+        );
+        let nodes = wait_for(
+            &session,
+            |snapshot| matches!(&snapshot.xpath, XmlXPathStatus::Nodes { request, .. } if request == &node_request),
+        );
+        let XmlXPathStatus::Nodes {
+            request,
+            nodes: matched,
+        } = &nodes.xpath
+        else {
+            panic!("node query publishes a distinct Nodes result");
+        };
+        assert_eq!(request, &node_request);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].id, item_id);
+        assert_eq!(nodes.parse, XmlParseStatus::Ready);
+        assert_eq!(nodes.output, parsed.output);
+
+        let zero_request = xpath_request(&parsed, 2, "nodes:zero", vec![], 1);
+        session.request_xpath(zero_request.clone()).unwrap();
+        let zero = wait_for(
+            &session,
+            |snapshot| matches!(&snapshot.xpath, XmlXPathStatus::Nodes { request, .. } if request == &zero_request),
+        );
+        assert!(matches!(&zero.xpath, XmlXPathStatus::Nodes { nodes, .. } if nodes.is_empty()));
+
+        for (request_id, lexical_value) in [(3, "false"), (4, "0"), (5, "")] {
+            let request = xpath_request(
+                &parsed,
+                request_id,
+                &format!("scalar:{lexical_value}"),
+                vec![],
+                1,
+            );
+            session.request_xpath(request.clone()).unwrap();
+            let scalar = wait_for(
+                &session,
+                |snapshot| matches!(&snapshot.xpath, XmlXPathStatus::ScalarText { request: current, .. } if current == &request),
+            );
+            assert!(matches!(
+                &scalar.xpath,
+                XmlXPathStatus::ScalarText { request: current, text }
+                    if current == &request && text.as_ref() == lexical_value
+            ));
+        }
+
+        let failure_request = xpath_request(&parsed, 6, "error:malformed expression", vec![], 1);
+        session.request_xpath(failure_request.clone()).unwrap();
+        let failed = wait_for(
+            &session,
+            |snapshot| matches!(&snapshot.xpath, XmlXPathStatus::Failed { request, .. } if request == &failure_request),
+        );
+        assert!(matches!(
+            &failed.xpath,
+            XmlXPathStatus::Failed { error: XmlEngineError::XPath(message), .. }
+                if message == "malformed expression"
+        ));
+        assert_eq!(failed.parse, XmlParseStatus::Ready);
+        assert_eq!(failed.tree, parsed.tree);
+        assert_eq!(failed.output, parsed.output);
+
+        let next_revision = session.replace_source("replacement".into()).unwrap();
+        assert_eq!(session.snapshot().xpath, XmlXPathStatus::NotRun);
+        let replacement = wait_for(&session, |snapshot| {
+            snapshot.revision == Some(next_revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+        assert_eq!(replacement.xpath, XmlXPathStatus::NotRun);
+        session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn m7d_query_edits_revoke_inflight_results_and_coalesce_pending_work() {
+        let parsed_sources = Arc::new(Mutex::new(Vec::new()));
+        let closed_documents = Arc::new(Mutex::new(Vec::new()));
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let mut engine = fake_engine(parsed_sources, closed_documents, None, None, None);
+        engine.blocked_query_expression = Some("slow".into());
+        engine.query_started = Some(started_sender);
+        engine.query_release = Some(release_receiver);
+        let session = XmlEngineSession::start_with_engine(engine).unwrap();
+        let revision = session.replace_source("valid".into()).unwrap();
+        let parsed = wait_for(&session, |snapshot| {
+            snapshot.revision == Some(revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+
+        let slow = xpath_request(&parsed, 1, "slow", vec![], 1);
+        session.request_xpath(slow).unwrap();
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the old query is active on the single engine owner");
+        session.invalidate_xpath(revision).unwrap();
+        assert_eq!(session.snapshot().xpath, XmlXPathStatus::NotRun);
+
+        let superseded = xpath_request(&parsed, 2, "superseded", vec![], 2);
+        let latest = xpath_request(&parsed, 3, "latest", vec![("p".into(), "urn:p".into())], 3);
+        session.request_xpath(superseded).unwrap();
+        session.request_xpath(latest.clone()).unwrap();
+        assert_eq!(
+            session.snapshot().xpath,
+            XmlXPathStatus::Pending(latest.clone())
+        );
+        release_sender.send(()).unwrap();
+
+        let completed = wait_for(
+            &session,
+            |snapshot| matches!(&snapshot.xpath, XmlXPathStatus::Nodes { request, .. } if request == &latest),
+        );
+        assert!(matches!(
+            &completed.xpath,
+            XmlXPathStatus::Nodes { request, nodes }
+                if request == &latest && nodes[0].value == "latest"
+        ));
+        assert_eq!(completed.revision, Some(revision));
+        assert_eq!(completed.parse, XmlParseStatus::Ready);
+        assert_eq!(completed.tree, parsed.tree);
+        session.shutdown().unwrap();
     }
 
     #[test]

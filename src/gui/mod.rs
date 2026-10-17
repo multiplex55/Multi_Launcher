@@ -80,6 +80,7 @@ pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
 pub(crate) mod xml_toolkit_tree;
+pub(crate) mod xml_toolkit_xpath;
 
 pub use crate::settings_save::SettingsSaveWorkerRegistry;
 

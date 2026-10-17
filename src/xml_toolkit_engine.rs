@@ -10,8 +10,9 @@ const MAX_SCHEMA_FILE_BYTES: usize = 1024 * 1024;
 const MAX_SCHEMA_GRAPH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_XPATH_RESULTS: usize = 10_000;
 const MAX_XPATH_RESULT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_XPATH_EXPRESSION_BYTES: usize = 16 * 1024;
 const MAX_NAMESPACE_BINDINGS: usize = 64;
-const MAX_NAMESPACE_BYTES: usize = 32 * 1024;
+pub const MAX_XPATH_NAMESPACE_BYTES: usize = 32 * 1024;
 const MAX_RETAINED_XML_NODE_IDENTITIES: usize = 250_000;
 const MAX_RETAINED_DOCUMENTS: usize = 16;
 const MAX_RETAINED_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -174,7 +175,7 @@ pub enum XmlEngineError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct XmlNodeSnapshot {
     pub id: XmlNodeId,
-    pub kind: String,
+    pub kind: XmlTreeNodeKind,
     pub qualified_name: String,
     pub value: String,
 }
@@ -186,6 +187,82 @@ pub enum XmlXPathResult {
     /// are evaluated through a fixed internal XSLT and intentionally remain
     /// text, because their lexical form does not reveal the XPath type.
     ScalarText(String),
+}
+
+/// Validate a complete per-query XPath namespace context before it reaches
+/// MSXML. An empty vector is meaningful: it clears every prior mapping.
+pub fn validate_xpath_namespaces(namespaces: &[(String, String)]) -> Result<(), XmlEngineError> {
+    if namespaces.len() > MAX_NAMESPACE_BINDINGS {
+        return Err(XmlEngineError::XPath(
+            "namespace binding count limit exceeded".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(namespaces.len());
+    let mut bytes = 0usize;
+    for (prefix, uri) in namespaces {
+        bytes = bytes
+            .saturating_add(prefix.len())
+            .saturating_add(uri.len())
+            .saturating_add(10);
+        if bytes > MAX_XPATH_NAMESPACE_BYTES {
+            return Err(XmlEngineError::XPath(
+                "namespace binding size limit exceeded".into(),
+            ));
+        }
+        if !valid_xpath_prefix(prefix) || prefix == "xml" || prefix == "xmlns" {
+            return Err(XmlEngineError::XPath(format!(
+                "invalid XPath namespace prefix {prefix:?}"
+            )));
+        }
+        if !seen.insert(prefix.as_str()) {
+            return Err(XmlEngineError::XPath(format!(
+                "duplicate XPath namespace prefix {prefix:?}"
+            )));
+        }
+        if uri.is_empty() || !uri.chars().all(is_xml_10_char) {
+            return Err(XmlEngineError::XPath(format!(
+                "namespace URI for prefix {prefix:?} must be nonempty XML text"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn valid_xpath_prefix(prefix: &str) -> bool {
+    let mut chars = prefix.chars();
+    chars.next().is_some_and(is_xpath_name_start) && chars.all(is_xpath_name_char)
+}
+
+fn is_xpath_name_start(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x5F
+            | 0x41..=0x5A
+            | 0x61..=0x7A
+            | 0xC0..=0xD6
+            | 0xD8..=0xF6
+            | 0xF8..=0x2FF
+            | 0x370..=0x37D
+            | 0x37F..=0x1FFF
+            | 0x200C..=0x200D
+            | 0x2070..=0x218F
+            | 0x2C00..=0x2FEF
+            | 0x3001..=0xD7FF
+            | 0xF900..=0xFDCF
+            | 0xFDF0..=0xFFFD
+            | 0x10000..=0xEFFFF
+    )
+}
+
+fn is_xpath_name_char(ch: char) -> bool {
+    is_xpath_name_start(ch)
+        || matches!(ch, '-' | '.')
+        || ch.is_ascii_digit()
+        || matches!(ch as u32, 0xB7 | 0x0300..=0x036F | 0x203F..=0x2040)
+}
+
+fn is_xml_10_char(ch: char) -> bool {
+    matches!(ch as u32, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
 }
 
 fn validate_utf8_declaration(source: &str) -> Result<(), XmlEngineError> {
@@ -262,13 +339,13 @@ mod windows_backend {
     use std::io::Read;
     use std::os::windows::io::AsRawHandle;
     use std::path::{Component, Path, Prefix};
-    use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
     use std::sync::Arc;
+    use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
     use std::thread::{self, JoinHandle};
     use windows::Win32::Data::Xml::MsXml::{
-        DOMDocument60, IXMLDOMDocument2, IXMLDOMDocument3, IXMLDOMElement, IXMLDOMNode,
-        IXMLDOMNamedNodeMap, IXMLDOMNodeList, IXMLDOMSchemaCollection2, NODE_ATTRIBUTE,
-        NODE_CDATA_SECTION, NODE_COMMENT, NODE_DOCUMENT, NODE_ELEMENT,
+        DOMDocument60, DOMNodeType, IXMLDOMDocument2, IXMLDOMDocument3, IXMLDOMElement,
+        IXMLDOMNamedNodeMap, IXMLDOMNode, IXMLDOMNodeList, IXMLDOMSchemaCollection2,
+        NODE_ATTRIBUTE, NODE_CDATA_SECTION, NODE_COMMENT, NODE_DOCUMENT, NODE_ELEMENT,
         NODE_PROCESSING_INSTRUCTION, NODE_TEXT, XMLSchemaCache60,
     };
     use windows::Win32::Foundation::{HANDLE, VARIANT_BOOL};
@@ -502,13 +579,7 @@ mod windows_backend {
                 .checked_add(1)
                 .ok_or(XmlEngineError::RetentionLimit("XML document identities"))?;
             self.retained_source_bytes = self.retained_source_bytes.saturating_add(source.len());
-            self.documents.insert(
-                id,
-                DocumentState {
-                    dom,
-                    source,
-                },
-            );
+            self.documents.insert(id, DocumentState { dom, source });
             let projection = match self.project_tree(id) {
                 Ok(projection) => Arc::new(projection),
                 Err(error) => {
@@ -540,8 +611,7 @@ mod windows_backend {
                 .retained_source_bytes
                 .saturating_sub(state.source.len());
             self.nodes.retain(|id, _| id.document != document);
-            self.node_identities
-                .retain(|_, id| id.document != document);
+            self.node_identities.retain(|_, id| id.document != document);
             Ok(())
         }
 
@@ -551,16 +621,17 @@ mod windows_backend {
             expression: &str,
             namespaces: &[(String, String)],
         ) -> Result<XmlXPathResult, XmlEngineError> {
-            if expression.len() > 16 * 1024 {
+            if expression.len() > MAX_XPATH_EXPRESSION_BYTES {
                 return Err(XmlEngineError::XPath(
                     "expression exceeds the size limit".into(),
                 ));
             }
             if contains_document_function(expression) {
-                return Err(XmlEngineError::SchemaPolicy(
+                return Err(XmlEngineError::XPath(
                     "the XSLT document() function is disabled".into(),
                 ));
             }
+            validate_xpath_namespaces(namespaces)?;
             let dom = self
                 .documents
                 .get(&document)
@@ -591,9 +662,13 @@ mod windows_backend {
             if !self.documents.contains_key(&document) {
                 return Err(XmlEngineError::UnknownDocument);
             }
-            let node = self.nodes.get(&node_id).ok_or(XmlEngineError::UnknownDocument)?;
-            let node_type = unsafe { node.nodeType() }
-                .map_err(|_| XmlEngineError::Detail("MSXML could not inspect the selected node".into()))?;
+            let node = self
+                .nodes
+                .get(&node_id)
+                .ok_or(XmlEngineError::UnknownDocument)?;
+            let node_type = unsafe { node.nodeType() }.map_err(|_| {
+                XmlEngineError::Detail("MSXML could not inspect the selected node".into())
+            })?;
             let value = match kind {
                 XmlNodeDetailKind::TextValue => {
                     if !matches!(
@@ -656,9 +731,9 @@ mod windows_backend {
                 .ok_or(XmlEngineError::UnknownDocument)?
                 .dom
                 .clone();
-            let root_node = dom
-                .cast::<IXMLDOMNode>()
-                .map_err(|_| XmlEngineError::Tree("MSXML could not expose the document node".into()))?;
+            let root_node = dom.cast::<IXMLDOMNode>().map_err(|_| {
+                XmlEngineError::Tree("MSXML could not expose the document node".into())
+            })?;
             let root_id = self.node_id_for(document, root_node.clone())?;
             let (root, root_bytes) = tree_node_snapshot(root_id, None, &root_node)?;
             if root_bytes > MAX_XML_TREE_PROJECTION_BYTES {
@@ -687,7 +762,8 @@ mod windows_backend {
                 };
                 if metadata_bytes.saturating_add(snapshot_bytes) > MAX_XML_TREE_PROJECTION_BYTES {
                     truncated = Some(XmlTreeProjectionLimit::MetadataBytes);
-                    if let Some(parent) = item.parent.and_then(|id| node_indexes.get(&id).copied()) {
+                    if let Some(parent) = item.parent.and_then(|id| node_indexes.get(&id).copied())
+                    {
                         if item.is_attribute {
                             nodes[parent].has_more_attributes = true;
                         } else {
@@ -695,8 +771,9 @@ mod windows_backend {
                         }
                     }
                     for remaining in &pending {
-                        if let Some(parent) =
-                            remaining.parent.and_then(|id| node_indexes.get(&id).copied())
+                        if let Some(parent) = remaining
+                            .parent
+                            .and_then(|id| node_indexes.get(&id).copied())
                         {
                             if remaining.is_attribute {
                                 nodes[parent].has_more_attributes = true;
@@ -724,23 +801,31 @@ mod windows_backend {
                     }
                 }
 
-                let node_type = unsafe { item.node.nodeType() }
-                    .map_err(|_| XmlEngineError::Tree("MSXML could not inspect a DOM node".into()))?;
+                let node_type = unsafe { item.node.nodeType() }.map_err(|_| {
+                    XmlEngineError::Tree("MSXML could not inspect a DOM node".into())
+                })?;
                 if node_type == NODE_ELEMENT {
-                    let attributes = unsafe { item.node.attributes() }
-                        .map_err(|_| XmlEngineError::Tree("MSXML could not enumerate element attributes".into()))?;
-                    let attribute_count = unsafe { attributes.length() }
-                        .map_err(|_| XmlEngineError::Tree("MSXML could not count element attributes".into()))?;
+                    let attributes = unsafe { item.node.attributes() }.map_err(|_| {
+                        XmlEngineError::Tree("MSXML could not enumerate element attributes".into())
+                    })?;
+                    let attribute_count = unsafe { attributes.length() }.map_err(|_| {
+                        XmlEngineError::Tree("MSXML could not count element attributes".into())
+                    })?;
                     for attribute_index in 0..attribute_count {
                         if scheduled >= MAX_XML_TREE_NODES {
                             nodes[index].has_more_attributes = true;
                             truncated = Some(XmlTreeProjectionLimit::NodeCount);
                             break;
                         }
-                        let attribute = unsafe { attributes.get_item(attribute_index) }
-                            .map_err(|_| XmlEngineError::Tree("MSXML could not read an element attribute".into()))?;
+                        let attribute =
+                            unsafe { attributes.get_item(attribute_index) }.map_err(|_| {
+                                XmlEngineError::Tree(
+                                    "MSXML could not read an element attribute".into(),
+                                )
+                            })?;
                         let id = self.node_id_for(document, attribute.clone())?;
-                        let (attribute_snapshot, bytes) = tree_node_snapshot(id, Some(item.id), &attribute)?;
+                        let (attribute_snapshot, bytes) =
+                            tree_node_snapshot(id, Some(item.id), &attribute)?;
                         if metadata_bytes.saturating_add(bytes) > MAX_XML_TREE_PROJECTION_BYTES {
                             nodes[index].has_more_attributes = true;
                             truncated = Some(XmlTreeProjectionLimit::MetadataBytes);
@@ -757,10 +842,12 @@ mod windows_backend {
                 if node_type == NODE_ATTRIBUTE {
                     continue;
                 }
-                let children = unsafe { item.node.childNodes() }
-                    .map_err(|_| XmlEngineError::Tree("MSXML could not enumerate child nodes".into()))?;
-                let child_count = unsafe { children.length() }
-                    .map_err(|_| XmlEngineError::Tree("MSXML could not count child nodes".into()))?;
+                let children = unsafe { item.node.childNodes() }.map_err(|_| {
+                    XmlEngineError::Tree("MSXML could not enumerate child nodes".into())
+                })?;
+                let child_count = unsafe { children.length() }.map_err(|_| {
+                    XmlEngineError::Tree("MSXML could not count child nodes".into())
+                })?;
                 let mut child_tasks = Vec::new();
                 for child_index in 0..child_count {
                     if scheduled >= MAX_XML_TREE_NODES {
@@ -768,8 +855,9 @@ mod windows_backend {
                         truncated = Some(XmlTreeProjectionLimit::NodeCount);
                         break;
                     }
-                    let child = unsafe { children.get_item(child_index) }
-                        .map_err(|_| XmlEngineError::Tree("MSXML could not read a child node".into()))?;
+                    let child = unsafe { children.get_item(child_index) }.map_err(|_| {
+                        XmlEngineError::Tree("MSXML could not read a child node".into())
+                    })?;
                     let id = self.node_id_for(document, child.clone())?;
                     child_tasks.push(PendingTreeNode {
                         id,
@@ -811,10 +899,7 @@ mod windows_backend {
                 .next_node
                 .checked_add(1)
                 .ok_or(XmlEngineError::RetentionLimit("XML DOM node identities"))?;
-            let id = XmlNodeId {
-                document,
-                ordinal,
-            };
+            let id = XmlNodeId { document, ordinal };
             self.node_identities.insert(identity_key, id);
             self.nodes.insert(id, node);
             Ok(id)
@@ -1038,27 +1123,13 @@ mod windows_backend {
         namespaces: &[(String, String)],
     ) -> Result<(), XmlEngineError> {
         let mut bindings = String::new();
-        if namespaces.len() > MAX_NAMESPACE_BINDINGS {
-            return Err(XmlEngineError::XPath(
-                "namespace binding count limit exceeded".into(),
-            ));
-        }
+        validate_xpath_namespaces(namespaces)?;
         for (prefix, uri) in namespaces {
-            if !valid_prefix(prefix) || prefix == "xml" || prefix == "xmlns" {
-                return Err(XmlEngineError::XPath(
-                    "invalid XPath namespace prefix".into(),
-                ));
-            }
             bindings.push_str("xmlns:");
             bindings.push_str(prefix);
             bindings.push_str("=\"");
             bindings.push_str(&escape_xml_attribute(uri));
             bindings.push_str("\" ");
-            if bindings.len() > MAX_NAMESPACE_BYTES {
-                return Err(XmlEngineError::XPath(
-                    "namespace binding size limit exceeded".into(),
-                ));
-            }
         }
         unsafe { document.setProperty(&BSTR::from("SelectionLanguage"), &VARIANT::from("XPath")) }
             .map_err(|_| XmlEngineError::XPath("MSXML XPath 1.0 is unavailable".into()))?;
@@ -1069,14 +1140,6 @@ mod windows_backend {
             )
         }
         .map_err(|_| XmlEngineError::XPath("MSXML rejected the namespace map".into()))
-    }
-
-    fn valid_prefix(prefix: &str) -> bool {
-        let mut chars = prefix.chars();
-        chars
-            .next()
-            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
-            && chars.all(|ch| ch == '_' || ch == '-' || ch == '.' || ch.is_ascii_alphanumeric())
     }
 
     fn escape_xml_attribute(value: &str) -> String {
@@ -1127,13 +1190,9 @@ mod windows_backend {
         expression: &str,
         namespaces: &[(String, String)],
     ) -> Result<String, XmlEngineError> {
+        validate_xpath_namespaces(namespaces)?;
         let mut stylesheet_namespaces = String::new();
         for (prefix, uri) in namespaces {
-            if !valid_prefix(prefix) || prefix == "xml" || prefix == "xmlns" {
-                return Err(XmlEngineError::XPath(
-                    "invalid XPath namespace prefix".into(),
-                ));
-            }
             stylesheet_namespaces.push_str(" xmlns:");
             stylesheet_namespaces.push_str(prefix);
             stylesheet_namespaces.push_str("=\"");
@@ -1141,17 +1200,33 @@ mod windows_backend {
             stylesheet_namespaces.push('"');
         }
         let stylesheet = format!(
-            "<xsl:stylesheet version=\"1.0\" xmlns:xsl=\"http://www.w3.org/1999/XSL/Transform\"{stylesheet_namespaces}><xsl:output method=\"text\"/><xsl:template match=\"/\"><xsl:value-of select=\"{}\"/></xsl:template></xsl:stylesheet>",
-            escape_xml_attribute(expression)
+            "<stylesheet xmlns=\"http://www.w3.org/1999/XSL/Transform\" version=\"1.0\"{stylesheet_namespaces}><output method=\"text\"/><template match=\"/\"><value-of select=\"{}\"/></template></stylesheet>",
+            escape_xml_attribute(expression),
         );
         let stylesheet = secure_document(&stylesheet, XmlErrorContext::Xml).map_err(|_| {
-            XmlEngineError::XPath("MSXML rejected the scalar XPath expression".into())
+            XmlEngineError::XPath(
+                "MSXML rejected the XPath expression; check its syntax and namespace prefixes"
+                    .into(),
+            )
         })?;
-        let root = unsafe { stylesheet.documentElement() }
-            .map_err(|_| XmlEngineError::XPath("MSXML could not prepare scalar XPath".into()))?;
-        unsafe { document.transformNode(&root) }
+        let root = unsafe { stylesheet.documentElement() }.map_err(|_| {
+            XmlEngineError::XPath(
+                "MSXML rejected the XPath expression; check its syntax and namespace prefixes"
+                    .into(),
+            )
+        })?;
+        let value = unsafe { document.transformNode(&root) }
             .map(|value| value.to_string())
-            .map_err(|_| XmlEngineError::XPath("MSXML rejected the scalar XPath expression".into()))
+            .map_err(|_| {
+                XmlEngineError::XPath(
+                    "MSXML rejected the XPath expression; check its syntax and namespace prefixes"
+                        .into(),
+                )
+            })?;
+        if value.len() > MAX_XPATH_RESULT_BYTES {
+            return Err(XmlEngineError::RetentionLimit("XPath result bytes"));
+        }
+        Ok(value)
     }
 
     struct PendingTreeNode {
@@ -1239,8 +1314,9 @@ mod windows_backend {
     }
 
     fn selected_node_value(node: &IXMLDOMNode) -> Result<String, XmlEngineError> {
-        let value = unsafe { node.nodeValue() }
-            .map_err(|_| XmlEngineError::Detail("MSXML could not read the selected node value".into()))?;
+        let value = unsafe { node.nodeValue() }.map_err(|_| {
+            XmlEngineError::Detail("MSXML could not read the selected node value".into())
+        })?;
         BSTR::try_from(&value)
             .map(|value| value.to_string())
             .map_err(|_| XmlEngineError::Detail("MSXML returned a non-text node value".into()))
@@ -1248,20 +1324,27 @@ mod windows_backend {
 
     fn namespace_valid_fragment(node: &IXMLDOMNode) -> Result<String, XmlEngineError> {
         let mut fragment = unsafe { node.xml() }
-            .map_err(|_| XmlEngineError::Detail("MSXML could not serialize the selected element".into()))?
+            .map_err(|_| {
+                XmlEngineError::Detail("MSXML could not serialize the selected element".into())
+            })?
             .to_string();
         let (open_tag_end, declared_names) = fragment_open_tag(&fragment)?;
         let mut context = BTreeMap::<String, String>::new();
         let mut current = Some(node.clone());
         while let Some(element) = current {
             if unsafe { element.nodeType() }.ok() == Some(NODE_ELEMENT) {
-                let attributes = unsafe { element.attributes() }
-                    .map_err(|_| XmlEngineError::Detail("MSXML could not read namespace context".into()))?;
-                let count = unsafe { attributes.length() }
-                    .map_err(|_| XmlEngineError::Detail("MSXML could not count namespace declarations".into()))?;
+                let attributes = unsafe { element.attributes() }.map_err(|_| {
+                    XmlEngineError::Detail("MSXML could not read namespace context".into())
+                })?;
+                let count = unsafe { attributes.length() }.map_err(|_| {
+                    XmlEngineError::Detail("MSXML could not count namespace declarations".into())
+                })?;
                 for index in 0..count {
-                    let attribute = unsafe { attributes.get_item(index) }
-                        .map_err(|_| XmlEngineError::Detail("MSXML could not read a namespace declaration".into()))?;
+                    let attribute = unsafe { attributes.get_item(index) }.map_err(|_| {
+                        XmlEngineError::Detail(
+                            "MSXML could not read a namespace declaration".into(),
+                        )
+                    })?;
                     let name = unsafe { attribute.nodeName() }
                         .map(|value| value.to_string())
                         .unwrap_or_default();
@@ -1304,7 +1387,8 @@ mod windows_backend {
             declarations.push('"');
         }
         if !declarations.is_empty() {
-            let insert_at = if fragment.as_bytes().get(open_tag_end.wrapping_sub(1)) == Some(&b'/') {
+            let insert_at = if fragment.as_bytes().get(open_tag_end.wrapping_sub(1)) == Some(&b'/')
+            {
                 open_tag_end - 1
             } else {
                 open_tag_end
@@ -1322,9 +1406,10 @@ mod windows_backend {
             ));
         }
         let mut index = 1usize;
-        while bytes.get(index).is_some_and(|byte| {
-            !byte.is_ascii_whitespace() && !matches!(*byte, b'/' | b'>')
-        }) {
+        while bytes
+            .get(index)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(*byte, b'/' | b'>'))
+        {
             index += 1;
         }
         let mut names = BTreeSet::new();
@@ -1417,10 +1502,11 @@ mod windows_backend {
             if result_bytes > MAX_XPATH_RESULT_BYTES {
                 return Err(XmlEngineError::RetentionLimit("XPath result bytes"));
             }
-            let kind = unsafe { node.nodeTypeString() }
-                .map(|value| value.to_string())
-                .unwrap_or_default();
-            result_bytes = result_bytes.saturating_add(kind.len());
+            let node_type = unsafe { node.nodeType() }.map_err(|_| {
+                XmlEngineError::XPath("MSXML could not inspect an XPath result".into())
+            })?;
+            let kind = tree_node_kind(node_type);
+            result_bytes = result_bytes.saturating_add(std::mem::size_of_val(&kind));
             if result_bytes > MAX_XPATH_RESULT_BYTES {
                 return Err(XmlEngineError::RetentionLimit("XPath result bytes"));
             }
@@ -1439,6 +1525,26 @@ mod windows_backend {
             });
         }
         Ok(result)
+    }
+
+    fn tree_node_kind(node_type: DOMNodeType) -> XmlTreeNodeKind {
+        if node_type == NODE_DOCUMENT {
+            XmlTreeNodeKind::Document
+        } else if node_type == NODE_ELEMENT {
+            XmlTreeNodeKind::Element
+        } else if node_type == NODE_ATTRIBUTE {
+            XmlTreeNodeKind::Attribute
+        } else if node_type == NODE_TEXT {
+            XmlTreeNodeKind::Text
+        } else if node_type == NODE_CDATA_SECTION {
+            XmlTreeNodeKind::CData
+        } else if node_type == NODE_COMMENT {
+            XmlTreeNodeKind::Comment
+        } else if node_type == NODE_PROCESSING_INSTRUCTION {
+            XmlTreeNodeKind::ProcessingInstruction
+        } else {
+            XmlTreeNodeKind::Other
+        }
     }
 
     fn format_existing_document(
@@ -2333,9 +2439,12 @@ mod windows_backend {
                         | XmlTreeNodeKind::ProcessingInstruction
                 )
             }));
-            assert!(projection.nodes.iter().any(|node| {
-                node.kind == XmlTreeNodeKind::Text && node.preview == "  "
-            }));
+            assert!(
+                projection
+                    .nodes
+                    .iter()
+                    .any(|node| { node.kind == XmlTreeNodeKind::Text && node.preview == "  " })
+            );
             let (cdata_id, cdata_preview_was_clipped) = projection
                 .nodes
                 .iter()
@@ -2355,13 +2464,14 @@ mod windows_backend {
                     .expect("element text is an explicit value request"),
                 format!("A & B{long_cdata}nestedtail")
             );
-            assert!(projection
-                .nodes
-                .iter()
-                .any(|node| node.kind == XmlTreeNodeKind::Comment && node.preview == " note "));
+            assert!(
+                projection
+                    .nodes
+                    .iter()
+                    .any(|node| node.kind == XmlTreeNodeKind::Comment && node.preview == " note ")
+            );
             assert!(projection.nodes.iter().any(|node| {
-                node.kind == XmlTreeNodeKind::ProcessingInstruction
-                    && node.qualified_name == "pick"
+                node.kind == XmlTreeNodeKind::ProcessingInstruction && node.qualified_name == "pick"
             }));
 
             let fragment = engine
@@ -2399,6 +2509,246 @@ mod windows_backend {
                 1
             );
             engine.close_document(round_trip).unwrap();
+            engine.close_document(document).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod m7d_tests {
+        use super::*;
+
+        fn node_snapshots(result: XmlXPathResult) -> Vec<XmlNodeSnapshot> {
+            match result {
+                XmlXPathResult::Nodes(nodes) => nodes,
+                XmlXPathResult::ScalarText(value) => {
+                    panic!("expected XPath nodes but received scalar {value:?}")
+                }
+            }
+        }
+
+        fn scalar_text(result: XmlXPathResult) -> String {
+            match result {
+                XmlXPathResult::ScalarText(value) => value,
+                XmlXPathResult::Nodes(nodes) => {
+                    panic!("expected scalar text but received {} nodes", nodes.len())
+                }
+            }
+        }
+
+        #[test]
+        fn m7d_engine_xpath_nodes_share_tree_ids_and_scalar_results_remain_text() {
+            let engine = XmlEngineWorker::start().expect("MSXML owner starts");
+            let source =
+                r#"<root xmlns="urn:default"><item id="a">0</item><item id="b">text</item></root>"#;
+            let (document, projection) = engine
+                .parse_with_tree(source.into())
+                .expect("source parses and produces the authoritative projection");
+            let namespaces = vec![("d".into(), "urn:default".into())];
+
+            let queried_items = node_snapshots(
+                engine
+                    .query(document, "//d:item", namespaces.clone())
+                    .expect("default-namespace elements are selectable through a user prefix"),
+            );
+            let projected_items: Vec<_> = projection
+                .nodes
+                .iter()
+                .filter(|node| node.kind == XmlTreeNodeKind::Element && node.local_name == "item")
+                .map(|node| node.id)
+                .collect();
+            assert_eq!(
+                queried_items.iter().map(|node| node.id).collect::<Vec<_>>(),
+                projected_items
+            );
+            assert_ne!(queried_items[0].id, queried_items[1].id);
+
+            let predicate = node_snapshots(
+                engine
+                    .query(document, "//d:item[@id='b']", namespaces.clone())
+                    .expect("predicates select the matching actual DOM node"),
+            );
+            assert_eq!(predicate.len(), 1);
+            assert_eq!(predicate[0].id, queried_items[1].id);
+
+            let attributes = node_snapshots(
+                engine
+                    .query(document, "//@id", Vec::new())
+                    .expect("attribute results retain their DOM identities"),
+            );
+            assert_eq!(attributes.len(), 2);
+            assert!(
+                attributes
+                    .iter()
+                    .all(|node| node.kind == XmlTreeNodeKind::Attribute)
+            );
+            let projected_attributes: Vec<_> = projection
+                .nodes
+                .iter()
+                .filter(|node| {
+                    node.kind == XmlTreeNodeKind::Attribute && node.qualified_name == "id"
+                })
+                .map(|node| node.id)
+                .collect();
+            assert_eq!(
+                attributes.iter().map(|node| node.id).collect::<Vec<_>>(),
+                projected_attributes
+            );
+
+            let text_nodes = node_snapshots(
+                engine
+                    .query(document, "//d:item/text()", namespaces.clone())
+                    .expect("text nodes are returned as nodes, not scalar strings"),
+            );
+            assert_eq!(text_nodes.len(), 2);
+            assert!(
+                text_nodes
+                    .iter()
+                    .all(|node| node.kind == XmlTreeNodeKind::Text)
+            );
+            let union = node_snapshots(
+                engine
+                    .query(document, "//d:item[1] | //@id", namespaces.clone())
+                    .expect("XPath unions return their real element and attribute nodes"),
+            );
+            assert_eq!(union.len(), 3);
+            assert!(union.iter().any(|node| node.id == queried_items[0].id));
+            assert!(
+                union
+                    .iter()
+                    .filter(|node| node.kind == XmlTreeNodeKind::Attribute)
+                    .count()
+                    == 2
+            );
+
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(document, "false()", Vec::new())
+                        .expect("boolean scalar is evaluated"),
+                ),
+                "false"
+            );
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(document, "0", Vec::new())
+                        .expect("numeric scalar is evaluated"),
+                ),
+                "0"
+            );
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(document, "string('')", Vec::new())
+                        .expect("empty string scalar is distinct from a zero-node result"),
+                ),
+                ""
+            );
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(document, "string('urn:literal')", Vec::new())
+                        .expect("colon characters inside literals are parsed by MSXML"),
+                ),
+                "urn:literal"
+            );
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(document, r#"concat('a&b', '"quoted"')"#, Vec::new(),)
+                        .expect("scalar expressions are safely quoted in the internal stylesheet"),
+                ),
+                "a&b\"quoted\""
+            );
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(document, "count(child::*)", Vec::new())
+                        .expect("standard XPath axes remain available"),
+                ),
+                "1"
+            );
+
+            let zero = node_snapshots(
+                engine
+                    .query(document, "//d:item[@id='missing']", namespaces.clone())
+                    .expect("no matching nodes is a successful empty node-set"),
+            );
+            assert!(zero.is_empty());
+            engine.close_document(document).unwrap();
+        }
+
+        #[test]
+        fn m7d_engine_namespace_context_is_complete_validated_and_collision_safe() {
+            let engine = XmlEngineWorker::start().expect("MSXML owner starts");
+            let (document, _) = engine
+                .parse_with_tree(r#"<root xmlns="urn:default"><item/><item/></root>"#.into())
+                .expect("source parses");
+
+            let bound = node_snapshots(
+                engine
+                    .query(
+                        document,
+                        "//d:item",
+                        vec![("d".into(), "urn:default".into())],
+                    )
+                    .expect("explicit default-namespace prefix is accepted"),
+            );
+            assert_eq!(bound.len(), 2);
+            let remapped = node_snapshots(
+                engine
+                    .query(document, "//d:item", vec![("d".into(), "urn:other".into())])
+                    .expect("each query replaces the complete mapping context"),
+            );
+            assert!(remapped.is_empty());
+            assert!(matches!(
+                engine.query(document, "//d:item", Vec::new()),
+                Err(XmlEngineError::XPath(_))
+            ));
+
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(
+                            document,
+                            "count(//xsl:item)",
+                            vec![("xsl".into(), "urn:default".into())],
+                        )
+                        .expect(
+                            "a valid user xsl prefix cannot collide with trusted fallback XSLT"
+                        ),
+                ),
+                "2"
+            );
+            assert!(matches!(
+                engine.query(document, "count(//xsl:item)", Vec::new()),
+                Err(XmlEngineError::XPath(_))
+            ));
+            assert!(matches!(
+                engine.query(document, "//[", Vec::new()),
+                Err(XmlEngineError::XPath(message))
+                    if message.contains("syntax and namespace prefixes")
+            ));
+
+            assert!(matches!(
+                validate_xpath_namespaces(&[("p".into(), "urn:p".into()), ("p".into(), "urn:q".into())]),
+                Err(XmlEngineError::XPath(message)) if message.contains("duplicate")
+            ));
+            assert!(matches!(
+                validate_xpath_namespaces(&[("xml".into(), "urn:custom".into())]),
+                Err(XmlEngineError::XPath(message)) if message.contains("invalid")
+            ));
+            assert!(matches!(
+                validate_xpath_namespaces(&[("1bad".into(), "urn:x".into())]),
+                Err(XmlEngineError::XPath(message)) if message.contains("invalid")
+            ));
+            validate_xpath_namespaces(&[("xsl".into(), "urn:user".into())])
+                .expect("the xsl prefix is not reserved in the user's XPath context");
+
+            assert!(matches!(
+                engine.query(document, "document('file.xml')", Vec::new()),
+                Err(XmlEngineError::XPath(message)) if message.contains("document()")
+            ));
             engine.close_document(document).unwrap();
         }
     }
