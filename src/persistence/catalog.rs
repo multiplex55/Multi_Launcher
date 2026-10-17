@@ -39,6 +39,7 @@ pub enum PersistentStoreId {
     MkMacroDocument,
     MkMacroAssets,
     MkMacroTemplates,
+    HotFolderRules,
     ClipboardModifiers,
     MultiManagerWorkspaces,
     Notes,
@@ -65,7 +66,7 @@ pub enum PersistentStoreId {
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 41] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -83,6 +84,7 @@ impl PersistentStoreId {
         Self::MkMacroDocument,
         Self::MkMacroAssets,
         Self::MkMacroTemplates,
+        Self::HotFolderRules,
         Self::ClipboardModifiers,
         Self::MultiManagerWorkspaces,
         Self::Notes,
@@ -521,6 +523,15 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             true,
             ProbeKind::Json(probe_mkmacro_templates),
         ),
+        Id::HotFolderRules => s(
+            "Hot Folder rules",
+            File,
+            Critical,
+            Sensitive,
+            Moderate,
+            true,
+            ProbeKind::Json(probe_hotfolder_rules),
+        ),
         Id::ClipboardModifiers => s(
             "Clipboard Modify configuration",
             File,
@@ -823,6 +834,10 @@ fn descriptor_for(
             current_dir,
             crate::mkmacro::templates::MKMACRO_TEMPLATES_FILE,
         ),
+        Id::HotFolderRules => (
+            root.path().join(crate::hotfolder::HOT_FOLDER_RULES_FILE),
+            false,
+        ),
         Id::QueryHistory => cwd(current_dir, "history.json"),
         Id::ClipboardHistory => cwd(current_dir, crate::plugins::clipboard::CLIPBOARD_FILE),
         Id::PasteSequences => cwd(current_dir, crate::paste_sequence::PASTE_SEQUENCES_FILE),
@@ -1096,6 +1111,16 @@ fn probe_mkmacro_templates(_: &Path, bytes: &[u8]) -> ProbeResult {
             ProbeResult::UnsupportedSchema(version.to_string())
         }
         Err(_) => ProbeResult::Malformed,
+    }
+}
+
+fn probe_hotfolder_rules(_: &Path, bytes: &[u8]) -> ProbeResult {
+    match crate::hotfolder::probe_document_bytes(bytes) {
+        crate::hotfolder::HotFolderDocumentProbe::Supported => ProbeResult::Healthy,
+        crate::hotfolder::HotFolderDocumentProbe::UnsupportedVersion(version) => {
+            ProbeResult::UnsupportedSchema(version.to_string())
+        }
+        crate::hotfolder::HotFolderDocumentProbe::Invalid => ProbeResult::Malformed,
     }
 }
 
