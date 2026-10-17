@@ -53,11 +53,255 @@ impl NativeFileIdentity {
     }
 }
 
+/// Fresh identity evidence for one explicit watch root. The retained proof is
+/// re-opened for every reported path; it does not authorize a scan or write.
+#[derive(Debug, Clone)]
+pub struct NativeWatchRoot {
+    proof: RootProof,
+}
+
+impl NativeWatchRoot {
+    pub fn selected_root(&self) -> &Path {
+        &self.proof.selected_path
+    }
+
+    pub fn canonical_root(&self) -> &Path {
+        &self.proof.canonical_path
+    }
+
+    pub fn identity(&self) -> NativeFileIdentity {
+        self.proof.identity
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_native_watch_root(
+    path: &Path,
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+) -> NativeWatchRoot {
+    let identity = NativeFileIdentity {
+        volume_serial_number,
+        file_id,
+    };
+    NativeWatchRoot {
+        proof: RootProof {
+            selected_path: path.to_path_buf(),
+            canonical_path: path.to_path_buf(),
+            identity,
+            recursive: false,
+            generation: RenameScanGeneration(0),
+            chain: vec![DirectoryProof {
+                lookup_path: path.to_path_buf(),
+                canonical_path: path.to_path_buf(),
+                identity,
+            }],
+        },
+    }
+}
+
+/// Read-only evidence for a single path that a watcher reported under an
+/// admitted root. This is a point-in-time observation, not mutation authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeWatchFileObservation {
+    canonical_path: PathBuf,
+    root_identity: NativeFileIdentity,
+    parent_identity: NativeFileIdentity,
+    file_identity: NativeFileIdentity,
+    length: u64,
+    modified: SystemTime,
+}
+
+impl NativeWatchFileObservation {
+    pub fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+
+    pub fn root_identity(&self) -> NativeFileIdentity {
+        self.root_identity
+    }
+
+    pub fn parent_identity(&self) -> NativeFileIdentity {
+        self.parent_identity
+    }
+
+    pub fn file_identity(&self) -> NativeFileIdentity {
+        self.file_identity
+    }
+
+    pub fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub fn modified(&self) -> SystemTime {
+        self.modified
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_native_watch_file_observation(
+    canonical_path: &Path,
+    root_identity: NativeFileIdentity,
+    parent_identity: NativeFileIdentity,
+    file_identity: NativeFileIdentity,
+    length: u64,
+    modified: SystemTime,
+) -> NativeWatchFileObservation {
+    NativeWatchFileObservation {
+        canonical_path: canonical_path.to_path_buf(),
+        root_identity,
+        parent_identity,
+        file_identity,
+        length,
+        modified,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_native_file_identity(
+    volume_serial_number: u64,
+    file_id: [u8; 16],
+) -> NativeFileIdentity {
+    NativeFileIdentity {
+        volume_serial_number,
+        file_id,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeWatchErrorKind {
+    Unsupported,
+    InvalidRoot,
+    RootChanged,
+    ParentChanged,
+    OutsideRoot,
+    InvalidPath,
+    Missing,
+    NotRegularFile,
+    ReparsePoint,
+    Busy,
+    Inaccessible,
+    UnsupportedIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeWatchError {
+    kind: NativeWatchErrorKind,
+}
+
+impl NativeWatchError {
+    pub fn kind(self) -> NativeWatchErrorKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Display for NativeWatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self.kind {
+            NativeWatchErrorKind::Unsupported => "native watch admission is unavailable on this platform",
+            NativeWatchErrorKind::InvalidRoot => "the explicit watch root is invalid",
+            NativeWatchErrorKind::RootChanged => "the watched root identity changed",
+            NativeWatchErrorKind::ParentChanged => "the reported file parent identity changed",
+            NativeWatchErrorKind::OutsideRoot => "the reported path is outside the watched root",
+            NativeWatchErrorKind::InvalidPath => "the reported path is not a supported local path",
+            NativeWatchErrorKind::Missing => "the reported file no longer exists",
+            NativeWatchErrorKind::NotRegularFile => "the reported path is not an ordinary file",
+            NativeWatchErrorKind::ReparsePoint => "the reported path is a reparse point",
+            NativeWatchErrorKind::Busy => "the reported file is still busy",
+            NativeWatchErrorKind::Inaccessible => "the reported file could not be inspected",
+            NativeWatchErrorKind::UnsupportedIdentity => "the filesystem did not provide stable file identity metadata",
+        })
+    }
+}
+
+impl std::error::Error for NativeWatchError {}
+
+/// Open and prove one explicit local root using metadata-only directory
+/// handles. This does not enumerate the directory.
+pub fn admit_watch_root(path: &Path) -> Result<NativeWatchRoot, NativeWatchError> {
+    #[cfg(windows)]
+    {
+        let root = ExplicitDirectoryRoot::new(path.to_path_buf())
+            .map_err(|_| native_watch_error(NativeWatchErrorKind::InvalidRoot))?;
+        let mut request = RenameScanRequest::new(root, false, RenameScanGeneration(0));
+        request.metadata_only_root = true;
+        let admission = NativeRenameScanBackend
+            .admit_root(&request)
+            .map_err(map_watch_backend_failure)?;
+        Ok(NativeWatchRoot {
+            proof: admission.proof,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(native_watch_error(NativeWatchErrorKind::Unsupported))
+    }
+}
+
+/// Re-admit the selected root and require the original volume/file identity.
+pub fn refresh_watch_root(root: &NativeWatchRoot) -> Result<NativeWatchRoot, NativeWatchError> {
+    let fresh = admit_watch_root(&root.proof.selected_path)?;
+    #[cfg(windows)]
+    if fresh.proof.identity != root.proof.identity
+        || batch_rename::compare_paths_windows_ordinal(
+            &fresh.proof.canonical_path,
+            &root.proof.canonical_path,
+        ) != std::cmp::Ordering::Equal
+    {
+        return Err(native_watch_error(NativeWatchErrorKind::RootChanged));
+    }
+    Ok(fresh)
+}
+
+/// Admit one exact watcher-reported path beneath its already selected root.
+/// `require_read_lock` requests a short-lived read handle that denies writers
+/// and deleters while final settle evidence is captured.
+pub fn observe_watch_file(
+    root: &NativeWatchRoot,
+    reported_path: &Path,
+    require_read_lock: bool,
+) -> Result<NativeWatchFileObservation, NativeWatchError> {
+    #[cfg(windows)]
+    {
+        observe_watch_file_native(root, reported_path, require_read_lock)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (root, reported_path, require_read_lock);
+        Err(native_watch_error(NativeWatchErrorKind::Unsupported))
+    }
+}
+
+fn native_watch_error(kind: NativeWatchErrorKind) -> NativeWatchError {
+    NativeWatchError { kind }
+}
+
+#[cfg(windows)]
+fn map_watch_backend_failure(error: BackendFailure) -> NativeWatchError {
+    let kind = match error.kind {
+        BackendFailureKind::InvalidRoot => NativeWatchErrorKind::InvalidRoot,
+        BackendFailureKind::RootChanged => NativeWatchErrorKind::RootChanged,
+        BackendFailureKind::ParentChanged => NativeWatchErrorKind::ParentChanged,
+        BackendFailureKind::PathEscapedRoot => NativeWatchErrorKind::OutsideRoot,
+        BackendFailureKind::UnsupportedIdentity => NativeWatchErrorKind::UnsupportedIdentity,
+        BackendFailureKind::Inaccessible | BackendFailureKind::ObjectChanged => {
+            NativeWatchErrorKind::Inaccessible
+        }
+        BackendFailureKind::InvalidEntry => NativeWatchErrorKind::InvalidPath,
+        BackendFailureKind::ResourceLimit | BackendFailureKind::Cancelled => {
+            NativeWatchErrorKind::Inaccessible
+        }
+    };
+    native_watch_error(kind)
+}
+
 #[derive(Debug, Clone)]
 pub struct RenameScanRequest {
     root: ExplicitDirectoryRoot,
     scope: RenameScanScope,
     generation: RenameScanGeneration,
+    metadata_only_root: bool,
 }
 
 impl RenameScanRequest {
@@ -74,6 +318,7 @@ impl RenameScanRequest {
                 RenameScanScope::DirectChildren
             },
             generation,
+            metadata_only_root: false,
         }
     }
 
@@ -3083,7 +3328,15 @@ impl RenameScanBackend for NativeRenameScanBackend {
             generation: request.generation,
             chain,
         };
-        let directories = self.reopen_chain(&root.chain, &root, DirectoryOpenAccess::Enumerate)?;
+        let directories = self.reopen_chain(
+            &root.chain,
+            &root,
+            if request.metadata_only_root {
+                DirectoryOpenAccess::Metadata
+            } else {
+                DirectoryOpenAccess::Enumerate
+            },
+        )?;
         let Some(directory) = directories.last() else {
             return Err(BackendFailure::new(
                 BackendFailureKind::RootChanged,
@@ -4170,6 +4423,171 @@ fn verified_parent_chain(
         return Err("the recorded parent directory identity changed".to_owned());
     }
     Ok(chain)
+}
+
+#[cfg(windows)]
+fn observe_watch_file_native(
+    root: &NativeWatchRoot,
+    reported_path: &Path,
+    require_read_lock: bool,
+) -> Result<NativeWatchFileObservation, NativeWatchError> {
+    let root = refresh_watch_root(root)?;
+    validate_local_root_spelling(reported_path)
+        .map_err(|_| native_watch_error(NativeWatchErrorKind::InvalidPath))?;
+    let relative = relative_watch_path(&root.proof.canonical_path, reported_path)?;
+    let Some(leaf) = relative.file_name() else {
+        return Err(native_watch_error(NativeWatchErrorKind::InvalidPath));
+    };
+    if relative.components().count().saturating_sub(1) > MAX_RENAME_SCAN_DEPTH {
+        return Err(native_watch_error(NativeWatchErrorKind::InvalidPath));
+    }
+    let relative_parent = relative.parent().unwrap_or_else(|| Path::new(""));
+    let parent_path = root.proof.canonical_path.join(relative_parent);
+    let parent_chain = admit_watch_parent_chain(&root.proof, &parent_path)?;
+    let backend = NativeRenameScanBackend;
+    let parent_guards = backend
+        .reopen_chain(&parent_chain, &root.proof, DirectoryOpenAccess::Metadata)
+        .map_err(map_watch_backend_failure)?;
+    let Some(parent) = parent_guards.last() else {
+        return Err(native_watch_error(NativeWatchErrorKind::ParentChanged));
+    };
+    let lookup_path = parent.canonical_path.join(leaf);
+    let opened = if require_read_lock {
+        open_native_verified_file(&lookup_path)
+    } else {
+        open_native_object(&lookup_path, false)
+    }
+    .map_err(map_watch_file_io)?;
+    if opened.reparse_point {
+        return Err(native_watch_error(NativeWatchErrorKind::ReparsePoint));
+    }
+    if opened.kind != SnapshotEntryKind::File {
+        return Err(native_watch_error(NativeWatchErrorKind::NotRegularFile));
+    }
+    if !batch_rename::path_is_within_windows_ordinal(
+        &root.proof.canonical_path,
+        &opened.canonical_path,
+    ) || opened.canonical_path.parent().is_none_or(|actual_parent| {
+        batch_rename::compare_paths_windows_ordinal(actual_parent, &parent.canonical_path)
+            != std::cmp::Ordering::Equal
+    }) {
+        return Err(native_watch_error(NativeWatchErrorKind::OutsideRoot));
+    }
+    let length = opened
+        .length
+        .ok_or_else(|| native_watch_error(NativeWatchErrorKind::UnsupportedIdentity))?;
+    let modified = opened
+        .modified
+        .ok_or_else(|| native_watch_error(NativeWatchErrorKind::UnsupportedIdentity))?;
+    let parent_identity = parent.identity;
+    backend
+        .reopen_chain(&parent_chain, &root.proof, DirectoryOpenAccess::Metadata)
+        .map_err(map_watch_backend_failure)?;
+    Ok(NativeWatchFileObservation {
+        canonical_path: opened.canonical_path,
+        root_identity: root.proof.identity,
+        parent_identity,
+        file_identity: opened.identity,
+        length,
+        modified,
+    })
+}
+
+#[cfg(windows)]
+fn relative_watch_path(root: &Path, path: &Path) -> Result<PathBuf, NativeWatchError> {
+    if !path.is_absolute() {
+        return Err(native_watch_error(NativeWatchErrorKind::InvalidPath));
+    }
+    let root_components = root.components().collect::<Vec<_>>();
+    let path_components = path.components().collect::<Vec<_>>();
+    if path_components.len() <= root_components.len()
+        || !root_components
+            .iter()
+            .zip(path_components.iter())
+            .all(|(root, path)| {
+                batch_rename::compare_paths_windows_ordinal(
+                    Path::new(root.as_os_str()),
+                    Path::new(path.as_os_str()),
+                ) == std::cmp::Ordering::Equal
+            })
+    {
+        return Err(native_watch_error(NativeWatchErrorKind::OutsideRoot));
+    }
+    let mut relative = PathBuf::new();
+    for component in path_components.iter().skip(root_components.len()) {
+        match component {
+            Component::Normal(name) => relative.push(name),
+            _ => return Err(native_watch_error(NativeWatchErrorKind::InvalidPath)),
+        }
+    }
+    Ok(relative)
+}
+
+#[cfg(windows)]
+fn admit_watch_parent_chain(
+    root: &RootProof,
+    parent_path: &Path,
+) -> Result<Vec<DirectoryProof>, NativeWatchError> {
+    let relative = if batch_rename::compare_paths_windows_ordinal(
+        &root.canonical_path,
+        parent_path,
+    ) == std::cmp::Ordering::Equal
+    {
+        PathBuf::new()
+    } else {
+        relative_watch_path(&root.canonical_path, parent_path)?
+    };
+    let mut chain = root.chain.clone();
+    let mut current = root.canonical_path.clone();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(native_watch_error(NativeWatchErrorKind::InvalidPath));
+        };
+        current.push(name);
+        let opened = open_native_object(&current, false).map_err(map_watch_file_io)?;
+        if opened.reparse_point {
+            return Err(native_watch_error(NativeWatchErrorKind::ReparsePoint));
+        }
+        if opened.kind != SnapshotEntryKind::Directory {
+            return Err(native_watch_error(NativeWatchErrorKind::ParentChanged));
+        }
+        let Some(expected_parent) = chain.last() else {
+            return Err(native_watch_error(NativeWatchErrorKind::RootChanged));
+        };
+        if opened.canonical_path.parent().is_none_or(|actual_parent| {
+            batch_rename::compare_paths_windows_ordinal(
+                actual_parent,
+                &expected_parent.canonical_path,
+            ) != std::cmp::Ordering::Equal
+        }) || opened.identity.volume_serial_number() != root.identity.volume_serial_number()
+        {
+            return Err(native_watch_error(NativeWatchErrorKind::OutsideRoot));
+        }
+        chain.push(DirectoryProof {
+            lookup_path: current.clone(),
+            canonical_path: opened.canonical_path,
+            identity: opened.identity,
+        });
+    }
+    NativeRenameScanBackend
+        .reopen_chain(&chain, root, DirectoryOpenAccess::Metadata)
+        .map_err(map_watch_backend_failure)?;
+    Ok(chain)
+}
+
+#[cfg(windows)]
+fn map_watch_file_io(error: std::io::Error) -> NativeWatchError {
+    let raw_code = native_raw_os_error(&error);
+    let kind = match raw_code {
+        Some(2 | 3) => NativeWatchErrorKind::Missing,
+        Some(32 | 33) => NativeWatchErrorKind::Busy,
+        Some(123 | 161) => NativeWatchErrorKind::InvalidPath,
+        _ if error.kind() == std::io::ErrorKind::Unsupported => {
+            NativeWatchErrorKind::UnsupportedIdentity
+        }
+        _ => NativeWatchErrorKind::Inaccessible,
+    };
+    native_watch_error(kind)
 }
 
 #[cfg(windows)]

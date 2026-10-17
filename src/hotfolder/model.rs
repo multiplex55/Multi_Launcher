@@ -17,6 +17,15 @@ pub const MAX_EXTENSION_CHARS: usize = 32;
 pub const MAX_RENAME_PART_CHARS: usize = 64;
 pub const MAX_EXTERNAL_ACTION_TEXT_CHARS: usize = 4096;
 pub const MAX_RULE_PATH_CHARS: usize = 4096;
+pub const MAX_WATCHED_ROOTS: usize = MAX_RULES;
+pub const MAX_WATCH_INGRESS_EVENTS: usize = 512;
+pub const MAX_EVENT_PATHS: usize = 64;
+pub const MAX_EVENT_PATH_BYTES: usize = 32 * 1024;
+pub const MAX_PENDING_FILES: usize = 1024;
+pub const MAX_READY_CANDIDATES: usize = 256;
+pub const MAX_RUNTIME_DIAGNOSTICS: usize = 128;
+pub const MAX_DUE_OBSERVATIONS_PER_TURN: usize = 32;
+pub const READY_LEASE_TIMEOUT_MS: u64 = 30_000;
 
 pub const MIN_SETTLE_INTERVAL_MS: u64 = 50;
 pub const MAX_SETTLE_INTERVAL_MS: u64 = 5_000;
@@ -310,6 +319,10 @@ pub struct HotFolderRule {
     pub filter: FilenameFilter,
     #[serde(default)]
     pub include_subfolders: bool,
+    /// Allow known temporary download suffixes such as `.part` and
+    /// `.crdownload` through the event filter. Defaults to false.
+    #[serde(default)]
+    pub include_temporary_files: bool,
     #[serde(default)]
     pub settle: SettlePolicy,
     pub action: RuleAction,
@@ -343,6 +356,7 @@ impl HotFolderRule {
             trigger: RuleTrigger::NewFile,
             filter: FilenameFilter::default(),
             include_subfolders: false,
+            include_temporary_files: false,
             settle: SettlePolicy::default(),
             action,
         }
@@ -546,8 +560,17 @@ mod tests {
         assert!(!rule.enabled);
         assert_eq!(rule.trigger, RuleTrigger::NewFile);
         assert!(!rule.include_subfolders);
+        assert!(!rule.include_temporary_files);
         assert_eq!(rule.settle, SettlePolicy::default());
         assert!(rule.validate().is_ok());
+
+        let mut legacy = serde_json::to_value(&rule).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("include_temporary_files");
+        let restored: HotFolderRule = serde_json::from_value(legacy).unwrap();
+        assert!(!restored.include_temporary_files);
 
         let mut invalid = rule.clone();
         invalid.watched_root = PathBuf::new();
