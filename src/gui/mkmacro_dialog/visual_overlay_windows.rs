@@ -2,7 +2,10 @@
 //! physical monitor: a single virtual-desktop popup would cover monitor gaps.
 use super::*;
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 use windows::{
@@ -1686,4 +1689,11 @@ pub(super) fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError>
     renderer.close();
     eprintln!("passive-overlay-smoke: cleanup: all overlay windows dismissed");
     Ok(())
+}
+
+#[path = "visual_overlay_rectangle_smoke.rs"]
+mod rectangle_input_smoke;
+
+pub(super) fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayError> {
+    rectangle_input_smoke::run()
 }

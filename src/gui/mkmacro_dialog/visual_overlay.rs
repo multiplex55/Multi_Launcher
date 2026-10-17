@@ -901,6 +901,16 @@ pub fn run_passive_overlay_smoke_test() -> Result<(), VisualOverlayError> {
     Err(VisualOverlayError::unsupported())
 }
 
+/// Owned Win32 receiver fixture; SendInput proves injected routing, not hardware input.
+#[cfg(windows)]
+pub fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayError> {
+    native::run_rectangle_input_isolation_smoke_test()
+}
+#[cfg(not(windows))]
+pub fn run_rectangle_input_isolation_smoke_test() -> Result<(), VisualOverlayError> {
+    Err(VisualOverlayError::unsupported())
+}
+
 /// Platform-neutral description of the pixels a native overlay must produce.
 /// The clear is deliberately first so repainting cannot leave an old drag
 /// rectangle behind.
