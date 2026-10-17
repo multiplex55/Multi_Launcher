@@ -118,6 +118,7 @@ pub enum PlaybackMode {
     #[default]
     Automatic,
     ManualAdvance,
+    PasteToAdvance,
 }
 
 /// A validated chord string in the application's existing hotkey syntax.
@@ -833,29 +834,33 @@ impl fmt::Debug for SequenceTarget {
     }
 }
 
-/// One immutable clock/clipboard/template context and the independently
-/// validated external target captured before the preflight UI takes focus.
+/// Immutable invocation inputs, captured before preflight takes focus. The
+/// optional origin supplies template variables, never a playback destination.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct SequenceInvocationContext {
     snippet_context: SnippetInvocationContext,
-    target: SequenceTarget,
+    origin: Option<SequenceTarget>,
 }
 
 impl SequenceInvocationContext {
     pub(crate) fn new(
         timestamp: DateTime<FixedOffset>,
         clipboard_text: Option<String>,
-        target: SequenceTarget,
+        origin: impl Into<Option<SequenceTarget>>,
     ) -> Self {
+        let origin = origin.into();
         let snippet_context = SnippetInvocationContext::new(
             timestamp,
             clipboard_text,
-            Some(target.hwnd()),
-            target.title().map(str::to_owned),
+            origin.as_ref().map(SequenceTarget::hwnd),
+            origin
+                .as_ref()
+                .and_then(SequenceTarget::title)
+                .map(str::to_owned),
         );
         Self {
             snippet_context,
-            target,
+            origin,
         }
     }
 
@@ -863,8 +868,8 @@ impl SequenceInvocationContext {
         &self.snippet_context
     }
 
-    pub(crate) fn target(&self) -> &SequenceTarget {
-        &self.target
+    pub(crate) fn origin(&self) -> Option<&SequenceTarget> {
+        self.origin.as_ref()
     }
 }
 
@@ -873,7 +878,7 @@ impl fmt::Debug for SequenceInvocationContext {
         formatter
             .debug_struct("SequenceInvocationContext")
             .field("snippet_context", &self.snippet_context)
-            .field("target", &self.target)
+            .field("origin", &self.origin)
             .finish()
     }
 }
@@ -1173,7 +1178,11 @@ impl SequencePreflight {
             name: self.sequence.name.clone(),
             mode: self.sequence.mode,
             delay_ms: self.sequence.delay_ms,
-            target: self.context.target.clone(),
+            origin_title: self
+                .context
+                .origin()
+                .and_then(SequenceTarget::title)
+                .map(str::to_owned),
             steps,
         })
     }
@@ -1236,7 +1245,7 @@ pub(crate) struct PreparedSequenceRun {
     name: String,
     mode: PlaybackMode,
     delay_ms: u32,
-    target: SequenceTarget,
+    origin_title: Option<String>,
     steps: Vec<ResolvedSequenceStep>,
 }
 
@@ -1257,10 +1266,6 @@ impl PreparedSequenceRun {
         self.delay_ms
     }
 
-    pub(crate) fn target(&self) -> &SequenceTarget {
-        &self.target
-    }
-
     pub(crate) fn step_count(&self) -> usize {
         self.steps.len()
     }
@@ -1270,19 +1275,14 @@ impl PreparedSequenceRun {
     }
 
     pub(crate) fn preview(&self) -> PreparedSequencePreview {
-        let target_label = self
-            .target
-            .title()
-            .filter(|title| !title.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("Process {}", self.target.process_id()));
+        let target_label = "Current eligible foreground application at each step".to_owned();
         PreparedSequencePreview {
             name: self.name.clone(),
             mode: self.mode,
             delay_ms: self.delay_ms,
             item_count: self.steps.len(),
             target_label,
-            target_title: self.target.title().map(str::to_owned),
+            target_title: self.origin_title.clone(),
             ready: true,
             steps: self
                 .steps
@@ -1326,7 +1326,7 @@ impl fmt::Debug for PreparedSequenceRun {
             .field("sequence_id", &self.sequence_id)
             .field("step_count", &self.steps.len())
             .field("delay_ms", &self.delay_ms)
-            .field("target", &self.target)
+            .field("origin_title_available", &self.origin_title.is_some())
             .finish()
     }
 }
@@ -1766,14 +1766,12 @@ mod tests {
         assert_eq!(run.step_text(2), Some("Hello Ada at 03:04"));
         assert_eq!(run.step_text(3), Some("history snapshot"));
         assert_eq!(run.step_text(4), Some("authored text"));
-        assert_eq!(run.target().hwnd(), 123);
-        assert_eq!(run.target().process_id(), 42);
-        assert_eq!(run.target().thread_id(), 456);
 
         let preview = run.preview();
         assert!(preview.ready);
         assert_eq!(preview.item_count, 5);
-        assert_eq!(preview.target_label, "origin editor");
+        assert_eq!(preview.target_title.as_deref(), Some("origin editor"));
+        assert!(preview.target_label.contains("Current eligible"));
         assert_eq!(preview.steps.len(), 5);
         assert_eq!(preview.steps[1].kind, PreparedStepKind::Snippet);
         assert_eq!(preview.steps[3].kind, PreparedStepKind::ClipboardHistory);
@@ -1782,6 +1780,69 @@ mod tests {
             preview.steps[1].text.as_deref(),
             Some("03:04/captured clipboard/origin editor")
         );
+    }
+
+    #[test]
+    fn playback_modes_preserve_legacy_serde_and_round_trip_paste_to_advance() {
+        assert_eq!(PlaybackMode::default(), PlaybackMode::Automatic);
+        for (json, mode) in [
+            ("\"automatic\"", PlaybackMode::Automatic),
+            ("\"manual_advance\"", PlaybackMode::ManualAdvance),
+            ("\"paste_to_advance\"", PlaybackMode::PasteToAdvance),
+        ] {
+            assert_eq!(serde_json::from_str::<PlaybackMode>(json).unwrap(), mode);
+            assert_eq!(serde_json::to_string(&mode).unwrap(), json);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join(super::PASTE_SEQUENCES_FILE));
+        let mut snapshot = store.load().unwrap();
+        let mut draft = SequenceDraft::new(
+            "Third mode",
+            vec![Step::LiteralText {
+                text: "exact \u{96ea}\ntext".into(),
+            }],
+        );
+        draft.mode = PlaybackMode::PasteToAdvance;
+        let id = snapshot.upsert(draft).unwrap();
+        store.commit(&mut snapshot).unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(
+            loaded.sequence(id).unwrap().mode,
+            PlaybackMode::PasteToAdvance
+        );
+    }
+
+    #[test]
+    fn preflight_without_origin_freezes_empty_title_and_preserves_hidden_preview() {
+        let snippets = vec![entry(
+            "context",
+            "{{sys.window_title}}/{{sys.clipboard}}/{{sys.time:%H:%M}}",
+            false,
+            true,
+        )];
+        let context = SequenceInvocationContext::new(
+            DateTime::parse_from_rfc3339("2024-01-02T03:04:05+00:00").unwrap(),
+            Some("origin clipboard".into()),
+            None,
+        );
+        let run = SequencePreflight::begin(
+            sequence(vec![Step::SnippetRef {
+                alias: "context".into(),
+            }]),
+            &snippets,
+            &[],
+            context,
+        )
+        .unwrap()
+        .finish(&snippets, &[])
+        .unwrap();
+        assert_eq!(run.step_text(0), Some("/origin clipboard/03:04"));
+        let preview = run.preview();
+        assert!(preview.ready);
+        assert!(preview.target_title.is_none());
+        assert!(preview.steps[0].hidden);
+        assert!(preview.steps[0].text.is_none());
+        assert!(!format!("{run:?}").contains("origin clipboard"));
     }
 
     #[test]

@@ -2585,10 +2585,8 @@ impl LauncherApp {
 
         let playback_now = std::time::Instant::now();
         if self.sequence_playback.needs_tick() {
-            let mut platform = crate::paste_sequence::NativeSequencePlaybackPlatform::new(
-                self.launcher_hwnd,
-                Some(ctx.clone()),
-            );
+            let mut platform =
+                crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
             self.sequence_playback.tick(&mut platform, playback_now);
             if let Some(delay) = self
                 .sequence_playback

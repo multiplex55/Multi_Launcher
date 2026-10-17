@@ -1168,7 +1168,12 @@ impl LauncherApp {
         }
         if matches!(
             self.sequence_playback.status(),
-            Status::Preparing | Status::Ready | Status::Running | Status::AwaitAdvance
+            Status::Preparing
+                | Status::Ready
+                | Status::Running
+                | Status::AwaitAdvance
+                | Status::AwaitTarget
+                | Status::AwaitPaste
         ) {
             self.cancel_sequence_playback();
             return true;
@@ -1177,8 +1182,8 @@ impl LauncherApp {
     }
 
     /// Capture every invocation input before the sequence prompt or preflight
-    /// panel takes focus. The external HWND/PID/thread identity is mandatory,
-    /// even when no snippet uses `sys.window_title`.
+    /// panel takes focus. An optional external origin supplies template values;
+    /// playback independently captures the current target at each step.
     pub(crate) fn capture_sequence_context(
         &mut self,
         source: crate::commands::ActivationSource,
@@ -1192,12 +1197,15 @@ impl LauncherApp {
             self.visible_flag.load(Ordering::SeqCst),
             crate::active_window::observe_foreground_window(),
             self.snippet_origin_window.clone(),
-        )
-        .ok_or(crate::paste_sequence::SequencePreflightError::InvalidTargetIdentity)?;
-        let target = crate::paste_sequence::SequenceTarget::from_external_window(
-            origin,
-            std::process::id(),
-        )?;
+        );
+        let target = origin
+            .map(|origin| {
+                crate::paste_sequence::SequenceTarget::from_external_window(
+                    origin,
+                    std::process::id(),
+                )
+            })
+            .transpose()?;
         let clipboard_text = crate::actions::clipboard::get_text().ok();
         Ok(crate::paste_sequence::SequenceInvocationContext::new(
             timestamp,
@@ -1348,10 +1356,8 @@ impl LauncherApp {
     pub(crate) fn start_sequence_playback(
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
-        let mut platform = crate::paste_sequence::NativeSequencePlaybackPlatform::new(
-            self.launcher_hwnd,
-            Some(self.egui_ctx.clone()),
-        );
+        let mut platform =
+            crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         let result = self.sequence_playback.start(&mut platform);
         self.schedule_sequence_playback_wake(std::time::Instant::now());
         result
@@ -1361,10 +1367,8 @@ impl LauncherApp {
         &mut self,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
         let now = std::time::Instant::now();
-        let mut platform = crate::paste_sequence::NativeSequencePlaybackPlatform::new(
-            self.launcher_hwnd,
-            Some(self.egui_ctx.clone()),
-        );
+        let mut platform =
+            crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         let result = self.sequence_playback.next(&mut platform, now);
         self.schedule_sequence_playback_wake(std::time::Instant::now());
         result
@@ -2245,7 +2249,7 @@ pub(in crate::gui) mod tests {
     }
 
     #[test]
-    fn sequence_target_requires_a_real_origin_except_for_launcher_ui_activation() {
+    fn sequence_template_origin_uses_fresh_foreground_or_launcher_ui_cache_only() {
         let cached = external_window(10, "session origin");
         let ui_target = select_sequence_origin_window(
             crate::commands::ActivationSource::Click,

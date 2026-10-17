@@ -1,12 +1,9 @@
 use super::{PlaybackMode, PreparedSequenceRun, SequenceTarget};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver, TryRecvError},
-};
 use std::time::{Duration, Instant};
 
 const CLIPBOARD_CONSUMPTION_SETTLE: Duration = Duration::from_millis(180);
+const TARGET_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const TARGET_WAIT_LIMIT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SequencePlaybackError {
@@ -22,7 +19,6 @@ pub(crate) enum SequencePlaybackError {
     ClipboardWriteFailed,
     ClipboardRestoreFailed,
     InputRejected,
-    ActivationRejected,
 }
 
 impl SequencePlaybackError {
@@ -35,8 +31,10 @@ impl SequencePlaybackError {
             Self::UnsupportedClipboard => {
                 "The current clipboard contains data that cannot be safely preserved."
             }
-            Self::InvalidTarget => "The original destination window is no longer valid.",
-            Self::FocusChanged => "The original destination no longer owns foreground focus.",
+            Self::InvalidTarget => "The current destination window is no longer valid.",
+            Self::FocusChanged => {
+                "The destination changed before paste; no further steps were pasted."
+            }
             Self::PasswordField => "Pasting into a detected password field is blocked.",
             Self::ClipboardChanged => {
                 "The clipboard changed during playback; remaining steps were stopped."
@@ -44,7 +42,6 @@ impl SequencePlaybackError {
             Self::ClipboardWriteFailed => "Sequence text could not be published to the clipboard.",
             Self::ClipboardRestoreFailed => "The original clipboard could not be restored.",
             Self::InputRejected => "The paste keystroke was rejected by Windows.",
-            Self::ActivationRejected => "The original destination window could not be activated.",
         }
     }
 }
@@ -56,6 +53,8 @@ pub(crate) enum SequencePlaybackStatus {
     Ready,
     Running,
     AwaitAdvance,
+    AwaitTarget,
+    AwaitPaste,
     Cancelled,
     Completed,
     Failed(SequencePlaybackError),
@@ -109,104 +108,14 @@ pub(crate) enum ClipboardRestoreOutcome {
     Failed,
 }
 
-pub(crate) enum ActivationPoll {
-    Pending,
-    Complete(Result<(), SequencePlaybackError>),
-}
-
-/// Owns a bounded activation worker until completion or shutdown. The worker
-/// reports through a channel and only requests an egui repaint; it never
-/// mutates application state.
-pub(crate) struct ActivationJob {
-    ready: Option<Result<(), SequencePlaybackError>>,
-    receiver: Option<Receiver<Result<(), SequencePlaybackError>>>,
-    worker: Option<std::thread::JoinHandle<()>>,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl ActivationJob {
-    pub(crate) fn completed(result: Result<(), SequencePlaybackError>) -> Self {
-        Self {
-            ready: Some(result),
-            receiver: None,
-            worker: None,
-            cancelled: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    pub(crate) fn spawn(
-        operation: impl FnOnce(Arc<AtomicBool>) -> Result<(), SequencePlaybackError> + Send + 'static,
-        wake: impl FnOnce() + Send + 'static,
-    ) -> Result<Self, SequencePlaybackError> {
-        let (sender, receiver) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = Arc::clone(&cancelled);
-        let worker = std::thread::Builder::new()
-            .name("paste-sequence-target-activation".into())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    operation(Arc::clone(&worker_cancelled))
-                }))
-                .unwrap_or(Err(SequencePlaybackError::ActivationRejected));
-                let _ = sender.send(result);
-                wake();
-            })
-            .map_err(|_| SequencePlaybackError::ActivationRejected)?;
-        Ok(Self {
-            ready: None,
-            receiver: Some(receiver),
-            worker: Some(worker),
-            cancelled,
-        })
-    }
-
-    pub(crate) fn poll(&mut self) -> ActivationPoll {
-        if let Some(result) = self.ready.take() {
-            return ActivationPoll::Complete(result);
-        }
-        let result = match self.receiver.as_ref().map(Receiver::try_recv) {
-            Some(Ok(result)) => result,
-            Some(Err(TryRecvError::Empty)) => return ActivationPoll::Pending,
-            Some(Err(TryRecvError::Disconnected)) | None => {
-                Err(SequencePlaybackError::ActivationRejected)
-            }
-        };
-        self.receiver = None;
-        let worker_ok = self
-            .worker
-            .take()
-            .is_none_or(|worker| worker.join().is_ok());
-        ActivationPoll::Complete(if worker_ok {
-            result
-        } else {
-            Err(SequencePlaybackError::ActivationRejected)
-        })
-    }
-
-    pub(crate) fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-
-    fn cancel_and_join(&mut self) {
-        self.cancel();
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-        self.receiver = None;
-        self.ready = None;
-    }
-}
-
 /// Minimal platform boundary for the playback state machine. Tests supply a
 /// deterministic fake; production only implements these narrow native calls.
 pub(crate) trait SequencePlaybackPlatform {
     fn now(&mut self) -> Instant;
     fn capture_clipboard(&mut self) -> Result<ClipboardSnapshot, SequencePlaybackError>;
     fn observe_target(&mut self, target: &SequenceTarget) -> TargetObservation;
-    fn activate_target(
-        &mut self,
-        target: &SequenceTarget,
-    ) -> Result<ActivationJob, SequencePlaybackError>;
+    /// Capture the actual foreground identity without reading its title.
+    fn current_target(&mut self) -> Result<SequenceTarget, SequencePlaybackError>;
     fn publish_text(
         &mut self,
         expected_sequence: u32,
@@ -232,7 +141,7 @@ struct PlaybackSession {
     last_paste_at: Option<Instant>,
     next_step_at: Option<Instant>,
     cleanup_at: Option<Instant>,
-    pending_activation: Option<ActivationJob>,
+    target_wait_deadline: Option<Instant>,
 }
 
 /// Nonblocking owner for a prepared run. Every time-based transition is driven
@@ -282,14 +191,11 @@ impl SequencePlaybackController {
     }
 
     /// Whether the GUI must give the controller a tick on the next frame.
-    /// Pending activation is woken by its worker; timed transitions are woken
-    /// by the scheduled repaint deadline.
+    /// Timed transitions are woken by the scheduled repaint deadline.
     pub(crate) fn needs_tick(&self) -> bool {
-        self.session.as_ref().is_some_and(|session| {
-            session.pending_activation.is_some()
-                || session.next_step_at.is_some()
-                || session.cleanup_at.is_some()
-        })
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.next_step_at.is_some() || session.cleanup_at.is_some())
     }
 
     pub(crate) fn begin_preparing(&mut self) -> Result<(), SequencePlaybackError> {
@@ -301,6 +207,8 @@ impl SequencePlaybackController {
                     | SequencePlaybackStatus::Ready
                     | SequencePlaybackStatus::Running
                     | SequencePlaybackStatus::AwaitAdvance
+                    | SequencePlaybackStatus::AwaitTarget
+                    | SequencePlaybackStatus::AwaitPaste
             )
         {
             return Err(SequencePlaybackError::Busy);
@@ -362,18 +270,26 @@ impl SequencePlaybackController {
             last_paste_at: None,
             next_step_at: None,
             cleanup_at: None,
-            pending_activation: None,
+            target_wait_deadline: None,
         });
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.run.mode() == PlaybackMode::PasteToAdvance)
+        {
+            self.status = SequencePlaybackStatus::AwaitPaste;
+            return Ok(());
+        }
         self.status = SequencePlaybackStatus::Running;
-        if let Err(error) = self.paste_next_step(platform, true) {
+        if let Err(error) = self.paste_next_step(platform) {
             self.fail(error, platform.now());
             return Err(error);
         }
         Ok(())
     }
 
-    /// Manually advance only from the explicit AwaitAdvance state. Launcher
-    /// foreground may be restored to the captured target for this user action.
+    /// Manual advancement captures the current foreground for this step. It
+    /// never redirects focus to an earlier destination.
     pub(crate) fn next(
         &mut self,
         platform: &mut impl SequencePlaybackPlatform,
@@ -392,7 +308,7 @@ impl SequencePlaybackController {
         }
         session.next_step_at = None;
         self.status = SequencePlaybackStatus::Running;
-        if let Err(error) = self.paste_next_step(platform, true) {
+        if let Err(error) = self.paste_next_step(platform) {
             self.fail(error, platform.now());
             return Err(error);
         }
@@ -406,16 +322,16 @@ impl SequencePlaybackController {
                 self.prepared = None;
                 self.status = SequencePlaybackStatus::Cancelled;
             }
-            SequencePlaybackStatus::Running | SequencePlaybackStatus::AwaitAdvance => {
+            SequencePlaybackStatus::Running
+            | SequencePlaybackStatus::AwaitAdvance
+            | SequencePlaybackStatus::AwaitTarget
+            | SequencePlaybackStatus::AwaitPaste => {
                 self.generation = self.generation.wrapping_add(1);
                 if let Some(session) = self.session.as_mut() {
                     session.next_step_at = None;
-                    if let Some(activation) = session.pending_activation.as_ref() {
-                        activation.cancel();
-                    }
                     if session.last_clipboard_sequence.is_some() {
                         session.cleanup_at = Some(Self::safe_cleanup_deadline(session, now));
-                    } else if session.pending_activation.is_none() {
+                    } else {
                         self.session = None;
                     }
                 }
@@ -435,43 +351,19 @@ impl SequencePlaybackController {
         now: Instant,
     ) -> Option<Duration> {
         let now = now.max(platform.now());
-        let activation_poll = self.session.as_mut().and_then(|session| {
-            session
-                .pending_activation
-                .as_mut()
-                .map(|job| (session.generation, job.poll()))
-        });
-        if let Some((generation, ActivationPoll::Complete(result))) = activation_poll {
-            if let Some(session) = self.session.as_mut() {
-                session.pending_activation = None;
-            }
-            if generation == self.generation && self.status == SequencePlaybackStatus::Running {
-                match result {
-                    Ok(()) => {
-                        if let Err(error) = self.paste_next_step(platform, false) {
-                            self.fail(error, platform.now());
-                        }
-                    }
-                    Err(error) => self.fail(error, platform.now()),
-                }
-            }
-        }
-
-        if self.status == SequencePlaybackStatus::Running
-            && self
-                .session
-                .as_ref()
-                .is_some_and(|session| session.pending_activation.is_none())
-            && self
-                .session
-                .as_ref()
-                .and_then(|session| session.next_step_at)
-                .is_some_and(|deadline| deadline <= now)
+        if matches!(
+            self.status,
+            SequencePlaybackStatus::Running | SequencePlaybackStatus::AwaitTarget
+        ) && self
+            .session
+            .as_ref()
+            .and_then(|session| session.next_step_at)
+            .is_some_and(|deadline| deadline <= now)
         {
             if let Some(session) = self.session.as_mut() {
                 session.next_step_at = None;
             }
-            if let Err(error) = self.paste_next_step(platform, false) {
+            if let Err(error) = self.paste_next_step(platform) {
                 self.fail(error, platform.now());
             }
         }
@@ -497,9 +389,7 @@ impl SequencePlaybackController {
         }
         if self.status == SequencePlaybackStatus::Cancelled
             && self.session.as_ref().is_some_and(|session| {
-                session.pending_activation.is_none()
-                    && session.last_clipboard_sequence.is_none()
-                    && session.cleanup_at.is_none()
+                session.last_clipboard_sequence.is_none() && session.cleanup_at.is_none()
             })
         {
             self.session = None;
@@ -519,23 +409,12 @@ impl SequencePlaybackController {
     }
 
     /// Stop future steps and extract the one pending conditional restore for
-    /// shutdown. Pending activation is cancelled and joined here; the GUI then
-    /// joins the short-lived conditional clipboard cleanup worker.
+    /// shutdown. The GUI joins the short-lived conditional cleanup worker.
     pub(crate) fn take_shutdown_restore_plan(
         &mut self,
         now: Instant,
     ) -> Option<ClipboardRestorePlan> {
         self.cancel(now);
-        if let Some(activation) = self
-            .session
-            .as_mut()
-            .and_then(|session| session.pending_activation.as_mut())
-        {
-            activation.cancel_and_join();
-            if let Some(session) = self.session.as_mut() {
-                session.pending_activation = None;
-            }
-        }
         let session = self.session.take()?;
         let expected_sequence = session.last_clipboard_sequence?;
         Some(ClipboardRestorePlan {
@@ -550,9 +429,42 @@ impl SequencePlaybackController {
     fn paste_next_step(
         &mut self,
         platform: &mut impl SequencePlaybackPlatform,
-        allow_launcher_restore: bool,
     ) -> Result<(), SequencePlaybackError> {
-        let (target, expected_sequence, rollback_text, text) = {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(SequencePlaybackError::InvalidState)?;
+        if session.generation != self.generation {
+            return Err(SequencePlaybackError::InvalidState);
+        }
+        if session
+            .target_wait_deadline
+            .is_some_and(|deadline| platform.now() >= deadline)
+        {
+            return Err(SequencePlaybackError::FocusChanged);
+        }
+        let target = match platform.current_target() {
+            Ok(target) => target,
+            Err(SequencePlaybackError::FocusChanged) => {
+                let now = platform.now();
+                let session = self
+                    .session
+                    .as_mut()
+                    .ok_or(SequencePlaybackError::InvalidState)?;
+                let deadline = *session
+                    .target_wait_deadline
+                    .get_or_insert(now + TARGET_WAIT_LIMIT);
+                if now >= deadline {
+                    return Err(SequencePlaybackError::FocusChanged);
+                }
+                session.next_step_at = Some((now + TARGET_RETRY_INTERVAL).min(deadline));
+                self.status = SequencePlaybackStatus::AwaitTarget;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        Self::ensure_target(platform, &target)?;
+        let (expected_sequence, rollback_text, text) = {
             let session = self
                 .session
                 .as_ref()
@@ -563,7 +475,6 @@ impl SequencePlaybackController {
                 .ok_or(SequencePlaybackError::InvalidState)?
                 .to_owned();
             (
-                session.run.target().clone(),
                 session
                     .last_clipboard_sequence
                     .unwrap_or(session.original_clipboard.sequence_number),
@@ -575,9 +486,6 @@ impl SequencePlaybackController {
             )
         };
 
-        if !self.ensure_target(platform, &target, allow_launcher_restore)? {
-            return Ok(());
-        }
         let published_sequence =
             match platform.publish_text(expected_sequence, rollback_text.as_deref(), &text) {
                 Ok(sequence) => sequence,
@@ -596,17 +504,13 @@ impl SequencePlaybackController {
             session.last_clipboard_text = Some(text);
         }
 
-        if !self.ensure_target(platform, &target, false)? {
-            return Err(SequencePlaybackError::ActivationRejected);
-        }
+        Self::ensure_target(platform, &target)?;
         if !platform.clipboard_sequence_matches(published_sequence) {
             return Err(SequencePlaybackError::ClipboardChanged);
         }
         // Recheck focus immediately before input so a launcher or unrelated
         // foreground transition between clipboard publication and Ctrl+V fails.
-        if !self.ensure_target(platform, &target, false)? {
-            return Err(SequencePlaybackError::ActivationRejected);
-        }
+        Self::ensure_target(platform, &target)?;
         platform.paste_chord()?;
         let pasted_at = platform.now();
 
@@ -614,6 +518,7 @@ impl SequencePlaybackController {
             .session
             .as_mut()
             .ok_or(SequencePlaybackError::InvalidState)?;
+        session.target_wait_deadline = None;
         session.next_step += 1;
         session.last_paste_at = Some(pasted_at);
         if session.next_step >= session.run.step_count() {
@@ -626,40 +531,23 @@ impl SequencePlaybackController {
             self.status = match session.run.mode() {
                 PlaybackMode::Automatic => SequencePlaybackStatus::Running,
                 PlaybackMode::ManualAdvance => SequencePlaybackStatus::AwaitAdvance,
+                PlaybackMode::PasteToAdvance => SequencePlaybackStatus::AwaitPaste,
             };
         }
         Ok(())
     }
 
     fn ensure_target(
-        &mut self,
         platform: &mut impl SequencePlaybackPlatform,
         target: &SequenceTarget,
-        allow_launcher_restore: bool,
-    ) -> Result<bool, SequencePlaybackError> {
+    ) -> Result<(), SequencePlaybackError> {
         match platform.observe_target(target) {
             TargetObservation::Target {
                 password_control: true,
             } => Err(SequencePlaybackError::PasswordField),
             TargetObservation::Target {
                 password_control: false,
-            } => Ok(true),
-            TargetObservation::Launcher if allow_launcher_restore => {
-                let mut activation = platform.activate_target(target)?;
-                match activation.poll() {
-                    ActivationPoll::Complete(Ok(())) => self.ensure_target(platform, target, false),
-                    ActivationPoll::Complete(Err(error)) => Err(error),
-                    ActivationPoll::Pending => {
-                        let session = self
-                            .session
-                            .as_mut()
-                            .ok_or(SequencePlaybackError::InvalidState)?;
-                        session.pending_activation = Some(activation);
-                        self.status = SequencePlaybackStatus::Running;
-                        Ok(false)
-                    }
-                }
-            }
+            } => Ok(()),
             TargetObservation::Invalid => Err(SequencePlaybackError::InvalidTarget),
             TargetObservation::Launcher
             | TargetObservation::Other
@@ -672,12 +560,9 @@ impl SequencePlaybackController {
         let mut drop_session = false;
         if let Some(session) = self.session.as_mut() {
             session.next_step_at = None;
-            if let Some(activation) = session.pending_activation.as_ref() {
-                activation.cancel();
-            }
             if session.last_clipboard_sequence.is_some() {
                 session.cleanup_at = Some(Self::safe_cleanup_deadline(session, now));
-            } else if session.pending_activation.is_none() {
+            } else {
                 drop_session = true;
             }
         }
@@ -706,16 +591,7 @@ impl SequencePlaybackController {
             self.status =
                 SequencePlaybackStatus::Failed(SequencePlaybackError::ClipboardRestoreFailed);
         }
-        let mut drop_session = false;
-        if let Some(session) = self.session.as_mut() {
-            session.last_clipboard_sequence = None;
-            session.last_clipboard_text = None;
-            session.cleanup_at = None;
-            drop_session = session.pending_activation.is_none();
-        }
-        if drop_session {
-            self.session = None;
-        }
+        self.session = None;
     }
 }
 
@@ -741,7 +617,7 @@ impl std::fmt::Debug for ClipboardRestorePlan {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActivationJob, ClipboardRestoreOutcome, ClipboardSnapshot, ClipboardWriteFailure,
+        ClipboardRestoreOutcome, ClipboardSnapshot, ClipboardWriteFailure,
         SequencePlaybackController, SequencePlaybackError, SequencePlaybackPlatform,
         SequencePlaybackStatus, TargetObservation,
     };
@@ -752,14 +628,12 @@ mod tests {
     };
     use crate::plugins::snippets::{SnippetEntry, SnippetFieldDefinition};
     use chrono::DateTime;
-    use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::{Duration, Instant};
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Event {
         Capture,
         Observe,
-        Activate,
         Publish,
         CheckSequence,
         Paste,
@@ -772,16 +646,16 @@ mod tests {
         sequence: u32,
         clipboard: Option<String>,
         target: TargetObservation,
-        activate_succeeds: bool,
         capture_error: Option<SequencePlaybackError>,
         write_error: Option<SequencePlaybackError>,
         rollback_succeeds: bool,
         paste_error: Option<SequencePlaybackError>,
-        activation_delay: Duration,
         publish_delay: Duration,
         paste_delay: Duration,
-        activation_gate: Option<Receiver<()>>,
-        activation_finished: Option<Sender<()>>,
+        foreground: SequenceTarget,
+        switch_after_publication: Option<SequenceTarget>,
+        switch_on_final_check: Option<SequenceTarget>,
+        pasted_targets: Vec<isize>,
         events: Vec<Event>,
     }
 
@@ -794,16 +668,16 @@ mod tests {
                 target: TargetObservation::Target {
                     password_control: false,
                 },
-                activate_succeeds: true,
                 capture_error: None,
                 write_error: None,
                 rollback_succeeds: true,
                 paste_error: None,
-                activation_delay: Duration::ZERO,
                 publish_delay: Duration::ZERO,
                 paste_delay: Duration::ZERO,
-                activation_gate: None,
-                activation_finished: None,
+                foreground: target(),
+                switch_after_publication: None,
+                switch_on_final_check: None,
+                pasted_targets: Vec::new(),
                 events: Vec::new(),
             }
         }
@@ -852,47 +726,26 @@ mod tests {
             ))
         }
 
-        fn observe_target(&mut self, _: &SequenceTarget) -> TargetObservation {
+        fn observe_target(&mut self, expected: &SequenceTarget) -> TargetObservation {
             self.events.push(Event::Observe);
-            self.target
+            if expected.hwnd() != self.foreground.hwnd()
+                || expected.process_id() != self.foreground.process_id()
+                || expected.thread_id() != self.foreground.thread_id()
+            {
+                TargetObservation::Other
+            } else {
+                self.target
+            }
         }
 
-        fn activate_target(
-            &mut self,
-            _: &SequenceTarget,
-        ) -> Result<ActivationJob, SequencePlaybackError> {
-            self.events.push(Event::Activate);
-            if !self.activate_succeeds {
-                return Ok(ActivationJob::completed(Err(
-                    SequencePlaybackError::ActivationRejected,
-                )));
+        fn current_target(&mut self) -> Result<SequenceTarget, SequencePlaybackError> {
+            match self.target {
+                TargetObservation::Target { .. } => Ok(self.foreground.clone()),
+                TargetObservation::Invalid => Err(SequencePlaybackError::InvalidTarget),
+                TargetObservation::Launcher
+                | TargetObservation::Other
+                | TargetObservation::Unavailable => Err(SequencePlaybackError::FocusChanged),
             }
-            if let Some(activation_gate) = self.activation_gate.take() {
-                let finished = self
-                    .activation_finished
-                    .take()
-                    .expect("test activation completion sender is paired with its gate");
-                return ActivationJob::spawn(
-                    move |cancelled| {
-                        activation_gate
-                            .recv()
-                            .map_err(|_| SequencePlaybackError::ActivationRejected)?;
-                        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                            Err(SequencePlaybackError::ActivationRejected)
-                        } else {
-                            Ok(())
-                        }
-                    },
-                    move || {
-                        let _ = finished.send(());
-                    },
-                );
-            }
-            self.advance_by(self.activation_delay);
-            self.target = TargetObservation::Target {
-                password_control: false,
-            };
-            Ok(ActivationJob::completed(Ok(())))
         }
 
         fn publish_text(
@@ -922,11 +775,17 @@ mod tests {
             }
             self.sequence += 1;
             self.clipboard = Some(text.to_owned());
+            if let Some(target) = self.switch_after_publication.take() {
+                self.foreground = target;
+            }
             Ok(self.sequence)
         }
 
         fn clipboard_sequence_matches(&mut self, expected_sequence: u32) -> bool {
             self.events.push(Event::CheckSequence);
+            if let Some(target) = self.switch_on_final_check.take() {
+                self.foreground = target;
+            }
             self.sequence == expected_sequence
         }
 
@@ -947,6 +806,7 @@ mod tests {
 
         fn paste_chord(&mut self) -> Result<(), SequencePlaybackError> {
             self.events.push(Event::Paste);
+            self.pasted_targets.push(self.foreground.hwnd());
             self.advance_by(self.paste_delay);
             self.paste_error.map_or(Ok(()), Err)
         }
@@ -1131,6 +991,8 @@ mod tests {
             );
 
             for (step_index, elapsed_ms) in [(1usize, 275u64), (2, 550), (3, 825)] {
+                // The title/template context stays frozen while destinations change.
+                platform.foreground = other_target(10 + step_index as isize);
                 let before_deadline = start + Duration::from_millis(elapsed_ms - 1);
                 let deadline = start + Duration::from_millis(elapsed_ms);
                 if mode == PlaybackMode::ManualAdvance {
@@ -1274,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn step_delays_start_after_slow_activation_publication_and_input_complete() {
+    fn step_delays_start_after_publication_and_input_complete() {
         let start = Instant::now();
         let mut controller = ready_controller(prepared_run(
             PlaybackMode::Automatic,
@@ -1282,29 +1144,27 @@ mod tests {
             &["first", "second"],
         ));
         let mut platform = FakePlatform::at(start);
-        platform.target = TargetObservation::Launcher;
-        platform.activation_delay = Duration::from_millis(70);
         platform.publish_delay = Duration::from_millis(50);
         platform.paste_delay = Duration::from_millis(70);
 
         controller.start(&mut platform).unwrap();
-        assert_eq!(platform.now(), start + Duration::from_millis(190));
+        assert_eq!(platform.now(), start + Duration::from_millis(120));
         assert_eq!(platform.paste_count(), 1);
         assert_eq!(
             controller.next_wake_after(start + Duration::from_millis(180)),
-            Some(Duration::from_millis(190))
+            Some(Duration::from_millis(120))
         );
 
         tick(
             &mut controller,
             &mut platform,
-            start + Duration::from_millis(369),
+            start + Duration::from_millis(299),
         );
         assert_eq!(platform.paste_count(), 1);
         tick(
             &mut controller,
             &mut platform,
-            start + Duration::from_millis(370),
+            start + Duration::from_millis(300),
         );
         assert_eq!(platform.paste_count(), 2);
         assert_eq!(
@@ -1314,13 +1174,13 @@ mod tests {
         tick(
             &mut controller,
             &mut platform,
-            start + Duration::from_millis(670),
+            start + Duration::from_millis(600),
         );
         assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
     }
 
     #[test]
-    fn manual_next_is_explicit_and_restores_the_target_only_from_launcher() {
+    fn manual_next_waits_for_current_target_without_restoring_launcher_origin() {
         let start = Instant::now();
         let mut controller = ready_controller(prepared_run(
             PlaybackMode::ManualAdvance,
@@ -1330,61 +1190,47 @@ mod tests {
         let mut platform = FakePlatform::at(start);
         platform.target = TargetObservation::Launcher;
         controller.start(&mut platform).unwrap();
+        assert_eq!(controller.status(), SequencePlaybackStatus::AwaitTarget);
+        assert_eq!(controller.current_step_number(), Some((1, 2)));
+        assert_eq!(platform.publication_count(), 0);
+        platform.target = TargetObservation::Target {
+            password_control: false,
+        };
+        tick(
+            &mut controller,
+            &mut platform,
+            start + Duration::from_millis(100),
+        );
         assert_eq!(controller.status(), SequencePlaybackStatus::AwaitAdvance);
         assert_eq!(platform.paste_count(), 1);
-        assert_eq!(
-            platform
-                .events
-                .iter()
-                .filter(|event| **event == Event::Activate)
-                .count(),
-            1
-        );
-
         assert_eq!(
             next(
                 &mut controller,
                 &mut platform,
-                start + Duration::from_millis(179)
+                start + Duration::from_millis(279)
             ),
             Err(SequencePlaybackError::TooSoon)
         );
-        assert_eq!(platform.paste_count(), 1);
-        assert_eq!(platform.publication_count(), 1);
-        assert_eq!(
-            tick(
-                &mut controller,
-                &mut platform,
-                start + Duration::from_millis(180)
-            ),
-            None
-        );
-        assert_eq!(platform.paste_count(), 1);
         platform.target = TargetObservation::Launcher;
         next(
             &mut controller,
             &mut platform,
-            start + Duration::from_millis(180),
+            start + Duration::from_millis(280),
         )
         .unwrap();
+        assert_eq!(controller.status(), SequencePlaybackStatus::AwaitTarget);
+        assert_eq!(platform.paste_count(), 1);
+        platform.foreground = other_target(11);
+        platform.target = TargetObservation::Target {
+            password_control: false,
+        };
+        tick(
+            &mut controller,
+            &mut platform,
+            start + Duration::from_millis(380),
+        );
         assert_eq!(controller.status(), SequencePlaybackStatus::Completed);
-        assert_eq!(platform.paste_count(), 2);
-        assert_eq!(
-            platform
-                .events
-                .iter()
-                .filter(|event| **event == Event::Activate)
-                .count(),
-            2
-        );
-        assert_eq!(
-            next(
-                &mut controller,
-                &mut platform,
-                start + Duration::from_secs(3)
-            ),
-            Err(SequencePlaybackError::InvalidState)
-        );
+        assert_eq!(platform.pasted_targets, [10, 11]);
     }
 
     #[test]
@@ -1422,49 +1268,46 @@ mod tests {
     }
 
     #[test]
-    fn stolen_focus_password_controls_and_reused_target_identity_refuse_paste() {
+    fn password_unknown_controls_and_reused_target_identity_refuse_paste() {
         let start = Instant::now();
-        let mut password = ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["secret"]));
-        let mut password_platform = FakePlatform::at(start);
-        password_platform.target = TargetObservation::Target {
-            password_control: true,
-        };
-        assert_eq!(
-            password.start(&mut password_platform),
-            Err(SequencePlaybackError::PasswordField)
-        );
-        assert_eq!(password_platform.publication_count(), 0);
-        assert_eq!(password_platform.paste_count(), 0);
-
-        let mut changed_focus =
-            ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["one", "two"]));
-        let mut focus_platform = FakePlatform::at(start);
-        changed_focus.start(&mut focus_platform).unwrap();
-        focus_platform.target = TargetObservation::Other;
-        assert_eq!(
-            tick(
-                &mut changed_focus,
-                &mut focus_platform,
-                start + Duration::from_millis(180)
+        for (observation, error) in [
+            (
+                TargetObservation::Target {
+                    password_control: true,
+                },
+                SequencePlaybackError::PasswordField,
             ),
-            None
+            (
+                TargetObservation::Invalid,
+                SequencePlaybackError::InvalidTarget,
+            ),
+        ] {
+            let mut controller =
+                ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["secret"]));
+            let mut platform = FakePlatform::at(start);
+            platform.target = observation;
+            assert_eq!(controller.start(&mut platform), Err(error));
+            assert_eq!(platform.publication_count(), 0);
+            assert_eq!(platform.paste_count(), 0);
+        }
+        let mut controller =
+            ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["secret"]));
+        let mut platform = FakePlatform::at(start);
+        platform.target = TargetObservation::Unavailable;
+        controller.start(&mut platform).unwrap();
+        assert_eq!(controller.status(), SequencePlaybackStatus::AwaitTarget);
+        tick(
+            &mut controller,
+            &mut platform,
+            start + Duration::from_secs(30),
         );
         assert_eq!(
-            changed_focus.status(),
+            controller.status(),
             SequencePlaybackStatus::Failed(SequencePlaybackError::FocusChanged)
         );
-        assert_eq!(focus_platform.paste_count(), 1);
-        assert_eq!(focus_platform.publication_count(), 1);
-
-        let mut reused =
-            ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["do not paste"]));
-        let mut reused_platform = FakePlatform::at(start);
-        reused_platform.target = TargetObservation::Invalid;
-        assert_eq!(
-            reused.start(&mut reused_platform),
-            Err(SequencePlaybackError::InvalidTarget)
-        );
-        assert_eq!(reused_platform.publication_count(), 0);
+        assert_eq!(platform.publication_count(), 0);
+        assert_eq!(platform.paste_count(), 0);
+        assert!(!controller.needs_tick());
     }
 
     #[test]
@@ -1617,81 +1460,145 @@ mod tests {
         controller.begin_preparing().unwrap();
     }
 
-    #[test]
-    fn cancelled_pending_activation_is_reaped_without_late_publication_or_input() {
-        let start = Instant::now();
-        let mut controller = ready_controller(prepared_run(
-            PlaybackMode::Automatic,
-            0,
-            &["must not paste"],
-        ));
-        let mut platform = FakePlatform::at(start);
-        platform.target = TargetObservation::Launcher;
-        let (release, activation_gate) = mpsc::channel();
-        let (activation_finished, finished) = mpsc::channel();
-        platform.activation_gate = Some(activation_gate);
-        platform.activation_finished = Some(activation_finished);
-
-        controller.start(&mut platform).unwrap();
-        assert_eq!(controller.status(), SequencePlaybackStatus::Running);
-        assert!(controller.needs_tick());
-        assert_eq!(platform.publication_count(), 0);
-        assert_eq!(platform.paste_count(), 0);
-        assert_eq!(
-            controller.begin_preparing(),
-            Err(SequencePlaybackError::Busy)
-        );
-
-        controller.cancel(start + Duration::from_millis(1));
-        assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
-        release.send(()).unwrap();
-        finished.recv_timeout(Duration::from_secs(2)).unwrap();
-        tick(
-            &mut controller,
-            &mut platform,
-            start + Duration::from_millis(2),
-        );
-        assert_eq!(platform.publication_count(), 0);
-        assert_eq!(platform.paste_count(), 0);
-        assert!(!controller.needs_tick());
-        controller.begin_preparing().unwrap();
+    fn other_target(hwnd: isize) -> SequenceTarget {
+        SequenceTarget::from_external_window(
+            ExternalForegroundWindow {
+                hwnd,
+                process_id: 21,
+                thread_id: 31,
+                title: None,
+            },
+            999,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn completed_pending_activation_revalidates_before_publication_and_input() {
+    fn current_target_can_change_a_b_a_between_automatic_and_manual_steps() {
+        for mode in [PlaybackMode::Automatic, PlaybackMode::ManualAdvance] {
+            let start = Instant::now();
+            let mut controller = ready_controller(prepared_run(mode, 0, &["one", "two", "three"]));
+            let mut platform = FakePlatform::at(start);
+            controller.start(&mut platform).unwrap();
+            platform.foreground = other_target(11);
+            if mode == PlaybackMode::Automatic {
+                tick(
+                    &mut controller,
+                    &mut platform,
+                    start + Duration::from_millis(180),
+                );
+            } else {
+                next(
+                    &mut controller,
+                    &mut platform,
+                    start + Duration::from_millis(180),
+                )
+                .unwrap();
+            }
+            platform.foreground = target();
+            if mode == PlaybackMode::Automatic {
+                tick(
+                    &mut controller,
+                    &mut platform,
+                    start + Duration::from_millis(360),
+                );
+            } else {
+                next(
+                    &mut controller,
+                    &mut platform,
+                    start + Duration::from_millis(360),
+                )
+                .unwrap();
+            }
+            assert_eq!(platform.pasted_targets, [10, 11, 10]);
+            assert_eq!(platform.clipboard.as_deref(), Some("three"));
+            assert_eq!(controller.status(), SequencePlaybackStatus::Completed);
+        }
+    }
+
+    #[test]
+    fn step_local_target_identity_is_rechecked_after_publish_and_immediately_before_input() {
+        for before_final_check in [false, true] {
+            let start = Instant::now();
+            let mut controller =
+                ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["do not paste"]));
+            let mut platform = FakePlatform::at(start);
+            if before_final_check {
+                platform.switch_on_final_check = Some(other_target(11));
+            } else {
+                platform.switch_after_publication = Some(other_target(11));
+            }
+            assert_eq!(
+                controller.start(&mut platform),
+                Err(SequencePlaybackError::FocusChanged)
+            );
+            assert_eq!(platform.publication_count(), 1);
+            assert_eq!(platform.paste_count(), 0);
+            assert_eq!(controller.current_step_number(), Some((1, 1)));
+            tick(
+                &mut controller,
+                &mut platform,
+                start + Duration::from_millis(180),
+            );
+            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+        }
+    }
+
+    #[test]
+    fn cancelling_target_wait_invalidates_generation_and_prevents_late_paste() {
         let start = Instant::now();
-        let mut controller = ready_controller(prepared_run(
-            PlaybackMode::Automatic,
-            0,
-            &["activated destination"],
-        ));
+        let mut controller = ready_controller(prepared_run(PlaybackMode::Automatic, 0, &["never"]));
+        let generation = controller.generation;
         let mut platform = FakePlatform::at(start);
         platform.target = TargetObservation::Launcher;
-        let (release, activation_gate) = mpsc::channel();
-        let (activation_finished, finished) = mpsc::channel();
-        platform.activation_gate = Some(activation_gate);
-        platform.activation_finished = Some(activation_finished);
-
         controller.start(&mut platform).unwrap();
-        assert_eq!(platform.publication_count(), 0);
-        assert!(controller.needs_tick());
-
-        release.send(()).unwrap();
-        finished.recv_timeout(Duration::from_secs(2)).unwrap();
+        controller.cancel(start);
+        assert_ne!(controller.generation, generation);
         platform.target = TargetObservation::Target {
             password_control: false,
         };
         tick(
             &mut controller,
             &mut platform,
-            start + Duration::from_millis(1),
+            start + Duration::from_millis(100),
         );
-
-        assert_eq!(controller.status(), SequencePlaybackStatus::Completed);
-        assert_eq!(platform.clipboard.as_deref(), Some("activated destination"));
-        assert_eq!(platform.publication_count(), 1);
+        assert_eq!(platform.paste_count(), 0);
+        assert_eq!(platform.publication_count(), 0);
+        assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
+        assert!(!controller.needs_tick());
+        controller.begin_preparing().unwrap();
+        controller
+            .set_ready(prepared_run(PlaybackMode::Automatic, 0, &["new run"]))
+            .unwrap();
+        controller.start(&mut platform).unwrap();
         assert_eq!(platform.paste_count(), 1);
-        assert!(controller.needs_tick());
+        assert_eq!(platform.clipboard.as_deref(), Some("new run"));
+    }
+
+    #[test]
+    fn paste_to_advance_start_only_arms_without_publication_or_input() {
+        let start = Instant::now();
+        let mut controller = ready_controller(prepared_run(
+            PlaybackMode::PasteToAdvance,
+            0,
+            &["one", "two"],
+        ));
+        let mut platform = FakePlatform::at(start);
+        platform.target = TargetObservation::Launcher;
+        controller.start(&mut platform).unwrap();
+        assert_eq!(controller.status(), SequencePlaybackStatus::AwaitPaste);
+        assert_eq!(controller.current_step_number(), Some((1, 2)));
+        assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+        assert_eq!(platform.publication_count(), 0);
+        assert_eq!(platform.paste_count(), 0);
+        assert!(!controller.needs_tick());
+        assert_eq!(
+            next(&mut controller, &mut platform, start),
+            Err(SequencePlaybackError::InvalidState)
+        );
+        controller.cancel(start);
+        assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
+        assert!(controller.take_shutdown_restore_plan(start).is_none());
     }
 }
 
@@ -1706,7 +1613,7 @@ pub(crate) struct NativeSequencePlaybackPlatform;
 
 #[cfg(not(windows))]
 impl NativeSequencePlaybackPlatform {
-    pub(crate) fn new(_: Option<usize>, _: Option<egui::Context>) -> Self {
+    pub(crate) fn new(_: Option<usize>) -> Self {
         Self
     }
 
@@ -1732,11 +1639,8 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
         TargetObservation::Unavailable
     }
 
-    fn activate_target(
-        &mut self,
-        _: &SequenceTarget,
-    ) -> Result<ActivationJob, SequencePlaybackError> {
-        Err(SequencePlaybackError::ActivationRejected)
+    fn current_target(&mut self) -> Result<SequenceTarget, SequencePlaybackError> {
+        Err(SequencePlaybackError::FocusChanged)
     }
 
     fn publish_text(

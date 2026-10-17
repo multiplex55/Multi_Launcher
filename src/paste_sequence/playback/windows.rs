@@ -1,7 +1,6 @@
 use super::{
-    ActivationJob, ClipboardRestoreOutcome, ClipboardRestorePlan, ClipboardSnapshot,
-    ClipboardWriteFailure, SequencePlaybackError, SequencePlaybackPlatform, SequenceTarget,
-    TargetObservation,
+    ClipboardRestoreOutcome, ClipboardRestorePlan, ClipboardSnapshot, ClipboardWriteFailure,
+    SequencePlaybackError, SequencePlaybackPlatform, SequenceTarget, TargetObservation,
 };
 use crate::mkmacro::MkKey;
 use crate::mkmacro::input::{LiveInputOptIn, Win32InputBackend};
@@ -28,18 +27,13 @@ const MAX_PRESERVED_TEXT_BYTES: usize = 16 * 1024 * 1024;
 pub(crate) struct NativeSequencePlaybackPlatform {
     clipboard_owner: Option<HWND>,
     input: Win32InputBackend,
-    repaint_context: Option<eframe::egui::Context>,
 }
 
 impl NativeSequencePlaybackPlatform {
-    pub(crate) fn new(
-        clipboard_owner_hwnd: Option<usize>,
-        repaint_context: Option<eframe::egui::Context>,
-    ) -> Self {
+    pub(crate) fn new(clipboard_owner_hwnd: Option<usize>) -> Self {
         Self {
             clipboard_owner: clipboard_owner_hwnd.map(|hwnd| HWND(hwnd as *mut std::ffi::c_void)),
             input: Win32InputBackend::system(LiveInputOptIn::production()),
-            repaint_context,
         }
     }
 
@@ -56,7 +50,7 @@ impl NativeSequencePlaybackPlatform {
         } = plan;
         let remaining = due.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            let mut platform = Self::new(clipboard_owner_hwnd, None);
+            let mut platform = Self::new(clipboard_owner_hwnd);
             return match platform.restore_clipboard_if_owned(expected_sequence, &original) {
                 ClipboardRestoreOutcome::Restored | ClipboardRestoreOutcome::OwnershipLost => {
                     Ok(())
@@ -71,7 +65,7 @@ impl NativeSequencePlaybackPlatform {
             .name("paste-sequence-clipboard-cleanup".into())
             .spawn(move || {
                 std::thread::sleep(remaining);
-                let mut platform = Self::new(clipboard_owner_hwnd, None);
+                let mut platform = Self::new(clipboard_owner_hwnd);
                 platform.restore_clipboard_if_owned(expected_sequence, &original)
             })
             .map_err(|_| SequencePlaybackError::ClipboardRestoreFailed)?;
@@ -170,43 +164,36 @@ impl SequencePlaybackPlatform for NativeSequencePlaybackPlatform {
             && foreground_process == target.process_id()
             && foreground_thread == target.thread_id()
         {
-            return TargetObservation::Target {
-                password_control: focused_control_is_password(foreground_thread),
+            return match focused_control_is_password(foreground_thread) {
+                Some(password_control) => TargetObservation::Target { password_control },
+                None => TargetObservation::Unavailable,
             };
         }
         TargetObservation::Other
     }
 
-    fn activate_target(
-        &mut self,
-        target: &SequenceTarget,
-    ) -> Result<ActivationJob, SequencePlaybackError> {
-        let repaint_context = self
-            .repaint_context
-            .clone()
-            .ok_or(SequencePlaybackError::ActivationRejected)?;
-        let hwnd = target.hwnd() as usize;
-        let target = target.clone();
-        ActivationJob::spawn(
-            move |cancelled| {
-                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(SequencePlaybackError::ActivationRejected);
-                }
-                if !target_identity_matches(&target) {
-                    return Err(SequencePlaybackError::InvalidTarget);
-                }
-                let result = crate::window_activation::activate_window(
-                    crate::window_activation::WindowActivationRequest::follow_window(hwnd),
-                )
-                .map_err(|_| SequencePlaybackError::ActivationRejected);
-                if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                    Err(SequencePlaybackError::ActivationRejected)
-                } else {
-                    result
-                }
+    fn current_target(&mut self) -> Result<SequenceTarget, SequencePlaybackError> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
+            return Err(SequencePlaybackError::FocusChanged);
+        }
+        let mut process_id = 0;
+        let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+        if process_id == 0 || thread_id == 0 || process_id == std::process::id() {
+            return Err(SequencePlaybackError::FocusChanged);
+        }
+        // Titles are invocation-time template inputs. Target switching must not
+        // perform another title read or change any already-rendered step.
+        SequenceTarget::from_external_window(
+            crate::active_window::ExternalForegroundWindow {
+                hwnd: hwnd.0 as isize,
+                process_id,
+                thread_id,
+                title: None,
             },
-            move || repaint_context.request_repaint(),
+            std::process::id(),
         )
+        .map_err(|_| SequencePlaybackError::InvalidTarget)
     }
 
     fn publish_text(
@@ -285,16 +272,6 @@ fn target_hwnd(target: &SequenceTarget) -> HWND {
     HWND(target.hwnd() as *mut std::ffi::c_void)
 }
 
-fn target_identity_matches(target: &SequenceTarget) -> bool {
-    let hwnd = target_hwnd(target);
-    if hwnd.0.is_null() || !unsafe { IsWindow(hwnd) }.as_bool() {
-        return false;
-    }
-    let mut process_id = 0;
-    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-    process_id == target.process_id() && thread_id == target.thread_id()
-}
-
 struct ClipboardGuard;
 
 impl ClipboardGuard {
@@ -367,7 +344,7 @@ fn write_unicode_text(text: &str) -> Result<(), ()> {
     Ok(())
 }
 
-fn focused_control_is_password(thread_id: u32) -> bool {
+fn focused_control_is_password(thread_id: u32) -> Option<bool> {
     let mut information = GUITHREADINFO {
         cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
         ..Default::default()
@@ -375,8 +352,13 @@ fn focused_control_is_password(thread_id: u32) -> bool {
     if unsafe { GetGUIThreadInfo(thread_id, &mut information) }.is_err()
         || information.hwndFocus.0.is_null()
     {
-        return false;
+        return None;
     }
-    let style = unsafe { GetWindowLongPtrW(information.hwndFocus, GWL_STYLE) } as u32;
-    style & ES_PASSWORD as u32 != 0
+    // A failed style query is unknown, never evidence of an unprotected control.
+    unsafe { SetLastError(ERROR_SUCCESS) };
+    let style = unsafe { GetWindowLongPtrW(information.hwndFocus, GWL_STYLE) };
+    if style == 0 && unsafe { GetLastError() } != ERROR_SUCCESS {
+        return None;
+    }
+    Some(style as u32 & ES_PASSWORD as u32 != 0)
 }

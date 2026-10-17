@@ -162,7 +162,10 @@ impl PasteSequenceDialog {
         match context {
             Ok(context) => {
                 self.context = Some(context);
-                self.status = Some("Destination captured before the editor opened.".into());
+                self.status = Some(
+                    "Invocation context captured; each step uses the current eligible application."
+                        .into(),
+                );
             }
             Err(error) => {
                 self.context = None;
@@ -446,17 +449,18 @@ impl PasteSequenceDialog {
     }
 
     fn editor(&mut self, ui: &mut egui::Ui, app: &mut super::LauncherApp, step_height: f32) {
-        if let Some(context) = &self.context {
-            let label = context
-                .target()
+        if let Some(origin) = self
+            .context
+            .as_ref()
+            .and_then(crate::paste_sequence::SequenceInvocationContext::origin)
+        {
+            let label = origin
                 .title()
                 .filter(|title| !title.trim().is_empty())
                 .unwrap_or("External window");
-            ui.weak(format!("Captured destination: {label}"));
+            ui.weak(format!("Template context captured from: {label}"));
         } else {
-            ui.weak(
-                "No external destination captured; close and reopen this editor from the launcher.",
-            );
+            ui.weak("No origin needed; start playback, then focus an eligible application.");
         }
         let mut name_changed = false;
         ui.horizontal(|ui| {
@@ -647,6 +651,8 @@ impl PasteSequenceDialog {
                             | crate::paste_sequence::SequencePlaybackStatus::Ready
                             | crate::paste_sequence::SequencePlaybackStatus::Running
                             | crate::paste_sequence::SequencePlaybackStatus::AwaitAdvance
+                            | crate::paste_sequence::SequencePlaybackStatus::AwaitTarget
+                            | crate::paste_sequence::SequencePlaybackStatus::AwaitPaste
                     ),
                     egui::Button::new("Cancel Run"),
                 )
@@ -776,6 +782,10 @@ impl PasteSequenceDialog {
             Status::Ready => "Ready; no text has been pasted".into(),
             Status::Running => "Running".into(),
             Status::AwaitAdvance => "Waiting for Next".into(),
+            Status::AwaitTarget => {
+                "Focus an eligible application to continue (30 second limit)".into()
+            }
+            Status::AwaitPaste => "Ready for Ctrl+V in an eligible application".into(),
             Status::Cancelled => "Cancelled".into(),
             Status::Completed => "Completed".into(),
             Status::Failed(error) => format!("Failed: {}", error.message()),
@@ -819,7 +829,10 @@ impl PasteSequenceDialog {
         self.inline_error = None;
         self.status = None;
         let Some(context) = self.context.clone() else {
-            self.inline_error = Some("No external destination was captured before the editor opened. Close and reopen it from the launcher.".into());
+            self.inline_error = Some(
+                "Invocation context is unavailable. Close and reopen this editor before running."
+                    .into(),
+            );
             return;
         };
         self.load_sources();
