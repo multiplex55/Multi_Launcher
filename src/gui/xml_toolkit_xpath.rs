@@ -942,6 +942,7 @@ mod tests {
                 request,
                 text: Arc::from(value),
             },
+            schema: Default::default(),
         }
     }
 
@@ -991,6 +992,7 @@ mod tests {
             tree: XmlTreeStatus::Ready(projection),
             detail: XmlDetailStatus::Empty,
             xpath: XmlXPathStatus::NotRun,
+            schema: Default::default(),
         };
         let mut view = XmlToolkitXPathViewState {
             revision: Some(revision),
@@ -1050,6 +1052,7 @@ mod tests {
                 request: request.clone(),
                 nodes: Arc::new(vec![queried_attribute.clone()]),
             },
+            schema: Default::default(),
         };
         let mut view = XmlToolkitXPathViewState {
             expression: request.expression.clone(),
@@ -1132,6 +1135,7 @@ mod tests {
                     value: "second".into(),
                 }]),
             },
+            schema: Default::default(),
         };
         let mut node_view = XmlToolkitXPathViewState {
             expression: node_request.expression.clone(),
@@ -1219,6 +1223,7 @@ mod tests {
                 request: request.clone(),
                 nodes: Arc::new(nodes),
             },
+            schema: Default::default(),
         };
         let mut view = XmlToolkitXPathViewState {
             expression: request.expression.clone(),

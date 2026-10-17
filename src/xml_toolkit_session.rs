@@ -7,11 +7,11 @@
 //! into their editor source.
 
 use crate::xml_toolkit_engine::{
-    MAX_XML_INPUT_BYTES, MAX_XPATH_EXPRESSION_BYTES, MAX_XPATH_NAMESPACE_BYTES, XmlDocumentId,
-    XmlEngineError, XmlFormatMode,
-    XmlNodeDetailKind, XmlNodeId, XmlNodeSnapshot, XmlTreeProjection, XmlXPathResult,
-    validate_xpath_namespaces,
+    MAX_XML_INPUT_BYTES, MAX_XML_SCHEMA_DIAGNOSTIC_BYTES, MAX_XPATH_EXPRESSION_BYTES,
+    MAX_XPATH_NAMESPACE_BYTES, XmlDocumentId, XmlEngineError, XmlFormatMode, XmlNodeDetailKind,
+    XmlNodeId, XmlNodeSnapshot, XmlTreeProjection, XmlXPathResult, validate_xpath_namespaces,
 };
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 #[cfg(any(windows, test))]
 use std::thread;
@@ -63,6 +63,39 @@ impl XmlNamespaceContextRevision {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct XmlSchemaRevision(u64);
+
+#[cfg(test)]
+impl XmlSchemaRevision {
+    pub(crate) const fn for_test(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct XmlSchemaRequestId(u64);
+
+impl XmlSchemaRequestId {
+    pub(crate) fn from_counter(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+/// A selected local schema path. It is never resolved or opened by the UI.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct XmlSchemaPath(PathBuf);
+
+impl XmlSchemaPath {
+    pub fn new(path: PathBuf) -> Self {
+        Self(path)
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum XmlDetailIntent {
     Inspect,
@@ -104,6 +137,55 @@ pub struct XmlXPathQueryRequest {
     pub namespaces: Vec<(String, String)>,
 }
 
+/// One explicit XSD validation request bound to both the parsed source and
+/// the current selected schema. The request ID distinguishes repeated runs
+/// against otherwise identical revisions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlSchemaValidationRequest {
+    pub source_revision: XmlSourceRevision,
+    pub document: XmlDocumentId,
+    pub schema_path: XmlSchemaPath,
+    pub schema_revision: XmlSchemaRevision,
+    pub request: XmlSchemaRequestId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum XmlSchemaStatus {
+    NotSelected,
+    NotRun,
+    Pending(XmlSchemaValidationRequest),
+    Valid(XmlSchemaValidationRequest),
+    SchemaViolation {
+        request: XmlSchemaValidationRequest,
+        diagnostic: crate::xml_toolkit_engine::XmlDiagnostic,
+    },
+    SchemaLoadParseResolveCompileError {
+        request: XmlSchemaValidationRequest,
+        error: XmlEngineError,
+    },
+    Unavailable {
+        request: XmlSchemaValidationRequest,
+        error: XmlEngineError,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct XmlSchemaSessionState {
+    pub selected_path: Option<XmlSchemaPath>,
+    pub revision: XmlSchemaRevision,
+    pub status: XmlSchemaStatus,
+}
+
+impl Default for XmlSchemaSessionState {
+    fn default() -> Self {
+        Self {
+            selected_path: None,
+            revision: XmlSchemaRevision(0),
+            status: XmlSchemaStatus::NotSelected,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum XmlSessionError {
     Engine(XmlEngineError),
@@ -111,6 +193,9 @@ pub enum XmlSessionError {
     StaleRevision,
     SourceNotReady,
     SelectionUnavailable,
+    SchemaNotSelected,
+    SchemaRevisionExhausted,
+    SchemaRequestExhausted,
     RevisionExhausted,
 }
 
@@ -192,6 +277,7 @@ pub struct XmlSessionSnapshot {
     pub tree: XmlTreeStatus,
     pub detail: XmlDetailStatus,
     pub xpath: XmlXPathStatus,
+    pub schema: XmlSchemaSessionState,
 }
 
 impl Default for XmlSessionSnapshot {
@@ -203,6 +289,7 @@ impl Default for XmlSessionSnapshot {
             tree: XmlTreeStatus::Empty,
             detail: XmlDetailStatus::Empty,
             xpath: XmlXPathStatus::Empty,
+            schema: XmlSchemaSessionState::default(),
         }
     }
 }
@@ -221,6 +308,8 @@ struct Mailbox {
     pending_format: Option<FormatJob>,
     pending_detail: Option<XmlNodeDetailRequest>,
     pending_xpath: Option<XmlXPathQueryRequest>,
+    pending_schema: Option<XmlSchemaValidationRequest>,
+    next_schema_request: u64,
     stopped: bool,
 }
 
@@ -276,6 +365,11 @@ trait SessionEngine: Send + 'static {
         expression: &str,
         namespaces: &[(String, String)],
     ) -> Result<XmlXPathResult, XmlEngineError>;
+    fn validate(
+        &mut self,
+        document: Self::Document,
+        selected_schema: &Path,
+    ) -> Result<(), XmlEngineError>;
     fn close(&mut self, document: Self::Document);
 }
 
@@ -324,6 +418,18 @@ impl SessionEngine for crate::xml_toolkit_engine::XmlEngineWorker {
             namespaces.to_vec(),
         )
     }
+
+    fn validate(
+        &mut self,
+        document: Self::Document,
+        selected_schema: &Path,
+    ) -> Result<(), XmlEngineError> {
+        crate::xml_toolkit_engine::XmlEngineWorker::validate_selected_schema(
+            self,
+            document,
+            selected_schema.to_path_buf(),
+        )
+    }
 }
 
 impl XmlEngineSession {
@@ -350,6 +456,8 @@ impl XmlEngineSession {
                 pending_format: None,
                 pending_detail: None,
                 pending_xpath: None,
+                pending_schema: None,
+                next_schema_request: 0,
                 stopped: false,
             }),
             wake: Condvar::new(),
@@ -407,13 +515,111 @@ impl XmlEngineSession {
             } else {
                 XmlXPathStatus::NotRun
             },
+            schema: XmlSchemaSessionState {
+                selected_path: mailbox.snapshot.schema.selected_path.clone(),
+                revision: mailbox.snapshot.schema.revision,
+                status: if mailbox.snapshot.schema.selected_path.is_some() {
+                    XmlSchemaStatus::NotRun
+                } else {
+                    XmlSchemaStatus::NotSelected
+                },
+            },
         });
         mailbox.pending_source = Some(SourceJob { revision, input });
         mailbox.pending_format = None;
         mailbox.pending_detail = None;
         mailbox.pending_xpath = None;
+        mailbox.pending_schema = None;
         self.shared.wake.notify_one();
         Ok(revision)
+    }
+
+    /// Selects a local XSD path without touching the filesystem. A new
+    /// selection immediately revokes any previous result or in-flight
+    /// publication, even when the same path is selected again.
+    pub fn select_schema_path(&self, path: PathBuf) -> Result<XmlSchemaRevision, XmlSessionError> {
+        self.set_schema_selection(Some(XmlSchemaPath::new(path)))
+    }
+
+    /// Clears the selected local XSD and revokes any result tied to it.
+    pub fn clear_schema_path(&self) -> Result<XmlSchemaRevision, XmlSessionError> {
+        self.set_schema_selection(None)
+    }
+
+    fn set_schema_selection(
+        &self,
+        selected_path: Option<XmlSchemaPath>,
+    ) -> Result<XmlSchemaRevision, XmlSessionError> {
+        let mut mailbox = lock(&self.shared.mailbox);
+        if mailbox.stopped {
+            return Err(XmlSessionError::Stopped);
+        }
+        let revision = mailbox
+            .snapshot
+            .schema
+            .revision
+            .0
+            .checked_add(1)
+            .map(XmlSchemaRevision)
+            .ok_or(XmlSessionError::SchemaRevisionExhausted)?;
+        let status = if selected_path.is_some() {
+            XmlSchemaStatus::NotRun
+        } else {
+            XmlSchemaStatus::NotSelected
+        };
+        let mut snapshot = (*mailbox.snapshot).clone();
+        snapshot.schema = XmlSchemaSessionState {
+            selected_path,
+            revision,
+            status,
+        };
+        mailbox.snapshot = Arc::new(snapshot);
+        mailbox.pending_schema = None;
+        self.shared.wake.notify_one();
+        Ok(revision)
+    }
+
+    /// Queues an explicit validation of the currently accepted XML DOM and
+    /// selected schema. No parsing, schema read, or COM call occurs here.
+    pub fn validate_selected_schema(&self) -> Result<XmlSchemaValidationRequest, XmlSessionError> {
+        let mut mailbox = lock(&self.shared.mailbox);
+        if mailbox.stopped {
+            return Err(XmlSessionError::Stopped);
+        }
+        let source_revision = mailbox
+            .snapshot
+            .revision
+            .ok_or(XmlSessionError::SourceNotReady)?;
+        if mailbox.snapshot.parse != XmlParseStatus::Ready {
+            return Err(XmlSessionError::SourceNotReady);
+        }
+        let XmlTreeStatus::Ready(projection) = &mailbox.snapshot.tree else {
+            return Err(XmlSessionError::SourceNotReady);
+        };
+        let document = projection.document;
+        let schema_path = mailbox
+            .snapshot
+            .schema
+            .selected_path
+            .clone()
+            .ok_or(XmlSessionError::SchemaNotSelected)?;
+        let request_id = mailbox.next_schema_request;
+        mailbox.next_schema_request = request_id
+            .checked_add(1)
+            .ok_or(XmlSessionError::SchemaRequestExhausted)?;
+        let request = XmlSchemaValidationRequest {
+            source_revision,
+            document,
+            schema_path,
+            schema_revision: mailbox.snapshot.schema.revision,
+            request: XmlSchemaRequestId::from_counter(request_id),
+        };
+        let mut snapshot = (*mailbox.snapshot).clone();
+        snapshot.schema.status = XmlSchemaStatus::Pending(request.clone());
+        mailbox.snapshot = Arc::new(snapshot);
+        mailbox.pending_schema = Some(request.clone());
+        self.shared.wake.notify_one();
+        Ok(request)
     }
 
     /// Requests a transformation for the current parsed source. This only
@@ -583,6 +789,7 @@ impl XmlEngineSession {
         mailbox.pending_format = None;
         mailbox.pending_detail = None;
         mailbox.pending_xpath = None;
+        mailbox.pending_schema = None;
         mailbox.snapshot = Arc::new(XmlSessionSnapshot::default());
         self.shared.wake.notify_one();
     }
@@ -617,6 +824,9 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 }
                 if let Some(request) = mailbox.pending_xpath.take() {
                     break Some(SessionAction::XPath(request));
+                }
+                if let Some(request) = mailbox.pending_schema.take() {
+                    break Some(SessionAction::Schema(request));
                 }
                 mailbox = shared
                     .wake
@@ -744,6 +954,58 @@ fn session_main<E: SessionEngine>(mut engine: E, shared: Arc<Shared>) {
                 };
                 mailbox.snapshot = Arc::new(snapshot);
             }
+            SessionAction::Schema(request) => {
+                let Some((revision, document, document_id)) = current_document else {
+                    continue;
+                };
+                if revision != request.source_revision || document_id != request.document {
+                    continue;
+                }
+                {
+                    let mailbox = lock(&shared.mailbox);
+                    if mailbox.stopped
+                        || mailbox.snapshot.revision != Some(request.source_revision)
+                        || mailbox.snapshot.schema.selected_path.as_ref()
+                            != Some(&request.schema_path)
+                        || mailbox.snapshot.schema.revision != request.schema_revision
+                        || mailbox.snapshot.schema.status
+                            != XmlSchemaStatus::Pending(request.clone())
+                    {
+                        continue;
+                    }
+                }
+                let result = engine
+                    .validate(document, request.schema_path.as_path())
+                    .map_err(bound_schema_error);
+                let mut mailbox = lock(&shared.mailbox);
+                if mailbox.stopped
+                    || mailbox.snapshot.revision != Some(request.source_revision)
+                    || mailbox.snapshot.schema.selected_path.as_ref() != Some(&request.schema_path)
+                    || mailbox.snapshot.schema.revision != request.schema_revision
+                    || mailbox.snapshot.schema.status != XmlSchemaStatus::Pending(request.clone())
+                {
+                    continue;
+                }
+                let mut snapshot = (*mailbox.snapshot).clone();
+                snapshot.schema.status = match result {
+                    Ok(()) => XmlSchemaStatus::Valid(request),
+                    Err(XmlEngineError::SchemaValidation(diagnostic)) => {
+                        XmlSchemaStatus::SchemaViolation {
+                            request,
+                            diagnostic,
+                        }
+                    }
+                    Err(
+                        error @ (XmlEngineError::UnsupportedPlatform
+                        | XmlEngineError::WorkerUnavailable
+                        | XmlEngineError::SchemaBackend(_)),
+                    ) => XmlSchemaStatus::Unavailable { request, error },
+                    Err(error) => {
+                        XmlSchemaStatus::SchemaLoadParseResolveCompileError { request, error }
+                    }
+                };
+                mailbox.snapshot = Arc::new(snapshot);
+            }
         }
     }
     if let Some((_, document, _)) = current_document.take() {
@@ -758,6 +1020,46 @@ enum SessionAction {
     Format(FormatJob),
     Detail(DetailJob),
     XPath(XmlXPathQueryRequest),
+    Schema(XmlSchemaValidationRequest),
+}
+
+fn bound_schema_error(error: XmlEngineError) -> XmlEngineError {
+    fn bound_message(message: &mut String) {
+        if message.len() <= MAX_XML_SCHEMA_DIAGNOSTIC_BYTES {
+            return;
+        }
+        const SUFFIX: &str = "… (diagnostic clipped)";
+        let mut end = MAX_XML_SCHEMA_DIAGNOSTIC_BYTES.saturating_sub(SUFFIX.len());
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.push_str(SUFFIX);
+    }
+
+    match error {
+        XmlEngineError::SchemaValidation(mut diagnostic) => {
+            bound_message(&mut diagnostic.message);
+            XmlEngineError::SchemaValidation(diagnostic)
+        }
+        XmlEngineError::SchemaLoad(mut diagnostic) => {
+            bound_message(&mut diagnostic.message);
+            XmlEngineError::SchemaLoad(diagnostic)
+        }
+        XmlEngineError::SchemaPolicy(mut message) => {
+            bound_message(&mut message);
+            XmlEngineError::SchemaPolicy(message)
+        }
+        XmlEngineError::SchemaBackend(mut message) => {
+            bound_message(&mut message);
+            XmlEngineError::SchemaBackend(message)
+        }
+        XmlEngineError::Io(mut message) => {
+            bound_message(&mut message);
+            XmlEngineError::Io(message)
+        }
+        other => other,
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -776,6 +1078,7 @@ mod tests {
     struct FakeEngine {
         parsed_sources: Arc<Mutex<Vec<String>>>,
         closed_documents: Arc<Mutex<Vec<u64>>>,
+        validated_schemas: Arc<Mutex<Vec<PathBuf>>>,
         next_document: u64,
         blocked_source: Option<String>,
         started: Option<Sender<()>>,
@@ -786,6 +1089,9 @@ mod tests {
         blocked_query_expression: Option<String>,
         query_started: Option<Sender<()>>,
         query_release: Option<Receiver<()>>,
+        blocked_schema_path: Option<PathBuf>,
+        schema_started: Option<Sender<()>>,
+        schema_release: Option<Receiver<()>>,
     }
 
     impl SessionEngine for FakeEngine {
@@ -878,6 +1184,43 @@ mod tests {
             }]))
         }
 
+        fn validate(
+            &mut self,
+            document: Self::Document,
+            selected_schema: &Path,
+        ) -> Result<(), XmlEngineError> {
+            assert!(document > 0);
+            self.validated_schemas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(selected_schema.to_path_buf());
+            if self.blocked_schema_path.as_deref() == Some(selected_schema) {
+                if let Some(started) = self.schema_started.take() {
+                    let _ = started.send(());
+                }
+                if let Some(release) = self.schema_release.take() {
+                    let _ = release.recv();
+                }
+            }
+            match selected_schema.file_name().and_then(|name| name.to_str()) {
+                Some("violation.xsd") => Err(XmlEngineError::SchemaValidation(
+                    crate::xml_toolkit_engine::XmlDiagnostic {
+                        line: Some(3),
+                        column: Some(9),
+                        message: "fake schema violation".into(),
+                    },
+                )),
+                Some("broken.xsd") => Err(XmlEngineError::SchemaLoad(
+                    crate::xml_toolkit_engine::XmlDiagnostic {
+                        line: Some(1),
+                        column: Some(1),
+                        message: "fake XSD syntax failure".into(),
+                    },
+                )),
+                _ => Ok(()),
+            }
+        }
+
         fn close(&mut self, document: Self::Document) {
             self.closed_documents
                 .lock()
@@ -914,6 +1257,7 @@ mod tests {
         FakeEngine {
             parsed_sources,
             closed_documents,
+            validated_schemas: Arc::new(Mutex::new(Vec::new())),
             next_document: 1,
             blocked_source,
             started,
@@ -924,6 +1268,9 @@ mod tests {
             blocked_query_expression: None,
             query_started: None,
             query_release: None,
+            blocked_schema_path: None,
+            schema_started: None,
+            schema_release: None,
         }
     }
 
@@ -1484,6 +1831,199 @@ mod tests {
         assert_eq!(completed.parse, XmlParseStatus::Ready);
         assert_eq!(completed.tree, parsed.tree);
         session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn m7e_schema_validation_is_explicit_revision_bound_and_preserves_other_results() {
+        let parsed_sources = Arc::new(Mutex::new(Vec::new()));
+        let closed_documents = Arc::new(Mutex::new(Vec::new()));
+        let validated_schemas = Arc::new(Mutex::new(Vec::new()));
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let mut engine = fake_engine(
+            parsed_sources,
+            Arc::clone(&closed_documents),
+            None,
+            None,
+            None,
+        );
+        engine.validated_schemas = Arc::clone(&validated_schemas);
+        engine.blocked_schema_path = Some(PathBuf::from("slow.xsd"));
+        engine.schema_started = Some(started_sender);
+        engine.schema_release = Some(release_receiver);
+        let session = XmlEngineSession::start_with_engine(engine).unwrap();
+
+        assert_eq!(
+            session.validate_selected_schema(),
+            Err(XmlSessionError::SourceNotReady)
+        );
+        let invalid_revision = session.replace_source("invalid".into()).unwrap();
+        wait_for(&session, |snapshot| {
+            snapshot.revision == Some(invalid_revision)
+                && matches!(&snapshot.parse, XmlParseStatus::Failed(_))
+        });
+        session
+            .select_schema_path(PathBuf::from("slow.xsd"))
+            .unwrap();
+        assert_eq!(
+            session.validate_selected_schema(),
+            Err(XmlSessionError::SourceNotReady)
+        );
+
+        let first_revision = session.replace_source("first valid XML".into()).unwrap();
+        let _first = wait_for(&session, |snapshot| {
+            snapshot.revision == Some(first_revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+        session.clear_schema_path().unwrap();
+        assert_eq!(
+            session.validate_selected_schema(),
+            Err(XmlSessionError::SchemaNotSelected)
+        );
+        session
+            .select_schema_path(PathBuf::from("slow.xsd"))
+            .unwrap();
+        assert!(
+            validated_schemas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "schema validation is never implicit after source parsing"
+        );
+        let old_request = session.validate_selected_schema().unwrap();
+        assert_eq!(
+            session.snapshot().schema.status,
+            XmlSchemaStatus::Pending(old_request.clone())
+        );
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the old schema validation is active on the engine owner");
+
+        let second_revision = session.replace_source("second valid XML".into()).unwrap();
+        assert_eq!(session.snapshot().schema.status, XmlSchemaStatus::NotRun);
+        assert_eq!(
+            session.validate_selected_schema(),
+            Err(XmlSessionError::SourceNotReady)
+        );
+        session
+            .select_schema_path(PathBuf::from("violation.xsd"))
+            .unwrap();
+        assert_eq!(session.snapshot().schema.status, XmlSchemaStatus::NotRun);
+        release_sender.send(()).unwrap();
+
+        let second_parsed = wait_for(&session, |snapshot| {
+            snapshot.revision == Some(second_revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+        assert_eq!(second_parsed.schema.status, XmlSchemaStatus::NotRun);
+        session
+            .format(second_revision, XmlFormatMode::Pretty)
+            .unwrap();
+        let formatted = wait_for(&session, |snapshot| {
+            matches!(&snapshot.output, XmlOutputStatus::Ready(_))
+        });
+        let query = xpath_request(&formatted, 10, "//item", Vec::new(), 0);
+        session.request_xpath(query.clone()).unwrap();
+        let second = wait_for(
+            &session,
+            |snapshot| matches!(&snapshot.xpath, XmlXPathStatus::Nodes { request, .. } if request == &query),
+        );
+        let new_request = session.validate_selected_schema().unwrap();
+        let failed = wait_for(
+            &session,
+            |snapshot| matches!(&snapshot.schema.status, XmlSchemaStatus::SchemaViolation { request, .. } if request == &new_request),
+        );
+        assert!(matches!(
+            &failed.schema.status,
+            XmlSchemaStatus::SchemaViolation { request, diagnostic }
+                if request == &new_request
+                    && diagnostic.line == Some(3)
+                    && diagnostic.column == Some(9)
+        ));
+        assert_eq!(failed.parse, second.parse);
+        assert_eq!(failed.tree, second.tree);
+        assert_eq!(failed.output, second.output);
+        assert_eq!(failed.xpath, second.xpath);
+        assert_eq!(new_request.source_revision, second_revision);
+        assert_ne!(old_request.schema_revision, new_request.schema_revision);
+        assert_eq!(
+            *validated_schemas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![PathBuf::from("slow.xsd"), PathBuf::from("violation.xsd")]
+        );
+
+        session
+            .select_schema_path(PathBuf::from("broken.xsd"))
+            .unwrap();
+        let broken = session.validate_selected_schema().unwrap();
+        let schema_error = wait_for(
+            &session,
+            |snapshot| matches!(&snapshot.schema.status, XmlSchemaStatus::SchemaLoadParseResolveCompileError { request, .. } if request == &broken),
+        );
+        assert!(matches!(
+            &schema_error.schema.status,
+            XmlSchemaStatus::SchemaLoadParseResolveCompileError {
+                error: XmlEngineError::SchemaLoad(diagnostic), ..
+            } if diagnostic.line == Some(1)
+        ));
+        assert_eq!(schema_error.parse, second.parse);
+        assert_eq!(schema_error.tree, second.tree);
+        assert_eq!(schema_error.output, second.output);
+        assert_eq!(schema_error.xpath, second.xpath);
+        session.shutdown().unwrap();
+        assert_eq!(
+            *closed_documents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn m7e_shutdown_retains_owner_until_active_schema_validation_finishes() {
+        let parsed_sources = Arc::new(Mutex::new(Vec::new()));
+        let closed_documents = Arc::new(Mutex::new(Vec::new()));
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let mut engine = fake_engine(
+            parsed_sources,
+            Arc::clone(&closed_documents),
+            None,
+            None,
+            None,
+        );
+        engine.blocked_schema_path = Some(PathBuf::from("held.xsd"));
+        engine.schema_started = Some(started_sender);
+        engine.schema_release = Some(release_receiver);
+        let session = XmlEngineSession::start_with_engine(engine).unwrap();
+        let revision = session.replace_source("valid".into()).unwrap();
+        wait_for(&session, |snapshot| {
+            snapshot.revision == Some(revision) && snapshot.parse == XmlParseStatus::Ready
+        });
+        session
+            .select_schema_path(PathBuf::from("held.xsd"))
+            .unwrap();
+        session.validate_selected_schema().unwrap();
+        started_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the schema validation is active on the engine owner");
+
+        session.request_shutdown();
+        assert!(!session.try_reap().unwrap());
+        release_sender.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !session.try_reap().unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "schema owner did not become reapable"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(
+            *closed_documents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![1]
+        );
     }
 
     #[test]

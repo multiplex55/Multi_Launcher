@@ -865,6 +865,7 @@ mod tests {
             tree,
             detail: XmlDetailStatus::Empty,
             xpath: XmlXPathStatus::NotRun,
+            schema: Default::default(),
         }
     }
 

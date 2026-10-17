@@ -79,6 +79,7 @@ mod unused_assets_dialog;
 pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
+pub(crate) mod xml_toolkit_schema;
 pub(crate) mod xml_toolkit_tree;
 pub(crate) mod xml_toolkit_xpath;
 

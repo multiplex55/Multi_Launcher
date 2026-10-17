@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 pub const MAX_XML_INPUT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_XML_SCHEMA_DIAGNOSTIC_BYTES: usize = 16 * 1024;
 const MAX_SCHEMA_FILES: usize = 32;
 const MAX_SCHEMA_DEPTH: usize = 16;
 const MAX_SCHEMA_FILE_BYTES: usize = 1024 * 1024;
@@ -166,6 +167,7 @@ pub enum XmlEngineError {
     Detail(String),
     XPath(String),
     SchemaPolicy(String),
+    SchemaBackend(String),
     SchemaLoad(XmlDiagnostic),
     SchemaValidation(XmlDiagnostic),
     Tree(String),
@@ -535,7 +537,7 @@ mod windows_backend {
 
     struct DocumentState {
         dom: IXMLDOMDocument2,
-        source: String,
+        source_bytes: usize,
     }
 
     struct Engine {
@@ -579,7 +581,13 @@ mod windows_backend {
                 .checked_add(1)
                 .ok_or(XmlEngineError::RetentionLimit("XML document identities"))?;
             self.retained_source_bytes = self.retained_source_bytes.saturating_add(source.len());
-            self.documents.insert(id, DocumentState { dom, source });
+            self.documents.insert(
+                id,
+                DocumentState {
+                    dom,
+                    source_bytes: source.len(),
+                },
+            );
             let projection = match self.project_tree(id) {
                 Ok(projection) => Arc::new(projection),
                 Err(error) => {
@@ -609,7 +617,7 @@ mod windows_backend {
                 .ok_or(XmlEngineError::UnknownDocument)?;
             self.retained_source_bytes = self
                 .retained_source_bytes
-                .saturating_sub(state.source.len());
+                .saturating_sub(state.source_bytes);
             self.nodes.retain(|id, _| id.document != document);
             self.node_identities.retain(|_, id| id.document != document);
             Ok(())
@@ -924,11 +932,7 @@ mod windows_backend {
                 )
             }
             .map_err(|_| {
-                XmlEngineError::SchemaLoad(XmlDiagnostic {
-                    line: None,
-                    column: None,
-                    message: "MSXML 6 schema cache could not be created".into(),
-                })
+                XmlEngineError::SchemaBackend("MSXML 6 schema cache could not be created".into())
             })?;
             unsafe { cache.SetvalidateOnLoad(VARIANT_BOOL(0)) }.map_err(|_| {
                 XmlEngineError::SchemaPolicy(
@@ -939,8 +943,18 @@ mod windows_backend {
                 add_schema_dom(&cache, &namespace, &schema)?;
             }
             add_schema_dom(&cache, &root_namespace, &root_schema)?;
+            unsafe { cache.validate() }.map_err(|error| {
+                XmlEngineError::SchemaLoad(XmlDiagnostic {
+                    line: None,
+                    column: None,
+                    message: format!(
+                        "{}: MSXML could not compile the selected local XSD graph: {error}",
+                        selected_schema.display()
+                    ),
+                })
+            })?;
 
-            let validation_dom = secure_document(&state.source, XmlErrorContext::Xml)?;
+            let validation_dom = secure_clone_document(&state.dom, XmlErrorContext::Schema)?;
             let unknown = IUnknown::from(cache.clone());
             unsafe { validation_dom.putref_schemas(&VARIANT::from(unknown)) }.map_err(|_| {
                 XmlEngineError::SchemaPolicy(
@@ -948,13 +962,15 @@ mod windows_backend {
                 )
             })?;
             let parse_error = unsafe { validation_dom.validate() }.map_err(|_| {
-                XmlEngineError::SchemaLoad(XmlDiagnostic {
-                    line: None,
-                    column: None,
-                    message: "MSXML could not validate against the selected local XSD".into(),
-                })
+                XmlEngineError::SchemaBackend(
+                    "MSXML could not validate against the selected local XSD".into(),
+                )
             })?;
-            let code = unsafe { parse_error.errorCode() }.unwrap_or(1);
+            let code = unsafe { parse_error.errorCode() }.map_err(|_| {
+                XmlEngineError::SchemaBackend(
+                    "MSXML could not determine the schema-validation outcome".into(),
+                )
+            })?;
             if code == 0 {
                 Ok(())
             } else {
@@ -1045,6 +1061,40 @@ mod windows_backend {
         }
         .map_err(|_| XmlEngineError::WorkerUnavailable)?;
 
+        configure_secure_document(&document, context)?;
+
+        let loaded = unsafe { document.loadXML(&BSTR::from(source)) }
+            .map_err(|_| parse_error(&document, context))?;
+        if loaded.0 == 0 {
+            return Err(parse_error(&document, context));
+        }
+        Ok(document)
+    }
+
+    fn secure_clone_document(
+        document: &IXMLDOMDocument2,
+        context: XmlErrorContext,
+    ) -> Result<IXMLDOMDocument2, XmlEngineError> {
+        let clone = unsafe { document.cloneNode(VARIANT_BOOL(-1)) }
+            .map_err(|_| {
+                XmlEngineError::SchemaBackend(
+                    "MSXML could not clone the accepted XML document for validation".into(),
+                )
+            })?
+            .cast::<IXMLDOMDocument2>()
+            .map_err(|_| {
+                XmlEngineError::SchemaBackend(
+                    "MSXML returned an invalid validation document clone".into(),
+                )
+            })?;
+        configure_secure_document(&clone, context)?;
+        Ok(clone)
+    }
+
+    fn configure_secure_document(
+        document: &IXMLDOMDocument2,
+        context: XmlErrorContext,
+    ) -> Result<(), XmlEngineError> {
         // Every security setting is mandatory. Failure to apply any setting
         // aborts the operation before any XML text is parsed.
         unsafe { document.Setasync(VARIANT_BOOL(0)) }.map_err(|_| policy_error(context))?;
@@ -1062,13 +1112,7 @@ mod windows_backend {
             document.setProperty(&BSTR::from("AllowDocumentFunction"), &VARIANT::from(false))
         }
         .map_err(|_| policy_error(context))?;
-
-        let loaded = unsafe { document.loadXML(&BSTR::from(source)) }
-            .map_err(|_| parse_error(&document, context))?;
-        if loaded.0 == 0 {
-            return Err(parse_error(&document, context));
-        }
-        Ok(document)
+        Ok(())
     }
 
     fn policy_error(context: XmlErrorContext) -> XmlEngineError {
@@ -1752,9 +1796,9 @@ mod windows_backend {
         fn read(selected_schema: &Path) -> Result<Self, XmlEngineError> {
             reject_network_or_device_path(selected_schema)?;
             reject_reparse_components(selected_schema)?;
-            let canonical_schema = selected_schema
-                .canonicalize()
-                .map_err(|error| XmlEngineError::Io(error.to_string()))?;
+            let canonical_schema = selected_schema.canonicalize().map_err(|error| {
+                XmlEngineError::Io(format!("{}: {error}", selected_schema.display()))
+            })?;
             let root = canonical_schema
                 .parent()
                 .ok_or_else(|| XmlEngineError::SchemaPolicy("XSD must be a local file".into()))?
@@ -1795,14 +1839,15 @@ mod windows_backend {
             reject_reparse_components(&requested)?;
             let canonical = requested
                 .canonicalize()
-                .map_err(|error| XmlEngineError::Io(error.to_string()))?;
+                .map_err(|error| XmlEngineError::Io(format!("{}: {error}", requested.display())))?;
             reject_network_or_device_path(&canonical)?;
             if !canonical.starts_with(&self.root) {
                 return Err(XmlEngineError::SchemaPolicy(
                     "XSD reference escapes the selected folder".into(),
                 ));
             }
-            let bytes = read_verified_schema_file(&canonical, &self.root)?;
+            let bytes = read_verified_schema_file(&canonical, &self.root)
+                .map_err(|error| schema_file_context(error, &canonical))?;
             self.total_bytes = self.total_bytes.saturating_add(bytes.len());
             if self.total_bytes > MAX_SCHEMA_GRAPH_BYTES {
                 return Err(XmlEngineError::SchemaPolicy(
@@ -1811,7 +1856,8 @@ mod windows_backend {
             }
             let source = std::str::from_utf8(&bytes)
                 .map_err(|_| XmlEngineError::SchemaPolicy("XSD files must use UTF-8".into()))?;
-            let dom = secure_document(source, XmlErrorContext::Schema)?;
+            let dom = secure_document(source, XmlErrorContext::Schema)
+                .map_err(|error| schema_file_context(error, &canonical))?;
             let root = schema_root(&dom)?;
             if unsafe { root.namespaceURI() }
                 .map(|namespace| namespace.to_string())
@@ -1858,7 +1904,8 @@ mod windows_backend {
                     .map_err(|_| {
                         XmlEngineError::SchemaPolicy("XSD dependency location is unreadable".into())
                     })?;
-                let child = local_schema_reference(&relative, &location)?;
+                let child = local_schema_reference(&relative, &location)
+                    .map_err(|error| schema_file_context(error, &canonical))?;
                 self.read_file(child, depth + 1)?;
             }
             Ok(())
@@ -2062,6 +2109,24 @@ mod windows_backend {
             }
             active.remove(relative);
             Ok(document)
+        }
+    }
+
+    fn schema_file_context(error: XmlEngineError, path: &Path) -> XmlEngineError {
+        let context = path.display().to_string();
+        match error {
+            XmlEngineError::SchemaLoad(mut diagnostic) => {
+                diagnostic.message = format!("{context}: {}", diagnostic.message);
+                XmlEngineError::SchemaLoad(diagnostic)
+            }
+            XmlEngineError::SchemaPolicy(message) => {
+                XmlEngineError::SchemaPolicy(format!("{context}: {message}"))
+            }
+            XmlEngineError::SchemaBackend(message) => {
+                XmlEngineError::SchemaBackend(format!("{context}: {message}"))
+            }
+            XmlEngineError::Io(message) => XmlEngineError::Io(format!("{context}: {message}")),
+            other => other,
         }
     }
 
@@ -2750,6 +2815,234 @@ mod windows_backend {
                 Err(XmlEngineError::XPath(message)) if message.contains("document()")
             ));
             engine.close_document(document).unwrap();
+        }
+    }
+
+    #[cfg(test)]
+    mod m7e_tests {
+        use super::*;
+        use std::fs;
+
+        const XSD_NS: &str = "http://www.w3.org/2001/XMLSchema";
+
+        fn scalar_text(result: XmlXPathResult) -> String {
+            match result {
+                XmlXPathResult::ScalarText(value) => value,
+                XmlXPathResult::Nodes(nodes) => {
+                    panic!("expected an XPath scalar but got {} nodes", nodes.len())
+                }
+            }
+        }
+
+        fn write_schema(directory: &Path, name: &str, source: &str) -> PathBuf {
+            let path = directory.join(name);
+            fs::write(&path, source).expect("write local XSD fixture");
+            path
+        }
+
+        fn constrained_schema() -> &'static str {
+            r#"<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <xs:element name="root">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="count" type="xs:positiveInteger"/>
+        <xs:element name="code">
+          <xs:simpleType><xs:restriction base="xs:string"><xs:pattern value="[A-Z]{2}"/></xs:restriction></xs:simpleType>
+        </xs:element>
+      </xs:sequence>
+      <xs:attribute name="mode" type="xs:string" use="optional" default="normal"/>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>"#
+        }
+
+        fn validate_source(
+            engine: &XmlEngineWorker,
+            source: &str,
+            schema: &Path,
+        ) -> Result<(), XmlEngineError> {
+            let document = engine.parse(source.to_owned())?;
+            let result = engine.validate_selected_schema(document, schema.to_path_buf());
+            engine.close_document(document)?;
+            result
+        }
+
+        #[test]
+        fn m7e_local_xsd_validates_real_constraints_on_an_unchanged_document_clone() {
+            let directory = tempfile::tempdir().expect("temporary XSD directory");
+            let schema = write_schema(directory.path(), "root.xsd", constrained_schema());
+            let engine = XmlEngineWorker::start().expect("MSXML owner starts");
+            let source = "<root><count>4</count><code>AB</code></root>";
+            let (document, _) = engine
+                .parse_with_tree(source.into())
+                .expect("accepted XML source parses once");
+            let before_format = engine
+                .format(document, XmlFormatMode::Pretty)
+                .expect("source can be formatted before schema validation");
+            let before_default_attribute = scalar_text(
+                engine
+                    .query(document, "count(//@mode)", Vec::new())
+                    .expect("source can be queried before schema validation"),
+            );
+
+            engine
+                .validate_selected_schema(document, schema.clone())
+                .expect("the local XSD accepts the valid instance");
+
+            assert_eq!(
+                scalar_text(
+                    engine
+                        .query(document, "count(//@mode)", Vec::new())
+                        .expect("the accepted document remains queryable after validation"),
+                ),
+                before_default_attribute,
+                "schema defaults applied to the validation clone must not enter the accepted DOM"
+            );
+            assert_eq!(
+                engine
+                    .format(document, XmlFormatMode::Pretty)
+                    .expect("the accepted source remains formattable after validation"),
+                before_format
+            );
+
+            for invalid in [
+                "<root><code>AB</code></root>",
+                "<root><count>nope</count><code>AB</code></root>",
+                "<root><count>4</count><code>ab</code></root>",
+                "<x:root xmlns:x=\"urn:wrong\"><x:count>4</x:count><x:code>AB</x:code></x:root>",
+            ] {
+                let error = validate_source(&engine, invalid, &schema).expect_err(
+                    "required, type, pattern, and namespace constraints reject invalid XML",
+                );
+                assert!(matches!(error, XmlEngineError::SchemaValidation(_)));
+            }
+            engine.close_document(document).unwrap();
+        }
+
+        #[test]
+        fn m7e_local_include_import_and_changed_dependency_are_resolved_from_fresh_bytes() {
+            let directory = tempfile::tempdir().expect("temporary XSD directory");
+            let root = write_schema(
+                directory.path(),
+                "include-root.xsd",
+                &format!(
+                    r#"<xs:schema xmlns:xs="{XSD_NS}">
+  <xs:include schemaLocation="included.xsd"/>
+  <xs:element name="item" type="AllowedCode"/>
+</xs:schema>"#
+                ),
+            );
+            write_schema(
+                directory.path(),
+                "included.xsd",
+                &format!(
+                    r#"<xs:schema xmlns:xs="{XSD_NS}">
+  <xs:simpleType name="AllowedCode"><xs:restriction base="xs:string"><xs:enumeration value="alpha"/></xs:restriction></xs:simpleType>
+</xs:schema>"#
+                ),
+            );
+            let engine = XmlEngineWorker::start().expect("MSXML owner starts");
+            let document = engine
+                .parse("<item>alpha</item>".into())
+                .expect("instance for include schema parses");
+            engine
+                .validate_selected_schema(document, root.clone())
+                .expect("confined relative include resolves successfully");
+
+            write_schema(
+                directory.path(),
+                "included.xsd",
+                &format!(
+                    r#"<xs:schema xmlns:xs="{XSD_NS}">
+  <xs:simpleType name="AllowedCode"><xs:restriction base="xs:string"><xs:enumeration value="beta"/></xs:restriction></xs:simpleType>
+</xs:schema>"#
+                ),
+            );
+            assert!(
+                matches!(
+                    engine.validate_selected_schema(document, root),
+                    Err(XmlEngineError::SchemaValidation(_))
+                ),
+                "an explicit rerun must read the changed included XSD bytes"
+            );
+            engine.close_document(document).unwrap();
+
+            let imported = write_schema(
+                directory.path(),
+                "import-root.xsd",
+                &format!(
+                    r#"<xs:schema xmlns:xs="{XSD_NS}" xmlns:i="urn:imported" targetNamespace="urn:root" elementFormDefault="qualified">
+  <xs:import namespace="urn:imported" schemaLocation="imported.xsd"/>
+  <xs:element name="root" type="i:Code"/>
+</xs:schema>"#
+                ),
+            );
+            write_schema(
+                directory.path(),
+                "imported.xsd",
+                &format!(
+                    r#"<xs:schema xmlns:xs="{XSD_NS}" targetNamespace="urn:imported">
+  <xs:simpleType name="Code"><xs:restriction base="xs:token"><xs:pattern value="[A-Z]{{2}}"/></xs:restriction></xs:simpleType>
+</xs:schema>"#
+                ),
+            );
+            let imported_document = engine
+                .parse("<root xmlns=\"urn:root\">AB</root>".into())
+                .expect("instance for imported schema parses");
+            engine
+                .validate_selected_schema(imported_document, imported)
+                .expect("confined namespace import resolves successfully");
+            engine.close_document(imported_document).unwrap();
+        }
+
+        #[test]
+        fn m7e_schema_load_and_resolution_failures_are_not_instance_violations() {
+            let directory = tempfile::tempdir().expect("temporary XSD directory");
+            let engine = XmlEngineWorker::start().expect("MSXML owner starts");
+            let source = "<root/>";
+            let missing = directory.path().join("missing.xsd");
+            assert!(matches!(
+                validate_source(&engine, source, &missing),
+                Err(XmlEngineError::Io(_))
+            ));
+
+            let malformed = write_schema(
+                directory.path(),
+                "malformed.xsd",
+                &format!("<xs:schema xmlns:xs=\"{XSD_NS}\">"),
+            );
+            assert!(matches!(
+                validate_source(&engine, source, &malformed),
+                Err(XmlEngineError::SchemaLoad(_))
+            ));
+
+            let invalid_schema = write_schema(
+                directory.path(),
+                "invalid-schema.xsd",
+                &format!(
+                    r#"<xs:schema xmlns:xs="{XSD_NS}"><xs:element name="root" type="xs:NoSuchType"/></xs:schema>"#
+                ),
+            );
+            let invalid_schema_result = validate_source(&engine, source, &invalid_schema);
+            assert!(
+                matches!(&invalid_schema_result, Err(XmlEngineError::SchemaLoad(_))),
+                "invalid XSD compilation must remain distinct from instance validation: {invalid_schema_result:?}"
+            );
+
+            let remote_reference = write_schema(
+                directory.path(),
+                "remote.xsd",
+                &format!(
+                    r#"<xs:schema xmlns:xs="{XSD_NS}"><xs:include schemaLocation="http://127.0.0.1:1/forbidden.xsd"/></xs:schema>"#
+                ),
+            );
+            assert!(
+                matches!(
+                    validate_source(&engine, source, &remote_reference),
+                    Err(XmlEngineError::SchemaPolicy(message)) if message.contains("relative")
+                ),
+                "URL dependencies are denied before MSXML receives any schema DOM"
+            );
         }
     }
 }
