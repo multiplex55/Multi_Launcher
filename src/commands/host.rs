@@ -124,7 +124,10 @@ pub trait SearchReplaceCommandHost {
 }
 
 pub trait HotFolderCommandHost {
-    fn execute_hotfolder_command(&mut self, command: super::HotFolderCommand) -> Result<(), String> {
+    fn execute_hotfolder_command(
+        &mut self,
+        command: super::HotFolderCommand,
+    ) -> Result<(), String> {
         let _ = command;
         Err("Hot Folder commands require the launcher interface".into())
     }

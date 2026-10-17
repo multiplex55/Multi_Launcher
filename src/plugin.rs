@@ -23,10 +23,10 @@ use crate::plugins::emoji::EmojiPlugin;
 use crate::plugins::fav::FavPlugin;
 use crate::plugins::file_search::FileSearchPlugin;
 use crate::plugins::folders::FoldersPlugin;
-use crate::plugins::help::HelpPlugin;
 use crate::plugins::hash_generator::HashGeneratorPlugin;
-use crate::plugins::hotfolder::HotFolderPlugin;
+use crate::plugins::help::HelpPlugin;
 use crate::plugins::history::HistoryPlugin;
+use crate::plugins::hotfolder::HotFolderPlugin;
 use crate::plugins::ip::IpPlugin;
 use crate::plugins::json_utility::JsonUtilityPlugin;
 use crate::plugins::keys::KeysPlugin;
@@ -55,8 +55,8 @@ use crate::plugins::reddit::RedditPlugin;
 use crate::plugins::regex_tester::RegexTesterPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
 use crate::plugins::screen_draw::ScreenDrawPlugin;
-use crate::plugins::search_replace::SearchReplacePlugin;
 use crate::plugins::screenshot::ScreenshotPlugin;
+use crate::plugins::search_replace::SearchReplacePlugin;
 use crate::plugins::settings::SettingsPlugin;
 use crate::plugins::shell::ShellPlugin;
 use crate::plugins::snippets::SnippetsPlugin;
@@ -1373,7 +1373,9 @@ mod tests {
     #[test]
     fn launcher_scope_prefix_override_respects_enabled_plugins_and_search_capability() {
         let mut manager = PluginManager::new_inert_for_test();
-        manager.register(Box::new(crate::plugins::file_search::FileSearchPlugin::default()));
+        manager.register(Box::new(
+            crate::plugins::file_search::FileSearchPlugin::default(),
+        ));
         manager.register(Box::new(RegexTesterPlugin));
         manager.register(Box::new(crate::plugins::mouse::MousePlugin));
 

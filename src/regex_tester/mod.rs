@@ -17,18 +17,18 @@ pub use examples::{BUILT_IN_EXAMPLES, RegexExample};
 pub use explanation::{Explanation, ExplanationKind, ExplanationResult, explain};
 pub use model::{
     ByteSpan, CaptureGroup, CaptureValue, EvaluationResult, MatchCompleteness, MatchId, RegexDraft,
-    RegexFlags, RegexMatch, RegexTestCase, RegexTestCaseCollectionError,
-    RegexTestCaseEvaluation, RegexTestCaseExpectation, RegexTestCaseId, RegexTestCaseResult,
-    RegexTestCaseStatus, RegexTestCaseSummary, RegexTestCases, RegexValidationError, SourceIndex,
-    SourceLocation, SubstitutionEvaluationResult, SubstitutionResult,
+    RegexFlags, RegexMatch, RegexTestCase, RegexTestCaseCollectionError, RegexTestCaseEvaluation,
+    RegexTestCaseExpectation, RegexTestCaseId, RegexTestCaseResult, RegexTestCaseStatus,
+    RegexTestCaseSummary, RegexTestCases, RegexValidationError, SourceIndex, SourceLocation,
+    SubstitutionEvaluationResult, SubstitutionResult,
 };
 pub use persistence::{
     HistoryEntry, HistoryStore, MAX_RECENT_REGEXES, PresetContent, PresetId, PresetInput,
     PresetStore, RegexPreset, RegexStoreError, StoreDiagnostic, StoreLoadStatus,
 };
 pub use policy::{
-    EvaluationLimit, EvaluationPolicy, EvaluationSuspension, TestCaseEvaluationPolicy,
-    MAX_TEST_CASE_AGGREGATE_TEXT_BYTES, MAX_TEST_CASES,
+    EvaluationLimit, EvaluationPolicy, EvaluationSuspension, MAX_TEST_CASE_AGGREGATE_TEXT_BYTES,
+    MAX_TEST_CASES, TestCaseEvaluationPolicy,
 };
 pub use reference::{
     QUICK_REFERENCE, ReferenceCategory, ReferenceEntry, ReferenceExample, ReferenceSyntaxKind,

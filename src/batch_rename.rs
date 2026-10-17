@@ -1686,7 +1686,11 @@ mod tests {
         assert_eq!(unchanged.selection_revision(), SelectionRevision(1));
 
         let rejected = selected_snapshot.with_entry_updates(&[
-            (SnapshotEntryRef(MAX_SELECTED_ENTRIES as u64), Some(true), None),
+            (
+                SnapshotEntryRef(MAX_SELECTED_ENTRIES as u64),
+                Some(true),
+                None,
+            ),
             (
                 SnapshotEntryRef((MAX_SELECTED_ENTRIES + 1) as u64),
                 None,

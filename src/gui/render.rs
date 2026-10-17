@@ -4495,21 +4495,17 @@ impl LauncherApp {
             .preview_dialog
             .ui(&ctx, &self.file_search_dialog.settings);
         let batch_rename_runtime = self.batch_rename_runtime_snapshot();
-        let batch_rename_commands = self.batch_rename_dialog.ui(
-            &ctx,
-            first_ui_pass,
-            &batch_rename_runtime,
-        );
+        let batch_rename_commands =
+            self.batch_rename_dialog
+                .ui(&ctx, first_ui_pass, &batch_rename_runtime);
         if first_ui_pass {
             for command in batch_rename_commands {
                 self.handle_batch_rename_ui_command(command);
             }
         }
-        let search_replace_commands = self.search_replace_dialog.ui(
-            &ctx,
-            first_ui_pass,
-            &self.replace_worker_snapshot,
-        );
+        let search_replace_commands =
+            self.search_replace_dialog
+                .ui(&ctx, first_ui_pass, &self.replace_worker_snapshot);
         if first_ui_pass {
             for command in search_replace_commands {
                 self.handle_search_replace_ui_command(command);
@@ -21854,16 +21850,96 @@ mod tests {
                 egui::Key::Num4,
                 Some(crate::search_scope::SearchScope::Notes),
             ),
-            (false, true, false, false, false, false, false, egui::Key::Num3, None),
-            (true, false, false, false, false, false, false, egui::Key::Num3, None),
-            (true, true, true, false, false, false, false, egui::Key::Num3, None),
-            (true, true, false, true, false, false, false, egui::Key::Num3, None),
+            (
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                egui::Key::Num3,
+                None,
+            ),
+            (
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                egui::Key::Num3,
+                None,
+            ),
+            (
+                true,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                egui::Key::Num3,
+                None,
+            ),
+            (
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                egui::Key::Num3,
+                None,
+            ),
             // Confirmation windows retain the ROOT query's previous focus.
-            (true, true, false, false, true, false, false, egui::Key::Num3, None),
-            (true, true, false, false, false, true, false, egui::Key::Num3, None),
+            (
+                true,
+                true,
+                false,
+                false,
+                true,
+                false,
+                false,
+                egui::Key::Num3,
+                None,
+            ),
+            (
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                false,
+                egui::Key::Num3,
+                None,
+            ),
             // Ctrl+1 and Ctrl+2 belong to the diff text view while it is open.
-            (true, true, false, false, false, false, true, egui::Key::Num1, None),
-            (true, true, false, false, false, false, true, egui::Key::Num2, None),
+            (
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                egui::Key::Num1,
+                None,
+            ),
+            (
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                egui::Key::Num2,
+                None,
+            ),
         ] {
             let ctx = egui::Context::default();
             ctx.begin_pass(egui::RawInput {

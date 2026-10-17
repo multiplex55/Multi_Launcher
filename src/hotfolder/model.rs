@@ -132,9 +132,9 @@ pub fn evaluate_rule_conditions(
 ) -> Result<(), &'static str> {
     if path.as_os_str().is_empty()
         || path.is_absolute()
-        || path.components().any(|component| {
-            !matches!(component, Component::Normal(_))
-        })
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err("sample path is not a root-relative file path");
     }

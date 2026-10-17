@@ -9,9 +9,9 @@ use crate::commands::{
     parse_action,
 };
 use crate::hotfolder::{
-    HotFolderExternalActionAdapter, HotFolderExternalActionOutcome,
-    HotFolderExternalActionRequest, HotFolderExecutionPhase, HotFolderTerminalStatus,
-    RuleAction, bind_mkmacro_action_with_dependencies, bind_registered_launcher_action,
+    HotFolderExecutionPhase, HotFolderExternalActionAdapter, HotFolderExternalActionOutcome,
+    HotFolderExternalActionRequest, HotFolderTerminalStatus, RuleAction,
+    bind_mkmacro_action_with_dependencies, bind_registered_launcher_action,
 };
 use crate::mkmacro::{MkMacroStore, RuntimeState};
 use crate::universal_actions::{
@@ -119,9 +119,7 @@ impl LauncherHotFolderActionAdapter {
         };
 
         loop {
-            if cancellation.is_cancelled()
-                && pending.cancel_if_pending()
-            {
+            if cancellation.is_cancelled() && pending.cancel_if_pending() {
                 return cancelled(request.operation_id, None);
             }
 
@@ -174,9 +172,10 @@ impl LauncherHotFolderActionAdapter {
                     response,
                 })
             }
-            Err(TrySendError::Full(_)) => {
-                Err(failure(request.operation_id, "launcher dispatch queue is full"))
-            }
+            Err(TrySendError::Full(_)) => Err(failure(
+                request.operation_id,
+                "launcher dispatch queue is full",
+            )),
             Err(TrySendError::Disconnected(_)) => Err(failure(
                 request.operation_id,
                 "launcher completion bridge is disconnected",
@@ -200,7 +199,10 @@ impl LauncherHotFolderActionAdapter {
             return cancelled(request.operation_id, None);
         }
         let document = self.mkmacro_store.snapshot();
-        let mut matching = document.macros.iter().filter(|macro_| macro_.id == *macro_id);
+        let mut matching = document
+            .macros
+            .iter()
+            .filter(|macro_| macro_.id == *macro_id);
         let Some(current) = matching.next() else {
             return failure(request.operation_id, "MkMacro target is unavailable");
         };
@@ -220,20 +222,20 @@ impl LauncherHotFolderActionAdapter {
 
         let run =
             match crate::mkmacro::runtime::start_hotfolder_macro(current, &expected_dependencies) {
-            Ok(run) => run,
-            Err(diagnostic) => {
-                let reason = match diagnostic.kind {
-                    crate::mkmacro::DiagnosticKind::RuntimeUnavailable => {
-                        "MkMacro runtime is unavailable or busy"
-                    }
-                    crate::mkmacro::DiagnosticKind::InvalidTarget => {
-                        "MkMacro configuration changed or invocation was rejected"
-                    }
-                    _ => "MkMacro invocation was rejected",
-                };
-                return failure(request.operation_id, reason);
-            }
-        };
+                Ok(run) => run,
+                Err(diagnostic) => {
+                    let reason = match diagnostic.kind {
+                        crate::mkmacro::DiagnosticKind::RuntimeUnavailable => {
+                            "MkMacro runtime is unavailable or busy"
+                        }
+                        crate::mkmacro::DiagnosticKind::InvalidTarget => {
+                            "MkMacro configuration changed or invocation was rejected"
+                        }
+                        _ => "MkMacro invocation was rejected",
+                    };
+                    return failure(request.operation_id, reason);
+                }
+            };
         let run_id = run.run_id();
         let mut cancellation_requested = !run.activate_if_not_cancelled(cancellation);
         loop {
@@ -257,9 +259,9 @@ impl LauncherHotFolderActionAdapter {
                             HotFolderTerminalStatus::Failure,
                             Some(format!(
                                 "MkMacro run failed ({:?})",
-                                completion.failure_kind.unwrap_or(
-                                    crate::mkmacro::DiagnosticKind::RuntimeUnavailable
-                                )
+                                completion
+                                    .failure_kind
+                                    .unwrap_or(crate::mkmacro::DiagnosticKind::RuntimeUnavailable)
                             )),
                         ),
                         _ => (
@@ -332,12 +334,18 @@ impl HotFolderExternalActionAdapter for LauncherHotFolderActionAdapter {
             || request.authorization.rule_fingerprint != request.rule_fingerprint
             || request.candidate_id.get() == 0
         {
-            return failure(request.operation_id, "Hot Folder authorization evidence is invalid");
+            return failure(
+                request.operation_id,
+                "Hot Folder authorization evidence is invalid",
+            );
         }
         match request.action.clone() {
             RuleAction::RegisteredLauncherAction { .. } => {
                 if !self.supports(&request.action) {
-                    return failure(request.operation_id, "registered launcher action is unsupported");
+                    return failure(
+                        request.operation_id,
+                        "registered launcher action is unsupported",
+                    );
                 }
                 if request.authorization.enablement
                     != crate::hotfolder::ActionEnablement::StrongConfirmationRequired
@@ -351,7 +359,10 @@ impl HotFolderExternalActionAdapter for LauncherHotFolderActionAdapter {
             }
             RuleAction::MkMacro { .. } => self.dispatch_mkmacro(request, cancellation),
             RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. } => {
-                failure(request.operation_id, "external adapter received a built-in action")
+                failure(
+                    request.operation_id,
+                    "external adapter received a built-in action",
+                )
             }
         }
     }
@@ -442,7 +453,9 @@ fn complete_launcher_actions(
             )
             .is_err()
         {
-            let _ = pending.reply.try_send(cancelled(pending.request.operation_id, None));
+            let _ = pending
+                .reply
+                .try_send(cancelled(pending.request.operation_id, None));
             continue;
         }
 
@@ -466,31 +479,41 @@ fn invoke_current_registered_action(
 pub(crate) fn invoke_registered_action_from_catalog(
     request: &HotFolderExternalActionRequest,
     entries: &[ResolvedActionTarget],
-    dispatch: impl FnOnce(
-        &CommandInvocation,
-    ) -> Result<CommandOutcome, CommandError>,
+    dispatch: impl FnOnce(&CommandInvocation) -> Result<CommandOutcome, CommandError>,
 ) -> HotFolderExternalActionOutcome {
     let RuleAction::RegisteredLauncherAction {
         reference,
         configuration_fingerprint,
     } = &request.action
     else {
-        return failure(request.operation_id, "registered launcher target is invalid");
+        return failure(
+            request.operation_id,
+            "registered launcher target is invalid",
+        );
     };
     let Some(saved_target) = reference.target.as_ref() else {
-        return failure(request.operation_id, "registered launcher target has no stable identity");
+        return failure(
+            request.operation_id,
+            "registered launcher target has no stable identity",
+        );
     };
 
     let mut matching = entries
         .iter()
         .filter(|entry| entry.target.persistent_ref().as_ref() == Some(saved_target));
     let Some(target) = matching.next() else {
-        return failure(request.operation_id, "registered launcher target is unavailable");
+        return failure(
+            request.operation_id,
+            "registered launcher target is unavailable",
+        );
     };
     if matching.next().is_some()
         || bind_registered_launcher_action(target).as_ref() != Ok(&request.action)
     {
-        return failure(request.operation_id, "registered launcher configuration changed");
+        return failure(
+            request.operation_id,
+            "registered launcher configuration changed",
+        );
     }
 
     let resolution = super::universal_action_catalog::action_resolution_context_for_target(
@@ -498,20 +521,27 @@ pub(crate) fn invoke_registered_action_from_catalog(
         ActionSurface::LauncherList,
         "",
     );
-    if reference.action_id != action_ids::RESULT_EXECUTE
-        || !configuration_fingerprint.is_valid()
-    {
-        return failure(request.operation_id, "registered launcher action is unsupported");
+    if reference.action_id != action_ids::RESULT_EXECUTE || !configuration_fingerprint.is_valid() {
+        return failure(
+            request.operation_id,
+            "registered launcher action is unsupported",
+        );
     }
     let mut registered = UniversalActionRegistry
         .resolve(target, &resolution)
         .into_iter()
         .filter(|action| action.id == reference.action_id);
     let Some(registered) = registered.next() else {
-        return failure(request.operation_id, "registered launcher action is unavailable");
+        return failure(
+            request.operation_id,
+            "registered launcher action is unavailable",
+        );
     };
     if registered.is_available() == false || registered.id != action_ids::RESULT_EXECUTE {
-        return failure(request.operation_id, "registered launcher action is disabled");
+        return failure(
+            request.operation_id,
+            "registered launcher action is disabled",
+        );
     }
     if registered.operation
         != UniversalActionOperation::InvokePrimary(target.selected_action.clone())
@@ -521,15 +551,26 @@ pub(crate) fn invoke_registered_action_from_catalog(
     let action = match &registered.operation {
         UniversalActionOperation::InvokePrimary(action) => action,
         UniversalActionOperation::Command { .. } | UniversalActionOperation::UiIntent(_) => {
-            return failure(request.operation_id, "registered launcher action needs a UI path");
+            return failure(
+                request.operation_id,
+                "registered launcher action needs a UI path",
+            );
         }
     };
     let command = match parse_action(action) {
         Ok(Command::External(command)) if registered_process_target(&command) => command,
-        _ => return failure(request.operation_id, "registered launcher action is unsupported"),
+        _ => {
+            return failure(
+                request.operation_id,
+                "registered launcher action is unsupported",
+            );
+        }
     };
     if command.namespace.is_some() {
-        return failure(request.operation_id, "registered launcher namespace is unsupported");
+        return failure(
+            request.operation_id,
+            "registered launcher namespace is unsupported",
+        );
     }
 
     let invocation = CommandInvocation {
@@ -554,10 +595,7 @@ fn registered_process_target(command: &ExternalCommand) -> bool {
     crate::hotfolder::is_registered_process_target(command)
 }
 
-fn cancelled(
-    operation_id: u128,
-    macro_run_id: Option<u64>,
-) -> HotFolderExternalActionOutcome {
+fn cancelled(operation_id: u128, macro_run_id: Option<u64>) -> HotFolderExternalActionOutcome {
     HotFolderExternalActionOutcome {
         operation_id,
         macro_run_id,
@@ -576,4 +614,3 @@ fn failure(operation_id: u128, reason: &'static str) -> HotFolderExternalActionO
         reason: Some(reason.into()),
     }
 }
-

@@ -1,5 +1,5 @@
-use super::model::{ConfigurationFingerprint, HotFolderRule, RuleAction};
 use super::execution::HotFolderExternalActionAdapter;
+use super::model::{ConfigurationFingerprint, HotFolderRule, RuleAction};
 use crate::actions::Action;
 use crate::commands::{Command, ExternalCommand, parse_action};
 use crate::mkmacro::{MkAction, MkCondition, MkInvocation, MkMacro, MkMacroDocument};
@@ -120,8 +120,9 @@ pub(crate) fn bind_mkmacro_action_with_dependencies(
     let program = crate::mkmacro::invocation::compile_invocation_program(document, &invocation)
         .map_err(|_| "MkMacro dependency or parameter validation failed")?;
     let dependency_definitions = macro_dependency_definitions(document, &program)?;
-    let configuration_fingerprint = macro_configuration_fingerprint(macro_id, &dependency_definitions)
-        .map_err(|_| "MkMacro dependency configuration could not be fingerprinted")?;
+    let configuration_fingerprint =
+        macro_configuration_fingerprint(macro_id, &dependency_definitions)
+            .map_err(|_| "MkMacro dependency configuration could not be fingerprinted")?;
     Ok((
         RuleAction::MkMacro {
             macro_id,
@@ -168,7 +169,7 @@ pub fn evaluate_action_capability(
                 return unavailable;
             }
             ActionCapability::Supported {
-            enablement: ActionEnablement::Standard,
+                enablement: ActionEnablement::Standard,
             }
         }
         RuleAction::Move { destination } => {
@@ -176,7 +177,7 @@ pub fn evaluate_action_capability(
                 return unavailable;
             }
             ActionCapability::Supported {
-            enablement: ActionEnablement::StrongConfirmationRequired,
+                enablement: ActionEnablement::StrongConfirmationRequired,
             }
         }
         RuleAction::Rename { .. } => ActionCapability::Supported {
@@ -357,17 +358,15 @@ fn evaluate_mkmacro(
         };
     }
     let invocation = MkInvocation::new(macro_id);
-    let program = match crate::mkmacro::invocation::compile_invocation_program(
-        document,
-        &invocation,
-    ) {
-        Ok(program) => program,
-        Err(_) => {
-            return ActionCapability::Unsupported {
-                reason: "MkMacro dependency or parameter validation failed",
-            };
-        }
-    };
+    let program =
+        match crate::mkmacro::invocation::compile_invocation_program(document, &invocation) {
+            Ok(program) => program,
+            Err(_) => {
+                return ActionCapability::Unsupported {
+                    reason: "MkMacro dependency or parameter validation failed",
+                };
+            }
+        };
     let Ok(dependency_definitions) = macro_dependency_definitions(document, &program) else {
         return ActionCapability::Invalid {
             reason: "MkMacro dependency closure is invalid",
@@ -433,7 +432,11 @@ fn evaluate_mkmacro(
                 reason: "MkMacro dependency plan is missing",
             };
         };
-        for instruction in plan.instructions.iter().filter(|instruction| instruction.step.enabled) {
+        for instruction in plan
+            .instructions
+            .iter()
+            .filter(|instruction| instruction.step.enabled)
+        {
             match &instruction.step.action {
                 MkAction::CallMacro(_)
                 | MkAction::Return(_)
@@ -507,7 +510,10 @@ fn macro_dependency_definitions(
 ) -> Result<Vec<MkMacro>, &'static str> {
     let mut dependency_definitions = Vec::with_capacity(program.macro_ids().len());
     for macro_id in program.macro_ids() {
-        let mut matching = document.macros.iter().filter(|macro_| macro_.id == *macro_id);
+        let mut matching = document
+            .macros
+            .iter()
+            .filter(|macro_| macro_.id == *macro_id);
         let Some(macro_) = matching.next() else {
             return Err("macro dependency is missing");
         };
@@ -585,8 +591,8 @@ fn has_unknown_protocol_prefix(target: &str) -> bool {
 mod tests {
     use super::*;
     use crate::hotfolder::{
-        HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
-        HotFolderExecutionPhase, HotFolderTerminalStatus,
+        HotFolderExecutionPhase, HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
+        HotFolderTerminalStatus,
     };
     use crate::universal_actions::{ActionResolutionContext, ActionSurface, ActionTarget};
     use std::collections::HashMap;
@@ -668,8 +674,8 @@ mod tests {
         let selected = target(external_action("Editor", Some("--open")));
         let bound = bind_registered_launcher_action(&selected).unwrap();
         let rules = [selected.clone()];
-        let context = capability_context(&rules, &document, &roots)
-            .with_external_action_adapter(&adapter);
+        let context =
+            capability_context(&rules, &document, &roots).with_external_action_adapter(&adapter);
         assert_eq!(
             evaluate_action_capability(&rule(bound.clone()), &context),
             ActionCapability::Supported {

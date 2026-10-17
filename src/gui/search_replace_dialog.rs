@@ -1,9 +1,9 @@
 use crate::batch_rename::ExplicitDirectoryRoot;
 use crate::file_operations::ScanCancellation;
 use crate::replace_executor::{
-    ConfirmedReplacementRequest, ReplaceExecutor, ReplaceExecutorWorker, ReplaceOperationResult,
-    ReplaceProgress, ReplaceRecoveryReceipt, ReplaceTransactionStatus,
-    ReplaceWorkerSnapshot, REPLACE_RECOVERY_DIRECTORY,
+    ConfirmedReplacementRequest, REPLACE_RECOVERY_DIRECTORY, ReplaceExecutor,
+    ReplaceExecutorWorker, ReplaceOperationResult, ReplaceProgress, ReplaceRecoveryReceipt,
+    ReplaceTransactionStatus, ReplaceWorkerSnapshot,
 };
 use crate::search_replace::{
     MatchId, ReplacementCandidate, ReplacementCandidateReadiness, ReplacementMode,
@@ -205,12 +205,11 @@ fn replacement_preview_loop(shared: Arc<(Mutex<PreviewWorkerState>, Condvar)>) {
             let Ok(mut state) = lock.lock() else {
                 return;
             };
-            let mut state = match wake.wait_while(state, |state| {
-                state.pending.is_none() && !state.shutdown
-            }) {
-                Ok(state) => state,
-                Err(_) => return,
-            };
+            let mut state =
+                match wake.wait_while(state, |state| state.pending.is_none() && !state.shutdown) {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
             if state.shutdown {
                 return;
             }
@@ -314,9 +313,9 @@ impl RecoveryReceiptLoader {
         match self.receiver.try_recv() {
             Ok(receipts) => Some(receipts),
             Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Some(Err("the recovery receipt reader stopped unexpectedly".into()))
-            }
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                "the recovery receipt reader stopped unexpectedly".into(),
+            )),
         }
     }
 
@@ -507,7 +506,9 @@ impl SearchReplaceDialogState {
                 self.accept_preview_result(result);
                 changed = true;
             }
-            if self.preview_dirty && let Some(job) = self.take_preview_job() {
+            if self.preview_dirty
+                && let Some(job) = self.take_preview_job()
+            {
                 if let Err(error) = preview_worker.submit(job) {
                     self.preview_pending = false;
                     self.candidate_error = Some(error);
@@ -557,12 +558,9 @@ impl SearchReplaceDialogState {
             .ok_or_else(|| "Choose an explicit folder before searching.".to_owned())?;
         let root = ExplicitDirectoryRoot::new(root_path.clone())
             .map_err(|error| format!("The selected root is invalid: {error:?}"))?;
-        let pattern = SearchPattern::compile(
-            self.pattern.clone(),
-            self.pattern_mode,
-            self.case_sensitive,
-        )
-        .map_err(|error| error.to_string())?;
+        let pattern =
+            SearchPattern::compile(self.pattern.clone(), self.pattern_mode, self.case_sensitive)
+                .map_err(|error| error.to_string())?;
         let filters = SearchFilterSpec {
             include_extensions: split_csv_or_lines(&self.include_extensions),
             include_path_globs: split_lines(&self.include_globs),
@@ -591,10 +589,7 @@ impl SearchReplaceDialogState {
         .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn record_search_ticket(
-        &mut self,
-        ticket: crate::search_replace::SearchTicket,
-    ) {
+    pub(crate) fn record_search_ticket(&mut self, ticket: crate::search_replace::SearchTicket) {
         self.current_generation = Some(ticket.generation());
         self.search_ticket = Some(ticket);
         self.search_progress = None;
@@ -742,9 +737,7 @@ impl SearchReplaceDialogState {
                 status,
                 Some(ReplaceTransactionStatus::Applied | ReplaceTransactionStatus::Partial)
             ),
-            RecoveryAction::Recover => {
-                status == Some(ReplaceTransactionStatus::RecoveryRequired)
-            }
+            RecoveryAction::Recover => status == Some(ReplaceTransactionStatus::RecoveryRequired),
         };
         if !allowed {
             self.status_message = Some(match action {
@@ -859,7 +852,11 @@ impl SearchReplaceDialogState {
 
     fn merge_loaded_receipts(&mut self, receipts: Vec<ReplaceRecoveryReceipt>) {
         for receipt in receipts {
-            if !self.receipts.iter().any(|existing| existing.id() == receipt.id()) {
+            if !self
+                .receipts
+                .iter()
+                .any(|existing| existing.id() == receipt.id())
+            {
                 self.receipts.push(receipt);
             }
         }
@@ -1021,8 +1018,7 @@ impl SearchReplaceDialogState {
         let mut files = Vec::new();
         for file in candidate.files() {
             if file.selected_match_ids().is_empty()
-                || file.readiness()
-                    != crate::search_replace::ReplacementFileReadiness::Ready
+                || file.readiness() != crate::search_replace::ReplacementFileReadiness::Ready
             {
                 continue;
             }
@@ -1081,7 +1077,9 @@ impl SearchReplaceDialogState {
             return;
         };
         if snapshot.encoding() == crate::search_replace::TextEncoding::Utf8Bom {
-            ui.weak("UTF-8 BOM is preserved as an original byte prefix; preview text starts after it.");
+            ui.weak(
+                "UTF-8 BOM is preserved as an original byte prefix; preview text starts after it.",
+            );
         }
         ui.label(format!(
             "Bounded diff context begins near original byte {}. The full candidate remains exact.",
@@ -1222,9 +1220,15 @@ impl SearchReplaceDialogState {
                 choose = choose.set_directory(root);
             }
             let clicked = ui
-                .add_enabled(process_interactions, egui::Button::new("Choose root folder…"))
+                .add_enabled(
+                    process_interactions,
+                    egui::Button::new("Choose root folder…"),
+                )
                 .clicked();
-            if process_interactions && clicked && let Some(root) = choose.pick_folder() {
+            if process_interactions
+                && clicked
+                && let Some(root) = choose.pick_folder()
+            {
                 commands.push(SearchReplaceUiCommand::SelectRoot(root));
             }
             if let Some(root) = &self.root {
@@ -1350,7 +1354,9 @@ impl SearchReplaceDialogState {
             });
         });
         if search_changed {
-            self.invalidate_search("Search inputs changed. Run Search to capture a new result set.".into());
+            self.invalidate_search(
+                "Search inputs changed. Run Search to capture a new result set.".into(),
+            );
         } else if replacement_changed {
             self.queue_candidate_recompute();
         }
@@ -1400,11 +1406,15 @@ impl SearchReplaceDialogState {
         }
         if let Some(search) = &self.search_result {
             let summary = search.summary();
-            let complete = summary.match_list_complete()
-                && search.status() == SearchStatus::Complete;
+            let complete =
+                summary.match_list_complete() && search.status() == SearchStatus::Complete;
             let label = format!(
                 "{} · roots scanned {}/{} · files discovered {} · examined {} · searched {} · matched {} · matches {} · skipped {}",
-                if complete { "Complete result set" } else { "Partial result set · Apply unavailable" },
+                if complete {
+                    "Complete result set"
+                } else {
+                    "Partial result set · Apply unavailable"
+                },
                 summary.roots_scanned(),
                 summary.roots_scanned() + summary.roots_unfinished(),
                 summary.files_discovered(),
@@ -1420,7 +1430,11 @@ impl SearchReplaceDialogState {
                     format!(
                         "Skipped files and scan issues · {} recorded{}",
                         summary.issue_count(),
-                        if summary.issues_truncated() { ", list truncated" } else { "" }
+                        if summary.issues_truncated() {
+                            ", list truncated"
+                        } else {
+                            ""
+                        }
                     ),
                     |ui| {
                         egui::ScrollArea::vertical()
@@ -1496,10 +1510,16 @@ impl SearchReplaceDialogState {
                 self.file_sort = sort;
             }
             let select = ui
-                .add_enabled(process_interactions, egui::Button::new("Select visible matches"))
+                .add_enabled(
+                    process_interactions,
+                    egui::Button::new("Select visible matches"),
+                )
                 .clicked();
             let clear = ui
-                .add_enabled(process_interactions, egui::Button::new("Clear visible matches"))
+                .add_enabled(
+                    process_interactions,
+                    egui::Button::new("Clear visible matches"),
+                )
                 .clicked();
             if process_interactions && select {
                 self.set_visible_files_selected(true);
@@ -1515,8 +1535,13 @@ impl SearchReplaceDialogState {
         let file_count = search.matched_files().len();
         let visible_count = self.visible_file_indices.len();
         ui.horizontal(|ui| {
-            ui.label(format!("Files with matches: {visible_count} shown of {file_count}"));
-            ui.label(format!("Matches found: {}", search.summary().matches_found()));
+            ui.label(format!(
+                "Files with matches: {visible_count} shown of {file_count}"
+            ));
+            ui.label(format!(
+                "Matches found: {}",
+                search.summary().matches_found()
+            ));
         });
         egui::ScrollArea::vertical()
             .id_salt("replace_file_results")
@@ -1624,15 +1649,15 @@ impl SearchReplaceDialogState {
                             ui.vertical(|ui| {
                                 ui.add(
                                     egui::Label::new(format!(
-                                    "line {}{} · match {} · byte range {:?}",
-                                    span.first_line(),
-                                    if span.last_line() != span.first_line() {
-                                        format!("–{}", span.last_line())
-                                    } else {
-                                        String::new()
-                                    },
-                                    id.ordinal() + 1,
-                                    span.raw_byte_range()
+                                        "line {}{} · match {} · byte range {:?}",
+                                        span.first_line(),
+                                        if span.last_line() != span.first_line() {
+                                            format!("–{}", span.last_line())
+                                        } else {
+                                            String::new()
+                                        },
+                                        id.ordinal() + 1,
+                                        span.raw_byte_range()
                                     ))
                                     .truncate(),
                                 );
@@ -1661,9 +1686,11 @@ impl SearchReplaceDialogState {
             });
         ui.label("Select a match row to inspect its exact captured and proposed text. Match selection controls approval; previews use the captured B candidate.");
         self.draw_diff(ui, file_index);
-        if let Some(span) = file.matches().iter().find(|span| {
-            self.inspected_match.as_ref() == Some(span.id())
-        }) {
+        if let Some(span) = file
+            .matches()
+            .iter()
+            .find(|span| self.inspected_match.as_ref() == Some(span.id()))
+        {
             self.draw_match_inspector(ui, file.path(), span);
         } else {
             ui.weak("Select a match row to inspect its original and proposed text. Long values are bounded here and disclose the omitted character count.");
@@ -1741,8 +1768,14 @@ impl SearchReplaceDialogState {
             ui.label(format!("affected files {}", summary.affected_files()));
             ui.label(format!("approved matches {}", summary.approved_matches()));
             ui.label(format!("changed matches {}", summary.changed_matches()));
-            ui.label(format!("selected no-op matches {}", summary.selected_noop_matches()));
-            ui.label(format!("estimated changed bytes {}", summary.estimated_changed_bytes()));
+            ui.label(format!(
+                "selected no-op matches {}",
+                summary.selected_noop_matches()
+            ));
+            ui.label(format!(
+                "estimated changed bytes {}",
+                summary.estimated_changed_bytes()
+            ));
             if summary.failed_files() > 0 {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
@@ -1777,7 +1810,10 @@ impl SearchReplaceDialogState {
                         progress.phase, progress.message, progress.completed, progress.total
                     ));
                     if ui
-                        .add_enabled(process_interactions, egui::Button::new("Cancel between files"))
+                        .add_enabled(
+                            process_interactions,
+                            egui::Button::new("Cancel between files"),
+                        )
                         .clicked()
                     {
                         commands.push(SearchReplaceUiCommand::CancelOperation);
@@ -1786,9 +1822,14 @@ impl SearchReplaceDialogState {
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Validating the frozen request and preparing guarded file operations…");
+                    ui.label(
+                        "Validating the frozen request and preparing guarded file operations…",
+                    );
                     if ui
-                        .add_enabled(process_interactions, egui::Button::new("Cancel between files"))
+                        .add_enabled(
+                            process_interactions,
+                            egui::Button::new("Cancel between files"),
+                        )
                         .clicked()
                     {
                         commands.push(SearchReplaceUiCommand::CancelOperation);
@@ -1796,7 +1837,9 @@ impl SearchReplaceDialogState {
                 });
             }
         } else if runtime.shutdown_requested {
-            ui.label("The replace worker is shutting down; recovery data remains in application data.");
+            ui.label(
+                "The replace worker is shutting down; recovery data remains in application data.",
+            );
         } else if let Some(message) = &self.status_message {
             ui.label(message);
         }
@@ -1829,7 +1872,13 @@ impl SearchReplaceDialogState {
                         let roots = receipt
                             .entries()
                             .iter()
-                            .map(|entry| entry.path().parent().unwrap_or(Path::new(".")).to_path_buf())
+                            .map(|entry| {
+                                entry
+                                    .path()
+                                    .parent()
+                                    .unwrap_or(Path::new("."))
+                                    .to_path_buf()
+                            })
                             .collect::<HashSet<_>>();
                         ui.label(format!("Recorded parent folders: {}", roots.len()));
                         let can_restore = matches!(
@@ -1867,7 +1916,11 @@ impl SearchReplaceDialogState {
                             .max_height(210.0)
                             .show(ui, |ui| {
                                 for entry in receipt.entries() {
-                                    ui.label(format!("{} · {:?}", entry.path().display(), entry.outcome()));
+                                    ui.label(format!(
+                                        "{} · {:?}",
+                                        entry.path().display(),
+                                        entry.outcome()
+                                    ));
                                 }
                             });
                     },
@@ -1880,7 +1933,9 @@ impl SearchReplaceDialogState {
                 directory.display()
             ));
         } else if self.receipt_load_pending {
-            ui.weak(format!("Recovery directory name: {REPLACE_RECOVERY_DIRECTORY}"));
+            ui.weak(format!(
+                "Recovery directory name: {REPLACE_RECOVERY_DIRECTORY}"
+            ));
         }
     }
 
@@ -2117,11 +2172,8 @@ mod tests {
         assert!(until(state), "background search/preview did not finish");
     }
 
-    fn wait_for_app_replace<F>(
-        app: &mut crate::gui::LauncherApp,
-        ctx: &egui::Context,
-        until: F,
-    ) where
+    fn wait_for_app_replace<F>(app: &mut crate::gui::LauncherApp, ctx: &egui::Context, until: F)
+    where
         F: Fn(&crate::gui::LauncherApp) -> bool,
     {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -2191,7 +2243,8 @@ mod tests {
 
         wait_for_preview(&mut state, &coordinator, &preview_worker, |state| {
             state.candidate.as_ref().is_some_and(|candidate| {
-                !state.preview_pending && candidate.readiness() == ReplacementCandidateReadiness::Ready
+                !state.preview_pending
+                    && candidate.readiness() == ReplacementCandidateReadiness::Ready
             })
         });
         let candidate = state.candidate.as_ref().unwrap();
@@ -2209,12 +2262,17 @@ mod tests {
         assert_eq!(multiline_output.original_text(), "first\r\nsecond");
         assert_eq!(multiline_output.proposed_text(), "updated");
         assert!(multiline_output.changed());
-        let distant_output = file_candidate.match_output(match_ids.last().unwrap()).unwrap();
+        let distant_output = file_candidate
+            .match_output(match_ids.last().unwrap())
+            .unwrap();
         assert_eq!(distant_output.original_text(), "needle");
         assert_eq!(distant_output.proposed_text(), "updated");
         let diff = file_candidate.diff_context().unwrap();
         assert!(diff.candidate_excerpt().contains("updated"));
-        assert!(diff.truncated(), "the UI only publishes bounded diff context");
+        assert!(
+            diff.truncated(),
+            "the UI only publishes bounded diff context"
+        );
         let cached_diff = state
             .candidate_unified_diffs
             .get(file_candidate.original_snapshot().path())
@@ -2235,8 +2293,14 @@ mod tests {
                 .get(file_candidate.original_snapshot().path())
                 .unwrap()
         ));
-        assert_eq!(bounded_single_line("first\r\nsecond", 32), "first\\r\\nsecond");
-        let (bounded, truncated) = bounded_text(&"x".repeat(MAX_INSPECTED_MATCH_CHARS + 1), MAX_INSPECTED_MATCH_CHARS);
+        assert_eq!(
+            bounded_single_line("first\r\nsecond", 32),
+            "first\\r\\nsecond"
+        );
+        let (bounded, truncated) = bounded_text(
+            &"x".repeat(MAX_INSPECTED_MATCH_CHARS + 1),
+            MAX_INSPECTED_MATCH_CHARS,
+        );
         assert!(truncated);
         assert!(bounded.ends_with('…'));
 
@@ -2263,14 +2327,16 @@ mod tests {
         while preview_worker.is_busy() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(2));
         }
-        assert!(!preview_worker.is_busy(), "stale candidate worker did not finish");
+        assert!(
+            !preview_worker.is_busy(),
+            "stale candidate worker did not finish"
+        );
         state.poll_background(Some(&coordinator), Some(&preview_worker), None, None);
         assert!(state.search_result.is_none());
         assert!(state.selected_matches.is_empty());
         assert!(state.candidate.is_none());
         assert_eq!(
-            state.preview_result_publications,
-            publications_before_stale_completion,
+            state.preview_result_publications, publications_before_stale_completion,
             "candidate completion from an invalidated revision must be discarded"
         );
         assert!(state.take_confirmed_request().is_none());
@@ -2290,8 +2356,8 @@ mod tests {
         use crate::plugins::search_replace::SearchReplacePlugin;
         use crate::settings::Settings;
         use std::collections::HashSet;
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
 
         struct NotesDirectoryOverride(Option<std::ffi::OsString>);
         impl NotesDirectoryOverride {
@@ -2334,7 +2400,9 @@ mod tests {
         let binary_path = root.join("binary.rs");
         let text_path = root.join("notes.txt");
         let outside_path = fixture.path().join("outside.rs");
-        let main_original = "\u{feff}// café Ω needle\r\nlet keep = \"needle\";".as_bytes().to_vec();
+        let main_original = "\u{feff}// café Ω needle\r\nlet keep = \"needle\";"
+            .as_bytes()
+            .to_vec();
         let stale_original = b"// stale needle\r\n".to_vec();
         let unchecked_original = b"// leave this needle untouched\n".to_vec();
         let nested_original = b"// nested needle\n".to_vec();
@@ -2412,7 +2480,10 @@ mod tests {
             .next()
             .expect("replace command is registered");
         let invocation = parse_command(replace_action, None, ActivationSource::Dashboard).unwrap();
-        assert_eq!(invocation.command, crate::commands::Command::SearchReplace(SearchReplaceCommand::Open));
+        assert_eq!(
+            invocation.command,
+            crate::commands::Command::SearchReplace(SearchReplaceCommand::Open)
+        );
         CommandBus.dispatch(&invocation, &mut app).unwrap();
         assert!(app.search_replace_dialog.open);
         assert!(app.search_replace_dialog.root.is_none());
@@ -2449,10 +2520,12 @@ mod tests {
                 PathBuf::from("unchecked.rs"),
             ])
         );
-        assert!(direct
-            .summary()
-            .skipped_by_reason()
-            .contains_key(&crate::search_replace::SkippedFileReason::Binary));
+        assert!(
+            direct
+                .summary()
+                .skipped_by_reason()
+                .contains_key(&crate::search_replace::SkippedFileReason::Binary)
+        );
         assert_eq!(std::fs::read(&main_path).unwrap(), main_original);
 
         // Explicit recursion includes nested files while extension/glob exclusions still apply.
@@ -2499,10 +2572,13 @@ mod tests {
         app.search_replace_dialog
             .set_match_selected(&stale_match, true);
         wait_for_app_replace(&mut app, &ctx, |app| {
-            app.search_replace_dialog.candidate.as_ref().is_some_and(|candidate| {
-                candidate.readiness() == ReplacementCandidateReadiness::Ready
-                    && !app.search_replace_dialog.preview_pending
-            })
+            app.search_replace_dialog
+                .candidate
+                .as_ref()
+                .is_some_and(|candidate| {
+                    candidate.readiness() == ReplacementCandidateReadiness::Ready
+                        && !app.search_replace_dialog.preview_pending
+                })
         });
         let candidate = app.search_replace_dialog.candidate.as_ref().unwrap();
         assert_eq!(candidate.summary().approved_matches(), 2);
@@ -2521,7 +2597,10 @@ mod tests {
             .iter()
             .find(|file| file.original_snapshot().relative_path() == Path::new("stale.rs"))
             .unwrap();
-        assert_eq!(stale_candidate.output_bytes().as_ref(), b"// stale changed\r\n");
+        assert_eq!(
+            stale_candidate.output_bytes().as_ref(),
+            b"// stale changed\r\n"
+        );
         assert_eq!(std::fs::read(&main_path).unwrap(), main_original);
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_original);
 
@@ -2529,7 +2608,11 @@ mod tests {
         std::fs::write(&stale_path, &stale_external).unwrap();
         app.search_replace_dialog.apply_review = app.search_replace_dialog.build_apply_review();
         assert_eq!(
-            app.search_replace_dialog.apply_review.as_ref().unwrap().approved_matches,
+            app.search_replace_dialog
+                .apply_review
+                .as_ref()
+                .unwrap()
+                .approved_matches,
             2
         );
         app.search_replace_dialog.apply_confirmation_open = true;
@@ -2548,14 +2631,21 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(receipt.entries().len(), 2);
-        assert!(receipt
-            .entries()
-            .iter()
-            .any(|entry| entry.path() == main_path && entry.outcome() == crate::replace_executor::ReplaceEntryOutcome::Applied));
-        assert!(receipt
-            .entries()
-            .iter()
-            .any(|entry| entry.path() == stale_path && entry.outcome() == crate::replace_executor::ReplaceEntryOutcome::StaleSkipped));
+        assert!(
+            receipt
+                .entries()
+                .iter()
+                .any(|entry| entry.path() == main_path
+                    && entry.outcome() == crate::replace_executor::ReplaceEntryOutcome::Applied)
+        );
+        assert!(
+            receipt
+                .entries()
+                .iter()
+                .any(|entry| entry.path() == stale_path
+                    && entry.outcome()
+                        == crate::replace_executor::ReplaceEntryOutcome::StaleSkipped)
+        );
         let main_applied = "\u{feff}// café Ω changed\r\nlet keep = \"needle\";".as_bytes();
         assert_eq!(std::fs::read(&main_path).unwrap(), main_applied);
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_external);
@@ -2566,8 +2656,8 @@ mod tests {
         assert_eq!(std::fs::read(&text_path).unwrap(), text_original);
         assert_eq!(std::fs::read(&outside_path).unwrap(), outside_original);
 
-        let recovery_directory = app_directory
-            .join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY);
+        let recovery_directory =
+            app_directory.join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY);
         let backup_files = std::fs::read_dir(&recovery_directory)
             .unwrap()
             .filter_map(Result::ok)
@@ -2579,15 +2669,17 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(backup_files.len(), 1);
         assert_eq!(std::fs::read(&backup_files[0]).unwrap(), main_original);
-        assert!(recovery_directory
-            .join(crate::replace_executor::REPLACE_RECOVERY_JOURNAL_FILE)
-            .is_file());
+        assert!(
+            recovery_directory
+                .join(crate::replace_executor::REPLACE_RECOVERY_JOURNAL_FILE)
+                .is_file()
+        );
 
         // Force the actual C receipt into its recovery-required presentation state. Its
         // applied/stale entry evidence remains intact; Recovery must reconcile the journal
         // without rewriting the files, while Restore must remain a distinct later action.
-        let journal_path = recovery_directory
-            .join(crate::replace_executor::REPLACE_RECOVERY_JOURNAL_FILE);
+        let journal_path =
+            recovery_directory.join(crate::replace_executor::REPLACE_RECOVERY_JOURNAL_FILE);
         let mut journal: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&journal_path).unwrap()).unwrap();
         let receipt_value = journal["receipts"]
@@ -2615,15 +2707,20 @@ mod tests {
         // Root changes, an explicit refresh, and closing the dialog retain the durable receipt.
         let alternate_root = fixture.path().join("alternate");
         std::fs::create_dir_all(&alternate_root).unwrap();
-        std::fs::write(alternate_root.join("alternate.rs"), b"needle in another chosen root\n")
-            .unwrap();
+        std::fs::write(
+            alternate_root.join("alternate.rs"),
+            b"needle in another chosen root\n",
+        )
+        .unwrap();
         app.handle_search_replace_ui_command(SearchReplaceUiCommand::SelectRoot(
             alternate_root.clone(),
         ));
-        assert!(app.search_replace_dialog
-            .receipts
-            .iter()
-            .any(|existing| existing.id() == receipt.id()));
+        assert!(
+            app.search_replace_dialog
+                .receipts
+                .iter()
+                .any(|existing| existing.id() == receipt.id())
+        );
         app.handle_search_replace_ui_command(SearchReplaceUiCommand::Search);
         wait_for_app_replace(&mut app, &ctx, |app| {
             app.search_replace_dialog.search_result.is_some()
@@ -2652,30 +2749,33 @@ mod tests {
         );
         app.handle_search_replace_ui_command(SearchReplaceUiCommand::Closed);
         assert!(!app.search_replace_dialog.open);
-        assert!(app.search_replace_dialog
-            .receipts
-            .iter()
-            .any(|existing| existing.id() == receipt.id()));
+        assert!(
+            app.search_replace_dialog
+                .receipts
+                .iter()
+                .any(|existing| existing.id() == receipt.id())
+        );
         app.ensure_open(crate::gui::Panel::SearchReplaceDialog);
         assert!(app.search_replace_dialog.open);
-        assert!(app.search_replace_dialog
-            .receipts
-            .iter()
-            .any(|existing| existing.id() == receipt.id()));
+        assert!(
+            app.search_replace_dialog
+                .receipts
+                .iter()
+                .any(|existing| existing.id() == receipt.id())
+        );
 
         app.handle_search_replace_ui_command(SearchReplaceUiCommand::ReviewRecovery(
             receipt.id().to_owned(),
         ));
         app.handle_search_replace_ui_command(SearchReplaceUiCommand::ConfirmRecovery);
         wait_for_app_replace(&mut app, &ctx, |app| {
-            app.search_replace_dialog
-                .receipts
-                .iter()
-                .any(|existing| {
-                    existing.id() == receipt.id()
-                        && existing.status() == ReplaceTransactionStatus::Partial
-                        && existing.message().contains("interrupted apply phases were reconciled")
-                })
+            app.search_replace_dialog.receipts.iter().any(|existing| {
+                existing.id() == receipt.id()
+                    && existing.status() == ReplaceTransactionStatus::Partial
+                    && existing
+                        .message()
+                        .contains("interrupted apply phases were reconciled")
+            })
         });
         assert_eq!(std::fs::read(&main_path).unwrap(), main_applied);
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_external);
@@ -2692,13 +2792,10 @@ mod tests {
         );
         app.handle_search_replace_ui_command(SearchReplaceUiCommand::ConfirmRestore);
         wait_for_app_replace(&mut app, &ctx, |app| {
-            app.search_replace_dialog
-                .receipts
-                .iter()
-                .any(|existing| {
-                    existing.id() == receipt.id()
-                        && existing.status() == ReplaceTransactionStatus::Restored
-                })
+            app.search_replace_dialog.receipts.iter().any(|existing| {
+                existing.id() == receipt.id()
+                    && existing.status() == ReplaceTransactionStatus::Restored
+            })
         });
         assert_eq!(std::fs::read(&main_path).unwrap(), main_original);
         assert_eq!(std::fs::read(&stale_path).unwrap(), stale_external);
@@ -2707,4 +2804,3 @@ mod tests {
         app.shutdown_search_replace_runtime();
     }
 }
-

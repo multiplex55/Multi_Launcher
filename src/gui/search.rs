@@ -1125,10 +1125,7 @@ impl LauncherApp {
                         }
                         let cloned = a.clone();
                         res.push((
-                            crate::search_scope::LauncherSearchResult::new(
-                                cloned,
-                                cached.category,
-                            ),
+                            crate::search_scope::LauncherSearchResult::new(cloned, cached.category),
                             score,
                         ));
                     }
@@ -1146,10 +1143,7 @@ impl LauncherApp {
                         }
                         let cloned = a.clone();
                         res.push((
-                            crate::search_scope::LauncherSearchResult::new(
-                                cloned,
-                                cached.category,
-                            ),
+                            crate::search_scope::LauncherSearchResult::new(cloned, cached.category),
                             score as f32 * self.fuzzy_weight,
                         ));
                     }
@@ -1740,13 +1734,11 @@ impl LauncherApp {
             crate::performance::track_c::Phase::SearchMoveResults,
         );
         let materialized = scored.len();
-        let (actions, categories): (
-            Vec<Action>,
-            Vec<crate::search_scope::SearchResultCategory>,
-        ) = scored
-            .into_iter()
-            .map(|(result, _)| (result.action, result.category))
-            .unzip();
+        let (actions, categories): (Vec<Action>, Vec<crate::search_scope::SearchResultCategory>) =
+            scored
+                .into_iter()
+                .map(|(result, _)| (result.action, result.category))
+                .unzip();
         materialize_timer.set_work_units(materialized);
         materialize_timer.finish(crate::performance::track_c::Outcome::Completed);
         let state = if provider_pending
@@ -1808,16 +1800,9 @@ impl LauncherApp {
         self.search_read_only_outcome(raw_query).actions
     }
 
-    fn apply_usage_weight(
-        &self,
-        res: &mut Vec<(crate::search_scope::LauncherSearchResult, f32)>,
-    ) {
+    fn apply_usage_weight(&self, res: &mut Vec<(crate::search_scope::LauncherSearchResult, f32)>) {
         for (result, score) in res.iter_mut() {
-            *score += self
-                .usage
-                .get(&result.action.action)
-                .cloned()
-                .unwrap_or(0) as f32
+            *score += self.usage.get(&result.action.action).cloned().unwrap_or(0) as f32
                 * self.usage_weight;
         }
     }
@@ -2111,11 +2096,16 @@ mod tests {
             args: None,
         };
         let versions = crate::radial::dynamic::MutableResultCatalogVersions::default();
-        let snapshot = c2a_snapshot(vec![provider_action.clone()], false, 1, 1, versions, versions);
-        let snapshot_outcome = app.search_read_only_outcome_with_plugin_snapshot(
-            "app scope marker",
-            snapshot,
+        let snapshot = c2a_snapshot(
+            vec![provider_action.clone()],
+            false,
+            1,
+            1,
+            versions,
+            versions,
         );
+        let snapshot_outcome =
+            app.search_read_only_outcome_with_plugin_snapshot("app scope marker", snapshot);
         assert_eq!(
             snapshot_outcome
                 .actions
@@ -2487,13 +2477,11 @@ mod tests {
                 .partial_cmp(&left.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let (actions, categories): (
-            Vec<Action>,
-            Vec<crate::search_scope::SearchResultCategory>,
-        ) = scored
-            .into_iter()
-            .map(|(action, _, category)| (action, category))
-            .unzip();
+        let (actions, categories): (Vec<Action>, Vec<crate::search_scope::SearchResultCategory>) =
+            scored
+                .into_iter()
+                .map(|(action, _, category)| (action, category))
+                .unzip();
         let state = if provider.pending
             || provider.start_revision != provider.provider_revision
             || !catalog_versions_stable
@@ -3281,13 +3269,11 @@ mod tests {
                 .partial_cmp(&left.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let (actions, categories): (
-            Vec<Action>,
-            Vec<crate::search_scope::SearchResultCategory>,
-        ) = scored
-            .into_iter()
-            .map(|(action, _, category)| (action, category))
-            .unzip();
+        let (actions, categories): (Vec<Action>, Vec<crate::search_scope::SearchResultCategory>) =
+            scored
+                .into_iter()
+                .map(|(action, _, category)| (action, category))
+                .unzip();
         let stable = provider.catalog_versions_at_start == provider.catalog_versions;
         let state =
             if provider.pending || provider.start_revision != provider.provider_revision || !stable

@@ -8,20 +8,20 @@
 use crate::batch_rename::{self, ExplicitDirectoryRoot, SnapshotEntryKind};
 use crate::common::persistence::save_json_atomic;
 use crate::file_operations::{
-    self, GuardedReplaceFile, GuardedReplaceStage, NativeFileIdentity, RenameScanGeneration,
-    RenameScanRequest, RenameScanStatus, ScanCancellation,
-    VerifiedReadSnapshot, VerifiedReplaceFailureKind, MAX_RENAME_HASH_BYTES_PER_BATCH,
-    MAX_RENAME_HASH_BYTES_PER_FILE,
+    self, GuardedReplaceFile, GuardedReplaceStage, MAX_RENAME_HASH_BYTES_PER_BATCH,
+    MAX_RENAME_HASH_BYTES_PER_FILE, NativeFileIdentity, RenameScanGeneration, RenameScanRequest,
+    RenameScanStatus, ScanCancellation, VerifiedReadSnapshot, VerifiedReplaceFailureKind,
 };
 use crate::search_replace::{
-    MatchId, ReplacementCandidate, ReplacementCandidateReadiness, ReplacementFileReadiness, ReplacementRevision, SearchGeneration, SearchRevision,
+    MatchId, ReplacementCandidate, ReplacementCandidateReadiness, ReplacementFileReadiness,
+    ReplacementRevision, SearchGeneration, SearchRevision,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
 use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -125,7 +125,9 @@ pub struct ConfirmReplacementError {
 
 impl ConfirmReplacementError {
     fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        Self {
+            message: message.into(),
+        }
     }
 
     pub fn message(&self) -> &str {
@@ -225,7 +227,9 @@ impl ConfirmedReplacementRequest {
             total_bytes = total_bytes
                 .checked_add(snapshot.length())
                 .and_then(|sum| sum.checked_add(output.len() as u64))
-                .ok_or_else(|| ConfirmReplacementError::new("replacement batch byte count overflowed"))?;
+                .ok_or_else(|| {
+                    ConfirmReplacementError::new("replacement batch byte count overflowed")
+                })?;
             if total_bytes > MAX_RENAME_HASH_BYTES_PER_BATCH {
                 return Err(ConfirmReplacementError::new(
                     "the selected replacement batch exceeds the bounded write and recovery limit",
@@ -295,7 +299,10 @@ pub enum ReplaceTransactionStatus {
 
 impl ReplaceTransactionStatus {
     fn blocks_new_apply(self) -> bool {
-        matches!(self, Self::Applying | Self::Restoring | Self::RecoveryRequired)
+        matches!(
+            self,
+            Self::Applying | Self::Restoring | Self::RecoveryRequired
+        )
     }
 }
 
@@ -349,7 +356,10 @@ struct ReplaceRecoveryJournal {
 
 impl Default for ReplaceRecoveryJournal {
     fn default() -> Self {
-        Self { schema_version: REPLACE_JOURNAL_SCHEMA_VERSION, receipts: Vec::new() }
+        Self {
+            schema_version: REPLACE_JOURNAL_SCHEMA_VERSION,
+            receipts: Vec::new(),
+        }
     }
 }
 
@@ -366,10 +376,18 @@ pub struct ReplaceRecoveryReceipt {
 }
 
 impl ReplaceRecoveryReceipt {
-    pub fn id(&self) -> &str { &self.id }
-    pub fn status(&self) -> ReplaceTransactionStatus { self.status }
-    pub fn entries(&self) -> &[ReplaceRecoveryEntry] { &self.entries }
-    pub fn message(&self) -> &str { &self.message }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn status(&self) -> ReplaceTransactionStatus {
+        self.status
+    }
+    pub fn entries(&self) -> &[ReplaceRecoveryEntry] {
+        &self.entries
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,10 +428,18 @@ pub struct ReplaceRecoveryEntry {
 }
 
 impl ReplaceRecoveryEntry {
-    pub fn path(&self) -> PathBuf { self.root_path.join(&self.relative_path) }
-    pub fn outcome(&self) -> ReplaceEntryOutcome { self.outcome }
-    pub fn original_sha256(&self) -> [u8; 32] { self.original_sha256 }
-    pub fn output_sha256(&self) -> [u8; 32] { self.output_sha256 }
+    pub fn path(&self) -> PathBuf {
+        self.root_path.join(&self.relative_path)
+    }
+    pub fn outcome(&self) -> ReplaceEntryOutcome {
+        self.outcome
+    }
+    pub fn original_sha256(&self) -> [u8; 32] {
+        self.original_sha256
+    }
+    pub fn output_sha256(&self) -> [u8; 32] {
+        self.output_sha256
+    }
 }
 
 mod option_system_time_serde {
@@ -421,7 +447,9 @@ mod option_system_time_serde {
     use std::time::SystemTime;
 
     pub fn serialize<S>(value: &Option<SystemTime>, serializer: S) -> Result<S::Ok, S::Error>
-    where S: Serializer {
+    where
+        S: Serializer,
+    {
         match value {
             Some(time) => super::system_time_serde::serialize(time, serializer),
             None => serializer.serialize_none(),
@@ -429,7 +457,9 @@ mod option_system_time_serde {
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<SystemTime>, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         Option::<super::system_time_serde::EncodedSystemTime>::deserialize(deserializer)?
             .map(super::system_time_serde::decode)
             .transpose()
@@ -469,7 +499,10 @@ impl ReplaceExecutor {
         if recovery_directory.to_str().is_none() {
             return Err("replacement recovery directory must be Unicode".into());
         }
-        Ok(Self { recovery_directory, operation_lock: Mutex::new(()) })
+        Ok(Self {
+            recovery_directory,
+            operation_lock: Mutex::new(()),
+        })
     }
 
     fn operation_guard(
@@ -477,12 +510,14 @@ impl ReplaceExecutor {
         transaction_id: &str,
     ) -> Result<std::sync::MutexGuard<'_, ()>, ReplaceOperationResult> {
         self.operation_lock.try_lock().map_err(|error| match error {
-            std::sync::TryLockError::WouldBlock => {
-                refused_result(transaction_id, "another replace operation is already active".into())
-            }
-            std::sync::TryLockError::Poisoned(_) => {
-                refused_result(transaction_id, "replace operation state is unavailable".into())
-            }
+            std::sync::TryLockError::WouldBlock => refused_result(
+                transaction_id,
+                "another replace operation is already active".into(),
+            ),
+            std::sync::TryLockError::Poisoned(_) => refused_result(
+                transaction_id,
+                "replace operation state is unavailable".into(),
+            ),
         })
     }
 
@@ -548,7 +583,11 @@ impl ReplaceExecutor {
             Ok(journal) => journal,
             Err(error) => return refused_result(&transaction_id, error),
         };
-        if journal.receipts.iter().any(|receipt| receipt.status.blocks_new_apply()) {
+        if journal
+            .receipts
+            .iter()
+            .any(|receipt| receipt.status.blocks_new_apply())
+        {
             return refused_result(
                 &transaction_id,
                 "an unresolved replacement receipt must be reconciled before another apply".into(),
@@ -563,7 +602,10 @@ impl ReplaceExecutor {
         let mut receipt = receipt_from_request(&transaction_id, &request);
         journal.receipts.push(receipt.clone());
         if let Err(error) = save_replace_journal(&journal_path, &journal) {
-            return failed_receipt(receipt, format!("recovery intent could not be saved before any source changed: {error}"));
+            return failed_receipt(
+                receipt,
+                format!("recovery intent could not be saved before any source changed: {error}"),
+            );
         }
         report(ReplaceProgress {
             transaction_id: transaction_id.clone(),
@@ -575,12 +617,31 @@ impl ReplaceExecutor {
 
         for index in 0..request.files.len() {
             if cancellation.is_cancelled() {
-                mark_remaining(&mut receipt, index, ReplaceEntryOutcome::Cancelled, ReplaceEntryPhase::Cancelled, "cancelled before this file was attempted");
+                mark_remaining(
+                    &mut receipt,
+                    index,
+                    ReplaceEntryOutcome::Cancelled,
+                    ReplaceEntryPhase::Cancelled,
+                    "cancelled before this file was attempted",
+                );
                 let _ = update_receipt(&mut journal, &journal_path, &receipt);
-                receipt.status = if receipt.entries.iter().any(|entry| entry.outcome == ReplaceEntryOutcome::Applied) { ReplaceTransactionStatus::Partial } else { ReplaceTransactionStatus::Cancelled };
-                receipt.message = "replacement was cancelled between files; completed files remain committed".into();
+                receipt.status = if receipt
+                    .entries
+                    .iter()
+                    .any(|entry| entry.outcome == ReplaceEntryOutcome::Applied)
+                {
+                    ReplaceTransactionStatus::Partial
+                } else {
+                    ReplaceTransactionStatus::Cancelled
+                };
+                receipt.message =
+                    "replacement was cancelled between files; completed files remain committed"
+                        .into();
                 let _ = update_receipt(&mut journal, &journal_path, &receipt);
-                return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                return ReplaceOperationResult {
+                    message: receipt.message.clone(),
+                    receipt,
+                };
             }
             report(ReplaceProgress {
                 transaction_id: transaction_id.clone(),
@@ -600,17 +661,50 @@ impl ReplaceExecutor {
                 before_output_publication,
             ) {
                 ApplyOneResult::Applied => {}
-                ApplyOneResult::Cancelled { message, recovery_required } => {
-                    receipt.entries[index].outcome = if recovery_required { ReplaceEntryOutcome::RecoveryRequired } else { ReplaceEntryOutcome::Cancelled };
-                    receipt.entries[index].phase = if recovery_required { ReplaceEntryPhase::RecoveryRequired } else { ReplaceEntryPhase::Cancelled };
+                ApplyOneResult::Cancelled {
+                    message,
+                    recovery_required,
+                } => {
+                    receipt.entries[index].outcome = if recovery_required {
+                        ReplaceEntryOutcome::RecoveryRequired
+                    } else {
+                        ReplaceEntryOutcome::Cancelled
+                    };
+                    receipt.entries[index].phase = if recovery_required {
+                        ReplaceEntryPhase::RecoveryRequired
+                    } else {
+                        ReplaceEntryPhase::Cancelled
+                    };
                     receipt.entries[index].message = bounded_message(&message);
-                    mark_remaining(&mut receipt, index + 1, ReplaceEntryOutcome::NotAttempted, ReplaceEntryPhase::NotAttempted, "not attempted after cancellation or recovery stop");
-                    receipt.status = if recovery_required { ReplaceTransactionStatus::RecoveryRequired } else if receipt.entries.iter().any(|entry| entry.outcome == ReplaceEntryOutcome::Applied) { ReplaceTransactionStatus::Partial } else { ReplaceTransactionStatus::Cancelled };
+                    mark_remaining(
+                        &mut receipt,
+                        index + 1,
+                        ReplaceEntryOutcome::NotAttempted,
+                        ReplaceEntryPhase::NotAttempted,
+                        "not attempted after cancellation or recovery stop",
+                    );
+                    receipt.status = if recovery_required {
+                        ReplaceTransactionStatus::RecoveryRequired
+                    } else if receipt
+                        .entries
+                        .iter()
+                        .any(|entry| entry.outcome == ReplaceEntryOutcome::Applied)
+                    {
+                        ReplaceTransactionStatus::Partial
+                    } else {
+                        ReplaceTransactionStatus::Cancelled
+                    };
                     receipt.message = bounded_message(&message);
                     let _ = update_receipt(&mut journal, &journal_path, &receipt);
-                    return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                    return ReplaceOperationResult {
+                        message: receipt.message.clone(),
+                        receipt,
+                    };
                 }
-                ApplyOneResult::Skip { root_changed, message } => {
+                ApplyOneResult::Skip {
+                    root_changed,
+                    message,
+                } => {
                     receipt.entries[index].outcome = ReplaceEntryOutcome::StaleSkipped;
                     receipt.entries[index].phase = ReplaceEntryPhase::StaleSkipped;
                     receipt.entries[index].message = bounded_message(&message);
@@ -618,41 +712,89 @@ impl ReplaceExecutor {
                         receipt.entries[index].outcome = ReplaceEntryOutcome::RecoveryRequired;
                         receipt.entries[index].phase = ReplaceEntryPhase::RecoveryRequired;
                         receipt.status = ReplaceTransactionStatus::RecoveryRequired;
-                        receipt.message = format!("stale per-file result could not be saved: {error}");
-                        return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                        receipt.message =
+                            format!("stale per-file result could not be saved: {error}");
+                        return ReplaceOperationResult {
+                            message: receipt.message.clone(),
+                            receipt,
+                        };
                     }
                     if root_changed {
-                        mark_remaining(&mut receipt, index + 1, ReplaceEntryOutcome::NotAttempted, ReplaceEntryPhase::NotAttempted, "not attempted because the selected root identity changed");
+                        mark_remaining(
+                            &mut receipt,
+                            index + 1,
+                            ReplaceEntryOutcome::NotAttempted,
+                            ReplaceEntryPhase::NotAttempted,
+                            "not attempted because the selected root identity changed",
+                        );
                         break;
                     }
                 }
-                ApplyOneResult::Refused { message, recovery_required } => {
-                    receipt.entries[index].outcome = if recovery_required { ReplaceEntryOutcome::RecoveryRequired } else { ReplaceEntryOutcome::Refused };
-                    receipt.entries[index].phase = if recovery_required { ReplaceEntryPhase::RecoveryRequired } else { ReplaceEntryPhase::Refused };
+                ApplyOneResult::Refused {
+                    message,
+                    recovery_required,
+                } => {
+                    receipt.entries[index].outcome = if recovery_required {
+                        ReplaceEntryOutcome::RecoveryRequired
+                    } else {
+                        ReplaceEntryOutcome::Refused
+                    };
+                    receipt.entries[index].phase = if recovery_required {
+                        ReplaceEntryPhase::RecoveryRequired
+                    } else {
+                        ReplaceEntryPhase::Refused
+                    };
                     receipt.entries[index].message = bounded_message(&message);
                     if recovery_required {
                         receipt.status = ReplaceTransactionStatus::RecoveryRequired;
                         receipt.message = bounded_message(&message);
                         let _ = update_receipt(&mut journal, &journal_path, &receipt);
-                        mark_remaining(&mut receipt, index + 1, ReplaceEntryOutcome::NotAttempted, ReplaceEntryPhase::NotAttempted, "not attempted because an earlier file needs recovery");
+                        mark_remaining(
+                            &mut receipt,
+                            index + 1,
+                            ReplaceEntryOutcome::NotAttempted,
+                            ReplaceEntryPhase::NotAttempted,
+                            "not attempted because an earlier file needs recovery",
+                        );
                         let _ = update_receipt(&mut journal, &journal_path, &receipt);
-                        return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                        return ReplaceOperationResult {
+                            message: receipt.message.clone(),
+                            receipt,
+                        };
                     }
                     if let Err(error) = update_receipt(&mut journal, &journal_path, &receipt) {
                         receipt.status = ReplaceTransactionStatus::RecoveryRequired;
                         receipt.message = format!("per-file refusal could not be saved: {error}");
-                        return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                        return ReplaceOperationResult {
+                            message: receipt.message.clone(),
+                            receipt,
+                        };
                     }
                 }
             }
         }
-        let any_applied = receipt.entries.iter().any(|entry| entry.outcome == ReplaceEntryOutcome::Applied);
-        let any_unattempted = receipt.entries.iter().any(|entry| matches!(entry.outcome, ReplaceEntryOutcome::NotAttempted | ReplaceEntryOutcome::Cancelled | ReplaceEntryOutcome::StaleSkipped | ReplaceEntryOutcome::Refused));
+        let any_applied = receipt
+            .entries
+            .iter()
+            .any(|entry| entry.outcome == ReplaceEntryOutcome::Applied);
+        let any_unattempted = receipt.entries.iter().any(|entry| {
+            matches!(
+                entry.outcome,
+                ReplaceEntryOutcome::NotAttempted
+                    | ReplaceEntryOutcome::Cancelled
+                    | ReplaceEntryOutcome::StaleSkipped
+                    | ReplaceEntryOutcome::Refused
+            )
+        });
         receipt.status = if any_applied && any_unattempted {
             ReplaceTransactionStatus::Partial
         } else if any_applied {
             ReplaceTransactionStatus::Applied
-        } else if receipt.entries.iter().any(|entry| entry.outcome == ReplaceEntryOutcome::RecoveryRequired) {
+        } else if receipt
+            .entries
+            .iter()
+            .any(|entry| entry.outcome == ReplaceEntryOutcome::RecoveryRequired)
+        {
             ReplaceTransactionStatus::RecoveryRequired
         } else if cancellation.is_cancelled() {
             ReplaceTransactionStatus::Cancelled
@@ -660,17 +802,28 @@ impl ReplaceExecutor {
             ReplaceTransactionStatus::Failed
         };
         receipt.message = match receipt.status {
-            ReplaceTransactionStatus::Applied => "all selected changed files were replaced and verified".into(),
-            ReplaceTransactionStatus::Partial => "replacement completed partially; each file outcome is recorded".into(),
-            ReplaceTransactionStatus::Cancelled => "replacement ended without committing a file".into(),
-            ReplaceTransactionStatus::RecoveryRequired => "replacement stopped with a retained recovery payload".into(),
+            ReplaceTransactionStatus::Applied => {
+                "all selected changed files were replaced and verified".into()
+            }
+            ReplaceTransactionStatus::Partial => {
+                "replacement completed partially; each file outcome is recorded".into()
+            }
+            ReplaceTransactionStatus::Cancelled => {
+                "replacement ended without committing a file".into()
+            }
+            ReplaceTransactionStatus::RecoveryRequired => {
+                "replacement stopped with a retained recovery payload".into()
+            }
             _ => "no selected file was replaced".into(),
         };
         if let Err(error) = update_receipt(&mut journal, &journal_path, &receipt) {
             receipt.status = ReplaceTransactionStatus::RecoveryRequired;
             receipt.message = format!("final replacement receipt could not be saved: {error}");
         }
-        ReplaceOperationResult { message: receipt.message.clone(), receipt }
+        ReplaceOperationResult {
+            message: receipt.message.clone(),
+            receipt,
+        }
     }
 
     pub fn restore(
@@ -684,10 +837,16 @@ impl ReplaceExecutor {
             Err(result) => return result,
         };
         if cancellation.is_cancelled() {
-            return refused_result(transaction_id, "Restore was cancelled before recovery setup".into());
+            return refused_result(
+                transaction_id,
+                "Restore was cancelled before recovery setup".into(),
+            );
         }
         #[cfg(not(windows))]
-        return refused_result(transaction_id, "safe replacement Restore is available only on Windows".into());
+        return refused_result(
+            transaction_id,
+            "safe replacement Restore is available only on Windows".into(),
+        );
         #[cfg(windows)]
         self.restore_windows(transaction_id, cancellation, &mut report)
     }
@@ -705,10 +864,16 @@ impl ReplaceExecutor {
             Err(result) => return result,
         };
         if cancellation.is_cancelled() {
-            return refused_result(transaction_id, "recovery was cancelled before journal reconciliation".into());
+            return refused_result(
+                transaction_id,
+                "recovery was cancelled before journal reconciliation".into(),
+            );
         }
         #[cfg(not(windows))]
-        return refused_result(transaction_id, "safe replacement recovery is available only on Windows".into());
+        return refused_result(
+            transaction_id,
+            "safe replacement recovery is available only on Windows".into(),
+        );
         #[cfg(windows)]
         self.recover_windows(transaction_id, cancellation, &mut report)
     }
@@ -729,24 +894,38 @@ impl ReplaceExecutor {
             Ok(journal) => journal,
             Err(error) => return refused_result(transaction_id, error),
         };
-        let Some(receipt_index) = journal.receipts.iter().position(|receipt| receipt.id == transaction_id) else {
-            return refused_result(transaction_id, "replacement recovery receipt was not found".into());
+        let Some(receipt_index) = journal
+            .receipts
+            .iter()
+            .position(|receipt| receipt.id == transaction_id)
+        else {
+            return refused_result(
+                transaction_id,
+                "replacement recovery receipt was not found".into(),
+            );
         };
         let mut receipt = journal.receipts[receipt_index].clone();
         if receipt.status == ReplaceTransactionStatus::Restored {
             for entry in &receipt.entries {
                 if entry.outcome == ReplaceEntryOutcome::Restored {
                     if let Err(message) = verify_already_restored(entry, cancellation) {
-                        return refused_receipt(receipt.clone(), format!("repeated Restore refused: {message}"));
+                        return refused_receipt(
+                            receipt.clone(),
+                            format!("repeated Restore refused: {message}"),
+                        );
                     }
                 }
             }
             return ReplaceOperationResult {
-                message: "this replacement transaction was already restored; no files changed".into(),
+                message: "this replacement transaction was already restored; no files changed"
+                    .into(),
                 receipt,
             };
         }
-        if !matches!(receipt.status, ReplaceTransactionStatus::Applied | ReplaceTransactionStatus::Partial) {
+        if !matches!(
+            receipt.status,
+            ReplaceTransactionStatus::Applied | ReplaceTransactionStatus::Partial
+        ) {
             return refused_receipt(
                 receipt,
                 "this replacement receipt is unresolved or has no safely restorable committed file",
@@ -757,11 +936,16 @@ impl ReplaceExecutor {
         }
 
         if !receipt.entries.iter().any(|entry| {
-            matches!(entry.outcome, ReplaceEntryOutcome::Applied | ReplaceEntryOutcome::Refused)
-                && entry.post_identity.is_some()
+            matches!(
+                entry.outcome,
+                ReplaceEntryOutcome::Applied | ReplaceEntryOutcome::Refused
+            ) && entry.post_identity.is_some()
                 && entry.backup_identity.is_some()
         }) {
-            return refused_receipt(receipt, "this receipt has no verified committed output and original backup to restore");
+            return refused_receipt(
+                receipt,
+                "this receipt has no verified committed output and original backup to restore",
+            );
         }
         let prior_status = receipt.status;
         receipt.status = ReplaceTransactionStatus::Restoring;
@@ -774,18 +958,33 @@ impl ReplaceExecutor {
             );
         }
 
-        let total = receipt.entries.iter().filter(|entry| {
-            matches!(entry.outcome, ReplaceEntryOutcome::Applied | ReplaceEntryOutcome::Refused | ReplaceEntryOutcome::Restored)
-        }).count();
+        let total = receipt
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.outcome,
+                    ReplaceEntryOutcome::Applied
+                        | ReplaceEntryOutcome::Refused
+                        | ReplaceEntryOutcome::Restored
+                )
+            })
+            .count();
         let mut completed = 0;
         for entry_index in 0..receipt.entries.len() {
             if receipt.entries[entry_index].outcome == ReplaceEntryOutcome::Restored {
-                if let Err(message) = verify_already_restored(&receipt.entries[entry_index], cancellation) {
+                if let Err(message) =
+                    verify_already_restored(&receipt.entries[entry_index], cancellation)
+                {
                     receipt.status = ReplaceTransactionStatus::RecoveryRequired;
-                    receipt.message = bounded_message(&format!("repeated Restore refused: {message}"));
+                    receipt.message =
+                        bounded_message(&format!("repeated Restore refused: {message}"));
                     journal.receipts[receipt_index] = receipt.clone();
                     let _ = save_replace_journal(&journal_path, &journal);
-                    return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                    return ReplaceOperationResult {
+                        message: receipt.message.clone(),
+                        receipt,
+                    };
                 }
                 completed += 1;
                 continue;
@@ -799,21 +998,35 @@ impl ReplaceExecutor {
                 continue;
             }
             if cancellation.is_cancelled() {
-                receipt.status = if completed > 0 { ReplaceTransactionStatus::Partial } else { prior_status };
-                receipt.message = "Restore was cancelled between files; completed restores remain committed".into();
+                receipt.status = if completed > 0 {
+                    ReplaceTransactionStatus::Partial
+                } else {
+                    prior_status
+                };
+                receipt.message =
+                    "Restore was cancelled between files; completed restores remain committed"
+                        .into();
                 journal.receipts[receipt_index] = receipt.clone();
                 if let Err(error) = save_replace_journal(&journal_path, &journal) {
                     receipt.status = ReplaceTransactionStatus::RecoveryRequired;
-                    receipt.message = format!("Restore was cancelled and its receipt could not be saved: {error}");
+                    receipt.message = format!(
+                        "Restore was cancelled and its receipt could not be saved: {error}"
+                    );
                 }
-                return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                return ReplaceOperationResult {
+                    message: receipt.message.clone(),
+                    receipt,
+                };
             }
             report(ReplaceProgress {
                 transaction_id: receipt.id.clone(),
                 phase: ReplaceTransactionStatus::Restoring,
                 completed,
                 total,
-                message: format!("Verifying {} before Restore", receipt.entries[entry_index].path().display()),
+                message: format!(
+                    "Verifying {} before Restore",
+                    receipt.entries[entry_index].path().display()
+                ),
             });
             match restore_one_entry(
                 entry_index,
@@ -825,7 +1038,10 @@ impl ReplaceExecutor {
                 cancellation,
             ) {
                 RestoreOneResult::Restored => completed += 1,
-                RestoreOneResult::Cancelled { message, recovery_required } => {
+                RestoreOneResult::Cancelled {
+                    message,
+                    recovery_required,
+                } => {
                     receipt.status = if recovery_required {
                         ReplaceTransactionStatus::RecoveryRequired
                     } else if completed > 0 {
@@ -845,11 +1061,22 @@ impl ReplaceExecutor {
                     let saved = save_replace_journal(&journal_path, &journal);
                     if saved.is_err() {
                         receipt.status = ReplaceTransactionStatus::RecoveryRequired;
-                        receipt.message = format!("{}; receipt save failed: {}", receipt.message, saved.unwrap_err());
+                        receipt.message = format!(
+                            "{}; receipt save failed: {}",
+                            receipt.message,
+                            saved.unwrap_err()
+                        );
                     }
-                    return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                    return ReplaceOperationResult {
+                        message: receipt.message.clone(),
+                        receipt,
+                    };
                 }
-                RestoreOneResult::Refused { message, recovery_required, committed } => {
+                RestoreOneResult::Refused {
+                    message,
+                    recovery_required,
+                    committed,
+                } => {
                     let entry = &mut receipt.entries[entry_index];
                     if recovery_required {
                         entry.phase = ReplaceEntryPhase::RecoveryRequired;
@@ -882,16 +1109,25 @@ impl ReplaceExecutor {
                             receipt.message
                         ));
                     }
-                    return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                    return ReplaceOperationResult {
+                        message: receipt.message.clone(),
+                        receipt,
+                    };
                 }
             }
         }
-        let committed = receipt.entries.iter().filter(|entry| {
-            entry.post_identity.is_some() && entry.backup_identity.is_some()
-        }).count();
-        let remaining = receipt.entries.iter().filter(|entry| {
-            entry.post_identity.is_some() && entry.outcome != ReplaceEntryOutcome::Restored
-        }).count();
+        let committed = receipt
+            .entries
+            .iter()
+            .filter(|entry| entry.post_identity.is_some() && entry.backup_identity.is_some())
+            .count();
+        let remaining = receipt
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.post_identity.is_some() && entry.outcome != ReplaceEntryOutcome::Restored
+            })
+            .count();
         receipt.status = if committed > 0 && remaining == 0 {
             ReplaceTransactionStatus::Restored
         } else {
@@ -905,9 +1141,14 @@ impl ReplaceExecutor {
         journal.receipts[receipt_index] = receipt.clone();
         if let Err(error) = save_replace_journal(&journal_path, &journal) {
             receipt.status = ReplaceTransactionStatus::RecoveryRequired;
-            receipt.message = format!("restored file state is verified but its receipt could not be saved: {error}");
+            receipt.message = format!(
+                "restored file state is verified but its receipt could not be saved: {error}"
+            );
         }
-        ReplaceOperationResult { message: receipt.message.clone(), receipt }
+        ReplaceOperationResult {
+            message: receipt.message.clone(),
+            receipt,
+        }
     }
 
     #[cfg(windows)]
@@ -926,13 +1167,21 @@ impl ReplaceExecutor {
             Ok(journal) => journal,
             Err(error) => return refused_result(transaction_id, error),
         };
-        let Some(receipt_index) = journal.receipts.iter().position(|receipt| receipt.id == transaction_id) else {
-            return refused_result(transaction_id, "replacement recovery receipt was not found".into());
+        let Some(receipt_index) = journal
+            .receipts
+            .iter()
+            .position(|receipt| receipt.id == transaction_id)
+        else {
+            return refused_result(
+                transaction_id,
+                "replacement recovery receipt was not found".into(),
+            );
         };
         let mut receipt = journal.receipts[receipt_index].clone();
         if !receipt.status.blocks_new_apply() {
             return ReplaceOperationResult {
-                message: "this replacement transaction has no interrupted operation to recover".into(),
+                message: "this replacement transaction has no interrupted operation to recover"
+                    .into(),
                 receipt,
             };
         }
@@ -956,10 +1205,14 @@ impl ReplaceExecutor {
         for entry_index in 0..receipt.entries.len() {
             if cancellation.is_cancelled() {
                 receipt.status = ReplaceTransactionStatus::RecoveryRequired;
-                receipt.message = "recovery was cancelled between guarded entry reconciliations".into();
+                receipt.message =
+                    "recovery was cancelled between guarded entry reconciliations".into();
                 journal.receipts[receipt_index] = receipt.clone();
                 let _ = save_replace_journal(&journal_path, &journal);
-                return ReplaceOperationResult { message: receipt.message.clone(), receipt };
+                return ReplaceOperationResult {
+                    message: receipt.message.clone(),
+                    receipt,
+                };
             }
             let entry = &receipt.entries[entry_index];
             let should_reconcile = if restoring {
@@ -999,7 +1252,10 @@ impl ReplaceExecutor {
                 phase: ReplaceTransactionStatus::RecoveryRequired,
                 completed: entry_index,
                 total,
-                message: format!("Rechecking recorded recovery roles for {}", entry.path().display()),
+                message: format!(
+                    "Rechecking recorded recovery roles for {}",
+                    entry.path().display()
+                ),
             });
             let result = if restoring {
                 recover_interrupted_restore(
@@ -1027,7 +1283,13 @@ impl ReplaceExecutor {
                 entry.phase = ReplaceEntryPhase::RecoveryRequired;
                 entry.outcome = ReplaceEntryOutcome::RecoveryRequired;
                 entry.message = bounded_message(&message);
-                let _ = persist_entry(&mut journal, &journal_path, &mut receipt, entry_index, &entry);
+                let _ = persist_entry(
+                    &mut journal,
+                    &journal_path,
+                    &mut receipt,
+                    entry_index,
+                    &entry,
+                );
                 unresolved = true;
                 receipt.message = bounded_message(&message);
                 break;
@@ -1037,12 +1299,16 @@ impl ReplaceExecutor {
         if unresolved {
             receipt.status = ReplaceTransactionStatus::RecoveryRequired;
         } else if restoring {
-            let committed = receipt.entries.iter().filter(|entry| {
-                entry.post_identity.is_some() && entry.backup_identity.is_some()
-            }).count();
-            let restored = receipt.entries.iter().filter(|entry| {
-                entry.outcome == ReplaceEntryOutcome::Restored
-            }).count();
+            let committed = receipt
+                .entries
+                .iter()
+                .filter(|entry| entry.post_identity.is_some() && entry.backup_identity.is_some())
+                .count();
+            let restored = receipt
+                .entries
+                .iter()
+                .filter(|entry| entry.outcome == ReplaceEntryOutcome::Restored)
+                .count();
             receipt.status = if committed > 0 && restored == committed {
                 ReplaceTransactionStatus::Restored
             } else if restored > 0 {
@@ -1053,9 +1319,10 @@ impl ReplaceExecutor {
                 ReplaceTransactionStatus::Failed
             };
         } else {
-            let any_applied = receipt.entries.iter().any(|entry| {
-                entry.outcome == ReplaceEntryOutcome::Applied
-            });
+            let any_applied = receipt
+                .entries
+                .iter()
+                .any(|entry| entry.outcome == ReplaceEntryOutcome::Applied);
             let any_other = receipt.entries.iter().any(|entry| {
                 matches!(
                     entry.outcome,
@@ -1076,9 +1343,11 @@ impl ReplaceExecutor {
         }
         if !unresolved {
             receipt.message = if restoring {
-                "interrupted Restore phases were reconciled from recorded identities and hashes".into()
+                "interrupted Restore phases were reconciled from recorded identities and hashes"
+                    .into()
             } else {
-                "interrupted apply phases were reconciled from recorded identities and hashes".into()
+                "interrupted apply phases were reconciled from recorded identities and hashes"
+                    .into()
             };
         }
         journal.receipts[receipt_index] = receipt.clone();
@@ -1088,16 +1357,28 @@ impl ReplaceExecutor {
                 "reconciled file state could not be durably recorded: {error}"
             ));
         }
-        ReplaceOperationResult { message: receipt.message.clone(), receipt }
+        ReplaceOperationResult {
+            message: receipt.message.clone(),
+            receipt,
+        }
     }
 }
 
 #[derive(Debug)]
 enum ApplyOneResult {
     Applied,
-    Skip { root_changed: bool, message: String },
-    Cancelled { message: String, recovery_required: bool },
-    Refused { message: String, recovery_required: bool },
+    Skip {
+        root_changed: bool,
+        message: String,
+    },
+    Cancelled {
+        message: String,
+        recovery_required: bool,
+    },
+    Refused {
+        message: String,
+        recovery_required: bool,
+    },
 }
 
 fn receipt_from_request(
@@ -1212,7 +1493,9 @@ fn apply_one_file(
     entry.message = "writing and verifying the original recovery payload".into();
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
         return ApplyOneResult::Refused {
-            message: format!("original backup was not created because its intent could not be saved: {error}"),
+            message: format!(
+                "original backup was not created because its intent could not be saved: {error}"
+            ),
             recovery_required: true,
         };
     }
@@ -1256,7 +1539,9 @@ fn apply_one_file(
                 recovery_required: false,
             },
             Err(error) => ApplyOneResult::Cancelled {
-                message: format!("cancelled before source mutation, but the outcome could not be saved: {error}"),
+                message: format!(
+                    "cancelled before source mutation, but the outcome could not be saved: {error}"
+                ),
                 recovery_required: true,
             },
         };
@@ -1266,7 +1551,9 @@ fn apply_one_file(
     entry.message = "creating a CREATE_NEW sibling stage for exact approved output".into();
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
         return ApplyOneResult::Refused {
-            message: format!("output stage was not created because its intent could not be saved: {error}"),
+            message: format!(
+                "output stage was not created because its intent could not be saved: {error}"
+            ),
             recovery_required: true,
         };
     }
@@ -1284,7 +1571,8 @@ fn apply_one_file(
             let collision = error.kind() == std::io::ErrorKind::AlreadyExists;
             return ApplyOneResult::Refused {
                 message: format!("exact output could not be staged: {error}"),
-                recovery_required: retained || (!collision && matches!(error.kind(), std::io::ErrorKind::Other)),
+                recovery_required: retained
+                    || (!collision && matches!(error.kind(), std::io::ErrorKind::Other)),
             };
         }
     };
@@ -1294,24 +1582,40 @@ fn apply_one_file(
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
         let cleanup = output.delete_if_matches(&ScanCancellation::new());
         return ApplyOneResult::Refused {
-            message: format!("verified output stage could not be recorded before source mutation: {error}; stage cleanup: {cleanup:?}"),
+            message: format!(
+                "verified output stage could not be recorded before source mutation: {error}; stage cleanup: {cleanup:?}"
+            ),
             recovery_required: cleanup.is_err(),
         };
     }
 
     if cancellation.is_cancelled() {
         let cleanup = output.delete_if_matches(&ScanCancellation::new());
-        entry.outcome = if cleanup.is_ok() { ReplaceEntryOutcome::Cancelled } else { ReplaceEntryOutcome::RecoveryRequired };
-        entry.phase = if cleanup.is_ok() { ReplaceEntryPhase::Cancelled } else { ReplaceEntryPhase::RecoveryRequired };
+        entry.outcome = if cleanup.is_ok() {
+            ReplaceEntryOutcome::Cancelled
+        } else {
+            ReplaceEntryOutcome::RecoveryRequired
+        };
+        entry.phase = if cleanup.is_ok() {
+            ReplaceEntryPhase::Cancelled
+        } else {
+            ReplaceEntryPhase::RecoveryRequired
+        };
         entry.message = if cleanup.is_ok() {
             "cancelled before source relocation; verified output stage was removed".into()
         } else {
-            format!("cancelled before source relocation; output stage remains at {} ({cleanup:?})", output.path().display())
+            format!(
+                "cancelled before source relocation; output stage remains at {} ({cleanup:?})",
+                output.path().display()
+            )
         };
         let saved = persist_entry(journal, journal_path, receipt, entry_index, &entry);
         let (message, save_failed) = match saved {
             Ok(()) => (entry.message.clone(), false),
-            Err(error) => (format!("{}; outcome save failed: {error}", entry.message), true),
+            Err(error) => (
+                format!("{}; outcome save failed: {error}", entry.message),
+                true,
+            ),
         };
         return ApplyOneResult::Cancelled {
             message,
@@ -1320,11 +1624,14 @@ fn apply_one_file(
     }
 
     entry.phase = ReplaceEntryPhase::OriginalMovePending;
-    entry.message = "durable backup and output stage are ready; relocating the verified original".into();
+    entry.message =
+        "durable backup and output stage are ready; relocating the verified original".into();
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
         let cleanup = output.delete_if_matches(&ScanCancellation::new());
         return ApplyOneResult::Refused {
-            message: format!("source was not moved because its relocation intent could not be saved: {error}; output stage cleanup: {cleanup:?}"),
+            message: format!(
+                "source was not moved because its relocation intent could not be saved: {error}; output stage cleanup: {cleanup:?}"
+            ),
             recovery_required: cleanup.is_err(),
         };
     }
@@ -1358,7 +1665,9 @@ fn apply_one_file(
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
         let compensated = compensate_original(&mut source, original_state, original_leaf);
         return ApplyOneResult::Refused {
-            message: format!("source relocation completed but could not be journaled: {error}; guarded compensation: {compensated:?}"),
+            message: format!(
+                "source relocation completed but could not be journaled: {error}; guarded compensation: {compensated:?}"
+            ),
             recovery_required: compensated.is_err(),
         };
     }
@@ -1401,7 +1710,8 @@ fn apply_one_file(
             entry.post_modified = Some(output.state().modified);
             entry.phase = ReplaceEntryPhase::RecoveryRequired;
             entry.outcome = ReplaceEntryOutcome::RecoveryRequired;
-            entry.message = format!("output moved but verification at the original path failed: {error}");
+            entry.message =
+                format!("output moved but verification at the original path failed: {error}");
             let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
             return ApplyOneResult::Refused {
                 message: entry.message.clone(),
@@ -1428,7 +1738,8 @@ fn apply_one_file(
             entry.post_modified = Some(output.state().modified);
             entry.phase = ReplaceEntryPhase::RecoveryRequired;
             entry.outcome = ReplaceEntryOutcome::RecoveryRequired;
-            entry.message = format!("output is at the selected path but final verification failed: {error}");
+            entry.message =
+                format!("output is at the selected path but final verification failed: {error}");
             let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
             return ApplyOneResult::Refused {
                 message: entry.message.clone(),
@@ -1440,10 +1751,13 @@ fn apply_one_file(
     entry.post_modified = Some(post.modified);
     entry.phase = ReplaceEntryPhase::Applied;
     entry.outcome = ReplaceEntryOutcome::Applied;
-    entry.message = "approved output bytes were published and verified; original backup retained".into();
+    entry.message =
+        "approved output bytes were published and verified; original backup retained".into();
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
         return ApplyOneResult::Refused {
-            message: format!("published output is verified, but its commit receipt could not be saved: {error}"),
+            message: format!(
+                "published output is verified, but its commit receipt could not be saved: {error}"
+            ),
             recovery_required: true,
         };
     }
@@ -1487,12 +1801,16 @@ fn compensate_before_publish(
     let stage_cleanup = if compensation.is_ok() {
         output.delete_if_matches(&ScanCancellation::new())
     } else {
-        Err(std::io::Error::other("original could not be returned to its recorded path"))
+        Err(std::io::Error::other(
+            "original could not be returned to its recorded path",
+        ))
     };
     if compensation.is_ok() && stage_cleanup.is_ok() {
         entry.phase = ReplaceEntryPhase::Failed;
         entry.outcome = ReplaceEntryOutcome::Failed;
-        entry.message = bounded_message(&format!("{reason}; original safely returned to its original path"));
+        entry.message = bounded_message(&format!(
+            "{reason}; original safely returned to its original path"
+        ));
         if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, entry) {
             return ApplyOneResult::Refused {
                 message: format!("{}; result save failed: {error}", entry.message),
@@ -1533,16 +1851,23 @@ fn cancel_between_moves(
     let stage_cleanup = if compensation.is_ok() {
         output.delete_if_matches(&ScanCancellation::new())
     } else {
-        Err(std::io::Error::other("original could not be returned to its recorded path"))
+        Err(std::io::Error::other(
+            "original could not be returned to its recorded path",
+        ))
     };
     if compensation.is_ok() && stage_cleanup.is_ok() {
         entry.phase = ReplaceEntryPhase::Cancelled;
         entry.outcome = ReplaceEntryOutcome::Cancelled;
-        entry.message = "cancelled between safe moves; original restored to its path and output stage removed".into();
+        entry.message =
+            "cancelled between safe moves; original restored to its path and output stage removed"
+                .into();
         let saved = persist_entry(journal, journal_path, receipt, entry_index, entry);
         let (message, save_failed) = match saved {
             Ok(()) => (entry.message.clone(), false),
-            Err(error) => (format!("{}; result save failed: {error}", entry.message), true),
+            Err(error) => (
+                format!("{}; result save failed: {error}", entry.message),
+                true,
+            ),
         };
         ApplyOneResult::Cancelled {
             message,
@@ -1561,7 +1886,6 @@ fn cancel_between_moves(
         }
     }
 }
-
 
 fn persist_entry(
     journal: &mut ReplaceRecoveryJournal,
@@ -1590,7 +1914,11 @@ fn update_receipt(
     journal_path: &Path,
     receipt: &ReplaceRecoveryReceipt,
 ) -> Result<(), String> {
-    let Some(existing) = journal.receipts.iter_mut().find(|existing| existing.id == receipt.id) else {
+    let Some(existing) = journal
+        .receipts
+        .iter_mut()
+        .find(|existing| existing.id == receipt.id)
+    else {
         return Err("replacement receipt is missing from its journal".into());
     };
     *existing = receipt.clone();
@@ -1656,7 +1984,9 @@ fn role_leaf(transaction_id: &str, index: usize, role: &str) -> String {
 
 fn is_confined_relative_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
-        && path.components().all(|component| matches!(component, Component::Normal(_)))
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn load_replace_journal(path: &Path) -> Result<ReplaceRecoveryJournal, String> {
@@ -1665,13 +1995,20 @@ fn load_replace_journal(path: &Path) -> Result<ReplaceRecoveryJournal, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(ReplaceRecoveryJournal::default());
         }
-        Err(error) => return Err(format!("replacement recovery journal could not be inspected: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "replacement recovery journal could not be inspected: {error}"
+            ));
+        }
     };
     if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
         return Err("replacement recovery journal is not a regular application-owned file".into());
     }
     if metadata.len() > MAX_REPLACE_JOURNAL_BYTES as u64 {
-        return Err("replacement recovery journal exceeds its strict size limit; its bytes were preserved".into());
+        return Err(
+            "replacement recovery journal exceeds its strict size limit; its bytes were preserved"
+                .into(),
+        );
     }
     let file = std::fs::File::open(path)
         .map_err(|error| format!("replacement recovery journal could not be opened: {error}"))?;
@@ -1683,7 +2020,10 @@ fn load_replace_journal(path: &Path) -> Result<ReplaceRecoveryJournal, String> {
         return Err("replacement recovery journal grew beyond its strict size limit; its bytes were preserved".into());
     }
     if bytes.iter().all(u8::is_ascii_whitespace) {
-        return Err("replacement recovery journal is empty or whitespace-only; its bytes were preserved".into());
+        return Err(
+            "replacement recovery journal is empty or whitespace-only; its bytes were preserved"
+                .into(),
+        );
     }
     let journal: ReplaceRecoveryJournal = serde_json::from_slice(&bytes)
         .map_err(|error| format!("replacement recovery journal is malformed or uses an unknown schema; its bytes were preserved: {error}"))?;
@@ -1698,8 +2038,9 @@ fn save_replace_journal(path: &Path, journal: &ReplaceRecoveryJournal) -> Result
     if bytes.len() > MAX_REPLACE_JOURNAL_BYTES {
         return Err("replacement recovery journal would exceed its strict size limit".into());
     }
-    save_json_atomic(path, journal)
-        .map_err(|error| format!("replacement recovery journal could not be durably saved: {error}"))?;
+    save_json_atomic(path, journal).map_err(|error| {
+        format!("replacement recovery journal could not be durably saved: {error}")
+    })?;
     let verified = load_replace_journal(path)?;
     if &verified != journal {
         return Err("replacement recovery journal did not verify after its durable save".into());
@@ -1709,7 +2050,10 @@ fn save_replace_journal(path: &Path, journal: &ReplaceRecoveryJournal) -> Result
 
 fn validate_replace_journal(journal: &ReplaceRecoveryJournal) -> Result<(), String> {
     if journal.schema_version != REPLACE_JOURNAL_SCHEMA_VERSION {
-        return Err("replacement recovery journal uses an unsupported schema; its bytes were preserved".into());
+        return Err(
+            "replacement recovery journal uses an unsupported schema; its bytes were preserved"
+                .into(),
+        );
     }
     if journal.receipts.len() > MAX_RETAINED_REPLACE_RECEIPTS {
         return Err("replacement recovery journal exceeds its receipt-count limit".into());
@@ -1733,12 +2077,17 @@ fn validate_replace_journal(journal: &ReplaceRecoveryJournal) -> Result<(), Stri
                 || entry.relative_path.to_str().is_none()
                 || !entry.path().is_absolute()
             {
-                return Err("replacement recovery receipt contains an unconfined or unsupported path".into());
+                return Err(
+                    "replacement recovery receipt contains an unconfined or unsupported path"
+                        .into(),
+                );
             }
             if entry.original_length > MAX_RENAME_HASH_BYTES_PER_FILE
                 || entry.output_length > MAX_RENAME_HASH_BYTES_PER_FILE
             {
-                return Err("replacement recovery receipt exceeds its per-file payload bound".into());
+                return Err(
+                    "replacement recovery receipt exceeds its per-file payload bound".into(),
+                );
             }
             total_bytes = total_bytes
                 .checked_add(entry.original_length)
@@ -1760,7 +2109,10 @@ fn validate_replace_journal(journal: &ReplaceRecoveryJournal) -> Result<(), Stri
                     &entry.restore_source_stage_leaf,
                 ]
                 .iter()
-                .any(|leaf| Path::new(leaf).components().count() != 1 || Path::new(leaf).file_name().is_none())
+                .any(|leaf| {
+                    Path::new(leaf).components().count() != 1
+                        || Path::new(leaf).file_name().is_none()
+                })
             {
                 return Err("replacement recovery receipt contains an untrusted stage role".into());
             }
@@ -1784,9 +2136,13 @@ fn valid_transaction_id(transaction_id: &str) -> bool {
 fn ensure_recovery_directory(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute()
         || path.to_str().is_none()
-        || path.components().any(|component| matches!(component, Component::ParentDir))
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
     {
-        return Err("replacement recovery directory must be an absolute confined Unicode path".into());
+        return Err(
+            "replacement recovery directory must be an absolute confined Unicode path".into(),
+        );
     }
     let Some(parent) = path.parent() else {
         return Err("replacement recovery directory has no parent".into());
@@ -1795,12 +2151,19 @@ fn ensure_recovery_directory(path: &Path) -> Result<PathBuf, String> {
     match std::fs::create_dir(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(format!("replacement recovery directory could not be created: {error}")),
+        Err(error) => {
+            return Err(format!(
+                "replacement recovery directory could not be created: {error}"
+            ));
+        }
     }
-    let metadata = std::fs::symlink_metadata(path)
-        .map_err(|error| format!("replacement recovery directory could not be inspected: {error}"))?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        format!("replacement recovery directory could not be inspected: {error}")
+    })?;
     if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
-        return Err("replacement recovery location is not a plain application-owned directory".into());
+        return Err(
+            "replacement recovery location is not a plain application-owned directory".into(),
+        );
     }
     Ok(path.to_path_buf())
 }
@@ -1813,15 +2176,24 @@ fn verify_directory_chain(path: &Path) -> Result<(), String> {
                 current.push(component.as_os_str());
             }
             Component::CurDir => continue,
-            Component::ParentDir => return Err("replacement recovery path contains parent traversal".into()),
+            Component::ParentDir => {
+                return Err("replacement recovery path contains parent traversal".into());
+            }
         }
         if current.as_os_str().is_empty() {
             continue;
         }
-        let metadata = std::fs::symlink_metadata(&current)
-            .map_err(|error| format!("replacement recovery parent {} is unavailable: {error}", current.display()))?;
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "replacement recovery parent {} is unavailable: {error}",
+                current.display()
+            )
+        })?;
         if !metadata.is_dir() || metadata_is_reparse_point(&metadata) {
-            return Err(format!("replacement recovery parent {} is not a plain directory", current.display()));
+            return Err(format!(
+                "replacement recovery parent {} is not a plain directory",
+                current.display()
+            ));
         }
     }
     Ok(())
@@ -1839,12 +2211,14 @@ fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
     }
 }
 
-
 #[cfg(windows)]
 #[derive(Debug)]
 enum RestoreOneResult {
     Restored,
-    Cancelled { message: String, recovery_required: bool },
+    Cancelled {
+        message: String,
+        recovery_required: bool,
+    },
     Refused {
         message: String,
         recovery_required: bool,
@@ -1975,7 +2349,9 @@ fn restore_one_entry(
 
     let destination_leaf = match entry.path().file_name() {
         Some(leaf) => leaf.to_os_string(),
-        None => return RestoreOneResult::refused("the recorded source path has no file name".into()),
+        None => {
+            return RestoreOneResult::refused("the recorded source path has no file name".into());
+        }
     };
     let mut restore_stage = match source.create_output_stage(
         std::ffi::OsStr::new(&entry.restore_stage_leaf),
@@ -2026,14 +2402,21 @@ fn restore_one_entry(
             ReplaceEntryOutcome::RecoveryRequired
         };
         entry.message = if cleanup.is_ok() {
-            "Restore cancelled before moving the current file; its verified stage was removed".into()
+            "Restore cancelled before moving the current file; its verified stage was removed"
+                .into()
         } else {
-            format!("Restore cancelled; verified original stage remains at {} ({cleanup:?})", restore_stage.path().display())
+            format!(
+                "Restore cancelled; verified original stage remains at {} ({cleanup:?})",
+                restore_stage.path().display()
+            )
         };
         let saved = persist_entry(journal, journal_path, receipt, entry_index, &entry);
         let (message, save_failed) = match saved {
             Ok(()) => (entry.message.clone(), false),
-            Err(error) => (format!("{}; receipt save failed: {error}", entry.message), true),
+            Err(error) => (
+                format!("{}; receipt save failed: {error}", entry.message),
+                true,
+            ),
         };
         return RestoreOneResult::Cancelled {
             message,
@@ -2076,9 +2459,8 @@ fn restore_one_entry(
             return RestoreOneResult::recovery(entry.message, false);
         }
         let cleanup = restore_stage.delete_if_matches(&ScanCancellation::new());
-        let message = format!(
-            "post-write file was not moved: {error}; original stage cleanup: {cleanup:?}"
-        );
+        let message =
+            format!("post-write file was not moved: {error}; original stage cleanup: {cleanup:?}");
         if cleanup.is_err() {
             entry.phase = ReplaceEntryPhase::RecoveryRequired;
             entry.outcome = ReplaceEntryOutcome::RecoveryRequired;
@@ -2092,15 +2474,14 @@ fn restore_one_entry(
     entry.phase = ReplaceEntryPhase::RestoreSourceMoved;
     entry.message = "verified post-write file is retained in its owned sibling stage".into();
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
-        let compensation = source.rename_to_leaf(
-            &destination_leaf,
-            post_state,
-            &ScanCancellation::new(),
-        );
+        let compensation =
+            source.rename_to_leaf(&destination_leaf, post_state, &ScanCancellation::new());
         let cleanup = if compensation.is_ok() {
             restore_stage.delete_if_matches(&ScanCancellation::new())
         } else {
-            Err(std::io::Error::other("post-write file could not be returned to its selected path"))
+            Err(std::io::Error::other(
+                "post-write file could not be returned to its selected path",
+            ))
         };
         let message = format!(
             "post-write file relocation could not be recorded: {error}; guarded compensation: {compensation:?}; original stage cleanup: {cleanup:?}"
@@ -2113,15 +2494,14 @@ fn restore_one_entry(
     }
 
     if cancellation.is_cancelled() {
-        let compensation = source.rename_to_leaf(
-            &destination_leaf,
-            post_state,
-            &ScanCancellation::new(),
-        );
+        let compensation =
+            source.rename_to_leaf(&destination_leaf, post_state, &ScanCancellation::new());
         let cleanup = if compensation.is_ok() {
             restore_stage.delete_if_matches(&ScanCancellation::new())
         } else {
-            Err(std::io::Error::other("post-write file could not be returned to its selected path"))
+            Err(std::io::Error::other(
+                "post-write file could not be returned to its selected path",
+            ))
         };
         let recovery_required = compensation.is_err() || cleanup.is_err();
         entry.phase = if recovery_required {
@@ -2140,7 +2520,10 @@ fn restore_one_entry(
         let saved = persist_entry(journal, journal_path, receipt, entry_index, &entry);
         let (message, save_failed) = match saved {
             Ok(()) => (entry.message.clone(), false),
-            Err(error) => (format!("{}; receipt save failed: {error}", entry.message), true),
+            Err(error) => (
+                format!("{}; receipt save failed: {error}", entry.message),
+                true,
+            ),
         };
         return RestoreOneResult::Cancelled {
             message,
@@ -2151,15 +2534,14 @@ fn restore_one_entry(
     entry.phase = ReplaceEntryPhase::RestorePublishPending;
     entry.message = "publishing the verified original stage without replacing any occupant".into();
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
-        let compensation = source.rename_to_leaf(
-            &destination_leaf,
-            post_state,
-            &ScanCancellation::new(),
-        );
+        let compensation =
+            source.rename_to_leaf(&destination_leaf, post_state, &ScanCancellation::new());
         let cleanup = if compensation.is_ok() {
             restore_stage.delete_if_matches(&ScanCancellation::new())
         } else {
-            Err(std::io::Error::other("post-write file could not be returned to its selected path"))
+            Err(std::io::Error::other(
+                "post-write file could not be returned to its selected path",
+            ))
         };
         let message = format!(
             "Restore publication intent could not be saved: {error}; guarded compensation: {compensation:?}; original stage cleanup: {cleanup:?}"
@@ -2184,15 +2566,14 @@ fn restore_one_entry(
             let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
             return RestoreOneResult::recovery(entry.message, true);
         }
-        let compensation = source.rename_to_leaf(
-            &destination_leaf,
-            post_state,
-            &ScanCancellation::new(),
-        );
+        let compensation =
+            source.rename_to_leaf(&destination_leaf, post_state, &ScanCancellation::new());
         let cleanup = if compensation.is_ok() {
             restore_stage.delete_if_matches(&ScanCancellation::new())
         } else {
-            Err(std::io::Error::other("post-write file could not be returned to its selected path"))
+            Err(std::io::Error::other(
+                "post-write file could not be returned to its selected path",
+            ))
         };
         let recovery_required = compensation.is_err() || cleanup.is_err();
         entry.phase = if recovery_required {
@@ -2221,12 +2602,17 @@ fn restore_one_entry(
             if state.identity == entry.restore_stage_identity.unwrap_or_default()
                 && state.length == entry.original_length
                 && state.content_sha256 == entry.original_sha256
-                && state.modified == entry.original_modified => state,
+                && state.modified == entry.original_modified =>
+        {
+            state
+        }
         Ok(_) => {
             entry.phase = ReplaceEntryPhase::RecoveryRequired;
             entry.outcome = ReplaceEntryOutcome::RecoveryRequired;
             entry.restored_identity = Some(restore_stage.state().identity);
-            entry.message = "restored source path did not match the verified original payload and metadata".into();
+            entry.message =
+                "restored source path did not match the verified original payload and metadata"
+                    .into();
             let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
             return RestoreOneResult::recovery(entry.message, true);
         }
@@ -2245,7 +2631,8 @@ fn restore_one_entry(
     entry.restored_modified = Some(restored.modified);
     entry.phase = ReplaceEntryPhase::Restored;
     entry.outcome = ReplaceEntryOutcome::Restored;
-    entry.message = "original backup bytes were restored and verified; durable backup retained".into();
+    entry.message =
+        "original backup bytes were restored and verified; durable backup retained".into();
     if let Err(error) = persist_entry(journal, journal_path, receipt, entry_index, &entry) {
         return RestoreOneResult::recovery(
             format!("restored source is verified, but its receipt could not be saved: {error}"),
@@ -2330,7 +2717,9 @@ fn read_recorded_replace_path(
         || row.length() != Some(expected_length)
         || expected_modified.is_some_and(|modified| row.modified() != Some(modified))
     {
-        return Err("recorded recovery role identity, parent, length, or modification time changed".into());
+        return Err(
+            "recorded recovery role identity, parent, length, or modification time changed".into(),
+        );
     }
     let read = file_operations::read_verified_scan_file(
         &scan,
@@ -2345,7 +2734,9 @@ fn read_recorded_replace_path(
         || read.identity() != expected_identity
         || read.parent_identity() != entry.parent_identity
     {
-        return Err("recorded recovery role content hash or verified source metadata changed".into());
+        return Err(
+            "recorded recovery role content hash or verified source metadata changed".into(),
+        );
     }
     Ok(read)
 }
@@ -2396,7 +2787,9 @@ fn recover_interrupted_apply(
             entry.post_modified = Some(published.modified());
             entry.phase = ReplaceEntryPhase::Applied;
             entry.outcome = ReplaceEntryOutcome::Applied;
-            entry.message = "reconciled the exact recorded output already published at its selected path".into();
+            entry.message =
+                "reconciled the exact recorded output already published at its selected path"
+                    .into();
             persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
             if let Err(error) = cleanup_recorded_original_stage(&entry, cancellation) {
                 entry.message = bounded_message(&format!(
@@ -2438,7 +2831,9 @@ fn recover_interrupted_apply(
     )
     .map_err(|error| format!("recorded original backup is not verified: {error}"))?;
 
-    let source_identity = entry.original_stage_identity.unwrap_or(entry.original_identity);
+    let source_identity = entry
+        .original_stage_identity
+        .unwrap_or(entry.original_identity);
     let source_stage_path = entry
         .path()
         .parent()
@@ -2486,7 +2881,12 @@ fn recover_interrupted_apply(
         original_stage.bytes(),
         cancellation,
     )
-    .map_err(|error| format!("recorded original stage changed during recovery admission: {}", error.message()))?;
+    .map_err(|error| {
+        format!(
+            "recorded original stage changed during recovery admission: {}",
+            error.message()
+        )
+    })?;
     let mut output_guard = file_operations::prepare_guarded_replace_file(
         output_stage.evidence(),
         &entry.root_path,
@@ -2500,21 +2900,25 @@ fn recover_interrupted_apply(
         output_stage.bytes(),
         cancellation,
     )
-    .map_err(|error| format!("recorded output stage changed during recovery admission: {}", error.message()))?;
+    .map_err(|error| {
+        format!(
+            "recorded output stage changed during recovery admission: {}",
+            error.message()
+        )
+    })?;
 
     entry.original_stage_identity = Some(source_identity);
     entry.phase = ReplaceEntryPhase::PublishPending;
-    entry.message = "verified output and original stages are ready for guarded recovery publication".into();
+    entry.message =
+        "verified output and original stages are ready for guarded recovery publication".into();
     persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
     if cancellation.is_cancelled() {
         return Err("recovery was cancelled before the guarded output publication".into());
     }
     let output_state = output_guard.original_state();
     if let Err(error) = output_guard.rename_to_leaf(&original_leaf, output_state, cancellation) {
-        if batch_rename::compare_paths_windows_ordinal(
-            output_guard.current_path(),
-            &entry.path(),
-        ) == std::cmp::Ordering::Equal
+        if batch_rename::compare_paths_windows_ordinal(output_guard.current_path(), &entry.path())
+            == std::cmp::Ordering::Equal
         {
             entry.post_identity = Some(output_state.identity);
             entry.phase = ReplaceEntryPhase::RecoveryRequired;
@@ -2524,7 +2928,9 @@ fn recover_interrupted_apply(
             ));
             let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
         }
-        return Err(format!("guarded recovery publication did not complete: {error}"));
+        return Err(format!(
+            "guarded recovery publication did not complete: {error}"
+        ));
     }
     let published = output_guard
         .verify_at(
@@ -2535,15 +2941,23 @@ fn recover_interrupted_apply(
             None,
             &ScanCancellation::new(),
         )
-        .map_err(|error| format!("recovered output moved but could not be verified at its selected path: {error}"))?;
+        .map_err(|error| {
+            format!(
+                "recovered output moved but could not be verified at its selected path: {error}"
+            )
+        })?;
     entry.post_identity = Some(published.identity);
     entry.post_modified = Some(published.modified);
     entry.phase = ReplaceEntryPhase::Applied;
     entry.outcome = ReplaceEntryOutcome::Applied;
-    entry.message = "exact recorded output was published by guarded recovery; durable original backup retained".into();
+    entry.message =
+        "exact recorded output was published by guarded recovery; durable original backup retained"
+            .into();
     persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
 
-    if let Err(error) = original_guard.delete_if_matches(original_guard.original_state(), &ScanCancellation::new()) {
+    if let Err(error) =
+        original_guard.delete_if_matches(original_guard.original_state(), &ScanCancellation::new())
+    {
         entry.message = bounded_message(&format!(
             "{}; verified duplicate original stage retained at {} ({error})",
             entry.message,
@@ -2559,7 +2973,9 @@ fn cleanup_recorded_original_stage(
     entry: &ReplaceRecoveryEntry,
     cancellation: &ScanCancellation,
 ) -> Result<(), String> {
-    let identity = entry.original_stage_identity.unwrap_or(entry.original_identity);
+    let identity = entry
+        .original_stage_identity
+        .unwrap_or(entry.original_identity);
     let stage_path = entry
         .path()
         .parent()
@@ -2591,7 +3007,12 @@ fn cleanup_recorded_original_stage(
         stage.bytes(),
         cancellation,
     )
-    .map_err(|error| format!("recorded original sibling stage changed before cleanup: {}", error.message()))?;
+    .map_err(|error| {
+        format!(
+            "recorded original sibling stage changed before cleanup: {}",
+            error.message()
+        )
+    })?;
     guard
         .delete_if_matches(guard.original_state(), &ScanCancellation::new())
         .map_err(|error| format!("recorded original sibling stage could not be removed: {error}"))
@@ -2634,15 +3055,16 @@ fn recover_interrupted_restore(
             entry.restored_modified = Some(restored.modified());
             entry.phase = ReplaceEntryPhase::Restored;
             entry.outcome = ReplaceEntryOutcome::Restored;
-            entry.message = "reconciled the exact restored original already at its selected path".into();
+            entry.message =
+                "reconciled the exact restored original already at its selected path".into();
             persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
             return Ok(());
         }
     }
 
-    let post_identity = entry.post_identity.ok_or_else(|| {
-        "interrupted Restore has no recorded post-write identity".to_owned()
-    })?;
+    let post_identity = entry
+        .post_identity
+        .ok_or_else(|| "interrupted Restore has no recorded post-write identity".to_owned())?;
     if read_recorded_replace_path(
         &entry,
         &entry.path(),
@@ -2656,7 +3078,8 @@ fn recover_interrupted_restore(
     {
         entry.phase = ReplaceEntryPhase::Applied;
         entry.outcome = ReplaceEntryOutcome::Applied;
-        entry.message = "reconciled that Restore had not moved the unchanged post-write file".into();
+        entry.message =
+            "reconciled that Restore had not moved the unchanged post-write file".into();
         persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
         if let Some(stage_identity) = entry.restore_stage_identity {
             let stage_path = entry
@@ -2675,7 +3098,11 @@ fn recover_interrupted_restore(
             ) {
                 Ok(stage) => stage,
                 Err(error) if error.contains("recorded recovery role is missing") => return Ok(()),
-                Err(error) => return Err(format!("recorded Restore stage cannot be safely cleaned: {error}")),
+                Err(error) => {
+                    return Err(format!(
+                        "recorded Restore stage cannot be safely cleaned: {error}"
+                    ));
+                }
             };
             let stage_guard = file_operations::prepare_guarded_replace_file(
                 stage.evidence(),
@@ -2690,7 +3117,12 @@ fn recover_interrupted_restore(
                 stage.bytes(),
                 cancellation,
             )
-            .map_err(|error| format!("recorded Restore stage changed before cleanup: {}", error.message()))?;
+            .map_err(|error| {
+                format!(
+                    "recorded Restore stage changed before cleanup: {}",
+                    error.message()
+                )
+            })?;
             stage_guard
                 .delete_if_matches(stage_guard.original_state(), &ScanCancellation::new())
                 .map_err(|error| format!("verified Restore stage could not be removed: {error}"))?;
@@ -2717,9 +3149,7 @@ fn recover_interrupted_restore(
     )
     .map_err(|error| format!("recorded original Restore stage is not verified: {error}"))?;
 
-    let post_stage_identity = entry
-        .restore_source_stage_identity
-        .unwrap_or(post_identity);
+    let post_stage_identity = entry.restore_source_stage_identity.unwrap_or(post_identity);
     let post_stage_path = entry
         .path()
         .parent()
@@ -2748,7 +3178,12 @@ fn recover_interrupted_restore(
         restore_stage.bytes(),
         cancellation,
     )
-    .map_err(|error| format!("recorded Restore stage changed during recovery admission: {}", error.message()))?;
+    .map_err(|error| {
+        format!(
+            "recorded Restore stage changed during recovery admission: {}",
+            error.message()
+        )
+    })?;
     let _post_guard = file_operations::prepare_guarded_replace_file(
         post_stage.evidence(),
         &entry.root_path,
@@ -2762,7 +3197,12 @@ fn recover_interrupted_restore(
         post_stage.bytes(),
         cancellation,
     )
-    .map_err(|error| format!("recorded post-write recovery stage changed during admission: {}", error.message()))?;
+    .map_err(|error| {
+        format!(
+            "recorded post-write recovery stage changed during admission: {}",
+            error.message()
+        )
+    })?;
 
     let destination_leaf = entry
         .path()
@@ -2770,17 +3210,17 @@ fn recover_interrupted_restore(
         .ok_or_else(|| "recorded source path has no final component".to_owned())?
         .to_os_string();
     entry.phase = ReplaceEntryPhase::RestorePublishPending;
-    entry.message = "verified original and post-write payloads are ready for guarded Restore recovery".into();
+    entry.message =
+        "verified original and post-write payloads are ready for guarded Restore recovery".into();
     persist_entry(journal, journal_path, receipt, entry_index, &entry)?;
     if cancellation.is_cancelled() {
         return Err("recovery was cancelled before guarded Restore publication".into());
     }
     let restore_state = restore_guard.original_state();
-    if let Err(error) = restore_guard.rename_to_leaf(&destination_leaf, restore_state, cancellation) {
-        if batch_rename::compare_paths_windows_ordinal(
-            restore_guard.current_path(),
-            &entry.path(),
-        ) == std::cmp::Ordering::Equal
+    if let Err(error) = restore_guard.rename_to_leaf(&destination_leaf, restore_state, cancellation)
+    {
+        if batch_rename::compare_paths_windows_ordinal(restore_guard.current_path(), &entry.path())
+            == std::cmp::Ordering::Equal
         {
             entry.restored_identity = Some(restore_state.identity);
             entry.phase = ReplaceEntryPhase::RecoveryRequired;
@@ -2790,7 +3230,9 @@ fn recover_interrupted_restore(
             ));
             let _ = persist_entry(journal, journal_path, receipt, entry_index, &entry);
         }
-        return Err(format!("guarded Restore recovery publication did not complete: {error}"));
+        return Err(format!(
+            "guarded Restore recovery publication did not complete: {error}"
+        ));
     }
     let restored = restore_guard
         .verify_at(
@@ -2831,7 +3273,6 @@ fn verify_already_restored(
     }
     Ok(())
 }
-
 
 #[derive(Debug, Clone, Default)]
 pub struct ReplaceWorkerSnapshot {
@@ -3111,13 +3552,13 @@ mod tests {
             output_stage_leaf: role_leaf(transaction_id, 0, "output"),
             output_stage_identity: None,
             original_stage_leaf: role_leaf(transaction_id, 0, "source"),
-        original_stage_identity: None,
+            original_stage_identity: None,
             post_identity: None,
             post_modified: None,
             restore_stage_leaf: role_leaf(transaction_id, 0, "restore"),
             restore_stage_identity: None,
             restore_source_stage_leaf: role_leaf(transaction_id, 0, "post"),
-        restore_source_stage_identity: None,
+            restore_source_stage_identity: None,
             restored_identity: None,
             restored_modified: None,
             phase: ReplaceEntryPhase::Planned,
@@ -3155,11 +3596,13 @@ mod tests {
         );
         let expected_post_modified = journal.receipts[0].entries[0].post_modified;
         let expected_restored_modified = journal.receipts[0].entries[0].restored_modified;
-        let reloaded: ReplaceRecoveryJournal = serde_json::from_slice(
-            &serde_json::to_vec(&journal).expect("encode timestamps"),
-        )
-        .expect("decode timestamps with the same checked representation");
-        assert_eq!(reloaded.receipts[0].entries[0].post_modified, expected_post_modified);
+        let reloaded: ReplaceRecoveryJournal =
+            serde_json::from_slice(&serde_json::to_vec(&journal).expect("encode timestamps"))
+                .expect("decode timestamps with the same checked representation");
+        assert_eq!(
+            reloaded.receipts[0].entries[0].post_modified,
+            expected_post_modified
+        );
         assert_eq!(
             reloaded.receipts[0].entries[0].restored_modified,
             expected_restored_modified
@@ -3181,8 +3624,8 @@ mod tests {
         use crate::batch_rename::ExplicitDirectoryRoot;
         use crate::search_replace::{
             ReplacementMode, ReplacementRevision, ReplacementSpec, SearchCoordinator,
-            SearchFilterSpec, SearchGeneration, SearchLimits, SearchPattern,
-            SearchPatternMode, SearchRevision, SearchStatus, TextSearchRequest,
+            SearchFilterSpec, SearchGeneration, SearchLimits, SearchPattern, SearchPatternMode,
+            SearchRevision, SearchStatus, TextSearchRequest,
         };
 
         let pattern = SearchPattern::compile("needle", SearchPatternMode::Literal, true)
@@ -3206,7 +3649,9 @@ mod tests {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 Ok(None) => panic!("A discovery did not finish within its test deadline"),
-                Err(error) => panic!("A discovery worker exited before returning a result: {error}"),
+                Err(error) => {
+                    panic!("A discovery worker exited before returning a result: {error}")
+                }
             }
         };
         coordinator.shutdown().expect("reap bounded search worker");
@@ -3220,13 +3665,10 @@ mod tests {
             .map(|matched| matched.id().clone())
             .collect::<Vec<_>>();
         assert!(!selected.is_empty());
-        let replacement = ReplacementSpec::new(
-            "changed",
-            ReplacementMode::Literal,
-            ReplacementRevision(19),
-        )
-        .compile(result.pattern())
-        .expect("literal replacement compiles");
+        let replacement =
+            ReplacementSpec::new("changed", ReplacementMode::Literal, ReplacementRevision(19))
+                .compile(result.pattern())
+                .expect("literal replacement compiles");
         let candidate = result
             .preview_replacement(&replacement, &selected)
             .expect("B candidate uses the completed A snapshot");
@@ -3318,14 +3760,14 @@ mod tests {
         std::fs::write(&named_stream, b"preserve this named stream")
             .expect("create NTFS named stream");
         let stream_candidate = native_confirmed_candidate(&stream_root, 83);
-        let stream_executor = ReplaceExecutor::new(stream_recovery.clone())
-            .expect("stream recovery location");
-        let stream_result = stream_executor.execute_confirmed(
-            stream_candidate,
-            &ScanCancellation::new(),
-            |_| {},
+        let stream_executor =
+            ReplaceExecutor::new(stream_recovery.clone()).expect("stream recovery location");
+        let stream_result =
+            stream_executor.execute_confirmed(stream_candidate, &ScanCancellation::new(), |_| {});
+        assert_eq!(
+            stream_result.receipt.status(),
+            ReplaceTransactionStatus::Failed
         );
-        assert_eq!(stream_result.receipt.status(), ReplaceTransactionStatus::Failed);
         assert_eq!(
             std::fs::read(&stream_source).expect("streamed source remains unchanged"),
             stream_original
@@ -3335,9 +3777,11 @@ mod tests {
             b"preserve this named stream"
         );
         assert!(stream_result.receipt.entries()[0].backup_identity.is_none());
-        assert!(!stream_recovery
-            .join(&stream_result.receipt.entries()[0].backup_leaf)
-            .exists());
+        assert!(
+            !stream_recovery
+                .join(&stream_result.receipt.entries()[0].backup_leaf)
+                .exists()
+        );
 
         let collision_root = workspace.path().join("collision-root");
         let collision_recovery = workspace.path().join("collision-recovery");
@@ -3370,7 +3814,10 @@ mod tests {
         );
         drop(_operation);
         assert!(injected, "the hook ran after original relocation");
-        assert_eq!(result.receipt.status(), ReplaceTransactionStatus::RecoveryRequired);
+        assert_eq!(
+            result.receipt.status(),
+            ReplaceTransactionStatus::RecoveryRequired
+        );
         assert_eq!(
             std::fs::read(&raced_path).expect("late occupant remains at approved path"),
             b"raced occupant"
@@ -3383,13 +3830,17 @@ mod tests {
             .receipt
             .entries()
             .iter()
-            .find(|entry| entry.path().file_name().and_then(|name| name.to_str()) == Some("a-raced.txt"))
+            .find(|entry| {
+                entry.path().file_name().and_then(|name| name.to_str()) == Some("a-raced.txt")
+            })
             .expect("recovery-required entry");
         let later = result
             .receipt
             .entries()
             .iter()
-            .find(|entry| entry.path().file_name().and_then(|name| name.to_str()) == Some("z-later.txt"))
+            .find(|entry| {
+                entry.path().file_name().and_then(|name| name.to_str()) == Some("z-later.txt")
+            })
             .expect("not-attempted entry");
         assert_eq!(first.outcome, ReplaceEntryOutcome::RecoveryRequired);
         assert_eq!(later.outcome, ReplaceEntryOutcome::NotAttempted);
@@ -3410,23 +3861,21 @@ mod tests {
         );
 
         let recovery_id = result.receipt.id().to_owned();
-        let blocked = collision_executor.recover(
-            &recovery_id,
-            &ScanCancellation::new(),
-            |_| {},
+        let blocked = collision_executor.recover(&recovery_id, &ScanCancellation::new(), |_| {});
+        assert_eq!(
+            blocked.receipt.status(),
+            ReplaceTransactionStatus::RecoveryRequired
         );
-        assert_eq!(blocked.receipt.status(), ReplaceTransactionStatus::RecoveryRequired);
         assert_eq!(
             std::fs::read(&raced_path).expect("recovery preserves a late occupant"),
             b"raced occupant"
         );
         std::fs::remove_file(&raced_path).expect("remove test-owned late occupant");
-        let recovered = collision_executor.recover(
-            &recovery_id,
-            &ScanCancellation::new(),
-            |_| {},
+        let recovered = collision_executor.recover(&recovery_id, &ScanCancellation::new(), |_| {});
+        assert_eq!(
+            recovered.receipt.status(),
+            ReplaceTransactionStatus::Partial
         );
-        assert_eq!(recovered.receipt.status(), ReplaceTransactionStatus::Partial);
         assert_eq!(
             std::fs::read(&raced_path).expect("recorded output stage recovered"),
             b"changed race"

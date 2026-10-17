@@ -358,12 +358,7 @@ impl HotFolderRulesStore {
             .snapshot
             .quarantined_rows
             .iter()
-            .filter_map(|row| {
-                row.raw
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
+            .filter_map(|row| row.raw.get("id").and_then(Value::as_str).map(str::to_owned))
             .collect::<std::collections::HashSet<_>>();
         for rule in &mut rules {
             if quarantined_ids.contains(rule.id.as_str()) {
@@ -1003,7 +998,10 @@ mod tests {
         );
 
         let mut without_quarantine: Value = serde_json::from_slice(&before_read_only_load).unwrap();
-        without_quarantine.as_object_mut().unwrap().remove("quarantined_rows");
+        without_quarantine
+            .as_object_mut()
+            .unwrap()
+            .remove("quarantined_rows");
         let without_quarantine_bytes = serde_json::to_vec(&without_quarantine).unwrap();
         std::fs::write(store.path(), &without_quarantine_bytes).unwrap();
         assert_eq!(descriptor.probe(), crate::persistence::StoreHealth::Healthy);

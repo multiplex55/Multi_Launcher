@@ -876,7 +876,8 @@ fn descriptor_for(
             false,
         ),
         Id::SearchReplaceRecovery => (
-            root.path().join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY),
+            root.path()
+                .join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY),
             false,
         ),
     };

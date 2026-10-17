@@ -20,8 +20,8 @@ use crate::batch_rename::{self, transform_filename_with_prefix_suffix};
 use crate::file_operations::{
     NativeFileIdentity, NativeHotFolderAction, NativeHotFolderError, NativeHotFolderFailureKind,
     NativeHotFolderInput, NativeHotFolderOutput, NativeHotFolderOutputKind, NativeHotFolderPhase,
-    NativeHotFolderProgress, NativeHotFolderResult, NativeWatchRoot, ScanCancellation, admit_watch_root,
-    execute_hotfolder_native_action, fingerprint_hotfolder_file,
+    NativeHotFolderProgress, NativeHotFolderResult, NativeWatchRoot, ScanCancellation,
+    admit_watch_root, execute_hotfolder_native_action, fingerprint_hotfolder_file,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -898,7 +898,8 @@ impl HotFolderExecutionEngine {
             Err(error) => {
                 state.journal.rows[index] = previous.clone();
                 journal_row.state = previous.state;
-                state.journal_error = Some("native mutation progress could not be persisted".into());
+                state.journal_error =
+                    Some("native mutation progress could not be persisted".into());
                 Err(error)
             }
         }
@@ -967,8 +968,13 @@ impl HotFolderExecutionEngine {
             phase,
             status,
             started_unix_nanos: system_time_nanos(started_wall),
-            duration_ms: u64::try_from(self.clock.now().saturating_duration_since(started).as_millis())
-                .unwrap_or(u64::MAX),
+            duration_ms: u64::try_from(
+                self.clock
+                    .now()
+                    .saturating_duration_since(started)
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX),
             reason: reason.map(sanitize_reason),
             durable: true,
         };
@@ -1016,10 +1022,9 @@ impl HotFolderExecutionEngine {
             }
             durable
         };
-        Ok(HotFolderRunDisposition::Executed(HotFolderExecutionReceipt {
-            durable,
-            ..receipt
-        }))
+        Ok(HotFolderRunDisposition::Executed(
+            HotFolderExecutionReceipt { durable, ..receipt },
+        ))
     }
 
     /// Claim at most one settled B candidate, revalidate the current selected
@@ -1408,9 +1413,8 @@ impl HotFolderExecutionEngine {
                 action,
                 destination,
             } => {
-                let mut record_progress = |progress| {
-                    self.persist_native_progress(&key, &mut journal_row, progress)
-                };
+                let mut record_progress =
+                    |progress| self.persist_native_progress(&key, &mut journal_row, progress);
                 let result = self.operation_port.execute(
                     &root,
                     &candidate.path,
@@ -1425,83 +1429,77 @@ impl HotFolderExecutionEngine {
                 let (status, phase, outputs, reason) = terminal_from_native(result);
                 (status, phase, outputs, reason, None)
             }
-            PlannedAction::External => {
-                match self.external_adapter.as_ref() {
-                    None => {
-                        let (status, phase, outputs, reason) = terminal_from_native(Err(
-                            native_execution_error(
-                                NativeHotFolderFailureKind::Io,
-                                "external action dispatch is unavailable",
-                                Vec::new(),
-                            ),
-                        ));
-                        (status, phase, outputs, reason, None)
-                    }
-                    Some(adapter) => {
-                        let request = HotFolderExternalActionRequest {
-                            operation_id,
-                            candidate_id: candidate.correlation,
-                            rule_id: current_rule.id.clone(),
+            PlannedAction::External => match self.external_adapter.as_ref() {
+                None => {
+                    let (status, phase, outputs, reason) =
+                        terminal_from_native(Err(native_execution_error(
+                            NativeHotFolderFailureKind::Io,
+                            "external action dispatch is unavailable",
+                            Vec::new(),
+                        )));
+                    (status, phase, outputs, reason, None)
+                }
+                Some(adapter) => {
+                    let request = HotFolderExternalActionRequest {
+                        operation_id,
+                        candidate_id: candidate.correlation,
+                        rule_id: current_rule.id.clone(),
+                        rule_fingerprint: current_fingerprint.clone(),
+                        action: current_rule.action.clone(),
+                        authorization: HotFolderExternalEnableAuthorization {
+                            store_revision: candidate.store_revision,
+                            epoch: candidate.epoch,
                             rule_fingerprint: current_fingerprint.clone(),
-                            action: current_rule.action.clone(),
-                            authorization: HotFolderExternalEnableAuthorization {
-                                store_revision: candidate.store_revision,
-                                epoch: candidate.epoch,
-                                rule_fingerprint: current_fingerprint.clone(),
-                                enablement,
-                            },
-                            file: HotFolderExternalFileEvidence {
-                                path: candidate.path.clone(),
-                                root_identity: input.root_identity,
-                                parent_identity: input.parent_identity,
-                                file_identity: input.file_identity,
-                                length: input.length,
-                                modified: input.modified,
-                                sha256: Some(input.sha256),
-                            },
-                        };
-                        let outcome = adapter.dispatch(request, &cancellation);
-                        if outcome.operation_id != operation_id {
-                            (
-                                HotFolderTerminalStatus::Failure,
-                                HotFolderExecutionPhase::Admission,
-                                Vec::new(),
-                                Some("external action returned a mismatched completion".into()),
-                                None,
-                            )
-                        } else if !valid_external_correlation(
-                            &current_rule.action,
-                            &outcome,
-                        ) {
-                            (
-                                HotFolderTerminalStatus::Failure,
-                                HotFolderExecutionPhase::Admission,
-                                Vec::new(),
-                                Some("external action returned invalid target correlation".into()),
-                                None,
-                            )
-                        } else if outcome.status == HotFolderTerminalStatus::Success
-                            && outcome.phase != HotFolderExecutionPhase::Complete
-                        {
-                            (
-                                HotFolderTerminalStatus::Failure,
-                                HotFolderExecutionPhase::Admission,
-                                Vec::new(),
-                                Some("external action returned an invalid terminal phase".into()),
-                                None,
-                            )
-                        } else {
-                            (
-                                outcome.status,
-                                outcome.phase,
-                                Vec::new(),
-                                outcome.reason,
-                                outcome.macro_run_id,
-                            )
-                        }
+                            enablement,
+                        },
+                        file: HotFolderExternalFileEvidence {
+                            path: candidate.path.clone(),
+                            root_identity: input.root_identity,
+                            parent_identity: input.parent_identity,
+                            file_identity: input.file_identity,
+                            length: input.length,
+                            modified: input.modified,
+                            sha256: Some(input.sha256),
+                        },
+                    };
+                    let outcome = adapter.dispatch(request, &cancellation);
+                    if outcome.operation_id != operation_id {
+                        (
+                            HotFolderTerminalStatus::Failure,
+                            HotFolderExecutionPhase::Admission,
+                            Vec::new(),
+                            Some("external action returned a mismatched completion".into()),
+                            None,
+                        )
+                    } else if !valid_external_correlation(&current_rule.action, &outcome) {
+                        (
+                            HotFolderTerminalStatus::Failure,
+                            HotFolderExecutionPhase::Admission,
+                            Vec::new(),
+                            Some("external action returned invalid target correlation".into()),
+                            None,
+                        )
+                    } else if outcome.status == HotFolderTerminalStatus::Success
+                        && outcome.phase != HotFolderExecutionPhase::Complete
+                    {
+                        (
+                            HotFolderTerminalStatus::Failure,
+                            HotFolderExecutionPhase::Admission,
+                            Vec::new(),
+                            Some("external action returned an invalid terminal phase".into()),
+                            None,
+                        )
+                    } else {
+                        (
+                            outcome.status,
+                            outcome.phase,
+                            Vec::new(),
+                            outcome.reason,
+                            outcome.macro_run_id,
+                        )
                     }
                 }
-            }
+            },
             PlannedAction::Rejected(error) => {
                 let (status, phase, outputs, reason) = terminal_from_native(Err(error));
                 (status, phase, outputs, reason, None)
@@ -1716,10 +1714,7 @@ fn candidate_path_matches_rule(path: &Path, root: &NativeWatchRoot, rule: &HotFo
         return false;
     }
     let mut relative = PathBuf::new();
-    for component in path
-        .components()
-        .skip(canonical_root.components().count())
-    {
+    for component in path.components().skip(canonical_root.components().count()) {
         let std::path::Component::Normal(name) = component else {
             return false;
         };
@@ -1766,15 +1761,11 @@ fn valid_external_correlation(
                     HotFolderTerminalStatus::Failure | HotFolderTerminalStatus::Cancelled
                 )
         }
-        (RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. }, _) => {
-            false
-        }
+        (RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. }, _) => false,
     }
 }
 
-fn external_target_receipt(
-    action: &RuleAction,
-) -> Option<HotFolderExternalTargetReceipt> {
+fn external_target_receipt(action: &RuleAction) -> Option<HotFolderExternalTargetReceipt> {
     match action {
         RuleAction::RegisteredLauncherAction {
             reference,
@@ -1879,8 +1870,7 @@ fn terminal_from_native(
                 || matches!(
                     error.phase,
                     NativeHotFolderPhase::Published | NativeHotFolderPhase::SourceRemoval
-                )
-            {
+                ) {
                 HotFolderTerminalStatus::Partial
             } else if error.kind == NativeHotFolderFailureKind::Cancelled {
                 HotFolderTerminalStatus::Cancelled
@@ -2041,10 +2031,7 @@ fn sanitize_reason(reason: String) -> String {
 }
 
 impl ExecutionKey {
-    fn from_candidate(
-        candidate: &HotFolderReadyCandidate,
-        sha256: Option<[u8; 32]>,
-    ) -> Self {
+    fn from_candidate(candidate: &HotFolderReadyCandidate, sha256: Option<[u8; 32]>) -> Self {
         Self {
             rule_id: candidate.rule.id.clone(),
             rule_fingerprint: candidate.rule_fingerprint.clone(),
@@ -2110,9 +2097,8 @@ impl ExecutionJournal {
         {
             return Err(HotFolderExecutionError::InvalidJournal);
         }
-        let mut cleared_history = HashSet::with_capacity(
-            journal.history_cleared_operation_ids.len(),
-        );
+        let mut cleared_history =
+            HashSet::with_capacity(journal.history_cleared_operation_ids.len());
         for operation_id in &journal.history_cleared_operation_ids {
             let parsed = operation_id
                 .parse::<u128>()
@@ -2171,11 +2157,14 @@ impl ExecutionJournal {
             || self.rows.len() > MAX_JOURNAL_ROWS
             || self.run_counters.len() > MAX_JOURNAL_RUN_COUNTERS
             || self.history_cleared_operation_ids.len() > MAX_JOURNAL_ROWS
-            || self.history_cleared_operation_ids.iter().any(|operation_id| {
-                operation_id
-                    .parse::<u128>()
-                    .map_or(true, |parsed| parsed.to_string() != *operation_id)
-            })
+            || self
+                .history_cleared_operation_ids
+                .iter()
+                .any(|operation_id| {
+                    operation_id
+                        .parse::<u128>()
+                        .map_or(true, |parsed| parsed.to_string() != *operation_id)
+                })
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2491,9 +2480,11 @@ impl JournalReceipt {
         if !source_path.is_absolute() {
             return Err(HotFolderExecutionError::InvalidJournal);
         }
-        if self.external_target.as_ref().is_some_and(|target| {
-            !valid_external_target(target, self.action)
-        }) {
+        if self
+            .external_target
+            .as_ref()
+            .is_some_and(|target| !valid_external_target(target, self.action))
+        {
             return Err(HotFolderExecutionError::InvalidJournal);
         }
         let external_input = self
@@ -2781,14 +2772,13 @@ mod tests {
                     outputs: vec![native_output.clone()],
                 })
                 .expect("engine should persist native mutation progress");
-                let persisted = ExecutionJournal::load(&self.journal_path)
-                    .map_err(|_| {
-                        native_execution_error(
-                            NativeHotFolderFailureKind::Io,
-                            "fixture journal could not be read",
-                            Vec::new(),
-                        )
-                    })?;
+                let persisted = ExecutionJournal::load(&self.journal_path).map_err(|_| {
+                    native_execution_error(
+                        NativeHotFolderFailureKind::Io,
+                        "fixture journal could not be read",
+                        Vec::new(),
+                    )
+                })?;
                 let Some(JournalRow {
                     state: JournalState::Pending { phase, outputs },
                     key,
@@ -2944,7 +2934,10 @@ mod tests {
         engine.external_adapter = Some(adapter.clone());
 
         let launcher_targets = [];
-        let roots = HashMap::from([(watched.clone(), crate::hotfolder::RootAvailability::ExistingDirectory)]);
+        let roots = HashMap::from([(
+            watched.clone(),
+            crate::hotfolder::RootAvailability::ExistingDirectory,
+        )]);
         let context = HotFolderCapabilityContext::new(
             &launcher_targets,
             ActionResolutionContext::new(ActionSurface::LauncherList, ""),
@@ -2979,7 +2972,10 @@ mod tests {
         assert_eq!(request.rule_id, rule_id);
         assert_eq!(request.file.path, candidate.path);
         assert_eq!(request.file.sha256, receipt.source_sha256);
-        assert_eq!(request.authorization.rule_fingerprint, receipt.rule_fingerprint);
+        assert_eq!(
+            request.authorization.rule_fingerprint,
+            receipt.rule_fingerprint
+        );
         assert_eq!(receipt.external_run_id, Some(7331));
         assert_eq!(receipt.status, HotFolderTerminalStatus::Success);
         assert_eq!(receipt.phase, HotFolderExecutionPhase::Complete);
@@ -3078,10 +3074,7 @@ mod tests {
         let max_u128 = u128::MAX;
         let encoded_max = serde_json::to_string(&DecimalU128Probe { value: max_u128 })
             .expect("serialize maximum u128 as a decimal string");
-        assert_eq!(
-            encoded_max,
-            format!(r#"{{"value":"{max_u128}"}}"#)
-        );
+        assert_eq!(encoded_max, format!(r#"{{"value":"{max_u128}"}}"#));
         assert_eq!(
             serde_json::from_str::<DecimalU128Probe>(&encoded_max)
                 .expect("round-trip maximum u128")
@@ -3263,8 +3256,8 @@ mod tests {
         assert!(receipt.durable);
         assert_eq!(fake.execute_calls.load(Ordering::SeqCst), 1);
 
-        let persisted = ExecutionJournal::load(&fake.journal_path)
-            .expect("load terminal execution receipt");
+        let persisted =
+            ExecutionJournal::load(&fake.journal_path).expect("load terminal execution receipt");
         let persisted_row = persisted
             .rows
             .iter()
@@ -3274,7 +3267,10 @@ mod tests {
             panic!("finished operation has a terminal receipt")
         };
         assert_eq!(persisted_row.operation_id, receipt.operation_id);
-        assert_eq!(persisted_row.key.modified_nanos, system_time_nanos(receipt.source_modified));
+        assert_eq!(
+            persisted_row.key.modified_nanos,
+            system_time_nanos(receipt.source_modified)
+        );
         assert_eq!(persisted_receipt.operation_id, receipt.operation_id);
         assert_eq!(
             persisted_receipt.source_modified_nanos,
@@ -3306,8 +3302,14 @@ mod tests {
             .find(|loaded| loaded.operation_id == receipt.operation_id)
             .expect("reopened exact terminal receipt");
         assert_eq!(reopened_receipt.source_modified, receipt.source_modified);
-        assert_eq!(reopened_receipt.started_unix_nanos, receipt.started_unix_nanos);
-        assert_eq!(reopened_receipt.outputs[0].modified, receipt.outputs[0].modified);
+        assert_eq!(
+            reopened_receipt.started_unix_nanos,
+            receipt.started_unix_nanos
+        );
+        assert_eq!(
+            reopened_receipt.outputs[0].modified,
+            receipt.outputs[0].modified
+        );
 
         let duplicate = run_candidate(&engine, &store, &context, source).unwrap();
         assert_eq!(duplicate, HotFolderRunDisposition::SuppressedDuplicate);
@@ -3347,16 +3349,17 @@ mod tests {
         ));
         assert_eq!(fake.execute_calls.load(Ordering::SeqCst), 2);
 
-        *fake.fingerprint_failure.lock().expect("fingerprint failure") = Some(
-            NativeHotFolderError {
-                phase: NativeHotFolderPhase::Admission,
-                ..native_execution_error(
-                    NativeHotFolderFailureKind::UnsupportedFidelity,
-                    "source has named streams or its stream set cannot be verified",
-                    Vec::new(),
-                )
-            },
-        );
+        *fake
+            .fingerprint_failure
+            .lock()
+            .expect("fingerprint failure") = Some(NativeHotFolderError {
+            phase: NativeHotFolderPhase::Admission,
+            ..native_execution_error(
+                NativeHotFolderFailureKind::UnsupportedFidelity,
+                "source has named streams or its stream set cannot be verified",
+                Vec::new(),
+            )
+        });
         let refused = ready_candidate(
             &outer,
             nested.join("stream-source.bin"),
@@ -3390,7 +3393,12 @@ mod tests {
         assert_eq!(refusal.status, HotFolderTerminalStatus::Failure);
         assert_eq!(refusal.phase, HotFolderExecutionPhase::Admission);
         assert_eq!(refusal.source_sha256, None);
-        assert!(refusal.reason.as_deref().is_some_and(|reason| reason.contains("named streams")));
+        assert!(
+            refusal
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("named streams"))
+        );
         assert!(refusal.durable);
         assert_eq!(
             run_candidate(&engine, &store, &context, refused),

@@ -6,8 +6,8 @@ use crate::common::entity_ref::EntityRef;
 use crate::diff::query::DiffOpenPayload;
 use crate::file_search::actions::{FileSearchModePayload, FileSearchStartPayload};
 use crate::mouse_gestures::selection::{GestureFocusArgs, GestureToggleArgs};
-use crate::persistence::{PersistentStoreId, RecoveryTarget};
 use crate::paste_sequence::SequenceId;
+use crate::persistence::{PersistentStoreId, RecoveryTarget};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

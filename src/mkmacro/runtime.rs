@@ -410,12 +410,7 @@ impl OwnedRunStartGate {
         let _lock = self.lock.lock().unwrap();
         let changed = self
             .state
-            .compare_exchange(
-                OWNED_RUN_PENDING,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .compare_exchange(OWNED_RUN_PENDING, next, Ordering::AcqRel, Ordering::Acquire)
             .is_ok();
         if changed {
             self.wake.notify_all();
@@ -712,7 +707,8 @@ impl MacroRuntime {
         c: RuntimeCommand,
         program: Option<super::MkCompiledProgram>,
     ) -> CommandResult {
-        self.submit_command_with_owner(c, program, None, None, None).0
+        self.submit_command_with_owner(c, program, None, None, None)
+            .0
     }
 
     fn submit_command_with_owner(
@@ -727,25 +723,34 @@ impl MacroRuntime {
         self.test_commands.lock().unwrap().push(c.clone());
         let request = run_request(&c);
         if matches!(&c, RuntimeCommand::RecordingPreview { .. }) && program.is_none() {
-            return (CommandResult::Rejected(ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidPlan,
-                "recording preview requires an ephemeral compiled program",
-            )), None);
+            return (
+                CommandResult::Rejected(ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidPlan,
+                    "recording preview requires an ephemeral compiled program",
+                )),
+                None,
+            );
         }
         if request.is_some_and(|request| request.selection.is_some_and(<[u64]>::is_empty)) {
-            return (CommandResult::Rejected(ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidSelection,
-                "selection is empty",
-            )), None);
+            return (
+                CommandResult::Rejected(ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidSelection,
+                    "selection is empty",
+                )),
+                None,
+            );
         }
         // Admission serializes terminal publication with control commands and
         // new-run claims. Lock order is admission -> control/snapshot/operations.
         let mut admission = self.shared.admission.lock().unwrap();
         if !self.available.load(Ordering::Acquire) {
-            return (CommandResult::Rejected(ExecutionDiagnostic::new(
-                DiagnosticKind::RuntimeUnavailable,
-                "macro worker is shut down",
-            )), None);
+            return (
+                CommandResult::Rejected(ExecutionDiagnostic::new(
+                    DiagnosticKind::RuntimeUnavailable,
+                    "macro worker is shut down",
+                )),
+                None,
+            );
         }
         if request.is_some()
             && let Some(active) = admission.as_ref()
@@ -760,12 +765,18 @@ impl MacroRuntime {
         if let Some(expected_macros) = expected_macros.as_ref() {
             let current = self.store.snapshot();
             for expected in expected_macros {
-                let mut matching = current.macros.iter().filter(|macro_| macro_.id == expected.id);
+                let mut matching = current
+                    .macros
+                    .iter()
+                    .filter(|macro_| macro_.id == expected.id);
                 if matching.next() != Some(expected) || matching.next().is_some() {
-                    return (CommandResult::Rejected(ExecutionDiagnostic::new(
-                        DiagnosticKind::InvalidTarget,
-                        "macro configuration changed before admission",
-                    )), None);
+                    return (
+                        CommandResult::Rejected(ExecutionDiagnostic::new(
+                            DiagnosticKind::InvalidTarget,
+                            "macro configuration changed before admission",
+                        )),
+                        None,
+                    );
                 }
             }
         }
@@ -779,18 +790,24 @@ impl MacroRuntime {
             _ => false,
         };
         if wrong_state {
-            return (CommandResult::Rejected(ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidTarget,
-                format!("command {c:?} is not valid while runtime is {state:?}"),
-            )), None);
+            return (
+                CommandResult::Rejected(ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidTarget,
+                    format!("command {c:?} is not valid while runtime is {state:?}"),
+                )),
+                None,
+            );
         }
         let mut run_id = None;
         if let Some(request) = request {
             if !self.shared.operations.claim(Operation::Playback) {
-                return (CommandResult::Rejected(ExecutionDiagnostic::new(
-                    DiagnosticKind::InvalidTarget,
-                    "recording is active",
-                )), None);
+                return (
+                    CommandResult::Rejected(ExecutionDiagnostic::new(
+                        DiagnosticKind::InvalidTarget,
+                        "recording is active",
+                    )),
+                    None,
+                );
             }
             self.shared.control.reset();
             let admitted_run_id = self.shared.next_run_id.fetch_add(1, Ordering::Relaxed);
@@ -861,10 +878,13 @@ impl MacroRuntime {
             self.shared.control.finish();
             self.shared.operations.release(Operation::Playback);
             *admission = None;
-            return (CommandResult::Rejected(ExecutionDiagnostic::new(
-                DiagnosticKind::RuntimeUnavailable,
-                "macro worker is shut down",
-            )), None);
+            return (
+                CommandResult::Rejected(ExecutionDiagnostic::new(
+                    DiagnosticKind::RuntimeUnavailable,
+                    "macro worker is shut down",
+                )),
+                None,
+            );
         }
         (CommandResult::Accepted, run_id)
     }
@@ -979,7 +999,10 @@ impl MacroRuntime {
         invocation.arguments = prepared.values;
         let mut expected_macros = Vec::with_capacity(program.macro_ids().len());
         for macro_id in program.macro_ids() {
-            let mut matching = document.macros.iter().filter(|macro_| macro_.id == *macro_id);
+            let mut matching = document
+                .macros
+                .iter()
+                .filter(|macro_| macro_.id == *macro_id);
             let Some(macro_) = matching.next() else {
                 return Err(ExecutionDiagnostic::new(
                     DiagnosticKind::InvalidPlan,
@@ -1522,65 +1545,66 @@ fn run_one(
         ))
     } else {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let program = match prepared_program {
-            Some(program) => program,
-            None => {
-                let invocation = request.to_invocation();
-                super::invocation::compile_invocation_program(&store.snapshot(), &invocation)?
-            }
-        };
-        let plan = program.plan(mid).ok_or_else(|| {
-            ExecutionDiagnostic::new(
-                DiagnosticKind::InvalidPlan,
-                "Compiled program root is missing",
-            )
-        })?;
-        let admission = shared.admission.lock().unwrap();
-        let state = controlled_state(&shared.control);
-        publish(shared, |s| {
-            *s = RuntimeSnapshot {
-                state,
-                run_mode: mode,
-                run_id,
-                origin,
-                macro_id: Some(mid),
-                pause_reason: (state == RuntimeState::Paused).then_some(RuntimePauseReason::User),
-                total_steps: plan.instructions.iter().filter(|x| x.step.enabled).count(),
-                started_at: Some(SystemTime::now()),
-                revision: s.revision,
-                ..RuntimeSnapshot::default()
+            let program = match prepared_program {
+                Some(program) => program,
+                None => {
+                    let invocation = request.to_invocation();
+                    super::invocation::compile_invocation_program(&store.snapshot(), &invocation)?
+                }
             };
-        });
-        drop(admission);
-        let observer = |context: ExecutionFrameContext, event: ExecutionEvent| {
-            #[cfg(test)]
-            if context.depth == 1
-                && !matches!(
-                    event,
-                    ExecutionEvent::FrameEntered(_) | ExecutionEvent::FrameExited { .. }
+            let plan = program.plan(mid).ok_or_else(|| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidPlan,
+                    "Compiled program root is missing",
                 )
-            {
-                shared.test_events.lock().unwrap().push(event.clone());
-            }
-            // Serialize state decisions with control commands. Read control
-            // before snapshot publication to preserve the single lock order.
-            let _admission = shared.admission.lock().unwrap();
+            })?;
+            let admission = shared.admission.lock().unwrap();
             let state = controlled_state(&shared.control);
-            publish(shared, |snapshot| {
-                apply_execution_event(snapshot, &program, context, event, state)
+            publish(shared, |s| {
+                *s = RuntimeSnapshot {
+                    state,
+                    run_mode: mode,
+                    run_id,
+                    origin,
+                    macro_id: Some(mid),
+                    pause_reason: (state == RuntimeState::Paused)
+                        .then_some(RuntimePauseReason::User),
+                    total_steps: plan.instructions.iter().filter(|x| x.step.enabled).count(),
+                    started_at: Some(SystemTime::now()),
+                    revision: s.revision,
+                    ..RuntimeSnapshot::default()
+                };
             });
-        };
-        let executor = Executor::new(backends.clone(), shared.control.clone());
-        let options = match mode {
-            RuntimeRunMode::Normal => ExecutionOptions::normal(),
-            RuntimeRunMode::Debug => ExecutionOptions::debug(),
-        };
-        executor.execute_program(
-            &program,
-            arguments.unwrap_or(&MkInvocationValues::new()),
-            options,
-            &observer,
-        )
+            drop(admission);
+            let observer = |context: ExecutionFrameContext, event: ExecutionEvent| {
+                #[cfg(test)]
+                if context.depth == 1
+                    && !matches!(
+                        event,
+                        ExecutionEvent::FrameEntered(_) | ExecutionEvent::FrameExited { .. }
+                    )
+                {
+                    shared.test_events.lock().unwrap().push(event.clone());
+                }
+                // Serialize state decisions with control commands. Read control
+                // before snapshot publication to preserve the single lock order.
+                let _admission = shared.admission.lock().unwrap();
+                let state = controlled_state(&shared.control);
+                publish(shared, |snapshot| {
+                    apply_execution_event(snapshot, &program, context, event, state)
+                });
+            };
+            let executor = Executor::new(backends.clone(), shared.control.clone());
+            let options = match mode {
+                RuntimeRunMode::Normal => ExecutionOptions::normal(),
+                RuntimeRunMode::Debug => ExecutionOptions::debug(),
+            };
+            executor.execute_program(
+                &program,
+                arguments.unwrap_or(&MkInvocationValues::new()),
+                options,
+                &observer,
+            )
         }))
         .unwrap_or_else(|payload| {
             let message = payload
@@ -1866,16 +1890,12 @@ pub(crate) fn start_hotfolder_macro(
     expected_macro: &super::MkMacro,
     expected_dependencies: &[super::MkMacro],
 ) -> ExecResult<OwnedMacroRun> {
-    let runtime = RUNTIME
-        .read()
-        .unwrap()
-        .clone()
-        .ok_or_else(|| {
-            ExecutionDiagnostic::new(
-                DiagnosticKind::RuntimeUnavailable,
-                "macro runtime is not initialized",
-            )
-        })?;
+    let runtime = RUNTIME.read().unwrap().clone().ok_or_else(|| {
+        ExecutionDiagnostic::new(
+            DiagnosticKind::RuntimeUnavailable,
+            "macro runtime is not initialized",
+        )
+    })?;
     runtime.start_owned_hotfolder_macro(expected_macro, expected_dependencies)
 }
 
@@ -4809,11 +4829,8 @@ mod run_mode_tests {
             ..Default::default()
         };
         let (validated_action, validated_dependencies) =
-            crate::hotfolder::bind_mkmacro_action_with_dependencies(
-                &validated_document,
-                root.id,
-            )
-            .expect("capture the validated dependency closure");
+            crate::hotfolder::bind_mkmacro_action_with_dependencies(&validated_document, root.id)
+                .expect("capture the validated dependency closure");
         assert!(matches!(
             validated_action,
             crate::hotfolder::RuleAction::MkMacro { .. }
@@ -4836,12 +4853,7 @@ mod run_mode_tests {
             })
         ));
         assert!(
-            raced_runtime
-                .shared
-                .admission
-                .lock()
-                .unwrap()
-                .is_none(),
+            raced_runtime.shared.admission.lock().unwrap().is_none(),
             "an edited transitive dependency must fail before run admission"
         );
 

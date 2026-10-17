@@ -304,7 +304,11 @@ mod pinboard_headless_tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("pinboard commands require the launcher interface"));
+        assert!(
+            error
+                .to_string()
+                .contains("pinboard commands require the launcher interface")
+        );
         assert!(external_calls.is_empty());
     }
 }

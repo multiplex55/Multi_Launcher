@@ -266,8 +266,14 @@ impl SequencePlaybackController {
 
     pub(crate) fn current_step_number(&self) -> Option<(usize, usize)> {
         self.session.as_ref().map(|session| {
-            let current = session.next_step.min(session.run.step_count()).saturating_add(1);
-            (current.min(session.run.step_count()), session.run.step_count())
+            let current = session
+                .next_step
+                .min(session.run.step_count())
+                .saturating_add(1);
+            (
+                current.min(session.run.step_count()),
+                session.run.step_count(),
+            )
         })
     }
 

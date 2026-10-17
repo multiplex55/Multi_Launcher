@@ -677,7 +677,10 @@ impl BatchRenameDialogState {
     ) {
         if !runtime.journal_ready {
             if let Some(error) = &runtime.journal_error {
-                ui.colored_label(ui.visuals().error_fg_color, format!("Recovery data is unavailable: {error}"));
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    format!("Recovery data is unavailable: {error}"),
+                );
             } else {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -748,9 +751,8 @@ impl BatchRenameDialogState {
                     let remaining = receipt.remaining_undo_count();
                     ui.horizontal(|ui| {
                         ui.label(format!("Undo entries: {remaining}"));
-                        let enabled = process_interactions
-                            && receipt.status().can_undo()
-                            && remaining > 0;
+                        let enabled =
+                            process_interactions && receipt.status().can_undo() && remaining > 0;
                         if ui
                             .add_enabled(enabled, egui::Button::new("Undo…"))
                             .clicked()
@@ -847,20 +849,25 @@ impl BatchRenameDialogState {
                     .open(&mut confirmation_open)
                     .show(ctx, |ui| {
                         ui.label(format!("Root: {}", receipt.root_path().display()));
-                        ui.label(format!("Restore {} recorded file(s) to their original names and bytes.", receipt.remaining_undo_count()));
-                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
-                            for entry in receipt.entries() {
-                                if let Some(current) = entry.current_path() {
-                                    if current != entry.original_path() {
-                                        ui.label(format!(
-                                            "{} → {}",
-                                            current.display(),
-                                            entry.original_path().display()
-                                        ));
+                        ui.label(format!(
+                            "Restore {} recorded file(s) to their original names and bytes.",
+                            receipt.remaining_undo_count()
+                        ));
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                for entry in receipt.entries() {
+                                    if let Some(current) = entry.current_path() {
+                                        if current != entry.original_path() {
+                                            ui.label(format!(
+                                                "{} → {}",
+                                                current.display(),
+                                                entry.original_path().display()
+                                            ));
+                                        }
                                     }
                                 }
-                            }
-                        });
+                            });
                         ui.horizontal(|ui| {
                             let confirm = ui
                                 .add_enabled(
@@ -1865,12 +1872,7 @@ mod tests {
         context: &egui::Context,
         input: egui::RawInput,
     ) -> Vec<BatchRenameUiCommand> {
-        run_dialog_frame_with_runtime(
-            state,
-            context,
-            input,
-            &RenameRuntimeSnapshot::default(),
-        )
+        run_dialog_frame_with_runtime(state, context, input, &RenameRuntimeSnapshot::default())
     }
 
     fn run_dialog_frame_with_runtime(
@@ -1950,10 +1952,7 @@ mod tests {
             std::sync::Arc::new(Vec::new()),
             0,
             crate::plugin::PluginManager::new_inert_for_test_at(&app_data),
-            app_data
-                .join("actions.json")
-                .to_string_lossy()
-                .into_owned(),
+            app_data.join("actions.json").to_string_lossy().into_owned(),
             app_data
                 .join("settings.json")
                 .to_string_lossy()
@@ -2037,7 +2036,12 @@ mod tests {
             .expect("read fixture root")
             .map(|entry| {
                 let entry = entry.expect("read fixture entry");
-                assert!(entry.file_type().expect("read fixture entry type").is_file());
+                assert!(
+                    entry
+                        .file_type()
+                        .expect("read fixture entry type")
+                        .is_file()
+                );
                 (
                     entry.file_name(),
                     fs::read(entry.path()).expect("read fixture file bytes"),
@@ -2418,7 +2422,15 @@ mod tests {
             .entry_ref();
         assert!(state.set_selected(changed_selection, false));
         assert!(state.pending_intent().is_none());
-        assert!(state.freeze_confirmed_plan().unwrap().plan().actions().len() < 2);
+        assert!(
+            state
+                .freeze_confirmed_plan()
+                .unwrap()
+                .plan()
+                .actions()
+                .len()
+                < 2
+        );
 
         state.end_session();
         assert!(state.pending_intent().is_none());
@@ -2452,17 +2464,12 @@ mod tests {
             .expect("the built-in rename plugin exposes its searchable route");
         assert!(action.args.is_none(), "the route carries no implicit root");
         assert!(action.desc.contains("guarded Apply"));
-        let invocation = crate::commands::parse_command(
-            action,
-            None,
-            crate::commands::ActivationSource::Enter,
-        )
-        .expect("Enter activation parses the normal rename action");
+        let invocation =
+            crate::commands::parse_command(action, None, crate::commands::ActivationSource::Enter)
+                .expect("Enter activation parses the normal rename action");
         assert_eq!(
             invocation.command,
-            crate::commands::Command::BatchRename(
-                crate::commands::BatchRenameCommand::Open
-            )
+            crate::commands::Command::BatchRename(crate::commands::BatchRenameCommand::Open)
         );
         crate::commands::CommandBus
             .dispatch(&invocation, &mut app)
@@ -2500,7 +2507,10 @@ mod tests {
         app.batch_rename_dialog.next_rule_id = 3;
         app.batch_rename_dialog.rules_revision = 2;
         app.batch_rename_dialog.rebuild_preview();
-        assert_eq!(app.batch_rename_dialog.extension_policy, ExtensionPolicy::Preserve);
+        assert_eq!(
+            app.batch_rename_dialog.extension_policy,
+            ExtensionPolicy::Preserve
+        );
         let original_identities = scan_identities(&app.batch_rename_dialog);
         assert_eq!(original_identities.len(), 2);
         let expected_bytes = file_bytes(&root);
@@ -2590,11 +2600,12 @@ mod tests {
         // A second confirmation cannot enqueue another job after the frozen
         // intent was consumed. A draft edit also cannot change that job.
         app.handle_batch_rename_ui_command(BatchRenameUiCommand::ApplyConfirmed);
-        assert!(app
-            .batch_rename_dialog
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("no longer available")));
+        assert!(
+            app.batch_rename_dialog
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("no longer available"))
+        );
         app.batch_rename_dialog.rules[0].rule =
             RenameRule::Prefix("edited-after-confirmation-".to_owned());
         app.batch_rename_dialog.rules_revision += 1;
@@ -2611,16 +2622,23 @@ mod tests {
             .expect("the real app worker publishes the applied recovery receipt")
             .clone();
         assert_eq!(applied_receipt.entries().len(), 2);
-        assert!(app
-            .batch_rename_dialog
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("All confirmed filenames")));
+        assert!(
+            app.batch_rename_dialog
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("All confirmed filenames"))
+        );
         assert_eq!(
             file_bytes(&root),
             std::collections::BTreeMap::from([
-                (OsString::from("renamed-alpha-copy.txt"), b"alpha bytes".to_vec()),
-                (OsString::from("renamed-beta-copy.txt"), b"beta bytes".to_vec()),
+                (
+                    OsString::from("renamed-alpha-copy.txt"),
+                    b"alpha bytes".to_vec()
+                ),
+                (
+                    OsString::from("renamed-beta-copy.txt"),
+                    b"beta bytes".to_vec()
+                ),
             ])
         );
 
@@ -2657,24 +2675,29 @@ mod tests {
             crate::batch_rename_transaction::RenameTransactionStatus::Undone
         );
         assert_eq!(undone_receipt.remaining_undo_count(), 0);
-        assert!(app
-            .batch_rename_dialog
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Undo")));
+        assert!(
+            app.batch_rename_dialog
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Undo"))
+        );
         app.handle_batch_rename_ui_command(BatchRenameUiCommand::UndoConfirmed(
             applied_receipt.id().to_owned(),
         ));
         assert!(!app.batch_rename_runtime_snapshot().operation_active);
-        assert!(app
-            .batch_rename_dialog
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Undo was not started")));
+        assert!(
+            app.batch_rename_dialog
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Undo was not started"))
+        );
 
         app.handle_batch_rename_ui_command(BatchRenameUiCommand::Rescan);
         finish_app_scan(&mut app, &ctx);
-        assert_eq!(scan_identities(&app.batch_rename_dialog), original_identities);
+        assert_eq!(
+            scan_identities(&app.batch_rename_dialog),
+            original_identities
+        );
         assert_eq!(file_bytes(&root), original_bytes);
 
         app.batch_rename_dialog.select_visible(true);
@@ -2698,15 +2721,18 @@ mod tests {
         assert!(app.batch_rename_dialog.freeze_confirmed_plan().is_some());
         app.handle_batch_rename_ui_command(BatchRenameUiCommand::ApplyConfirmed);
         let refused = finish_app_operation(&mut app, &ctx);
-        assert!(refused
-            .last_message
-            .as_deref()
-            .is_some_and(|message| message.contains("destination is occupied")));
-        assert!(app
-            .batch_rename_dialog
-            .status_message
-            .as_deref()
-            .is_some_and(|message| message.contains("Refresh the preview")));
+        assert!(
+            refused
+                .last_message
+                .as_deref()
+                .is_some_and(|message| message.contains("destination is occupied"))
+        );
+        assert!(
+            app.batch_rename_dialog
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Refresh the preview"))
+        );
         assert_eq!(fs::read(root.join("alpha.txt")).unwrap(), b"alpha bytes");
         assert_eq!(fs::read(root.join("beta.txt")).unwrap(), b"beta bytes");
         assert_eq!(

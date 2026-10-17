@@ -88,7 +88,11 @@ mod pinboard_parser_tests {
             assert_eq!(parsed.kind_name(), expected.kind_name());
         }
 
-        for raw in ["pinboard:future", "pinboard:capture:extra", "pinboard: list"] {
+        for raw in [
+            "pinboard:future",
+            "pinboard:capture:extra",
+            "pinboard: list",
+        ] {
             assert!(matches!(
                 parse_action(&action(raw, None)).unwrap(),
                 Command::Pinboard(PinboardCommand::Unknown { raw: parsed })
@@ -1694,14 +1698,18 @@ mod tests {
         }
         let mut payload = action("hotfolder:open");
         payload.args = Some("C:\\private\\file.txt".into());
-        assert!(parse_action(&payload)
-            .unwrap_err()
-            .message
-            .contains("do not accept a path or content payload"));
-        assert!(parse_action(&action("hotfolder:enable"))
-            .unwrap_err()
-            .message
-            .contains("unknown Hot Folder command"));
+        assert!(
+            parse_action(&payload)
+                .unwrap_err()
+                .message
+                .contains("do not accept a path or content payload")
+        );
+        assert!(
+            parse_action(&action("hotfolder:enable"))
+                .unwrap_err()
+                .message
+                .contains("unknown Hot Folder command")
+        );
     }
 
     #[test]

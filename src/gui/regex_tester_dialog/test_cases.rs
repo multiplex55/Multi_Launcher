@@ -33,10 +33,7 @@ fn summary_text(summary: RegexTestCaseSummary) -> String {
     )
 }
 
-fn status_for(
-    case: &RegexTestCase,
-    status: Option<&RegexTestCaseStatus>,
-) -> PresentedStatus {
+fn status_for(case: &RegexTestCase, status: Option<&RegexTestCaseStatus>) -> PresentedStatus {
     match status {
         None | Some(RegexTestCaseStatus::Pending) => PresentedStatus {
             tone: StatusTone::Info,
@@ -120,10 +117,7 @@ fn apply_action(session: &mut RegexSession, action: CaseAction) -> Result<(), St
             .add(None, String::new(), RegexTestCaseExpectation::Match)
             .map(|_| ())
             .map_err(collection_error),
-        CaseAction::Duplicate(id) => cases
-            .duplicate(id)
-            .map(|_| ())
-            .map_err(collection_error),
+        CaseAction::Duplicate(id) => cases.duplicate(id).map(|_| ()).map_err(collection_error),
         CaseAction::Remove(id) => cases
             .remove(id)
             .map(|_| ())
@@ -153,7 +147,11 @@ pub(super) fn show(
     let mut copy_rect = egui::Rect::NOTHING;
 
     ui.horizontal_wrapped(|ui| {
-        let disclosure = if *expanded { "▾ Test Cases" } else { "▸ Test Cases" };
+        let disclosure = if *expanded {
+            "▾ Test Cases"
+        } else {
+            "▸ Test Cases"
+        };
         if ui.small_button(disclosure).clicked() && process_actions {
             *expanded = !*expanded;
         }
@@ -161,7 +159,10 @@ pub(super) fn show(
         let add = ui
             .add_enabled(!at_limit, egui::Button::new("+ Add"))
             .on_hover_text(if at_limit {
-                format!("The limit is {} cases.", session.test_case_policy().maximum_cases)
+                format!(
+                    "The limit is {} cases.",
+                    session.test_case_policy().maximum_cases
+                )
             } else {
                 "Add a new test case".to_owned()
             });
@@ -385,11 +386,10 @@ mod tests {
     use super::*;
     use crate::clipboard_modify::clipboard::ClipboardError;
     use crate::regex_tester::{
-        RegexFlags, RegexTestCaseStatus, RegexTestCases,
-        session::EVALUATION_DEBOUNCE,
+        RegexFlags, RegexTestCaseStatus, RegexTestCases, session::EVALUATION_DEBOUNCE,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
     struct CaptureClipboard {
@@ -579,7 +579,12 @@ mod tests {
             )),
         );
         assert_eq!(limited.label, "Error · not evaluated");
-        assert!(limited.details.unwrap().contains("combined test input size"));
+        assert!(
+            limited
+                .details
+                .unwrap()
+                .contains("combined test input size")
+        );
     }
 
     #[test]
@@ -601,7 +606,10 @@ mod tests {
         let feedback = copy_summary(&clipboard, summary).unwrap();
         assert_eq!(feedback, "Copied test case summary");
         let copied = clipboard.text.lock().unwrap().clone().unwrap();
-        assert_eq!(copied, "1 case · 0 passed · 0 failed · 0 errors · 1 pending");
+        assert_eq!(
+            copied,
+            "1 case · 0 passed · 0 failed · 0 errors · 1 pending"
+        );
         assert_eq!(clipboard.reads.load(Ordering::Relaxed), 0);
         assert_eq!(clipboard.writes.load(Ordering::Relaxed), 1);
         assert!(!copied.contains("sensitive label"));
@@ -627,11 +635,26 @@ mod tests {
             .unwrap();
         let copy = session.draft.test_cases.duplicate(first).unwrap();
         assert_ne!(first, copy);
-        assert_eq!(session.draft.test_cases.get(copy).unwrap().input, "line 1\nline 2");
+        assert_eq!(
+            session.draft.test_cases.get(copy).unwrap().input,
+            "line 1\nline 2"
+        );
         assert!(session.draft.test_cases.move_to(second, 0));
         assert_eq!(session.draft.test_cases.as_slice()[0].id, second);
-        assert_eq!(session.draft.test_cases.get(first).unwrap().input, "line 1\nline 2");
-        assert_eq!(session.draft.test_cases.get(first).unwrap().label.as_deref(), Some("first"));
+        assert_eq!(
+            session.draft.test_cases.get(first).unwrap().input,
+            "line 1\nline 2"
+        );
+        assert_eq!(
+            session
+                .draft
+                .test_cases
+                .get(first)
+                .unwrap()
+                .label
+                .as_deref(),
+            Some("first")
+        );
         assert!(session.draft.test_cases.remove(copy).is_some());
         assert!(session.draft.test_cases.get(first).is_some());
     }
@@ -889,8 +912,7 @@ mod tests {
             &mut feedback,
             true,
         );
-        context
-            .memory_mut(|memory| memory.request_focus(label_widget_id(case_id)));
+        context.memory_mut(|memory| memory.request_focus(label_widget_id(case_id)));
 
         render_panel(
             &context,
@@ -906,7 +928,13 @@ mod tests {
             true,
         );
         assert_eq!(
-            session.draft.test_cases.get(case_id).unwrap().label.as_deref(),
+            session
+                .draft
+                .test_cases
+                .get(case_id)
+                .unwrap()
+                .label
+                .as_deref(),
             Some("my ")
         );
 
@@ -924,7 +952,13 @@ mod tests {
             true,
         );
         assert_eq!(
-            session.draft.test_cases.get(case_id).unwrap().label.as_deref(),
+            session
+                .draft
+                .test_cases
+                .get(case_id)
+                .unwrap()
+                .label
+                .as_deref(),
             Some("my case")
         );
     }

@@ -134,9 +134,9 @@ impl HashGeneratorDialogState {
     }
 
     pub fn is_running(&self) -> bool {
-        self.job.as_ref().is_some_and(|job| {
-            self.current_request == Some((self.generation, job.request_id()))
-        })
+        self.job
+            .as_ref()
+            .is_some_and(|job| self.current_request == Some((self.generation, job.request_id())))
     }
 
     pub fn is_stopping_stale_job(&self) -> bool {
@@ -154,7 +154,9 @@ impl HashGeneratorDialogState {
         match parse_expected_digest(result.algorithm, &self.expected) {
             Ok(None) => Some(Ok(HashComparison::NotRequested)),
             Ok(Some(_)) => {
-                let trimmed = self.expected.trim_matches(|ch: char| ch.is_ascii_whitespace());
+                let trimmed = self
+                    .expected
+                    .trim_matches(|ch: char| ch.is_ascii_whitespace());
                 Some(Ok(if result.digest.eq_ignore_ascii_case(trimmed) {
                     HashComparison::Match
                 } else {
@@ -205,7 +207,9 @@ impl HashGeneratorDialogState {
     pub fn load_clipboard(&mut self, clipboard: &dyn ClipboardBackend) {
         match clipboard.read_text() {
             Ok(text) => {
-                if self.mode != HashInputMode::Clipboard || self.clipboard_text.as_deref() != Some(&text) {
+                if self.mode != HashInputMode::Clipboard
+                    || self.clipboard_text.as_deref() != Some(&text)
+                {
                     self.invalidate_current();
                     self.mode = HashInputMode::Clipboard;
                     self.clipboard_text = Some(text);
@@ -233,7 +237,9 @@ impl HashGeneratorDialogState {
         ) -> Result<HashJob, crate::hash_generator::HashError>,
     ) -> Result<(), String> {
         if self.job.is_some() {
-            return Err("Wait for the cancelled hash worker to finish before starting another".into());
+            return Err(
+                "Wait for the cancelled hash worker to finish before starting another".into(),
+            );
         }
         let input = match self.mode {
             HashInputMode::Text => HashInput::Text(self.text.clone()),
@@ -248,7 +254,8 @@ impl HashGeneratorDialogState {
                     .ok_or_else(|| "Choose a file before calculating".to_owned())?,
             ),
         };
-        let request = HashRequest::new(self.algorithm, input, None).map_err(|error| error.to_string())?;
+        let request =
+            HashRequest::new(self.algorithm, input, None).map_err(|error| error.to_string())?;
         let request_id = request.request_id();
         let job = start_job(request, repaint).map_err(|error| error.to_string())?;
         self.result = None;
@@ -361,7 +368,11 @@ impl HashGeneratorDialogState {
             egui::ComboBox::from_id_salt("hash_source_mode")
                 .selected_text(mode_label(mode))
                 .show_ui(ui, |ui| {
-                    for candidate in [HashInputMode::Text, HashInputMode::Clipboard, HashInputMode::File] {
+                    for candidate in [
+                        HashInputMode::Text,
+                        HashInputMode::Clipboard,
+                        HashInputMode::File,
+                    ] {
                         ui.selectable_value(&mut mode, candidate, mode_label(candidate));
                     }
                 });
@@ -373,7 +384,11 @@ impl HashGeneratorDialogState {
             egui::ComboBox::from_id_salt("hash_algorithm")
                 .selected_text(algorithm.name())
                 .show_ui(ui, |ui| {
-                    for candidate in [HashAlgorithm::Sha256, HashAlgorithm::Sha512, HashAlgorithm::Sha1] {
+                    for candidate in [
+                        HashAlgorithm::Sha256,
+                        HashAlgorithm::Sha512,
+                        HashAlgorithm::Sha1,
+                    ] {
                         ui.selectable_value(&mut algorithm, candidate, candidate.name());
                     }
                 });
@@ -384,7 +399,8 @@ impl HashGeneratorDialogState {
             if ui.button("Load Clipboard").clicked() {
                 self.load_clipboard(&ArboardClipboardBackend);
             }
-            if self.mode == HashInputMode::File && ui.button("Choose File…").clicked()
+            if self.mode == HashInputMode::File
+                && ui.button("Choose File…").clicked()
                 && let Some(path) = rfd::FileDialog::new().pick_file()
             {
                 self.set_file_path(Some(path));
@@ -394,7 +410,10 @@ impl HashGeneratorDialogState {
         match self.mode {
             HashInputMode::Text => {
                 ui.label("Text input · hashed as exact UTF-8 bytes");
-                let editor_size = egui::vec2(ui.available_width(), (ui.available_height() * 0.36).clamp(72.0, 150.0));
+                let editor_size = egui::vec2(
+                    ui.available_width(),
+                    (ui.available_height() * 0.36).clamp(72.0, 150.0),
+                );
                 let response = ui.add_sized(
                     editor_size,
                     egui::TextEdit::multiline(&mut self.text)
@@ -452,13 +471,12 @@ impl HashGeneratorDialogState {
         }
 
         ui.horizontal_wrapped(|ui| {
-            let calculate = ui.add_enabled(
-                self.job.is_none(),
-                egui::Button::new("Calculate"),
-            );
+            let calculate = ui.add_enabled(self.job.is_none(), egui::Button::new("Calculate"));
             if calculate.clicked() {
                 let repaint_context = ctx.clone();
-                if let Err(error) = self.calculate(Arc::new(move || repaint_context.request_repaint())) {
+                if let Err(error) =
+                    self.calculate(Arc::new(move || repaint_context.request_repaint()))
+                {
                     self.error = Some(error);
                 }
             }
@@ -494,7 +512,10 @@ impl HashGeneratorDialogState {
                     ui.colored_label(ui.visuals().error_fg_color, "Mismatch");
                 }
                 Some(Err(error)) => {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("Invalid expected digest: {error}"));
+                    ui.colored_label(
+                        ui.visuals().error_fg_color,
+                        format!("Invalid expected digest: {error}"),
+                    );
                 }
                 None => {}
             }
@@ -578,8 +599,7 @@ mod tests {
         let worker_slot_for_start = worker_slot.clone();
         dialog
             .calculate_with_start(Arc::new(|| {}), move |request, repaint| {
-                let (job, run_worker) =
-                    HashJob::start_deferred_for_test(request, repaint)?;
+                let (job, run_worker) = HashJob::start_deferred_for_test(request, repaint)?;
                 *worker_slot_for_start
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(run_worker);
@@ -712,7 +732,10 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(dialog.poll());
-            assert!(dialog.result().is_none(), "stale {edit} result was published");
+            assert!(
+                dialog.result().is_none(),
+                "stale {edit} result was published"
+            );
             assert!(dialog.error.is_none(), "stale {edit} error was published");
             assert!(!dialog.can_copy_digest());
 
@@ -742,7 +765,10 @@ mod tests {
         assert!(dialog.calculate(Arc::new(|| {})).is_err());
         dialog.open = false;
         dialog.show(&context);
-        assert!(dialog.has_job(), "polling must not run or join the deferred worker");
+        assert!(
+            dialog.has_job(),
+            "polling must not run or join the deferred worker"
+        );
         finish_cancelled();
         dialog.show(&context);
         assert!(!dialog.has_job());
@@ -798,7 +824,10 @@ mod tests {
         wait_for_terminal(&mut dialog);
         let result = dialog.result().expect("file digest is available");
         assert_eq!(result.input_mode, HashInputMode::File);
-        assert_eq!(result.bytes_processed, std::fs::metadata(&path).unwrap().len());
+        assert_eq!(
+            result.bytes_processed,
+            std::fs::metadata(&path).unwrap().len()
+        );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "id,value\r\n1,λ\n");
     }
 

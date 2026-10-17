@@ -26,6 +26,10 @@ mod fav_dialog;
 mod file_search_dialog;
 pub mod file_search_preview_dialog;
 mod font_revision;
+mod hash_generator_dialog;
+pub(crate) mod hotfolder_dialog;
+pub(crate) mod hotfolder_dispatch;
+pub(crate) mod hotfolder_runtime;
 pub mod image_crop_editor;
 mod image_panel;
 mod indexing;
@@ -44,13 +48,9 @@ mod notes_dialog;
 mod numpad_navigation;
 mod ocr;
 mod ocr_view;
+mod paste_sequence_dialog;
 pub(crate) mod pinboard;
 mod pinboard_windows;
-mod paste_sequence_dialog;
-mod hash_generator_dialog;
-pub(crate) mod hotfolder_dispatch;
-pub(crate) mod hotfolder_dialog;
-pub(crate) mod hotfolder_runtime;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;
@@ -106,9 +106,6 @@ pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
 pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
-pub(crate) use search_replace_dialog::{
-    ReplacementPreviewWorker, SearchReplaceDialogState, SearchReplaceUiCommand,
-};
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BRIGHTNESS_QUERIES;
 pub use brightness_dialog::BrightnessDialog;
@@ -116,6 +113,9 @@ pub use calendar_event_details::CalendarEventDetails;
 pub use calendar_event_editor::CalendarEventEditor;
 pub use calendar_popover::CalendarPopover;
 pub use clipboard_dialog::ClipboardDialog;
+pub(crate) use search_replace_dialog::{
+    ReplacementPreviewWorker, SearchReplaceDialogState, SearchReplaceUiCommand,
+};
 
 pub use clipboard_modify_dialog::{ClipboardModifyDialogSection, ClipboardModifyDialogState};
 pub use convert_panel::ConvertPanel;
@@ -129,6 +129,7 @@ pub use file_search_dialog::{
     FileSearchDialogState, FileSearchMode, FileSearchScopeMode, FileSearchUiCommand,
 };
 pub use file_search_preview_dialog::FileSearchPreviewDialogState;
+pub use hash_generator_dialog::HashGeneratorDialogState;
 pub use image_panel::ImagePanel;
 pub use json_utility_dialog::JsonUtilityDialogState;
 pub use macro_dialog::MacroDialog;
@@ -143,7 +144,6 @@ pub use note_panel::{
 };
 pub use notes_dialog::NotesDialog;
 pub(crate) use paste_sequence_dialog::PasteSequenceDialog;
-pub use hash_generator_dialog::HashGeneratorDialogState;
 #[cfg(feature = "qa-framebuffer-capture")]
 pub use qa_framebuffer::QaFramebufferRequest;
 pub use qr_dialog::QrDialogState;
@@ -1729,16 +1729,15 @@ impl LauncherApp {
             BatchRenameUiCommand::UndoConfirmed(transaction_id) => {
                 let Some(coordinator) = self.batch_rename_coordinator.as_ref() else {
                     self.batch_rename_dialog.set_status_message(
-                        "The rename worker is unavailable; recovery data remains saved."
-                            .to_owned(),
+                        "The rename worker is unavailable; recovery data remains saved.".to_owned(),
                     );
                     return;
                 };
                 match coordinator.submit_undo(transaction_id) {
                     Ok(()) => self.batch_rename_dialog.mark_operation_submitted(),
-                    Err(error) => self.batch_rename_dialog.set_status_message(format!(
-                        "Undo was not started: {error}"
-                    )),
+                    Err(error) => self
+                        .batch_rename_dialog
+                        .set_status_message(format!("Undo was not started: {error}")),
                 }
             }
             BatchRenameUiCommand::CancelOperation => {
@@ -1757,17 +1756,15 @@ impl LauncherApp {
 
     fn start_batch_rename_scan(&mut self, root: PathBuf) {
         if self.batch_rename_coordinator.is_none() {
-            let journal_path = crate::platform::app_data::AppDataRoot::from_settings_path(
-                &self.settings_path,
-            )
-            .map(|root| {
-                root.path()
-                    .join(crate::batch_rename_transaction::RECOVERY_JOURNAL_FILE)
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()));
-            let coordinator = journal_path.and_then(
-                crate::file_operations::RenameScanCoordinator::new_with_journal,
-            );
+            let journal_path =
+                crate::platform::app_data::AppDataRoot::from_settings_path(&self.settings_path)
+                    .map(|root| {
+                        root.path()
+                            .join(crate::batch_rename_transaction::RECOVERY_JOURNAL_FILE)
+                    })
+                    .map_err(|error| std::io::Error::other(error.to_string()));
+            let coordinator = journal_path
+                .and_then(crate::file_operations::RenameScanCoordinator::new_with_journal);
             match coordinator {
                 Ok(coordinator) => self.batch_rename_coordinator = Some(coordinator),
                 Err(error) => {
@@ -1823,20 +1820,24 @@ impl LauncherApp {
     }
 
     fn ensure_replace_executor(&mut self) -> Result<PathBuf, String> {
-        let recovery_directory = crate::platform::app_data::AppDataRoot::from_settings_path(
-            &self.settings_path,
-        )
-        .map_err(|error| format!("could not locate application data for replacement recovery: {error}"))?
-        .path()
-        .join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY);
+        let recovery_directory =
+            crate::platform::app_data::AppDataRoot::from_settings_path(&self.settings_path)
+                .map_err(|error| {
+                    format!("could not locate application data for replacement recovery: {error}")
+                })?
+                .path()
+                .join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY);
         self.search_replace_dialog
             .set_recovery_directory(recovery_directory.clone());
         if self.replace_executor_worker.is_none() {
-            let executor = crate::replace_executor::ReplaceExecutor::new(recovery_directory.clone())
-                .map_err(|error| format!("could not initialize replacement recovery: {error}"))?;
+            let executor = crate::replace_executor::ReplaceExecutor::new(
+                recovery_directory.clone(),
+            )
+            .map_err(|error| format!("could not initialize replacement recovery: {error}"))?;
             self.replace_executor_worker = Some(
-                crate::replace_executor::ReplaceExecutorWorker::new(executor)
-                    .map_err(|error| format!("could not start the guarded replace worker: {error}"))?,
+                crate::replace_executor::ReplaceExecutorWorker::new(executor).map_err(|error| {
+                    format!("could not start the guarded replace worker: {error}")
+                })?,
             );
         }
         self.search_replace_dialog.start_receipt_load()?;
@@ -1860,10 +1861,7 @@ impl LauncherApp {
         Ok(())
     }
 
-    pub(crate) fn handle_search_replace_ui_command(
-        &mut self,
-        command: SearchReplaceUiCommand,
-    ) {
+    pub(crate) fn handle_search_replace_ui_command(&mut self, command: SearchReplaceUiCommand) {
         match command {
             SearchReplaceUiCommand::SelectRoot(root) => self.search_replace_dialog.set_root(root),
             SearchReplaceUiCommand::Search => self.start_search_replace_search(),
@@ -1882,31 +1880,35 @@ impl LauncherApp {
                     return;
                 };
                 let Some(worker) = self.replace_preview_worker.as_ref() else {
-                    self.search_replace_dialog.confirm_request_failed(
-                        "The preview worker is unavailable.".into(),
-                    );
+                    self.search_replace_dialog
+                        .confirm_request_failed("The preview worker is unavailable.".into());
                     return;
                 };
                 if let Err(error) = worker.submit(job) {
                     self.search_replace_dialog.confirm_request_failed(error);
                 }
             }
-            SearchReplaceUiCommand::CancelApply
-            | SearchReplaceUiCommand::CancelRecoveryAction => {
+            SearchReplaceUiCommand::CancelApply | SearchReplaceUiCommand::CancelRecoveryAction => {
                 self.search_replace_dialog.cancel_confirmation();
             }
-            SearchReplaceUiCommand::ReviewRestore(transaction_id) => self
-                .search_replace_dialog
-                .review_recovery(transaction_id, search_replace_dialog::RecoveryAction::Restore),
-            SearchReplaceUiCommand::ReviewRecovery(transaction_id) => self
-                .search_replace_dialog
-                .review_recovery(transaction_id, search_replace_dialog::RecoveryAction::Recover),
-            SearchReplaceUiCommand::ConfirmRestore => self.submit_search_replace_recovery(
-                search_replace_dialog::RecoveryAction::Restore,
-            ),
-            SearchReplaceUiCommand::ConfirmRecovery => self.submit_search_replace_recovery(
-                search_replace_dialog::RecoveryAction::Recover,
-            ),
+            SearchReplaceUiCommand::ReviewRestore(transaction_id) => {
+                self.search_replace_dialog.review_recovery(
+                    transaction_id,
+                    search_replace_dialog::RecoveryAction::Restore,
+                )
+            }
+            SearchReplaceUiCommand::ReviewRecovery(transaction_id) => {
+                self.search_replace_dialog.review_recovery(
+                    transaction_id,
+                    search_replace_dialog::RecoveryAction::Recover,
+                )
+            }
+            SearchReplaceUiCommand::ConfirmRestore => {
+                self.submit_search_replace_recovery(search_replace_dialog::RecoveryAction::Restore)
+            }
+            SearchReplaceUiCommand::ConfirmRecovery => {
+                self.submit_search_replace_recovery(search_replace_dialog::RecoveryAction::Recover)
+            }
             SearchReplaceUiCommand::CancelOperation => {
                 if let Some(worker) = self.replace_executor_worker.as_ref() {
                     worker.cancel_active();
@@ -1998,9 +2000,7 @@ impl LauncherApp {
             return;
         };
         let result = match action {
-            search_replace_dialog::RecoveryAction::Restore => {
-                worker.submit_restore(transaction_id)
-            }
+            search_replace_dialog::RecoveryAction::Restore => worker.submit_restore(transaction_id),
             search_replace_dialog::RecoveryAction::Recover => {
                 worker.submit_recovery(transaction_id)
             }
@@ -2019,7 +2019,11 @@ impl LauncherApp {
     pub(crate) fn poll_search_replace_runtime(&mut self, ctx: &egui::Context) {
         let replace_snapshot = self
             .replace_operation_pending
-            .then(|| self.replace_executor_worker.as_ref().map(|worker| worker.snapshot()))
+            .then(|| {
+                self.replace_executor_worker
+                    .as_ref()
+                    .map(|worker| worker.snapshot())
+            })
             .flatten();
         let changed = self.search_replace_dialog.poll_background(
             self.replace_search_coordinator.as_ref(),
@@ -2030,7 +2034,8 @@ impl LauncherApp {
         if let Some(snapshot) = replace_snapshot {
             if snapshot.result.is_some() || snapshot.worker_exited {
                 self.replace_operation_pending = false;
-                self.replace_worker_snapshot = crate::replace_executor::ReplaceWorkerSnapshot::default();
+                self.replace_worker_snapshot =
+                    crate::replace_executor::ReplaceWorkerSnapshot::default();
                 if snapshot.worker_exited && snapshot.result.is_none() {
                     self.search_replace_dialog.set_status_message(
                         "The guarded replace worker exited before returning a receipt. Existing recovery data remains on disk.",
@@ -2040,7 +2045,8 @@ impl LauncherApp {
                 self.replace_worker_snapshot = snapshot;
             }
         } else {
-            self.replace_worker_snapshot = crate::replace_executor::ReplaceWorkerSnapshot::default();
+            self.replace_worker_snapshot =
+                crate::replace_executor::ReplaceWorkerSnapshot::default();
         }
         if changed {
             ctx.request_repaint();
@@ -2271,7 +2277,10 @@ impl LauncherApp {
         } else if !hotfolder_was_enabled && hotfolder_will_be_enabled {
             self.hotfolder_action_adapter.set_active(true);
             self.hotfolder_action_pump.set_active(true);
-            if let Err(error) = self.hotfolder_runtime.start(self.hotfolder_capability_inputs()) {
+            if let Err(error) = self
+                .hotfolder_runtime
+                .start(self.hotfolder_capability_inputs())
+            {
                 tracing::warn!(reason = error, "Hot Folder start request was not queued");
             }
         }
@@ -3256,7 +3265,10 @@ impl LauncherApp {
         app.hotfolder_action_adapter.set_active(hotfolder_enabled);
         app.hotfolder_action_pump.set_active(hotfolder_enabled);
         if hotfolder_enabled {
-            if let Err(error) = app.hotfolder_runtime.start(app.hotfolder_capability_inputs()) {
+            if let Err(error) = app
+                .hotfolder_runtime
+                .start(app.hotfolder_capability_inputs())
+            {
                 tracing::warn!(reason = error, "Hot Folder runtime did not start");
             }
         }

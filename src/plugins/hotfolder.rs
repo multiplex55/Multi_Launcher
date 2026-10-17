@@ -38,8 +38,16 @@ impl Plugin for HotFolderPlugin {
                 "Open the Hot Folder rule manager. Choose explicit watched roots; rules start disabled. Previously enabled intent returns only after fresh validation and startup never scans or backfills existing files. Direct children are the default scope; .part and .crdownload files are skipped unless included. Files settle for 2–10 stable observations at 50–5,000 ms intervals before execution, with bounded queues and per-rule/global run limits. Test Rule reads sample metadata only and has zero execution effects. Saving a changed rule disables it. Closing the manager leaves watching active; Pause or disabling the plugin stops new admission. History distinguishes terminal Success, Failure, Partial, and Cancelled receipts and retains recovery records.",
                 "query:hotfolder",
             ),
-            action("Pause Hot Folder", "Stop new Hot Folder admissions and request cancellation of owned active work.", "hotfolder:pause"),
-            action("Resume Hot Folder", "Revalidate enabled rules and resume watching without backfilling existing files.", "hotfolder:resume"),
+            action(
+                "Pause Hot Folder",
+                "Stop new Hot Folder admissions and request cancellation of owned active work.",
+                "hotfolder:pause",
+            ),
+            action(
+                "Resume Hot Folder",
+                "Revalidate enabled rules and resume watching without backfilling existing files.",
+                "hotfolder:resume",
+            ),
             action(
                 "Open Hot Folder Manager",
                 "Edit and test rules without side effects. Saving a changed rule disables it; close keeps background watching active, while Pause or disabling the plugin stops admission.",

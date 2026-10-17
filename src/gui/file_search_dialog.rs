@@ -3462,12 +3462,11 @@ mod tests {
                                         .id_salt(results_scroll_id_source(FileSearchMode::Filename))
                                         .auto_shrink([false, false])
                                         .show(ui, |ui| {
-                                            geometry =
-                                                Some(state.filename_results(
-                                                    ui,
-                                                    &mut coordinator,
-                                                    &mut commands,
-                                                ));
+                                            geometry = Some(state.filename_results(
+                                                ui,
+                                                &mut coordinator,
+                                                &mut commands,
+                                            ));
                                         });
                                 });
                             });

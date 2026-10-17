@@ -11,6 +11,8 @@ use crate::batch_rename::{
     RenameRuleSet, RenameSnapshotEntry, SelectionRevision, SnapshotEntryKind, SnapshotEntryRef,
     SnapshotRevision,
 };
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -18,8 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::SystemTime;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 pub const MAX_RENAME_SCAN_DIRECTORIES: usize = 4_096;
 pub const MAX_RENAME_SCAN_DEPTH: usize = 256;
@@ -277,7 +277,9 @@ impl NativeWatchError {
 impl std::fmt::Display for NativeWatchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self.kind {
-            NativeWatchErrorKind::Unsupported => "native watch admission is unavailable on this platform",
+            NativeWatchErrorKind::Unsupported => {
+                "native watch admission is unavailable on this platform"
+            }
             NativeWatchErrorKind::InvalidRoot => "the explicit watch root is invalid",
             NativeWatchErrorKind::RootChanged => "the watched root identity changed",
             NativeWatchErrorKind::ParentChanged => "the reported file parent identity changed",
@@ -288,7 +290,9 @@ impl std::fmt::Display for NativeWatchError {
             NativeWatchErrorKind::ReparsePoint => "the reported path is a reparse point",
             NativeWatchErrorKind::Busy => "the reported file is still busy",
             NativeWatchErrorKind::Inaccessible => "the reported file could not be inspected",
-            NativeWatchErrorKind::UnsupportedIdentity => "the filesystem did not provide stable file identity metadata",
+            NativeWatchErrorKind::UnsupportedIdentity => {
+                "the filesystem did not provide stable file identity metadata"
+            }
         })
     }
 }
@@ -1145,7 +1149,11 @@ impl GuardedRenameFile {
                 .ok_or_else(|| std::io::Error::other("verified rename parent is missing"))?;
             let backend = NativeRenameScanBackend;
             backend
-                .reopen_chain(&self.parent_chain, &self.root, DirectoryOpenAccess::Enumerate)
+                .reopen_chain(
+                    &self.parent_chain,
+                    &self.root,
+                    DirectoryOpenAccess::Enumerate,
+                )
                 .map_err(|failure| std::io::Error::other(failure.message))?;
             rename_open_file_no_replace(&self.source, parent, leaf)?;
             let next_path = self.parent_path.join(leaf);
@@ -2395,7 +2403,10 @@ pub(crate) fn inspect_recorded_rename_file(
                 ));
             }
             let Some(leaf) = path.file_name() else {
-                return Err(format!("receipt candidate {} has no filename", path.display()));
+                return Err(format!(
+                    "receipt candidate {} has no filename",
+                    path.display()
+                ));
             };
             let opened = match open_native_verified_file(&parent_canonical_path.join(leaf)) {
                 Ok(opened) => opened,
@@ -2411,10 +2422,8 @@ pub(crate) fn inspect_recorded_rename_file(
                 )
                 .map_err(|error| error.to_string())?
                     == expected_sha256
-                && batch_rename::compare_paths_windows_ordinal(
-                    &opened.canonical_path,
-                    path,
-                ) == std::cmp::Ordering::Equal
+                && batch_rename::compare_paths_windows_ordinal(&opened.canonical_path, path)
+                    == std::cmp::Ordering::Equal
                 && opened.canonical_path.file_name() == path.file_name()
             {
                 matches.push(path.clone());
@@ -2542,13 +2551,10 @@ fn prepare_guarded_rename_batch_native(
                 &opened.canonical_path,
                 action.source_path(),
             ) != std::cmp::Ordering::Equal
-            || opened
-                .canonical_path
-                .parent()
-                .is_none_or(|actual_parent| {
-                    batch_rename::compare_paths_windows_ordinal(actual_parent, parent_path)
-                        != std::cmp::Ordering::Equal
-                })
+            || opened.canonical_path.parent().is_none_or(|actual_parent| {
+                batch_rename::compare_paths_windows_ordinal(actual_parent, parent_path)
+                    != std::cmp::Ordering::Equal
+            })
         {
             return Err(format!(
                 "source changed since preview: {}",
@@ -2615,7 +2621,7 @@ fn prepare_guarded_rename_batch_native(
             &file.original_path,
             ContentVerificationMode::Cooperative(cancellation),
         )
-            .map_err(|error| format!("source changed during preflight: {error}"))?;
+        .map_err(|error| format!("source changed during preflight: {error}"))?;
     }
     Ok(GuardedRenameBatch { files })
 }
@@ -2773,10 +2779,8 @@ fn check_guarded_destinations(
         }) {
             let occupied_path = parent.canonical_path.join(&name.name);
             let selected_source = files.iter().find(|source| {
-                batch_rename::compare_paths_windows_ordinal(
-                    &source.current_path,
-                    &occupied_path,
-                ) == std::cmp::Ordering::Equal
+                batch_rename::compare_paths_windows_ordinal(&source.current_path, &occupied_path)
+                    == std::cmp::Ordering::Equal
             });
             if let Some(source) = selected_source {
                 let occupant = open_native_occupancy_file(&occupied_path)
@@ -2938,7 +2942,9 @@ pub(crate) fn prepare_guarded_replace_file(
     }
     let root = &evidence.proof.root;
     let Some(entry) = evidence.proof.entries.get(&evidence.entry_ref) else {
-        return Err(invalid("the replacement source proof has no matching scan entry"));
+        return Err(invalid(
+            "the replacement source proof has no matching scan entry",
+        ));
     };
     let recorded_parent = entry.parent_chain.last();
     if root.identity != expected_root_identity
@@ -3039,10 +3045,8 @@ fn prepare_guarded_replace_file_native(
     })?;
     if parent.identity != expected_parent_identity
         || expected_path.parent().is_none_or(|expected_parent| {
-            batch_rename::compare_paths_windows_ordinal(
-                &parent.canonical_path,
-                expected_parent,
-            ) != std::cmp::Ordering::Equal
+            batch_rename::compare_paths_windows_ordinal(&parent.canonical_path, expected_parent)
+                != std::cmp::Ordering::Equal
         })
     {
         return Err(VerifiedReplaceFailure {
@@ -3112,7 +3116,10 @@ fn prepare_guarded_replace_file_native(
             cancellation,
         )
         .map_err(|error| {
-            replace_io_failure("the selected source changed during guarded verification", error)
+            replace_io_failure(
+                "the selected source changed during guarded verification",
+                error,
+            )
         })?;
     Ok(GuardedReplaceFile {
         original_path: expected_path.to_path_buf(),
@@ -3185,10 +3192,7 @@ fn ensure_unnamed_stream_only(file: &std::fs::File) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn replace_backend_failure(
-    error: BackendFailure,
-    root_check: bool,
-) -> VerifiedReplaceFailure {
+fn replace_backend_failure(error: BackendFailure, root_check: bool) -> VerifiedReplaceFailure {
     let kind = match error.kind {
         BackendFailureKind::RootChanged => VerifiedReplaceFailureKind::RootChanged,
         BackendFailureKind::Cancelled => VerifiedReplaceFailureKind::Cancelled,
@@ -3897,9 +3901,7 @@ enum ActiveWorker {
 impl ActiveWorker {
     fn cancellation(&self) -> &ScanCancellation {
         match self {
-            Self::Scan(_, cancellation)
-            | Self::Apply(cancellation)
-            | Self::Undo(cancellation) => {
+            Self::Scan(_, cancellation) | Self::Apply(cancellation) | Self::Undo(cancellation) => {
                 cancellation
             }
         }
@@ -4001,8 +4003,14 @@ impl RenameScanCoordinator {
                 "rename scan worker is shutting down",
             ));
         }
-        if state.active.as_ref().is_some_and(|active| !active.is_scan())
-            || state.pending.as_ref().is_some_and(|pending| !pending.is_scan())
+        if state
+            .active
+            .as_ref()
+            .is_some_and(|active| !active.is_scan())
+            || state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| !pending.is_scan())
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -4095,9 +4103,7 @@ impl RenameScanCoordinator {
             ));
         }
         let cancellation = ScanCancellation::new();
-        state.pending = Some(WorkerJob::Apply {
-            plan,
-            cancellation });
+        state.pending = Some(WorkerJob::Apply { plan, cancellation });
         runtime.operation_active = true;
         runtime.progress = None;
         runtime.last_message = None;
@@ -4175,16 +4181,18 @@ impl RenameScanCoordinator {
                     active.cancellation().cancel();
                 }
             }
-            if state.pending.as_ref().is_some_and(|pending| !pending.is_scan())
+            if state
+                .pending
+                .as_ref()
+                .is_some_and(|pending| !pending.is_scan())
                 && let Some(pending) = state.pending.take()
             {
                 pending.cancellation().cancel();
                 if let Ok(mut runtime) = self.runtime.lock() {
                     runtime.operation_active = false;
                     runtime.progress = None;
-                    runtime.last_message = Some(
-                        "rename was cancelled before any file was moved".to_owned(),
-                    );
+                    runtime.last_message =
+                        Some("rename was cancelled before any file was moved".to_owned());
                 }
             }
         }
@@ -4241,9 +4249,8 @@ impl RenameScanCoordinator {
                 if let Ok(mut runtime) = self.runtime.lock() {
                     runtime.operation_active = false;
                     runtime.progress = None;
-                    runtime.last_message = Some(
-                        "pending rename work was cancelled during shutdown".to_owned(),
-                    );
+                    runtime.last_message =
+                        Some("pending rename work was cancelled during shutdown".to_owned());
                 }
             }
             wake.notify_all();
@@ -4375,12 +4382,12 @@ fn scan_worker_loop(
                 let generation = request.generation;
                 let result = scan_rename_root(request.clone(), &cancellation);
                 let _ = reply.send(result);
-                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Scan(active_generation, _) if *active_generation == generation),
+                clear_active_worker(
+                    &state,
+                    |active| matches!(active, ActiveWorker::Scan(active_generation, _) if *active_generation == generation),
                 );
             }
-            WorkerJob::Apply {
-                plan,
-                cancellation } => {
+            WorkerJob::Apply { plan, cancellation } => {
                 let result = if let Some(path) = journal_path.as_deref() {
                     let report_runtime = Arc::clone(&runtime);
                     Some(crate::batch_rename_transaction::execute_apply(
@@ -4615,10 +4622,8 @@ fn verified_root_proof(
         .admit_root(&request)
         .map_err(|error| error.to_string())?;
     if admission.proof.identity != expected_identity
-        || batch_rename::compare_paths_windows_ordinal(
-            &admission.proof.canonical_path,
-            root_path,
-        ) != std::cmp::Ordering::Equal
+        || batch_rename::compare_paths_windows_ordinal(&admission.proof.canonical_path, root_path)
+            != std::cmp::Ordering::Equal
     {
         return Err("the recorded rename root identity changed".to_owned());
     }
@@ -4634,10 +4639,8 @@ fn verified_parent_chain(
     if !batch_rename::path_is_within_windows_ordinal(&root.canonical_path, parent_path) {
         return Err("the recorded rename parent escaped its root".to_owned());
     }
-    let relative = if batch_rename::compare_paths_windows_ordinal(
-        &root.canonical_path,
-        parent_path,
-    ) == std::cmp::Ordering::Equal
+    let relative = if batch_rename::compare_paths_windows_ordinal(&root.canonical_path, parent_path)
+        == std::cmp::Ordering::Equal
     {
         PathBuf::new()
     } else {
@@ -4679,10 +4682,8 @@ fn verified_parent_chain(
     }
     if chain.last().is_none_or(|directory| {
         directory.identity != expected_identity
-            || batch_rename::compare_paths_windows_ordinal(
-                &directory.canonical_path,
-                parent_path,
-            ) != std::cmp::Ordering::Equal
+            || batch_rename::compare_paths_windows_ordinal(&directory.canonical_path, parent_path)
+                != std::cmp::Ordering::Equal
     }) {
         return Err("the recorded parent directory identity changed".to_owned());
     }
@@ -4792,10 +4793,8 @@ fn admit_watch_parent_chain(
     root: &RootProof,
     parent_path: &Path,
 ) -> Result<Vec<DirectoryProof>, NativeWatchError> {
-    let relative = if batch_rename::compare_paths_windows_ordinal(
-        &root.canonical_path,
-        parent_path,
-    ) == std::cmp::Ordering::Equal
+    let relative = if batch_rename::compare_paths_windows_ordinal(&root.canonical_path, parent_path)
+        == std::cmp::Ordering::Equal
     {
         PathBuf::new()
     } else {
@@ -4890,7 +4889,10 @@ fn open_native_mutation_file(path: &Path) -> std::io::Result<OpenedObject<std::f
         )
     }
     .map_err(|error| {
-        native_contextual_io_error("CreateFileW(DELETE | FILE_READ_DATA)", windows_error_to_io(error))
+        native_contextual_io_error(
+            "CreateFileW(DELETE | FILE_READ_DATA)",
+            windows_error_to_io(error),
+        )
     })?;
     // SAFETY: CreateFileW returned a valid owned HANDLE which is transferred
     // exactly once to File and closed by Drop.
@@ -4941,10 +4943,7 @@ fn open_native_replace_file(path: &Path) -> std::io::Result<OpenedObject<std::fs
 
     let mut wide_path = extended_local_path(path)?;
     wide_path.push(0);
-    let desired_access = DELETE.0
-        | FILE_READ_DATA.0
-        | FILE_READ_ATTRIBUTES.0
-        | READ_CONTROL.0;
+    let desired_access = DELETE.0 | FILE_READ_DATA.0 | FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0;
     // The retained handle denies write/delete sharing and can read the source
     // security descriptor. The original bytes are never changed in place.
     let handle = unsafe {
@@ -5068,7 +5067,13 @@ pub(crate) fn open_verified_replace_backup(
     }
     #[cfg(not(windows))]
     {
-        let _ = (path, expected_identity, expected_length, expected_sha256, cancellation);
+        let _ = (
+            path,
+            expected_identity,
+            expected_length,
+            expected_sha256,
+            cancellation,
+        );
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "safe replacement backups are available only on Windows",
@@ -5209,7 +5214,9 @@ impl GuardedReplaceFile {
         cancellation: &ScanCancellation,
     ) -> std::io::Result<PathBuf> {
         #[cfg(windows)]
-        return self.native.rename_to_leaf(leaf, expected_state, cancellation);
+        return self
+            .native
+            .rename_to_leaf(leaf, expected_state, cancellation);
         #[cfg(not(windows))]
         {
             let _ = (leaf, expected_state, cancellation);
@@ -5258,7 +5265,8 @@ impl GuardedReplaceFile {
                 None,
                 cancellation,
             )?;
-            self.native.create_output_stage(leaf, bytes, sha256, modified, cancellation)
+            self.native
+                .create_output_stage(leaf, bytes, sha256, modified, cancellation)
         }
         #[cfg(not(windows))]
         {
@@ -5464,12 +5472,7 @@ fn execute_hotfolder_native_action_windows(
     }
 
     if action == NativeHotFolderAction::Rename {
-        rename_hotfolder_guard_to_leaf(
-            &mut source.native,
-            target_leaf,
-            source_state,
-            cancellation,
-        )
+        rename_hotfolder_guard_to_leaf(&mut source.native, target_leaf, source_state, cancellation)
             .map_err(|error| {
                 map_hotfolder_io_error(
                     error,
@@ -5497,7 +5500,8 @@ fn execute_hotfolder_native_action_windows(
                 NativeHotFolderPhase::Published
             },
             partial: !durable || !verified,
-            reason: (!durable).then_some("published rename could not be durably recorded")
+            reason: (!durable)
+                .then_some("published rename could not be durably recorded")
                 .or_else(|| (!verified).then_some("renamed file could not be revalidated")),
         });
     }
@@ -5554,7 +5558,8 @@ fn execute_hotfolder_native_action_windows(
                 NativeHotFolderPhase::Published
             },
             partial: !durable || !verified,
-            reason: (!durable).then_some("published move could not be durably recorded")
+            reason: (!durable)
+                .then_some("published move could not be durably recorded")
                 .or_else(|| (!verified).then_some("moved file could not be revalidated")),
         });
     }
@@ -5742,9 +5747,8 @@ fn execute_hotfolder_cross_volume_move(
                 })
                 .with_retained_outputs(retained_outputs));
             }
-            published_revalidated.set(
-                verify_published_hotfolder_guard(&stage.native, staged_state).is_ok(),
-            );
+            published_revalidated
+                .set(verify_published_hotfolder_guard(&stage.native, staged_state).is_ok());
             stage.state = staged_state;
             Ok(hotfolder_output(
                 NativeHotFolderOutputKind::Final,
@@ -5770,14 +5774,16 @@ fn execute_hotfolder_cross_volume_move(
             (*recorder)(NativeHotFolderProgress {
                 phase: NativeHotFolderPhase::Published,
                 outputs: vec![output.clone()],
-            }).is_ok()
+            })
+            .is_ok()
         },
         |_, output| {
             let mut recorder = progress.borrow_mut();
             (*recorder)(NativeHotFolderProgress {
                 phase: NativeHotFolderPhase::SourceRemoval,
                 outputs: vec![output.clone()],
-            }).is_ok()
+            })
+            .is_ok()
         },
         || delete_hotfolder_guarded(&source.native, source_state, cancellation).is_ok(),
     )?;
@@ -6450,9 +6456,7 @@ impl GuardedReplaceStage {
         }
     }
 
-    pub(crate) fn delete_if_matches(
-        &self,
-        cancellation: &ScanCancellation) -> std::io::Result<()> {
+    pub(crate) fn delete_if_matches(&self, cancellation: &ScanCancellation) -> std::io::Result<()> {
         #[cfg(windows)]
         return self.native.delete_if_matches(self.state, cancellation);
         #[cfg(not(windows))]
@@ -6518,7 +6522,8 @@ impl GuardedReplaceHandle {
         }
         let metadata_after = self.file.metadata()?;
         if metadata_after.len() != expected_length
-            || expected_modified.is_some_and(|modified| metadata_after.modified().ok() != Some(modified))
+            || expected_modified
+                .is_some_and(|modified| metadata_after.modified().ok() != Some(modified))
             || native_file_identity(&self.file)? != self.identity
         {
             return Err(std::io::Error::new(
@@ -6748,7 +6753,11 @@ impl GuardedReplaceHandle {
             .reopen_chain(&self.root.chain, &self.root, DirectoryOpenAccess::Enumerate)
             .map_err(|error| std::io::Error::other(error.message))?;
         let parent_guards = backend
-            .reopen_chain(&self.parent_chain, &self.root, DirectoryOpenAccess::Enumerate)
+            .reopen_chain(
+                &self.parent_chain,
+                &self.root,
+                DirectoryOpenAccess::Enumerate,
+            )
             .map_err(|error| std::io::Error::other(error.message))?;
         if root_guards
             .last()
@@ -6770,7 +6779,6 @@ impl GuardedReplaceHandle {
     }
 }
 
-
 #[cfg(windows)]
 fn create_verified_replace_backup_native(
     path: &Path,
@@ -6790,7 +6798,10 @@ fn create_verified_replace_backup_native(
     use windows::core::PCWSTR;
 
     validate_replace_leaf(path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "backup path has no filename")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup path has no filename",
+        )
     })?)?;
     let mut wide_path = extended_local_path(path)?;
     wide_path.push(0);
@@ -6809,11 +6820,11 @@ fn create_verified_replace_backup_native(
     let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
     let metadata = file.metadata()?;
     if !metadata.is_file()
-        || metadata.file_attributes() & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
-        || batch_rename::compare_paths_windows_ordinal(
-            &final_path_for_handle(&file)?,
-            path,
-        ) != std::cmp::Ordering::Equal
+        || metadata.file_attributes()
+            & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0
+            != 0
+        || batch_rename::compare_paths_windows_ordinal(&final_path_for_handle(&file)?, path)
+            != std::cmp::Ordering::Equal
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -6871,7 +6882,10 @@ fn open_verified_replace_backup_native(
     use windows::core::PCWSTR;
 
     validate_replace_leaf(path.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "backup path has no filename")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "backup path has no filename",
+        )
     })?)?;
     let mut wide_path = extended_local_path(path)?;
     wide_path.push(0);
@@ -7083,7 +7097,9 @@ fn validate_replace_basic_attributes(attributes: u32) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
-fn query_replace_basic_info(file: &std::fs::File) -> std::io::Result<windows::Win32::Storage::FileSystem::FILE_BASIC_INFO> {
+fn query_replace_basic_info(
+    file: &std::fs::File,
+) -> std::io::Result<windows::Win32::Storage::FileSystem::FILE_BASIC_INFO> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
@@ -7183,7 +7199,8 @@ fn query_replace_security(
     use windows::Win32::Foundation::{BOOL, HANDLE};
     use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows::Win32::Security::{
-        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
         SE_DACL_PROTECTED,
     };
 
@@ -7282,8 +7299,12 @@ fn copy_replace_security(source: &std::fs::File, output: &std::fs::File) -> std:
         return Err(std::io::Error::from_raw_os_error(status.0 as i32));
     }
     let (_output_descriptor, output_parts) = query_replace_security(output)?;
-    let owner_matches = unsafe { windows::Win32::Security::EqualSid(source_parts.owner, output_parts.owner) }.is_ok();
-    let group_matches = unsafe { windows::Win32::Security::EqualSid(source_parts.group, output_parts.group) }.is_ok();
+    let owner_matches =
+        unsafe { windows::Win32::Security::EqualSid(source_parts.owner, output_parts.owner) }
+            .is_ok();
+    let group_matches =
+        unsafe { windows::Win32::Security::EqualSid(source_parts.group, output_parts.group) }
+            .is_ok();
     let dacl_matches = unsafe { replace_dacl_equal(&source_parts, &output_parts) };
     if !owner_matches
         || !group_matches
@@ -7300,16 +7321,15 @@ fn copy_replace_security(source: &std::fs::File, output: &std::fs::File) -> std:
 }
 
 #[cfg(windows)]
-unsafe fn replace_dacl_equal(
-    left: &ReplaceSecurityParts,
-    right: &ReplaceSecurityParts,
-) -> bool {
+unsafe fn replace_dacl_equal(left: &ReplaceSecurityParts, right: &ReplaceSecurityParts) -> bool {
     if left.dacl.is_null() || right.dacl.is_null() {
         return left.dacl.is_null() && right.dacl.is_null();
     }
     let left_length = unsafe { (*left.dacl).AclSize } as usize;
     let right_length = unsafe { (*right.dacl).AclSize } as usize;
-    if left_length != right_length || left_length < std::mem::size_of::<windows::Win32::Security::ACL>() {
+    if left_length != right_length
+        || left_length < std::mem::size_of::<windows::Win32::Security::ACL>()
+    {
         return false;
     }
     let left_bytes = unsafe { std::slice::from_raw_parts(left.dacl.cast::<u8>(), left_length) };
@@ -7325,7 +7345,8 @@ fn delete_open_file(file: &std::fs::File) -> std::io::Result<()> {
         FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
     };
 
-    let disposition = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1),
+    let disposition = FILE_DISPOSITION_INFO {
+        DeleteFile: BOOLEAN(1),
     };
     unsafe {
         SetFileInformationByHandle(
@@ -7440,7 +7461,10 @@ fn open_native_verified_file(path: &Path) -> std::io::Result<OpenedObject<std::f
         )
     }
     .map_err(|error| {
-        native_contextual_io_error("CreateFileW(read-only receipt verification)", windows_error_to_io(error))
+        native_contextual_io_error(
+            "CreateFileW(read-only receipt verification)",
+            windows_error_to_io(error),
+        )
     })?;
     // SAFETY: CreateFileW returned a valid owned HANDLE which is transferred
     // exactly once to File and closed by Drop.
@@ -7552,7 +7576,10 @@ fn rename_open_file_no_replace(
     };
 
     if Path::new(leaf).components().count() != 1
-        || !matches!(Path::new(leaf).components().next(), Some(Component::Normal(_)))
+        || !matches!(
+            Path::new(leaf).components().next(),
+            Some(Component::Normal(_))
+        )
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -7653,7 +7680,9 @@ fn read_handle_bytes(
     })?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(capacity).map_err(|error| {
-        std::io::Error::other(format!("could not reserve replacement verification memory: {error}"))
+        std::io::Error::other(format!(
+            "could not reserve replacement verification memory: {error}"
+        ))
     })?;
     let mut reader = file.try_clone()?;
     reader.seek(SeekFrom::Start(0))?;
@@ -8270,10 +8299,7 @@ mod tests {
             bytes.len() as u64,
             ContentVerificationMode::Cooperative(&cooperative_token),
         );
-        assert_eq!(
-            result.unwrap_err().kind(),
-            std::io::ErrorKind::Interrupted
-        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
         assert_eq!(cooperative_calls.get(), 1);
 
         let compensation_token = ScanCancellation::new();
@@ -9064,10 +9090,7 @@ mod tests {
                 (refs[1], None, Some(EntryInclusion::Excluded)),
             ])
             .unwrap();
-        assert_eq!(
-            updated.snapshot.selection_revision(),
-            SelectionRevision(1)
-        );
+        assert_eq!(updated.snapshot.selection_revision(), SelectionRevision(1));
         let rules = RenameRuleSet::new(
             batch_rename::ExtensionPolicy::Preserve,
             vec![batch_rename::RenameRule::Suffix("-renamed".into())],
@@ -9080,7 +9103,10 @@ mod tests {
             &ScanCancellation::new(),
         );
         assert_eq!(fresh.root_status(), FreshCheckStatus::Current);
-        assert_eq!(fresh.entries()[0].source_status(), FreshCheckStatus::Current);
+        assert_eq!(
+            fresh.entries()[0].source_status(),
+            FreshCheckStatus::Current
+        );
     }
 
     #[test]
@@ -9274,7 +9300,9 @@ mod tests {
             },
             || false,
             |_, _| {
-                progress_failure_events.borrow_mut().push("record published");
+                progress_failure_events
+                    .borrow_mut()
+                    .push("record published");
                 true
             },
             |_, _| {
@@ -9284,9 +9312,7 @@ mod tests {
                 false
             },
             || {
-                progress_failure_events
-                    .borrow_mut()
-                    .push("source removal");
+                progress_failure_events.borrow_mut().push("source removal");
                 retained_source_exists.set(false);
                 true
             },
@@ -9394,9 +9420,8 @@ mod tests {
         };
 
         let bytes = b"native hot folder fixture payload";
-        let mut ignore_progress = |_progress: NativeHotFolderProgress| -> std::io::Result<()> {
-            Ok(())
-        };
+        let mut ignore_progress =
+            |_progress: NativeHotFolderProgress| -> std::io::Result<()> { Ok(()) };
         let copy_source = watched_path.join("copy-source.bin");
         fs::write(&copy_source, bytes).expect("write copy source");
         let copy_input = fingerprint(&copy_source);
@@ -9506,6 +9531,6 @@ mod tests {
                 NativeHotFolderFailureKind::UnsupportedFidelity
             );
             assert!(stream_source.exists());
-}
+        }
     }
 }

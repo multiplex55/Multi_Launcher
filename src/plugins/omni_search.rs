@@ -436,9 +436,7 @@ impl OmniSearchPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        LauncherSearchResult, OmniSearchPlugin, OmniSearchSettings, SearchResultCategory,
-    };
+    use super::{LauncherSearchResult, OmniSearchPlugin, OmniSearchSettings, SearchResultCategory};
     use crate::actions::Action;
     use crate::plugin::Plugin;
     use eframe::egui;
@@ -759,10 +757,7 @@ mod tests {
             plugin.search("o list ")
         );
 
-        let first = LauncherSearchResult::new(
-            actions[0].clone(),
-            SearchResultCategory::Files,
-        );
+        let first = LauncherSearchResult::new(actions[0].clone(), SearchResultCategory::Files);
         let duplicate = LauncherSearchResult::new(
             Action {
                 label: " LEGACY   TOOL ".into(),

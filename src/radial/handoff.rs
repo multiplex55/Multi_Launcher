@@ -120,7 +120,8 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::Query(_)
         | Command::Dialog(_)
         | Command::Pinboard(
-            crate::commands::PinboardCommand::List | crate::commands::PinboardCommand::Unknown { .. },
+            crate::commands::PinboardCommand::List
+            | crate::commands::PinboardCommand::Unknown { .. },
         )
         | Command::FileSearch(_)
         | Command::Diff(_) => InteractionRequirement::LauncherUi,

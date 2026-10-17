@@ -317,12 +317,7 @@ impl PasteSequenceDialog {
         );
     }
 
-    fn editor(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        app: &mut super::LauncherApp,
-    ) {
+    fn editor(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, app: &mut super::LauncherApp) {
         if let Some(context) = &self.context {
             let label = context
                 .target()

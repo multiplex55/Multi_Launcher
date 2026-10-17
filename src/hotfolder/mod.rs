@@ -17,30 +17,29 @@ pub use capability::{
 pub(crate) use capability::{bind_mkmacro_action_with_dependencies, is_registered_process_target};
 pub use execution::{
     HotFolderExecutionAction, HotFolderExecutionControl, HotFolderExecutionEngine,
-    HotFolderExecutionError,
-    HotFolderExecutionPhase, HotFolderExecutionReceipt, HotFolderExecutionSnapshot,
-    HotFolderExecutionProgress,
-    HotFolderExternalActionAdapter, HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
+    HotFolderExecutionError, HotFolderExecutionPhase, HotFolderExecutionProgress,
+    HotFolderExecutionReceipt, HotFolderExecutionSnapshot, HotFolderExternalActionAdapter,
+    HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
     HotFolderExternalEnableAuthorization, HotFolderExternalFileEvidence,
-    HotFolderExternalTargetReceipt,
-    HotFolderOutputEvidence, HotFolderOutputKind, HotFolderRunDisposition, HotFolderTerminalStatus,
+    HotFolderExternalTargetReceipt, HotFolderOutputEvidence, HotFolderOutputKind,
+    HotFolderRunDisposition, HotFolderTerminalStatus,
 };
 pub use model::{
-    ConfigurationFingerprint, FilenameFilter, HotFolderEventKind, HOT_FOLDER_RULES_FILE,
-    HOT_FOLDER_RULES_FORMAT_VERSION, HotFolderRule, MAX_DOCUMENT_BYTES,
+    ConfigurationFingerprint, FilenameFilter, HOT_FOLDER_RULES_FILE,
+    HOT_FOLDER_RULES_FORMAT_VERSION, HotFolderEventKind, HotFolderRule, MAX_DOCUMENT_BYTES,
     MAX_DUE_OBSERVATIONS_PER_TURN, MAX_EVENT_PATH_BYTES, MAX_EVENT_PATHS, MAX_EXTENSIONS,
     MAX_FILENAME_GLOB_CHARS, MAX_PENDING_FILES, MAX_QUARANTINED_ROWS, MAX_READY_CANDIDATES,
     MAX_RULE_PATH_CHARS, MAX_RULES, MAX_RUNTIME_DIAGNOSTICS, MAX_WATCH_INGRESS_EVENTS,
     MAX_WATCHED_ROOTS, READY_LEASE_TIMEOUT_MS, RuleAction, RuleId, RuleTrigger, SettlePolicy,
     evaluate_rule_conditions,
 };
+pub(crate) use runtime::relative_path_beneath;
 pub use runtime::{
     HotFolderCandidateId, HotFolderDiagnostic, HotFolderDiagnosticKind, HotFolderEnableRequest,
     HotFolderFileEvidence, HotFolderLeaseDisposition, HotFolderReadyCandidate, HotFolderReadyLease,
     HotFolderReconcileReport, HotFolderRuntimeError, HotFolderRuntimeSnapshot,
     HotFolderWatchService, StrongActionConfirmation,
 };
-pub(crate) use runtime::relative_path_beneath;
 pub(crate) use store::{HotFolderDocumentProbe, probe_document_bytes};
 pub use store::{
     HotFolderLoadReport, HotFolderLoadStatus, HotFolderRulesSnapshot, HotFolderRulesStore,

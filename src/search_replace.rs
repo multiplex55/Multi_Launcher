@@ -5,8 +5,8 @@
 use crate::batch_rename::{self, ExplicitDirectoryRoot, SnapshotEntryKind};
 use crate::file_operations::{
     self, NativeFileIdentity, RenameScanGeneration, RenameScanIssueKind, RenameScanRequest,
-    RenameScanResult, RenameScanRow, RenameScanStatus, ScanCancellation, VerifiedReadFailureKind,
-    VerifiedReadEvidence, VerifiedReadSnapshot,
+    RenameScanResult, RenameScanRow, RenameScanStatus, ScanCancellation, VerifiedReadEvidence,
+    VerifiedReadFailureKind, VerifiedReadSnapshot,
 };
 use regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256};
@@ -1135,9 +1135,10 @@ fn parse_replacement_template(
             (end + 1, Some(&text[index + 2..end]))
         } else {
             let mut end = index + 1;
-            while bytes.get(end).is_some_and(|byte| {
-                byte.is_ascii_alphanumeric() || *byte == b'_'
-            }) {
+            while bytes
+                .get(end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
                 end += 1;
             }
             if end == index + 1 {
@@ -1556,8 +1557,8 @@ fn build_replacement_candidate(
             continue;
         }
         let same_path = path_set.contains(id.snapshot_path.as_ref());
-        let current_scan_identity = id.search_revision == result.revision()
-            && id.search_generation == result.generation();
+        let current_scan_identity =
+            id.search_revision == result.revision() && id.search_generation == result.generation();
         let (kind, message) = if same_path || !current_scan_identity {
             (
                 ReplacementPreviewErrorKind::StaleSelection,
@@ -1627,8 +1628,8 @@ fn build_replacement_candidate(
                 summary.estimated_changed_bytes = summary
                     .estimated_changed_bytes
                     .saturating_add(computed.estimated_changed_bytes);
-                total_output_remaining = total_output_remaining
-                    .saturating_sub(computed.bytes.len());
+                total_output_remaining =
+                    total_output_remaining.saturating_sub(computed.bytes.len());
                 ReplacementFileCandidate {
                     original_snapshot: snapshot.clone(),
                     output_bytes: computed.bytes,
@@ -1650,8 +1651,8 @@ fn build_replacement_candidate(
             }
             Err(diagnostic) => {
                 summary.failed_files = summary.failed_files.saturating_add(1);
-                total_output_remaining = total_output_remaining
-                    .saturating_sub(snapshot.raw_bytes.len());
+                total_output_remaining =
+                    total_output_remaining.saturating_sub(snapshot.raw_bytes.len());
                 ReplacementFileCandidate {
                     original_snapshot: snapshot.clone(),
                     output_bytes: Arc::clone(&snapshot.raw_bytes),
@@ -1824,14 +1825,22 @@ fn compute_file_output(
             continue;
         }
         let range = span.raw_byte_range();
-        append_output(&mut output, &raw[cursor..range.start], output_limit, revision)?;
-        let relative_start = range.start.checked_sub(snapshot.bom_offset).ok_or_else(|| {
-            ReplacementDiagnostic::new(
-                revision,
-                ReplacementDiagnosticKind::CapturedMatchMismatch,
-                "a selected match offset precedes the original UTF-8 body",
-            )
-        })?;
+        append_output(
+            &mut output,
+            &raw[cursor..range.start],
+            output_limit,
+            revision,
+        )?;
+        let relative_start = range
+            .start
+            .checked_sub(snapshot.bom_offset)
+            .ok_or_else(|| {
+                ReplacementDiagnostic::new(
+                    revision,
+                    ReplacementDiagnosticKind::CapturedMatchMismatch,
+                    "a selected match offset precedes the original UTF-8 body",
+                )
+            })?;
         let relative_end = range.end.checked_sub(snapshot.bom_offset).ok_or_else(|| {
             ReplacementDiagnostic::new(
                 revision,
@@ -1958,9 +1967,10 @@ fn append_output(
     output_limit: usize,
     revision: ReplacementRevision,
 ) -> Result<(), ReplacementDiagnostic> {
-    let new_len = output.len().checked_add(bytes.len()).ok_or_else(|| {
-        output_limit_diagnostic(revision, output_limit)
-    })?;
+    let new_len = output
+        .len()
+        .checked_add(bytes.len())
+        .ok_or_else(|| output_limit_diagnostic(revision, output_limit))?;
     if new_len > output_limit {
         return Err(output_limit_diagnostic(revision, output_limit));
     }
@@ -3144,8 +3154,8 @@ mod tests {
         let root = ExplicitDirectoryRoot::new(std::env::temp_dir()).expect("absolute test root");
         let path = root.as_path().join(file_name);
         let revision = SearchRevision(8);
-        let pattern = SearchPattern::compile(pattern_source, pattern_mode, true)
-            .expect("valid test pattern");
+        let pattern =
+            SearchPattern::compile(pattern_source, pattern_mode, true).expect("valid test pattern");
         let (encoding, bom_offset, text) = decode_supported_utf8(raw).expect("UTF-8 fixture");
         let cancellation = ScanCancellation::new();
         let limits = small_limits();
@@ -3225,13 +3235,10 @@ mod tests {
             .iter()
             .map(|matched| matched.id().clone())
             .collect::<Vec<_>>();
-        let replacement = ReplacementSpec::new(
-            "changed",
-            ReplacementMode::Literal,
-            ReplacementRevision(6),
-        )
-        .compile(result.pattern())
-        .expect("literal replacement compiles");
+        let replacement =
+            ReplacementSpec::new("changed", ReplacementMode::Literal, ReplacementRevision(6))
+                .compile(result.pattern())
+                .expect("literal replacement compiles");
         let candidate = result
             .preview_replacement(&replacement, &selected)
             .expect("synthetic candidate computes exact output bytes");
@@ -3259,21 +3266,18 @@ mod tests {
         mixed.summary.files_searched = 2;
         mixed.summary.files_matched = 2;
         mixed.summary.matches_found = 2;
-        mixed.summary.bytes_read = u64::try_from(b"bb".len() + b"a".len())
-            .expect("fixture byte count fits u64");
+        mixed.summary.bytes_read =
+            u64::try_from(b"bb".len() + b"a".len()).expect("fixture byte count fits u64");
         let mixed_ids = mixed
             .matched_files()
             .iter()
             .flat_map(|file| file.matches())
             .map(|matched| matched.id().clone())
             .collect::<Vec<_>>();
-        let replacement = ReplacementSpec::new(
-            "bb",
-            ReplacementMode::Literal,
-            ReplacementRevision(7),
-        )
-        .compile(mixed.pattern())
-        .expect("mixed replacement compiles");
+        let replacement =
+            ReplacementSpec::new("bb", ReplacementMode::Literal, ReplacementRevision(7))
+                .compile(mixed.pattern())
+                .expect("mixed replacement compiles");
         let mixed_candidate = mixed
             .preview_replacement(&replacement, &mixed_ids)
             .expect("mixed candidate retains the selected no-op match");
@@ -3396,13 +3400,10 @@ mod tests {
         let matches = result.matched_files()[0].matches();
         let second_id = matches[1].id().clone();
         assert_eq!(second_id.ordinal(), 1);
-        let replacement = ReplacementSpec::new(
-            "hit!",
-            ReplacementMode::Literal,
-            ReplacementRevision(10),
-        )
-        .compile(result.pattern())
-        .expect("literal replacement");
+        let replacement =
+            ReplacementSpec::new("hit!", ReplacementMode::Literal, ReplacementRevision(10))
+                .compile(result.pattern())
+                .expect("literal replacement");
         let candidate = result
             .preview_replacement(&replacement, std::slice::from_ref(&second_id))
             .expect("selected second-match preview");
@@ -3419,17 +3420,16 @@ mod tests {
         assert_eq!(candidate.summary().changed_matches(), 1);
         assert_eq!(candidate.summary().estimated_changed_bytes(), 7);
 
-        let no_op = ReplacementSpec::new(
-            "hit",
-            ReplacementMode::Literal,
-            ReplacementRevision(11),
-        )
-        .compile(result.pattern())
-        .expect("no-op replacement");
+        let no_op = ReplacementSpec::new("hit", ReplacementMode::Literal, ReplacementRevision(11))
+            .compile(result.pattern())
+            .expect("no-op replacement");
         let no_op_candidate = result
             .preview_replacement(&no_op, std::slice::from_ref(&second_id))
             .expect("no-op preview");
-        assert_eq!(no_op_candidate.readiness(), ReplacementCandidateReadiness::NoOp);
+        assert_eq!(
+            no_op_candidate.readiness(),
+            ReplacementCandidateReadiness::NoOp
+        );
         assert!(Arc::ptr_eq(
             no_op_candidate.files()[0].output_bytes(),
             result.matched_files()[0].raw_bytes()
@@ -3451,13 +3451,10 @@ mod tests {
             SearchGeneration(32),
             "mixed-lines.txt",
         );
-        let newer_replacement = ReplacementSpec::new(
-            "hit!",
-            ReplacementMode::Literal,
-            ReplacementRevision(12),
-        )
-        .compile(newer_scan.pattern())
-        .expect("replacement for newer scan");
+        let newer_replacement =
+            ReplacementSpec::new("hit!", ReplacementMode::Literal, ReplacementRevision(12))
+                .compile(newer_scan.pattern())
+                .expect("replacement for newer scan");
         assert_eq!(
             newer_scan
                 .preview_replacement(&newer_replacement, &[second_id.clone()])
@@ -3472,13 +3469,10 @@ mod tests {
             generation,
             "other.txt",
         );
-        let other_replacement = ReplacementSpec::new(
-            "hit!",
-            ReplacementMode::Literal,
-            ReplacementRevision(13),
-        )
-        .compile(other_file.pattern())
-        .expect("replacement for other file");
+        let other_replacement =
+            ReplacementSpec::new("hit!", ReplacementMode::Literal, ReplacementRevision(13))
+                .compile(other_file.pattern())
+                .expect("replacement for other file");
         assert_eq!(
             other_file
                 .preview_replacement(&other_replacement, &[second_id.clone()])
@@ -3505,13 +3499,10 @@ mod tests {
             SearchGeneration(33),
             "adjacent.txt",
         );
-        let adjacent_replacement = ReplacementSpec::new(
-            "X",
-            ReplacementMode::Literal,
-            ReplacementRevision(14),
-        )
-        .compile(adjacent.pattern())
-        .expect("adjacent replacement");
+        let adjacent_replacement =
+            ReplacementSpec::new("X", ReplacementMode::Literal, ReplacementRevision(14))
+                .compile(adjacent.pattern())
+                .expect("adjacent replacement");
         let adjacent_ids = adjacent.matched_files()[0]
             .matches()
             .iter()
@@ -3534,13 +3525,10 @@ mod tests {
             SearchGeneration(34),
             "zero-width.txt",
         );
-        let zero_width_replacement = ReplacementSpec::new(
-            ">",
-            ReplacementMode::Literal,
-            ReplacementRevision(15),
-        )
-        .compile(zero_width.pattern())
-        .expect("zero-width replacement");
+        let zero_width_replacement =
+            ReplacementSpec::new(">", ReplacementMode::Literal, ReplacementRevision(15))
+                .compile(zero_width.pattern())
+                .expect("zero-width replacement");
         let first_zero_width = zero_width.matched_files()[0].matches()[0].id().clone();
         assert_eq!(
             zero_width
@@ -3562,7 +3550,10 @@ mod tests {
         let limited_candidate = adjacent
             .preview_replacement(&limited_replacement, &[adjacent_ids[0].clone()])
             .expect("output-limit failures remain visible in the candidate");
-        assert_eq!(limited_candidate.readiness(), ReplacementCandidateReadiness::Blocked);
+        assert_eq!(
+            limited_candidate.readiness(),
+            ReplacementCandidateReadiness::Blocked
+        );
         assert_eq!(
             limited_candidate.files()[0]
                 .diagnostic()
@@ -3603,17 +3594,17 @@ mod tests {
             .iter()
             .flat_map(|file| file.matches().iter().map(|span| span.id().clone()))
             .collect::<Vec<_>>();
-        let aggregate_replacement = ReplacementSpec::new(
-            "XX",
-            ReplacementMode::Literal,
-            ReplacementRevision(17),
-        )
-        .compile(aggregate.pattern())
-        .expect("aggregate replacement");
+        let aggregate_replacement =
+            ReplacementSpec::new("XX", ReplacementMode::Literal, ReplacementRevision(17))
+                .compile(aggregate.pattern())
+                .expect("aggregate replacement");
         let aggregate_candidate = aggregate
             .preview_replacement(&aggregate_replacement, &aggregate_selection)
             .expect("shrinking output fits the aggregate budget");
-        assert_eq!(aggregate_candidate.readiness(), ReplacementCandidateReadiness::Ready);
+        assert_eq!(
+            aggregate_candidate.readiness(),
+            ReplacementCandidateReadiness::Ready
+        );
         assert_eq!(
             aggregate_candidate
                 .files()
@@ -3755,5 +3746,4 @@ mod tests {
         assert_eq!(cancelled.status(), SearchStatus::Cancelled);
         assert!(!cancelled.summary().match_list_complete());
     }
-
 }

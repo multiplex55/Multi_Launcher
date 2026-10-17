@@ -1,6 +1,4 @@
-use crate::commands::{
-    CommandError, CommandOutcome, PinboardCommand, PinboardCommandHost,
-};
+use crate::commands::{CommandError, CommandOutcome, PinboardCommand, PinboardCommandHost};
 
 pub(crate) fn handle_pinboard<H>(
     host: &mut H,

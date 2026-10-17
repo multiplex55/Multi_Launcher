@@ -2,14 +2,14 @@
 //! state; every persistent or runtime transition is returned as a typed
 //! request to the app-owned driver.
 
-use crate::hotfolder::{
-    ActionCapability, HotFolderEventKind, HotFolderExecutionAction,
-    HotFolderExecutionPhase, HotFolderExecutionReceipt, HotFolderRule, HotFolderTerminalStatus,
-    RuleAction, RuleId, RuleTrigger, StrongActionConfirmation,
-};
 use crate::gui::hotfolder_runtime::{
     HotFolderCapabilityInputs, HotFolderDriverSnapshot, HotFolderEnablePreview,
     evaluate_sample_conditions,
+};
+use crate::hotfolder::{
+    ActionCapability, HotFolderEventKind, HotFolderExecutionAction, HotFolderExecutionPhase,
+    HotFolderExecutionReceipt, HotFolderRule, HotFolderTerminalStatus, RuleAction, RuleId,
+    RuleTrigger, StrongActionConfirmation,
 };
 use crate::mkmacro::MkMacroDocument;
 use crate::universal_actions::ResolvedActionTarget;
@@ -136,12 +136,7 @@ struct RuleEditor {
 }
 
 impl RuleEditor {
-    fn new(
-        editor_id: u128,
-        mode: EditMode,
-        expected_revision: u64,
-        draft: HotFolderRule,
-    ) -> Self {
+    fn new(editor_id: u128, mode: EditMode, expected_revision: u64, draft: HotFolderRule) -> Self {
         Self {
             editor_id,
             mode,
@@ -176,15 +171,10 @@ impl RuleEditor {
 
     fn validate(&mut self) {
         self.update_filter_from_text();
-        self.validation_error = self
-            .draft
-            .validate()
-            .err()
-            .map(str::to_owned)
-            .or_else(|| {
-                (!self.current_action_matches_choice())
-                    .then(|| "Choose an exact current action or macro before saving".into())
-            });
+        self.validation_error = self.draft.validate().err().map(str::to_owned).or_else(|| {
+            (!self.current_action_matches_choice())
+                .then(|| "Choose an exact current action or macro before saving".into())
+        });
     }
 
     fn changed(&mut self) {
@@ -509,7 +499,8 @@ impl HotFolderDialog {
                     PendingKind::Save => {
                         self.editor = None;
                         self.retire_sample_test();
-                        self.notice = Some("Rule saved disabled. Enable it explicitly after review.".into());
+                        self.notice =
+                            Some("Rule saved disabled. Enable it explicitly after review.".into());
                     }
                     PendingKind::Delete => {
                         self.undo_delete = pending.undo_rule;
@@ -519,7 +510,10 @@ impl HotFolderDialog {
                     }
                     PendingKind::CancelEnable => {}
                     PendingKind::ClearHistory => {
-                        self.notice = Some("Terminal history cleared; dedupe and recovery records were retained.".into());
+                        self.notice = Some(
+                            "Terminal history cleared; dedupe and recovery records were retained."
+                                .into(),
+                        );
                     }
                     PendingKind::Load
                     | PendingKind::PrepareEnable
@@ -542,7 +536,12 @@ impl HotFolderDialog {
             },
         );
         rule.enabled = false;
-        self.editor = Some(RuleEditor::new(self.allocate_editor_id(), EditMode::New, revision, rule));
+        self.editor = Some(RuleEditor::new(
+            self.allocate_editor_id(),
+            EditMode::New,
+            revision,
+            rule,
+        ));
         self.picker_targets = None;
         self.picker_macros = None;
         self.retire_sample_test();
@@ -550,7 +549,12 @@ impl HotFolderDialog {
     }
 
     fn begin_edit(&mut self, revision: u64, rule: HotFolderRule) {
-        self.editor = Some(RuleEditor::new(self.allocate_editor_id(), EditMode::Existing, revision, rule));
+        self.editor = Some(RuleEditor::new(
+            self.allocate_editor_id(),
+            EditMode::Existing,
+            revision,
+            rule,
+        ));
         self.picker_targets = None;
         self.picker_macros = None;
         self.retire_sample_test();
@@ -684,8 +688,16 @@ impl HotFolderDialog {
                         RuleTrigger::ModifiedFile => "Modified file",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut editor.draft.trigger, RuleTrigger::NewFile, "New file");
-                        ui.selectable_value(&mut editor.draft.trigger, RuleTrigger::ModifiedFile, "Modified file");
+                        ui.selectable_value(
+                            &mut editor.draft.trigger,
+                            RuleTrigger::NewFile,
+                            "New file",
+                        );
+                        ui.selectable_value(
+                            &mut editor.draft.trigger,
+                            RuleTrigger::ModifiedFile,
+                            "Modified file",
+                        );
                     });
                 ui.end_row();
 
@@ -700,22 +712,46 @@ impl HotFolderDialog {
                 ui.label("Scope");
                 ui.vertical(|ui| {
                     ui.checkbox(&mut editor.draft.include_subfolders, "Include subfolders");
-                    ui.checkbox(&mut editor.draft.include_temporary_files, "Include .part and .crdownload files");
+                    ui.checkbox(
+                        &mut editor.draft.include_temporary_files,
+                        "Include .part and .crdownload files",
+                    );
                 });
                 ui.end_row();
 
                 ui.label("Settle policy");
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut editor.draft.settle.sample_interval_ms).range(50..=5000).suffix(" ms interval"));
-                    ui.add(egui::DragValue::new(&mut editor.draft.settle.stable_observations).range(2..=10).suffix(" stable observations"));
-                    ui.add(egui::DragValue::new(&mut editor.draft.settle.timeout_ms).range(100..=30000).suffix(" ms timeout"));
+                    ui.add(
+                        egui::DragValue::new(&mut editor.draft.settle.sample_interval_ms)
+                            .range(50..=5000)
+                            .suffix(" ms interval"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut editor.draft.settle.stable_observations)
+                            .range(2..=10)
+                            .suffix(" stable observations"),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut editor.draft.settle.timeout_ms)
+                            .range(100..=30000)
+                            .suffix(" ms timeout"),
+                    );
                 });
                 ui.end_row();
 
                 ui.label("Action");
                 ui.horizontal_wrapped(|ui| {
-                    for choice in [ActionChoice::Copy, ActionChoice::Move, ActionChoice::Rename, ActionChoice::RegisteredAction, ActionChoice::MkMacro] {
-                        if ui.selectable_label(editor.action_choice == choice, choice.label()).clicked() {
+                    for choice in [
+                        ActionChoice::Copy,
+                        ActionChoice::Move,
+                        ActionChoice::Rename,
+                        ActionChoice::RegisteredAction,
+                        ActionChoice::MkMacro,
+                    ] {
+                        if ui
+                            .selectable_label(editor.action_choice == choice, choice.label())
+                            .clicked()
+                        {
                             select_action_choice(&mut editor, choice);
                         }
                     }
@@ -723,11 +759,16 @@ impl HotFolderDialog {
                 ui.end_row();
 
                 match (&mut editor.draft.action, editor.action_choice) {
-                    (RuleAction::Copy { destination } | RuleAction::Move { destination }, ActionChoice::Copy | ActionChoice::Move) => {
+                    (
+                        RuleAction::Copy { destination } | RuleAction::Move { destination },
+                        ActionChoice::Copy | ActionChoice::Move,
+                    ) => {
                         ui.label("Destination directory");
                         ui.horizontal(|ui| {
                             ui.label(destination.display().to_string());
-                            if ui.button("Choose directory…").clicked() { requested_picker = Some(1); }
+                            if ui.button("Choose directory…").clicked() {
+                                requested_picker = Some(1);
+                            }
                         });
                         ui.end_row();
                     }
@@ -739,7 +780,10 @@ impl HotFolderDialog {
                         ui.text_edit_singleline(suffix);
                         ui.end_row();
                     }
-                    (RuleAction::RegisteredLauncherAction { .. }, ActionChoice::RegisteredAction)
+                    (
+                        RuleAction::RegisteredLauncherAction { .. },
+                        ActionChoice::RegisteredAction,
+                    )
                     | (RuleAction::MkMacro { .. }, ActionChoice::MkMacro) => {
                         ui.label("Exact action");
                         ui.horizontal(|ui| {
@@ -756,7 +800,10 @@ impl HotFolderDialog {
                     }
                     _ => {
                         ui.label("Exact action");
-                        ui.colored_label(egui::Color32::YELLOW, "Choose a current registered action or macro.");
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "Choose a current registered action or macro.",
+                        );
                         ui.end_row();
                     }
                 }
@@ -783,7 +830,8 @@ impl HotFolderDialog {
                 }
                 1 => {
                     if let Some(path) = rfd::FileDialog::new().pick_folder()
-                        && let RuleAction::Copy { destination } | RuleAction::Move { destination } = &mut editor.draft.action
+                        && let RuleAction::Copy { destination } | RuleAction::Move { destination } =
+                            &mut editor.draft.action
                     {
                         *destination = path;
                     }
@@ -800,21 +848,39 @@ impl HotFolderDialog {
             {
                 editor.sample_path = Some(path);
             }
-            ui.label(editor.sample_path.as_ref().map_or_else(|| "No sample selected".into(), |path| path.display().to_string()));
+            ui.label(editor.sample_path.as_ref().map_or_else(
+                || "No sample selected".into(),
+                |path| path.display().to_string(),
+            ));
         });
         egui::ComboBox::from_id_salt("hotfolder_test_event")
             .selected_text(event_label(editor.sample_event))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut editor.sample_event, HotFolderEventKind::Created, "Created");
-                ui.selectable_value(&mut editor.sample_event, HotFolderEventKind::Modified, "Modified");
-                ui.selectable_value(&mut editor.sample_event, HotFolderEventKind::RenamedTo, "Renamed to");
+                ui.selectable_value(
+                    &mut editor.sample_event,
+                    HotFolderEventKind::Created,
+                    "Created",
+                );
+                ui.selectable_value(
+                    &mut editor.sample_event,
+                    HotFolderEventKind::Modified,
+                    "Modified",
+                );
+                ui.selectable_value(
+                    &mut editor.sample_event,
+                    HotFolderEventKind::RenamedTo,
+                    "Renamed to",
+                );
             });
 
         editor.validate();
         if let Some(error) = editor.validation_error.as_deref() {
             ui.colored_label(egui::Color32::LIGHT_RED, format!("Validation: {error}"));
         } else {
-            ui.colored_label(egui::Color32::LIGHT_GREEN, "Draft is structurally valid; current capability is checked again on Enable.");
+            ui.colored_label(
+                egui::Color32::LIGHT_GREEN,
+                "Draft is structurally valid; current capability is checked again on Enable.",
+            );
         }
         if old_draft != editor.draft
             || old_glob != editor.glob_text
@@ -828,20 +894,42 @@ impl HotFolderDialog {
 
         ui.horizontal(|ui| {
             let saving = self.pending.is_some();
-            if ui.add_enabled(!saving && editor.validation_error.is_none() && editor.expected_revision == current_revision, egui::Button::new("Save Disabled Rule")).clicked() {
+            if ui
+                .add_enabled(
+                    !saving
+                        && editor.validation_error.is_none()
+                        && editor.expected_revision == current_revision,
+                    egui::Button::new("Save Disabled Rule"),
+                )
+                .clicked()
+            {
                 let mut rule = editor.draft.clone();
                 rule.enabled = false;
                 actions.push(match editor.mode {
-                    EditMode::New => HotFolderDialogAction::SaveNew { expected_revision: editor.expected_revision, rule },
-                    EditMode::Existing => HotFolderDialogAction::SaveEdit { expected_revision: editor.expected_revision, rule },
+                    EditMode::New => HotFolderDialogAction::SaveNew {
+                        expected_revision: editor.expected_revision,
+                        rule,
+                    },
+                    EditMode::Existing => HotFolderDialogAction::SaveEdit {
+                        expected_revision: editor.expected_revision,
+                        rule,
+                    },
                 });
             }
-            if ui.add_enabled(!saving && editor.sample_path.is_some(), egui::Button::new("Test Rule (zero effects)")).clicked()
+            if ui
+                .add_enabled(
+                    !saving && editor.sample_path.is_some(),
+                    egui::Button::new("Test Rule (zero effects)"),
+                )
+                .clicked()
                 && let Some(action) = sample_test_action(&editor)
             {
                 actions.push(action);
             }
-            if ui.add_enabled(!saving, egui::Button::new("Cancel Draft")).clicked() {
+            if ui
+                .add_enabled(!saving, egui::Button::new("Cancel Draft"))
+                .clicked()
+            {
                 cancel_draft = true;
                 self.picker_targets = None;
                 self.picker_macros = None;
@@ -864,9 +952,21 @@ impl HotFolderDialog {
     fn render_test_result(&self, ui: &mut egui::Ui, result: &SampleTestResult) {
         ui.group(|ui| {
             ui.strong("Pure sample evaluation");
-            ui.label(format!("Sample: {}", result.sample.file_name().unwrap_or_default().to_string_lossy()));
+            ui.label(format!(
+                "Sample: {}",
+                result
+                    .sample
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ));
             if let Some(size) = result.size {
-                ui.label(format!("Read-only metadata: {size} bytes{}", result.modified.map_or_else(String::new, |time| format!(" · {}", format_time(time)))));
+                ui.label(format!(
+                    "Read-only metadata: {size} bytes{}",
+                    result
+                        .modified
+                        .map_or_else(String::new, |time| format!(" · {}", format_time(time)))
+                ));
             }
             match &result.condition {
                 Ok(()) => {
@@ -876,10 +976,16 @@ impl HotFolderDialog {
                     }
                 }
                 Err(reason) => {
-                    ui.colored_label(egui::Color32::YELLOW, format!("Conditions: no match — {reason}"));
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        format!("Conditions: no match — {reason}"),
+                    );
                 }
             }
-            ui.label(format!("Capability: {}", capability_label(&result.capability)));
+            ui.label(format!(
+                "Capability: {}",
+                capability_label(&result.capability)
+            ));
             ui.small("This sample evaluation did not enter the live watcher or execution history.");
         });
     }
@@ -923,25 +1029,37 @@ impl HotFolderDialog {
         });
         if let Some(runtime) = snapshot.runtime.as_ref() {
             for diagnostic in runtime.diagnostics.iter().take(8) {
-                ui.small(format!("Watcher diagnostic: {:?}{}", diagnostic.kind, diagnostic.rule_id.as_ref().map_or_else(String::new, |id| format!(" · rule {}", id.as_str()))));
+                ui.small(format!(
+                    "Watcher diagnostic: {:?}{}",
+                    diagnostic.kind,
+                    diagnostic
+                        .rule_id
+                        .as_ref()
+                        .map_or_else(String::new, |id| format!(" · rule {}", id.as_str()))
+                ));
             }
         }
         if let Some(execution) = snapshot.execution.as_ref()
             && let Some(error) = execution.journal_error.as_deref()
         {
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("Execution journal: {error}"));
+            ui.colored_label(
+                egui::Color32::LIGHT_RED,
+                format!("Execution journal: {error}"),
+            );
         }
     }
 
-    fn render_history(
-        &mut self,
-        ui: &mut egui::Ui,
-        snapshot: &HotFolderDriverSnapshot,
-    ) {
+    fn render_history(&mut self, ui: &mut egui::Ui, snapshot: &HotFolderDriverSnapshot) {
         ui.horizontal(|ui| {
             ui.heading("Terminal history");
             ui.checkbox(&mut self.show_full_paths, "Show full paths");
-            if ui.add_enabled(snapshot.execution.is_some(), egui::Button::new("Clear History…")).clicked() {
+            if ui
+                .add_enabled(
+                    snapshot.execution.is_some(),
+                    egui::Button::new("Clear History…"),
+                )
+                .clicked()
+            {
                 self.clear_history_confirmation = true;
             }
         });
@@ -1080,7 +1198,15 @@ impl HotFolderDialog {
         });
         self.test_result = None;
         thread::spawn(move || {
-            let result = evaluate_sample_test(editor_id, rule, sample, event, draft_revision, &inputs, adapter.as_ref());
+            let result = evaluate_sample_test(
+                editor_id,
+                rule,
+                sample,
+                event,
+                draft_revision,
+                &inputs,
+                adapter.as_ref(),
+            );
             let _ = sender.send(result);
         });
     }
@@ -1157,19 +1283,25 @@ fn evaluate_sample_test(
 ) -> SampleTestResult {
     let root = fs_canonicalize(&rule.watched_root);
     let sample_path = fs_canonicalize(&sample);
-    let metadata = sample_path.as_ref().ok().and_then(|path| std::fs::metadata(path).ok());
-    let relative = root
+    let metadata = sample_path
         .as_ref()
         .ok()
-        .and_then(|root| sample_path.as_ref().ok().and_then(|path| crate::hotfolder::relative_path_beneath(root, path)));
+        .and_then(|path| std::fs::metadata(path).ok());
+    let relative = root.as_ref().ok().and_then(|root| {
+        sample_path
+            .as_ref()
+            .ok()
+            .and_then(|path| crate::hotfolder::relative_path_beneath(root, path))
+    });
     let condition = match (&root, &sample_path, &metadata, &relative) {
         (Err(_), _, _, _) => Err("watched root could not be opened for read-only metadata".into()),
         (_, Err(_), _, _) => Err("sample file could not be opened for read-only metadata".into()),
         (_, _, None, _) => Err("sample metadata is unavailable".into()),
         (_, _, Some(metadata), _) if !metadata.is_file() => Err("sample path is not a file".into()),
         (_, _, _, None) => Err("sample file is outside the watched root".into()),
-        (_, _, _, Some(relative)) => evaluate_sample_conditions(&rule, event, relative)
-            .map_err(str::to_owned),
+        (_, _, _, Some(relative)) => {
+            evaluate_sample_conditions(&rule, event, relative).map_err(str::to_owned)
+        }
     };
     let capability = inputs.evaluate_rule(&rule, adapter);
     let plan = condition
@@ -1205,14 +1337,27 @@ fn fs_canonicalize(path: &Path) -> Result<PathBuf, String> {
 fn planned_action_summary(rule: &HotFolderRule, sample: &Path) -> Option<String> {
     let filename = sample.file_name()?;
     Some(match &rule.action {
-        RuleAction::Copy { destination } => format!("Copy to {}", destination.join(filename).display()),
-        RuleAction::Move { destination } => format!("Move to {}", destination.join(filename).display()),
-        RuleAction::Rename { prefix, suffix } => match crate::batch_rename::transform_filename_with_prefix_suffix(filename, prefix, suffix) {
-            Ok(next) => format!("Rename to {}", sample.with_file_name(next).display()),
-            Err(_) => "Rename plan is invalid".into(),
-        },
-        RuleAction::RegisteredLauncherAction { reference, .. } => format!("Run the exact registered primary action {}", reference.action_id),
-        RuleAction::MkMacro { macro_id, .. } => format!("Run exact MkMacro ID {macro_id} with its validated defaults"),
+        RuleAction::Copy { destination } => {
+            format!("Copy to {}", destination.join(filename).display())
+        }
+        RuleAction::Move { destination } => {
+            format!("Move to {}", destination.join(filename).display())
+        }
+        RuleAction::Rename { prefix, suffix } => {
+            match crate::batch_rename::transform_filename_with_prefix_suffix(
+                filename, prefix, suffix,
+            ) {
+                Ok(next) => format!("Rename to {}", sample.with_file_name(next).display()),
+                Err(_) => "Rename plan is invalid".into(),
+            }
+        }
+        RuleAction::RegisteredLauncherAction { reference, .. } => format!(
+            "Run the exact registered primary action {}",
+            reference.action_id
+        ),
+        RuleAction::MkMacro { macro_id, .. } => {
+            format!("Run exact MkMacro ID {macro_id} with its validated defaults")
+        }
     })
 }
 
@@ -1222,20 +1367,42 @@ fn select_action_choice(editor: &mut RuleEditor, choice: ActionChoice) {
     }
     let old = editor.draft.action.clone();
     editor.action_choice = choice;
-    editor.picker_open = matches!(choice, ActionChoice::RegisteredAction | ActionChoice::MkMacro);
+    editor.picker_open = matches!(
+        choice,
+        ActionChoice::RegisteredAction | ActionChoice::MkMacro
+    );
     editor.draft.action = match (choice, old) {
         (ActionChoice::Copy, RuleAction::Copy { destination })
-        | (ActionChoice::Copy, RuleAction::Move { destination }) => RuleAction::Copy { destination },
+        | (ActionChoice::Copy, RuleAction::Move { destination }) => {
+            RuleAction::Copy { destination }
+        }
         (ActionChoice::Move, RuleAction::Move { destination })
-        | (ActionChoice::Move, RuleAction::Copy { destination }) => RuleAction::Move { destination },
-        (ActionChoice::Copy, _) => RuleAction::Copy { destination: PathBuf::new() },
-        (ActionChoice::Move, _) => RuleAction::Move { destination: PathBuf::new() },
-        (ActionChoice::Rename, RuleAction::Rename { prefix, suffix }) => RuleAction::Rename { prefix, suffix },
-        (ActionChoice::Rename, _) => RuleAction::Rename { prefix: String::new(), suffix: String::new() },
-        (ActionChoice::RegisteredAction, action @ RuleAction::RegisteredLauncherAction { .. }) => action,
+        | (ActionChoice::Move, RuleAction::Copy { destination }) => {
+            RuleAction::Move { destination }
+        }
+        (ActionChoice::Copy, _) => RuleAction::Copy {
+            destination: PathBuf::new(),
+        },
+        (ActionChoice::Move, _) => RuleAction::Move {
+            destination: PathBuf::new(),
+        },
+        (ActionChoice::Rename, RuleAction::Rename { prefix, suffix }) => {
+            RuleAction::Rename { prefix, suffix }
+        }
+        (ActionChoice::Rename, _) => RuleAction::Rename {
+            prefix: String::new(),
+            suffix: String::new(),
+        },
+        (ActionChoice::RegisteredAction, action @ RuleAction::RegisteredLauncherAction { .. }) => {
+            action
+        }
         (ActionChoice::MkMacro, action @ RuleAction::MkMacro { .. }) => action,
-        (ActionChoice::RegisteredAction, _) => RuleAction::Copy { destination: PathBuf::new() },
-        (ActionChoice::MkMacro, _) => RuleAction::Copy { destination: PathBuf::new() },
+        (ActionChoice::RegisteredAction, _) => RuleAction::Copy {
+            destination: PathBuf::new(),
+        },
+        (ActionChoice::MkMacro, _) => RuleAction::Copy {
+            destination: PathBuf::new(),
+        },
     };
     editor.changed();
 }
@@ -1326,8 +1493,12 @@ fn action_summary(action: &RuleAction) -> String {
     match action {
         RuleAction::Copy { destination } => format!("Copy → {}", destination.display()),
         RuleAction::Move { destination } => format!("Move → {}", destination.display()),
-        RuleAction::Rename { prefix, suffix } => format!("Rename with prefix {prefix:?} and suffix {suffix:?}"),
-        RuleAction::RegisteredLauncherAction { reference, .. } => format!("Registered action {}", reference.action_id),
+        RuleAction::Rename { prefix, suffix } => {
+            format!("Rename with prefix {prefix:?} and suffix {suffix:?}")
+        }
+        RuleAction::RegisteredLauncherAction { reference, .. } => {
+            format!("Registered action {}", reference.action_id)
+        }
         RuleAction::MkMacro { macro_id, .. } => format!("MkMacro ID {macro_id}"),
     }
 }
@@ -1337,14 +1508,28 @@ fn rule_scope_summary(rule: &HotFolderRule) -> String {
         RuleTrigger::NewFile => "new file",
         RuleTrigger::ModifiedFile => "modified file",
     };
-    let scope = if rule.include_subfolders { "root and subfolders" } else { "direct children" };
+    let scope = if rule.include_subfolders {
+        "root and subfolders"
+    } else {
+        "direct children"
+    };
     let filter = match (&rule.filter.glob, rule.filter.extensions.is_empty()) {
-        (Some(glob), false) => format!("glob {glob:?} and extensions {}", rule.filter.extensions.join(", ")),
+        (Some(glob), false) => format!(
+            "glob {glob:?} and extensions {}",
+            rule.filter.extensions.join(", ")
+        ),
         (Some(glob), true) => format!("glob {glob:?}"),
         (None, false) => format!("extensions {}", rule.filter.extensions.join(", ")),
         (None, true) => "all filenames".into(),
     };
-    format!("{trigger} · {scope} · {filter} · temporary files {}", if rule.include_temporary_files { "included" } else { "skipped" })
+    format!(
+        "{trigger} · {scope} · {filter} · temporary files {}",
+        if rule.include_temporary_files {
+            "included"
+        } else {
+            "skipped"
+        }
+    )
 }
 
 fn capability_label(capability: &ActionCapability) -> String {
@@ -1402,8 +1587,8 @@ fn format_unix_nanos(nanos: u128) -> String {
 mod m10e_editor_fixtures {
     use super::*;
     use crate::hotfolder::{
-        HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
-        HotFolderExecutionPhase, HotFolderTerminalStatus,
+        HotFolderExecutionPhase, HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
+        HotFolderTerminalStatus,
     };
     use crate::platform::app_data::AppDataRoot;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1470,10 +1655,8 @@ mod m10e_editor_fixtures {
         let adapter = Arc::new(CountingExternalAdapter {
             dispatches: AtomicUsize::new(0),
         });
-        let mut driver = crate::gui::hotfolder_runtime::HotFolderRuntimeDriver::new(
-            data_root,
-            adapter.clone(),
-        );
+        let mut driver =
+            crate::gui::hotfolder_runtime::HotFolderRuntimeDriver::new(data_root, adapter.clone());
         let inputs = HotFolderCapabilityInputs::empty();
         let start = driver
             .start(inputs.clone())
@@ -1481,7 +1664,11 @@ mod m10e_editor_fixtures {
         let start_deadline = Instant::now() + Duration::from_secs(3);
         let started = loop {
             let snapshot = driver.snapshot();
-            if snapshot.acknowledgements.iter().any(|ack| ack.request_id == start) {
+            if snapshot
+                .acknowledgements
+                .iter()
+                .any(|ack| ack.request_id == start)
+            {
                 assert!(snapshot.running);
                 break snapshot;
             }
@@ -1503,7 +1690,10 @@ mod m10e_editor_fixtures {
                 ack.result.as_ref().expect("explicit enable succeeds");
                 break snapshot;
             }
-            assert!(Instant::now() < enable_deadline, "enabled rule was not acknowledged");
+            assert!(
+                Instant::now() < enable_deadline,
+                "enabled rule was not acknowledged"
+            );
             std::thread::sleep(Duration::from_millis(10));
         };
         let before_store = before.store.clone().expect("live store snapshot");
@@ -1530,50 +1720,76 @@ mod m10e_editor_fixtures {
         dialog.editor = Some(editor);
         let context = egui::Context::default();
         let mut rendered_actions = Vec::new();
-        context.run_ui(egui::RawInput::default(), |ctx| {
-            rendered_actions = dialog.ui(ctx, &before);
-        }).drop_without_applying_deltas();
-        assert!(rendered_actions.is_empty(), "rendering the manager has no implicit runtime command");
+        context
+            .run_ui(egui::RawInput::default(), |ctx| {
+                rendered_actions = dialog.ui(ctx, &before);
+            })
+            .drop_without_applying_deltas();
+        assert!(
+            rendered_actions.is_empty(),
+            "rendering the manager has no implicit runtime command"
+        );
 
         let test_action = sample_test_action(dialog.editor.as_ref().expect("current draft"))
             .expect("sample selection creates the UI Test Rule action");
-        let unhandled = dialog.start_sample_test_from_action(
-            test_action,
-            inputs,
-            adapter.clone(),
+        let unhandled = dialog.start_sample_test_from_action(test_action, inputs, adapter.clone());
+        assert!(
+            unhandled.is_none(),
+            "Test Rule stays inside the read-only worker"
         );
-        assert!(unhandled.is_none(), "Test Rule stays inside the read-only worker");
 
         let deadline = Instant::now() + Duration::from_secs(2);
         while dialog.test_result.is_none() && Instant::now() < deadline {
             let snapshot = driver.snapshot();
-            context.run_ui(egui::RawInput::default(), |ctx| {
-                let _ = dialog.ui(ctx, &snapshot);
-            }).drop_without_applying_deltas();
+            context
+                .run_ui(egui::RawInput::default(), |ctx| {
+                    let _ = dialog.ui(ctx, &snapshot);
+                })
+                .drop_without_applying_deltas();
             std::thread::yield_now();
         }
         let result = dialog.test_result.expect("sample evaluation completed");
         assert!(result.condition.is_ok());
-        assert!(result.plan.as_deref().is_some_and(|plan| {
-            plan.contains("outgoing") && plan.contains("report.txt")
-        }));
-        assert!(matches!(result.capability, ActionCapability::Supported { .. }));
+        assert!(
+            result
+                .plan
+                .as_deref()
+                .is_some_and(|plan| { plan.contains("outgoing") && plan.contains("report.txt") })
+        );
+        assert!(matches!(
+            result.capability,
+            ActionCapability::Supported { .. }
+        ));
         assert_eq!(adapter.dispatches.load(Ordering::SeqCst), 0);
-        assert_eq!(std::fs::read(&sample).expect("sample remains readable"), b"unchanged sample bytes");
+        assert_eq!(
+            std::fs::read(&sample).expect("sample remains readable"),
+            b"unchanged sample bytes"
+        );
         assert!(!destination.join("report.txt").exists());
         let after = driver.snapshot();
         let after_store = after.store.as_ref().expect("live store remains available");
         assert_eq!(after_store.revision, before_store.revision);
         assert_eq!(after_store.rules, before_store.rules);
-        assert_eq!(std::fs::read(store.path()).expect("rules remain unchanged"), before_raw);
+        assert_eq!(
+            std::fs::read(store.path()).expect("rules remain unchanged"),
+            before_raw
+        );
         assert_eq!(after.runtime.as_ref(), Some(&before_runtime));
         assert_eq!(after.execution.as_ref(), Some(&before_execution));
         assert_eq!(after.execution_progress, Default::default());
 
         let stop = driver.stop().expect("submit live driver stop");
         let stop_deadline = Instant::now() + Duration::from_secs(3);
-        while !driver.snapshot().acknowledgements.iter().any(|ack| ack.request_id == stop) {
-            assert!(Instant::now() < stop_deadline, "live driver did not acknowledge stop");
+        while !driver
+            .snapshot()
+            .acknowledgements
+            .iter()
+            .any(|ack| ack.request_id == stop)
+        {
+            assert!(
+                Instant::now() < stop_deadline,
+                "live driver did not acknowledge stop"
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         driver.shutdown_and_reap();

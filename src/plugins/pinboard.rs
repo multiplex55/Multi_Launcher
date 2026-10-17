@@ -8,8 +8,8 @@ impl Plugin for PinboardPlugin {
         let query = query.trim();
         let capture = query.eq_ignore_ascii_case("pinboard")
             || query.eq_ignore_ascii_case("pinboard capture");
-        let list = query.eq_ignore_ascii_case("pinboard")
-            || query.eq_ignore_ascii_case("pinboard list");
+        let list =
+            query.eq_ignore_ascii_case("pinboard") || query.eq_ignore_ascii_case("pinboard list");
 
         let mut actions = Vec::with_capacity(2);
         if capture {
@@ -83,7 +83,10 @@ mod tests {
             assert_eq!(actions.len(), 1, "{query:?}");
             assert_eq!(actions[0].action, wire);
             assert!(actions[0].args.is_none());
-            assert_eq!(parse_action(&actions[0]).unwrap(), Command::Pinboard(command));
+            assert_eq!(
+                parse_action(&actions[0]).unwrap(),
+                Command::Pinboard(command)
+            );
         }
 
         for query in [
@@ -100,7 +103,13 @@ mod tests {
     fn plugin_help_discloses_both_pinboard_paths() {
         assert_eq!(PinboardPlugin.commands()[0].action, "query:pinboard");
         let description = PinboardPlugin.description();
-        for detail in ["region-only", "session-only", "topmost", "pin list", "256 MiB"] {
+        for detail in [
+            "region-only",
+            "session-only",
+            "topmost",
+            "pin list",
+            "256 MiB",
+        ] {
             assert!(description.contains(detail), "missing {detail:?}");
         }
     }

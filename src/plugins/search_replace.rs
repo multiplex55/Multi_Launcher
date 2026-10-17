@@ -64,16 +64,20 @@ mod tests {
         }
         let mut payload = SearchReplacePlugin.search("replace").remove(0);
         payload.args = Some("untrusted content".into());
-        assert!(parse_action(&payload)
-            .unwrap_err()
-            .message
-            .contains("does not accept a path or content payload"));
+        assert!(
+            parse_action(&payload)
+                .unwrap_err()
+                .message
+                .contains("does not accept a path or content payload")
+        );
         let mut malformed = SearchReplacePlugin.search("replace").remove(0);
         malformed.action = "replace:future".into();
-        assert!(parse_action(&malformed)
-            .unwrap_err()
-            .message
-            .contains("unknown Search and Replace command"));
+        assert!(
+            parse_action(&malformed)
+                .unwrap_err()
+                .message
+                .contains("unknown Search and Replace command")
+        );
     }
 
     #[test]

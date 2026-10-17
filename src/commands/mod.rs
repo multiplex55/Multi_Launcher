@@ -16,10 +16,10 @@ pub use host::{
     BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost,
     CommandHost, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
     FileSearchCommandHost, HeadlessCommandHost, HotFolderCommandHost, JsonUtilityCommandHost,
-    LauncherCommandHost,
-    MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, OcrCommandHost,
-    PinboardCommandHost, RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult,
-    SearchReplaceCommandHost, SnippetPromptIntent, TodoCommandHost, XmlToolkitCommandHost,
+    LauncherCommandHost, MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost,
+    OcrCommandHost, PinboardCommandHost, RadialCommandHost, ScreenDrawCommandHost,
+    ScreenshotCommandHost, ScreenshotCommandResult, SearchReplaceCommandHost, SnippetPromptIntent,
+    TodoCommandHost, XmlToolkitCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

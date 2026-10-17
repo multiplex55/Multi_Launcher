@@ -9,8 +9,8 @@ use super::capability::{
 use super::model::{
     ConfigurationFingerprint, HotFolderEventKind, HotFolderRule, MAX_DUE_OBSERVATIONS_PER_TURN,
     MAX_EVENT_PATH_BYTES, MAX_EVENT_PATHS, MAX_PENDING_FILES, MAX_READY_CANDIDATES, MAX_RULES,
-    MAX_RUNTIME_DIAGNOSTICS, MAX_WATCH_INGRESS_EVENTS, MAX_WATCHED_ROOTS,
-    READY_LEASE_TIMEOUT_MS, RuleId, evaluate_rule_conditions,
+    MAX_RUNTIME_DIAGNOSTICS, MAX_WATCH_INGRESS_EVENTS, MAX_WATCHED_ROOTS, READY_LEASE_TIMEOUT_MS,
+    RuleId, evaluate_rule_conditions,
 };
 use super::store::HotFolderRulesSnapshot;
 use crate::file_operations::{
