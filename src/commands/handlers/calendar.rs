@@ -407,6 +407,7 @@ mod tests {
             false
         }
     }
+    impl crate::commands::PinboardCommandHost for Host {}
     impl crate::commands::ScreenDrawCommandHost for Host {
         fn execute_screen_draw_command(
             &mut self,

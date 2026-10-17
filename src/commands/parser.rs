@@ -64,6 +64,57 @@ mod screen_draw_parser_tests {
 }
 
 #[cfg(test)]
+mod pinboard_parser_tests {
+    use super::*;
+
+    fn action(raw: &str, args: Option<&str>) -> Action {
+        Action {
+            label: raw.into(),
+            desc: String::new(),
+            action: raw.into(),
+            args: args.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn pinboard_namespace_is_exact_typed_and_payload_free() {
+        for (raw, expected) in [
+            ("pinboard:capture", PinboardCommand::Capture),
+            ("pinboard:list", PinboardCommand::List),
+        ] {
+            let parsed = parse_action(&action(raw, None)).unwrap();
+            assert_eq!(parsed, Command::Pinboard(expected.clone()));
+            assert_eq!(parsed.domain(), "pinboard");
+            assert_eq!(parsed.kind_name(), expected.kind_name());
+        }
+
+        for raw in ["pinboard:future", "pinboard:capture:extra", "pinboard: list"] {
+            assert!(matches!(
+                parse_action(&action(raw, None)).unwrap(),
+                Command::Pinboard(PinboardCommand::Unknown { raw: parsed })
+                    if parsed == raw.strip_prefix("pinboard:").unwrap()
+            ));
+        }
+
+        for args in [Some(""), Some("payload")] {
+            let error = parse_action(&action("pinboard:capture", args)).unwrap_err();
+            assert_eq!(error.domain, "pinboard");
+            assert!(error.message.contains("do not accept"));
+            assert!(error.toast && error.refocus);
+        }
+
+        assert!(matches!(
+            parse_action(&action("Pinboard:capture", None)).unwrap(),
+            Command::External(_)
+        ));
+        assert!(matches!(
+            parse_action(&action("pinboard", None)).unwrap(),
+            Command::External(_)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod ocr_parser_tests {
     use super::*;
     #[test]
@@ -238,6 +289,21 @@ mod radial_parser_tests {
 
 pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     let s = action.action.as_str();
+    if let Some(raw) = s.strip_prefix("pinboard:") {
+        if action.args.is_some() {
+            return Err(CommandError::new(
+                "pinboard",
+                "Pinboard commands do not accept a path or content payload",
+            )
+            .with_gui_failure_policy());
+        }
+        let command = match raw {
+            "capture" => PinboardCommand::Capture,
+            "list" => PinboardCommand::List,
+            _ => PinboardCommand::Unknown { raw: raw.into() },
+        };
+        return Ok(Command::Pinboard(command));
+    }
     if s == "qr:open" {
         return Ok(Command::Dialog(DialogCommand::Qr {
             initial_text: action.args.clone(),

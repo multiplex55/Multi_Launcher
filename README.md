@@ -106,6 +106,7 @@ Multi Launcher is centered around a **single query box**:
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
 | `mouse` | Mouse settings, coordinates, picking, and independent crosshair | `mouse settings` / `mouse coords copy` / `mouse crosshair toggle` |
 | `ocr` | Local English text recognition from a screen region | `ocr` |
+| `pinboard` | Session-only screenshot reference pins | `pinboard capture` / `pinboard list` |
 | `ss` / `shot` | Screenshot actions | `ss` / `shot region markup` |
 | `sd` / `sa` | Full-desktop Screen Draw annotations | `sd` / `sd ghost` / `sa done` |
 | `conv` / `convert` | Conversion panel + converters | `conv` / `conv 10 km to mi` |
@@ -1128,6 +1129,12 @@ Screenshot behavior is controlled by settings:
 - `screenshot_dir`
 - `screenshot_auto_save`
 - `screenshot_use_editor`
+
+## Screenshot pinboard
+
+Use `pinboard capture` to select a screen region and open it as an in-memory floating reference image. Multiple pins are session-only, default to Always on Top, and are limited to 8 pins and 256 MiB total image data. Each pin can be moved and resized, switched between Fit and 1:1 display, zoomed, made not-topmost or click-through, and explicitly copied or saved. Fit and 1:1 sizing use each child viewport's DPI. The image remains available without a backing temporary file; Copy Image and Save As run only when selected.
+
+Use `pinboard list` to recover a click-through pin with its Recover control or the keyboard-accessible Recover All button, or to close pins. The list reports desired control values separately from native child-window status. Region-selection cancellation creates no pin; capture errors are shown in the launcher. Pin layout and images are not restored after restart. Existing `ss`, `shot`, and `screenshot` commands keep opening the screenshot capture/editor flows.
 
 ---
 

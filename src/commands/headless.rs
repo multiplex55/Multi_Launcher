@@ -181,6 +181,7 @@ fn execute_with_external(
         Command::Note(_) => execute_external(original_action),
         Command::ClipboardModify(command) => execute_clipboard_modify(command, original_action),
         Command::Screenshot(command) => execute_screenshot(command, original_action),
+        Command::Pinboard(_) => anyhow::bail!("pinboard commands require the launcher interface"),
         Command::Data(_) => anyhow::bail!("data commands require the launcher interface"),
         Command::PasteSequence(_) => {
             anyhow::bail!("paste sequence commands require the launcher interface")
@@ -276,6 +277,34 @@ mod xml_toolkit_headless_tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("require the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod pinboard_headless_tests {
+    use super::*;
+
+    #[test]
+    fn pinboard_is_explicitly_gui_only_and_never_uses_external_fallback() {
+        let original = Action {
+            label: "Capture Screenshot Pin".into(),
+            desc: String::new(),
+            action: "pinboard:capture".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::Pinboard(PinboardCommand::Capture),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("pinboard commands require the launcher interface"));
         assert!(external_calls.is_empty());
     }
 }

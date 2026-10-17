@@ -204,6 +204,16 @@ pub trait ScreenshotCommandHost {
     fn screenshot_launcher_should_refocus(&self) -> bool;
 }
 
+pub trait PinboardCommandHost {
+    fn start_pinboard_capture(&mut self) -> Result<bool, String> {
+        Err("pinboard commands require the launcher interface".into())
+    }
+
+    fn open_pinboard_list(&mut self) -> Result<(), String> {
+        Err("pinboard commands require the launcher interface".into())
+    }
+}
+
 pub trait ScreenDrawCommandHost {
     fn execute_screen_draw_command(
         &mut self,
@@ -313,6 +323,7 @@ pub trait CommandHost:
     + FileSearchCommandHost
     + DiffCommandHost
     + ScreenshotCommandHost
+    + PinboardCommandHost
     + ScreenDrawCommandHost
     + ClipboardModifyCommandHost
     + DataCommandHost
@@ -340,6 +351,7 @@ impl<T> CommandHost for T where
         + FileSearchCommandHost
         + DiffCommandHost
         + ScreenshotCommandHost
+        + PinboardCommandHost
         + ScreenDrawCommandHost
         + ClipboardModifyCommandHost
         + DataCommandHost

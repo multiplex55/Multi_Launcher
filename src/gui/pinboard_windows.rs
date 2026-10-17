@@ -175,6 +175,9 @@ pub(crate) struct PinWindowPresenter {
     registry: Arc<Mutex<PinWindowRegistry>>,
     actions: PinActionWorker,
     pending_parent_cleanup: bool,
+    pin_list_focus_requested: bool,
+    #[cfg(test)]
+    last_recover_all_widget_id: Option<egui::Id>,
 }
 
 impl PinWindowPresenter {
@@ -189,6 +192,18 @@ impl PinWindowPresenter {
     fn with_native_api_and_save_picker(
         native_api: Arc<dyn PinNativeApi>,
         save_picker: Arc<dyn PinSavePicker>,
+    ) -> Self {
+        Self::with_native_api_and_targets(
+            native_api,
+            save_picker,
+            Arc::new(SystemPinImageClipboard),
+        )
+    }
+
+    fn with_native_api_and_targets(
+        native_api: Arc<dyn PinNativeApi>,
+        save_picker: Arc<dyn PinSavePicker>,
+        clipboard: Arc<dyn PinImageClipboard>,
     ) -> Self {
         let process_id = std::process::id();
         let now = SystemTime::now()
@@ -208,8 +223,11 @@ impl PinWindowPresenter {
         }));
         Self {
             registry,
-            actions: PinActionWorker::with_save_picker(save_picker),
+            actions: PinActionWorker::with_action_targets(save_picker, clipboard),
             pending_parent_cleanup: false,
+            pin_list_focus_requested: false,
+            #[cfg(test)]
+            last_recover_all_widget_id: None,
         }
     }
 
@@ -393,6 +411,14 @@ impl PinWindowPresenter {
         if !*open || ctx.embed_viewports() || ctx.viewport_id() != egui::ViewportId::ROOT {
             return;
         }
+        let focus_requested = std::mem::take(&mut self.pin_list_focus_requested);
+        if focus_requested {
+            ctx.move_to_top(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("screenshot-pin-list"),
+            ));
+            ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+        }
         let (entries, native_api, root_hwnd, shutting_down) = {
             let Ok(registry) = self.registry.lock() else {
                 return;
@@ -435,6 +461,9 @@ impl PinWindowPresenter {
         };
 
         let mut actions = Vec::new();
+        let mut focus_widget_id = None;
+        #[cfg(test)]
+        let mut recover_all_widget_id = None;
         egui::Window::new("Screenshot Pins")
             .id(egui::Id::new("screenshot-pin-list"))
             .open(open)
@@ -448,16 +477,32 @@ impl PinWindowPresenter {
                     .iter()
                     .any(|entry| entry.click_through && entry.controls_available);
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(has_recoverable && !shutting_down, egui::Button::new("Recover All"))
-                        .clicked()
+                    let recover_all = ui.add_enabled(
+                        has_recoverable && !shutting_down,
+                        egui::Button::new("Recover All"),
+                    );
+                    if focus_requested && has_recoverable && !shutting_down {
+                        focus_widget_id = Some(recover_all.id);
+                    }
+                    #[cfg(test)]
                     {
+                        recover_all_widget_id = Some(recover_all.id);
+                    }
+                    if recover_all.clicked() {
                         actions.push(PinListAction::RecoverAll);
                     }
-                    if ui
-                        .add_enabled(!entries.is_empty() && !shutting_down, egui::Button::new("Close All"))
-                        .clicked()
+                    let close_all = ui.add_enabled(
+                        !entries.is_empty() && !shutting_down,
+                        egui::Button::new("Close All"),
+                    );
+                    if focus_requested
+                        && !has_recoverable
+                        && !entries.is_empty()
+                        && !shutting_down
                     {
+                        focus_widget_id = Some(close_all.id);
+                    }
+                    if close_all.clicked() {
                         actions.push(PinListAction::CloseAll);
                     }
                 });
@@ -566,6 +611,14 @@ impl PinWindowPresenter {
                     }
                 });
             });
+        if let Some(id) = focus_widget_id {
+            ctx.memory_mut(|memory| memory.request_focus(id));
+        }
+
+        #[cfg(test)]
+        {
+            self.last_recover_all_widget_id = recover_all_widget_id;
+        }
 
         for action in actions {
             match action {
@@ -627,6 +680,52 @@ impl PinWindowPresenter {
         // Style requests do not show or focus a pin. Wake the root owner so its
         // next parent pass can apply the latest desired builder state.
         ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    pub(crate) fn request_pin_list_focus(&mut self) {
+        self.pin_list_focus_requested = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pin_click_through_for_test(
+        &mut self,
+        ctx: &egui::Context,
+        board: &mut Pinboard,
+        pin_id: PinId,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let (lifetime, native_api, root_hwnd) = {
+            let registry = self
+                .registry
+                .lock()
+                .map_err(|_| "pin window registry lock was poisoned".to_owned())?;
+            let runtime = registry
+                .pins
+                .get(&pin_id)
+                .ok_or_else(|| "pin window is not registered".to_owned())?;
+            (
+                runtime.lifetime,
+                Arc::clone(&registry.native_api),
+                registry.root_native_identity.0,
+            )
+        };
+        self.apply_list_control(
+            ctx,
+            board,
+            pin_id,
+            lifetime,
+            PinControlChange {
+                always_on_top: None,
+                click_through: Some(enabled),
+            },
+            native_api.as_ref(),
+            root_hwnd,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn recover_all_widget_id_for_test(&self) -> Option<egui::Id> {
+        self.last_recover_all_widget_id
     }
 
     fn apply_list_control(
@@ -2170,6 +2269,7 @@ struct PinActionQueue {
     completions: SyncSender<PinActionCompletion>,
     worker: Mutex<Option<JoinHandle<()>>>,
     save_picker: Arc<dyn PinSavePicker>,
+    clipboard: Arc<dyn PinImageClipboard>,
 }
 
 struct PinActionWorker {
@@ -2188,6 +2288,10 @@ trait PinSavePicker: Send + Sync {
         pin_id: PinId,
         cancellation: &PinPickerCancellation,
     ) -> Result<Option<PathBuf>, String>;
+}
+
+trait PinImageClipboard: Send + Sync {
+    fn copy_image(&self, image: &image::RgbaImage) -> Result<(), String>;
 }
 
 #[derive(Clone, Default)]
@@ -2283,6 +2387,13 @@ impl PinPickerCancellation {
 
 impl PinActionWorker {
     fn with_save_picker(save_picker: Arc<dyn PinSavePicker>) -> Self {
+        Self::with_action_targets(save_picker, Arc::new(SystemPinImageClipboard))
+    }
+
+    fn with_action_targets(
+        save_picker: Arc<dyn PinSavePicker>,
+        clipboard: Arc<dyn PinImageClipboard>,
+    ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(MAX_PIN_ACTIONS);
         Self {
             shared: Arc::new(PinActionQueue {
@@ -2298,6 +2409,7 @@ impl PinActionWorker {
                 completions: sender,
                 worker: Mutex::new(None),
                 save_picker,
+                clipboard,
             }),
             completions: receiver,
         }
@@ -2443,7 +2555,8 @@ fn pin_action_worker(shared: Arc<PinActionQueue>) {
         };
         let cancellation_for_job = cancellation.clone().unwrap_or_default();
         let save_picker = Arc::clone(&shared.save_picker);
-        let result = run_pin_action_with_save_picker(&job, || {
+        let clipboard = Arc::clone(&shared.clipboard);
+        let result = run_pin_action_with_targets(&job, clipboard.as_ref(), || {
             save_picker.save_file(job.pin_id, &cancellation_for_job)
         });
         let completion = PinActionCompletion {
@@ -2465,6 +2578,18 @@ fn pin_action_worker(shared: Arc<PinActionQueue>) {
 }
 
 struct NativePinSavePicker;
+
+struct SystemPinImageClipboard;
+
+impl PinImageClipboard for SystemPinImageClipboard {
+    fn copy_image(&self, image: &image::RgbaImage) -> Result<(), String> {
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|error| format!("could not open the image clipboard: {error}"))?;
+        clipboard
+            .set_image(clipboard_image_data(image))
+            .map_err(|error| format!("could not copy screenshot pin: {error}"))
+    }
+}
 
 fn post_pin_save_cancel(owner: usize) {
     #[cfg(windows)]
@@ -2494,18 +2619,15 @@ impl PinSavePicker for NativePinSavePicker {
     }
 }
 
-fn run_pin_action_with_save_picker(
+fn run_pin_action_with_targets(
     job: &PinActionJob,
+    clipboard: &dyn PinImageClipboard,
     save_picker: impl FnOnce() -> Result<Option<PathBuf>, String>,
 ) -> Result<Option<String>, String> {
     match &job.kind {
         PinActionKind::Copy => {
             let image = job.image.pixels();
-            let mut clipboard = arboard::Clipboard::new()
-                .map_err(|error| format!("could not open the image clipboard: {error}"))?;
-            clipboard
-                .set_image(clipboard_image_data(image))
-                .map_err(|error| format!("could not copy screenshot pin: {error}"))?;
+            clipboard.copy_image(image)?;
             Ok(Some("Copied pin image to the clipboard.".into()))
         }
         PinActionKind::SaveAs => {
@@ -3081,6 +3203,10 @@ mod tests {
     }
 
     impl FakePinNativeApi {
+        fn contains(&self, hwnd: usize) -> bool {
+            self.windows.lock().unwrap().contains_key(&hwnd)
+        }
+
         fn add_window(
             &self,
             runtime: &PinWindowRuntime,
@@ -3264,6 +3390,281 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::NONE,
         }
+    }
+
+    struct PinboardFixtureCaptureBackend {
+        desktop: ScreenRect,
+        captures: AtomicUsize,
+    }
+
+    impl crate::mkmacro::ScreenCaptureBackend for PinboardFixtureCaptureBackend {
+        fn virtual_desktop(&self) -> crate::mkmacro::ExecResult<ScreenRect> {
+            Ok(self.desktop)
+        }
+
+        fn region_bounds(
+            &self,
+            _region: &crate::mkmacro::SearchRegion,
+        ) -> crate::mkmacro::ExecResult<ScreenRect> {
+            Ok(self.desktop)
+        }
+
+        fn capture_rect(
+            &self,
+            rect: ScreenRect,
+            cancelled: &dyn Fn() -> bool,
+        ) -> crate::mkmacro::ExecResult<image::RgbaImage> {
+            if cancelled() {
+                return Err(crate::mkmacro::cancelled_error());
+            }
+            let call = self.captures.fetch_add(1, Ordering::AcqRel) as u8;
+            Ok(image::RgbaImage::from_pixel(
+                rect.width,
+                rect.height,
+                image::Rgba([call + 17, call + 29, call + 43, 255]),
+            ))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingPinClipboard {
+        images: Mutex<Vec<image::RgbaImage>>,
+    }
+
+    impl PinImageClipboard for RecordingPinClipboard {
+        fn copy_image(&self, image: &image::RgbaImage) -> Result<(), String> {
+            self.images.lock().unwrap().push(image.clone());
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct PinboardFixtureParkingLog {
+        begins: AtomicUsize,
+        restores: AtomicUsize,
+        reparks: AtomicUsize,
+        commits: AtomicUsize,
+    }
+
+    struct PinboardFixtureParkingFactory(Arc<PinboardFixtureParkingLog>);
+
+    struct PinboardFixtureParking(Arc<PinboardFixtureParkingLog>);
+
+    impl crate::gui::pinboard::LauncherCaptureParkingFactory for PinboardFixtureParkingFactory {
+        fn begin(
+            &self,
+            _generation: crate::pinboard::PinCaptureGeneration,
+            _hwnd: usize,
+            _virtual_desktop: ScreenRect,
+        ) -> Result<Box<dyn crate::gui::pinboard::LauncherCaptureParking>, String> {
+            self.0.begins.fetch_add(1, Ordering::AcqRel);
+            Ok(Box::new(PinboardFixtureParking(Arc::clone(&self.0))))
+        }
+    }
+
+    impl crate::gui::pinboard::LauncherCaptureParking for PinboardFixtureParking {
+        fn verify_capture_safe(&mut self) -> Result<bool, String> {
+            Ok(true)
+        }
+
+        fn restore(&mut self) -> Result<(), String> {
+            self.0.restores.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn repark(&mut self) -> Result<(), String> {
+            self.0.reparks.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn commit_hidden(&mut self) {
+            self.0.commits.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn dispatch_pinboard_command(app: &mut crate::gui::LauncherApp, action: &str) {
+        let invocation = crate::commands::parse_command(
+            crate::actions::Action {
+                label: action.into(),
+                desc: String::new(),
+                action: action.into(),
+                args: None,
+            },
+            None,
+            crate::commands::ActivationSource::Enter,
+        )
+        .unwrap();
+        app.dispatch_command_invocation(invocation);
+    }
+
+    fn reflect_child_visibility_commands(
+        app: &crate::gui::LauncherApp,
+        native: &FakePinNativeApi,
+        output: &egui::FullOutput,
+    ) {
+        let presenter = app.pinboard_capture.presenter_for_test();
+        let registry = presenter.registry.lock().unwrap();
+        for runtime in registry.pins.values().chain(registry.retired.values()) {
+            assert_ne!(runtime.viewport_id, egui::ViewportId::ROOT);
+            let hwnd = 0x200 + runtime.pin_id.get() as usize;
+            if !native.contains(hwnd) {
+                continue;
+            }
+            let Some(viewport) = output.viewport_output.get(&runtime.viewport_id) else {
+                continue;
+            };
+            for command in &viewport.commands {
+                if let egui::ViewportCommand::Visible(visible) = command {
+                    native.set_visible(hwnd, *visible);
+                }
+            }
+        }
+    }
+
+    fn launcher_pinboard_frame(
+        app: &mut crate::gui::LauncherApp,
+        native: &FakePinNativeApi,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let context = app.egui_ctx.clone();
+        let output = context.run_ui(root_input(events), |root| {
+            app.poll_pinboard_capture(root.ctx());
+            app.show_screenshot_pins(root.ctx());
+            let open = app.pin_list_open;
+            app.pin_list_open = app.show_screenshot_pin_list(root.ctx(), open);
+        });
+        reflect_child_visibility_commands(app, native, &output);
+        output
+    }
+
+    fn request_competing_query_focus(ctx: &egui::Context) -> egui::Id {
+        let query_id = egui::Id::new("pinboard-competing-query-widget");
+        let mut query = String::from("another query");
+        let output = ctx.run_ui(root_input(Vec::new()), |root| {
+            egui::CentralPanel::default().show(root, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut query).id(query_id))
+                    .request_focus();
+            });
+        });
+        assert_eq!(ctx.memory(|memory| memory.focused()), Some(query_id));
+        output.drop_without_applying_deltas();
+        query_id
+    }
+
+    fn register_fixture_native_children(app: &crate::gui::LauncherApp, native: &FakePinNativeApi) {
+        let presenter = app.pinboard_capture.presenter_for_test();
+        let registry = presenter.registry.lock().unwrap();
+        for runtime in registry.pins.values() {
+            let hwnd = 0x200 + runtime.pin_id.get() as usize;
+            if !native.contains(hwnd) {
+                native.add_window(
+                    runtime,
+                    hwnd,
+                    true,
+                    app.pinboard_capture
+                        .pinboard()
+                        .get(runtime.pin_id)
+                        .unwrap()
+                        .display_bounds(),
+                );
+            }
+        }
+    }
+
+    fn pinboard_selector_operations(
+        overlay: &crate::gui::mkmacro_dialog::visual_capture_workflow::TestOverlayServiceFixture,
+    ) -> Vec<u64> {
+        overlay
+            .observer
+            .commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|command| match command {
+                crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayCommand::BeginRectanglePick {
+                    operation_id,
+                    purpose: crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose::PinboardCapture,
+                    ..
+                } => Some(*operation_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn capture_pin_through_launcher_command(
+        app: &mut crate::gui::LauncherApp,
+        native: &FakePinNativeApi,
+        overlay: &crate::gui::mkmacro_dialog::visual_capture_workflow::TestOverlayServiceFixture,
+        expected_hidden_child: Option<PinId>,
+        rect: ScreenRect,
+    ) -> PinId {
+        let prior_pin_count = app.pinboard_capture.pinboard().len();
+        let prior_selector_count = pinboard_selector_operations(overlay).len();
+        let expected_hwnd = expected_hidden_child.map(|pin_id| 0x200 + pin_id.get() as usize);
+        dispatch_pinboard_command(app, "pinboard:capture");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut saw_child_hide_command = expected_hidden_child.is_none();
+        while std::time::Instant::now() < deadline
+            && pinboard_selector_operations(overlay).len() <= prior_selector_count
+        {
+            let output = launcher_pinboard_frame(app, native, Vec::new());
+            if let Some(pin_id) = expected_hidden_child {
+                let viewport_id = {
+                    let presenter = app.pinboard_capture.presenter_for_test();
+                    let registry = presenter.registry.lock().unwrap();
+                    registry.pins[&pin_id].viewport_id
+                };
+                if output
+                    .viewport_output
+                    .get(&viewport_id)
+                    .is_some_and(|viewport| {
+                        viewport
+                            .commands
+                            .iter()
+                            .any(|command| matches!(command, egui::ViewportCommand::Visible(false)))
+                    })
+                {
+                    saw_child_hide_command = true;
+                }
+            }
+            output.drop_without_applying_deltas();
+            std::thread::yield_now();
+        }
+        let operation_id = pinboard_selector_operations(overlay)
+            .get(prior_selector_count)
+            .copied()
+            .expect("selector starts after ROOT and existing-child hide acknowledgements");
+        assert!(
+            saw_child_hide_command,
+            "existing child received its hide request"
+        );
+        if let Some(hwnd) = expected_hwnd {
+            assert!(!native.is_visible_for_test(hwnd));
+        }
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        assert!(!app.last_visible);
+        overlay.controller.inject_pinboard_event_for_test(
+            crate::gui::mkmacro_dialog::visual_overlay::VisualOverlayEvent::RectangleConfirmed {
+                operation_id,
+                purpose:
+                    crate::gui::mkmacro_dialog::visual_overlay::RectanglePurpose::PinboardCapture,
+                rect,
+            },
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && app.pinboard_capture.pinboard().len() == prior_pin_count
+        {
+            let output = launcher_pinboard_frame(app, native, Vec::new());
+            output.drop_without_applying_deltas();
+            std::thread::yield_now();
+        }
+        assert_eq!(app.pinboard_capture.pinboard().len(), prior_pin_count + 1);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+        app.pinboard_capture.pinboard().pins().last().unwrap().id()
     }
 
     fn assert_no_pin_control_commands(output: &egui::FullOutput, context: &str) {
@@ -3498,6 +3899,305 @@ mod tests {
         assert!(first_runtime.state.lock().unwrap().click_through);
         stale_output.drop_without_applying_deltas();
         presenter.shutdown().unwrap();
+    }
+
+    #[test]
+    fn launcher_pinboard_commands_capture_two_pins_and_recover_all_by_keyboard() {
+        let directory = fixture_directory();
+        let mut app = crate::gui::command_host::tests::inert_test_app(directory.path());
+        app.egui_ctx.set_embed_viewports(false);
+        app.launcher_hwnd = Some(ROOT_HWND);
+        app.root_window_bridge.set_identity_for_test(ROOT_HWND);
+        app.visible_flag.store(true, Ordering::SeqCst);
+        app.last_visible = true;
+        let root_identity = app.root_window_bridge.identity();
+
+        let overlay =
+            crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController::test_fixture();
+        app.mkmacro_dialog.visual_overlay = overlay.controller.clone();
+        let desktop = ScreenRect::new(-1_920, -240, 3_840, 1_320);
+        let capture_backend = Arc::new(PinboardFixtureCaptureBackend {
+            desktop,
+            captures: AtomicUsize::new(0),
+        });
+        let parking_log = Arc::new(PinboardFixtureParkingLog::default());
+        let mut lifecycle = crate::gui::pinboard::PinboardCaptureLifecycle::new(
+            overlay.controller.clone(),
+            capture_backend.clone(),
+        );
+        lifecycle.set_parking_factory_for_test(Arc::new(PinboardFixtureParkingFactory(
+            Arc::clone(&parking_log),
+        )));
+
+        let fake_native = Arc::new(FakePinNativeApi::default());
+        let native_api: Arc<dyn PinNativeApi> = fake_native.clone();
+        let save_path = directory.path().join("explicit-pin-save.png");
+        let (save_started_tx, save_started_rx) = mpsc::channel();
+        let save_picker: Arc<dyn PinSavePicker> = Arc::new(FixturePinSavePicker {
+            path: save_path.clone(),
+            started: save_started_tx,
+            calls: AtomicUsize::new(0),
+        });
+        let clipboard = Arc::new(RecordingPinClipboard::default());
+        let presenter = PinWindowPresenter::with_native_api_and_targets(
+            native_api,
+            save_picker,
+            clipboard.clone(),
+        );
+        lifecycle.install_window_presenter_for_test(presenter);
+        app.pinboard_capture = lifecycle;
+
+        let first = capture_pin_through_launcher_command(
+            &mut app,
+            fake_native.as_ref(),
+            &overlay,
+            None,
+            ScreenRect::new(-300, 40, 8, 8),
+        );
+        assert_eq!(first.get(), 1);
+        register_fixture_native_children(&app, fake_native.as_ref());
+        let first_bind_frame = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        first_bind_frame.drop_without_applying_deltas();
+        {
+            let presenter = app.pinboard_capture.presenter_for_test();
+            let registry = presenter.registry.lock().unwrap();
+            let first_runtime = &registry.pins[&first];
+            assert_ne!(first_runtime.viewport_id, egui::ViewportId::ROOT);
+            assert!(first_runtime.state.lock().unwrap().native.is_some());
+        }
+        let context = app.egui_ctx.clone();
+        app.pinboard_capture
+            .set_pin_click_through_for_test(&context, first, true)
+            .unwrap();
+        let first_passthrough = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        first_passthrough.drop_without_applying_deltas();
+
+        let second = capture_pin_through_launcher_command(
+            &mut app,
+            fake_native.as_ref(),
+            &overlay,
+            Some(first),
+            ScreenRect::new(160, 120, 8, 8),
+        );
+        assert_eq!(second.get(), 2);
+        register_fixture_native_children(&app, fake_native.as_ref());
+        let second_bind_frame = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        second_bind_frame.drop_without_applying_deltas();
+        let (first_viewport, second_viewport, second_bounds) = {
+            let presenter = app.pinboard_capture.presenter_for_test();
+            let registry = presenter.registry.lock().unwrap();
+            let first_runtime = &registry.pins[&first];
+            let second_runtime = &registry.pins[&second];
+            assert_ne!(first_runtime.viewport_id, egui::ViewportId::ROOT);
+            assert_ne!(second_runtime.viewport_id, egui::ViewportId::ROOT);
+            assert_ne!(first_runtime.viewport_id, second_runtime.viewport_id);
+            assert!(first_runtime.state.lock().unwrap().native.is_some());
+            assert!(second_runtime.state.lock().unwrap().native.is_some());
+            (
+                first_runtime.viewport_id,
+                second_runtime.viewport_id,
+                app.pinboard_capture
+                    .pinboard()
+                    .get(second)
+                    .unwrap()
+                    .display_bounds(),
+            )
+        };
+        let context = app.egui_ctx.clone();
+        app.pinboard_capture
+            .set_pin_click_through_for_test(&context, first, true)
+            .unwrap();
+        app.pinboard_capture
+            .set_pin_click_through_for_test(&context, second, true)
+            .unwrap();
+        let passthrough = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        passthrough.drop_without_applying_deltas();
+
+        let query_focus_id = request_competing_query_focus(&app.egui_ctx);
+        app.focus_query = true;
+        dispatch_pinboard_command(&mut app, "pinboard:list");
+        assert!(app.pin_list_open);
+        assert!(
+            !app.focus_query,
+            "the explicit list command cancels query refocus"
+        );
+        let list_frame = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        let recover_all_id = app
+            .pinboard_capture
+            .presenter_for_test()
+            .recover_all_widget_id_for_test();
+        let root_focus_requested = list_frame
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::Focus))
+            });
+        let focused_widget = app.egui_ctx.memory(|memory| memory.focused());
+        let top_layer = app.egui_ctx.top_layer_id();
+        list_frame.drop_without_applying_deltas();
+        let recover_all_id = recover_all_id.expect("Pin List rendered its Recover All control");
+        assert!(root_focus_requested);
+        assert_ne!(query_focus_id, recover_all_id);
+        assert_eq!(
+            focused_widget,
+            Some(recover_all_id),
+            "the explicit list command transfers focus from the query to Recover All"
+        );
+        assert_eq!(
+            top_layer,
+            Some(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("screenshot-pin-list"),
+            )),
+            "the explicitly opened list is raised above other root windows"
+        );
+        let passive_update = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        let passive_focus_requested = passive_update
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|viewport| {
+                viewport
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::Focus))
+            });
+        passive_update.drop_without_applying_deltas();
+        assert!(!passive_focus_requested);
+        let recovery = launcher_pinboard_frame(
+            &mut app,
+            fake_native.as_ref(),
+            vec![key_event(egui::Key::Enter)],
+        );
+        let recovered_children = [first_viewport, second_viewport].map(|viewport_id| {
+            recovery
+                .viewport_output
+                .get(&viewport_id)
+                .is_some_and(|viewport| {
+                    viewport.commands.iter().any(|command| {
+                        matches!(command, egui::ViewportCommand::MousePassthrough(false))
+                    })
+                })
+        });
+        let root_style_unchanged = recovery
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_none_or(|viewport| {
+                !viewport
+                    .commands
+                    .iter()
+                    .any(|command| matches!(command, egui::ViewportCommand::MousePassthrough(_)))
+            });
+        recovery.drop_without_applying_deltas();
+        assert!(recovered_children.into_iter().all(|recovered| recovered));
+        assert!(root_style_unchanged);
+        let recovery_sync = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        recovery_sync.drop_without_applying_deltas();
+        assert!(
+            !app.pinboard_capture
+                .pinboard()
+                .get(first)
+                .unwrap()
+                .click_through()
+        );
+        assert!(
+            !app.pinboard_capture
+                .pinboard()
+                .get(second)
+                .unwrap()
+                .click_through()
+        );
+
+        assert!(clipboard.images.lock().unwrap().is_empty());
+        assert!(!save_path.exists());
+        let action_client = app.pinboard_capture.presenter_for_test().actions.client();
+        let second_image = app
+            .pinboard_capture
+            .pinboard()
+            .get(second)
+            .unwrap()
+            .snapshot()
+            .image_handle();
+        action_client
+            .submit(PinActionJob {
+                pin_id: second,
+                lifetime: second.get(),
+                request_id: 91,
+                image: second_image.clone(),
+                kind: PinActionKind::Copy,
+            })
+            .unwrap();
+        action_client
+            .submit(PinActionJob {
+                pin_id: second,
+                lifetime: second.get(),
+                request_id: 92,
+                image: second_image,
+                kind: PinActionKind::SaveAs,
+            })
+            .unwrap();
+        assert_eq!(
+            save_started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            0
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut completions = Vec::new();
+        while std::time::Instant::now() < deadline && completions.len() < 2 {
+            completions.extend(
+                app.pinboard_capture
+                    .presenter_for_test()
+                    .actions
+                    .drain_completions(),
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(completions.len(), 2);
+        assert!(
+            completions
+                .iter()
+                .all(|completion| completion.result.is_ok())
+        );
+        assert!(save_path.exists());
+        assert_eq!(
+            *image::open(&save_path)
+                .unwrap()
+                .into_rgba8()
+                .get_pixel(0, 0),
+            Rgba([18, 30, 44, 255])
+        );
+        assert_eq!(
+            *clipboard.images.lock().unwrap()[0].get_pixel(0, 0),
+            Rgba([18, 30, 44, 255])
+        );
+        assert_eq!(capture_backend.captures.load(Ordering::Acquire), 2);
+        assert_eq!(parking_log.begins.load(Ordering::Acquire), 2);
+        assert_eq!(parking_log.restores.load(Ordering::Acquire), 2);
+        assert_eq!(app.root_window_bridge.identity(), root_identity);
+        assert!(app.visible_flag.load(Ordering::SeqCst));
+        assert!(app.last_visible);
+
+        assert!(app.close_screenshot_pin(first));
+        assert!(app.pinboard_capture.pinboard().get(first).is_none());
+        assert!(fake_native.contains(0x200 + first.get() as usize));
+        fake_native.destroy(0x200 + first.get() as usize);
+        let close_frame = launcher_pinboard_frame(&mut app, fake_native.as_ref(), Vec::new());
+        close_frame.drop_without_applying_deltas();
+        assert_eq!(app.pinboard_capture.pinboard().len(), 1);
+        assert_eq!(app.pinboard_capture.pinboard().image_bytes(), 8 * 8 * 4);
+        assert_eq!(
+            app.pinboard_capture
+                .pinboard()
+                .get(second)
+                .unwrap()
+                .display_bounds(),
+            second_bounds
+        );
+        assert_eq!(app.root_window_bridge.identity(), root_identity);
+        app.shutdown_pinboard_capture();
     }
 
     #[test]

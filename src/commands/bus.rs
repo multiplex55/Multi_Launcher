@@ -7,7 +7,7 @@ use crate::commands::handlers::{
     handle_note, handle_ocr, handle_paste_sequence, handle_query, handle_radial,
     handle_search_replace,
     handle_hotfolder, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo,
-    handle_xml_toolkit,
+    handle_pinboard, handle_xml_toolkit,
 };
 
 #[derive(Debug, Default)]
@@ -59,6 +59,7 @@ impl CommandBus {
             Command::FileSearch(command) => Ok(handle_file_search(host, command)),
             Command::Diff(command) => handle_diff(host, command),
             Command::Screenshot(command) => handle_screenshot(host, command),
+            Command::Pinboard(command) => handle_pinboard(host, command),
             Command::ScreenDraw(command) => handle_screen_draw(host, command),
             Command::CoordinateTool(command) => handle_coordinate_tool(host, command),
             Command::ClipboardModify(command) => Ok(handle_clipboard_modify_with_history_query(
@@ -105,7 +106,7 @@ mod tests {
         ActivationSource, CalendarCommandHost, CoordinateToolCommand, CropCommandHost,
         DialogCommandHost, HeadlessCommandHost, HistoryPolicy, LauncherCommand,
         LauncherCommandHost, MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy,
-        RadialCommandHost, TodoCommandHost, VisibilityPolicy,
+        PinboardCommandHost, RadialCommandHost, TodoCommandHost, VisibilityPolicy,
     };
     use crate::gui::hotfolder_dispatch::{
         LauncherHotFolderActionAdapter, invoke_registered_action_from_catalog,
@@ -137,6 +138,7 @@ mod tests {
         file_search_calls: usize,
         diff_calls: usize,
         screenshot_calls: usize,
+        pinboard_calls: Vec<&'static str>,
         screen_draw_calls: Vec<crate::commands::ScreenDrawCommand>,
         coordinate_tool_calls: Vec<CoordinateToolCommand>,
         mouse_settings_calls: usize,
@@ -373,6 +375,17 @@ mod tests {
             false
         }
     }
+    impl PinboardCommandHost for FakeHost {
+        fn start_pinboard_capture(&mut self) -> Result<bool, String> {
+            self.pinboard_calls.push("capture");
+            Ok(true)
+        }
+
+        fn open_pinboard_list(&mut self) -> Result<(), String> {
+            self.pinboard_calls.push("list");
+            Ok(())
+        }
+    }
     impl crate::commands::ScreenDrawCommandHost for FakeHost {
         fn execute_screen_draw_command(
             &mut self,
@@ -524,6 +537,23 @@ mod tests {
             query_override: None,
             source: ActivationSource::Dashboard,
         }
+    }
+
+    #[test]
+    fn pinboard_commands_dispatch_to_the_typed_gui_host() {
+        let mut host = FakeHost::default();
+        for command in [
+            crate::commands::PinboardCommand::Capture,
+            crate::commands::PinboardCommand::List,
+        ] {
+            let outcome = CommandBus
+                .dispatch(&invocation(Command::Pinboard(command)), &mut host)
+                .unwrap();
+            assert_eq!(outcome.visibility, crate::commands::VisibilityPolicy::Keep);
+            assert!(!outcome.focus && !outcome.restore && !outcome.search);
+        }
+        assert_eq!(host.pinboard_calls, ["capture", "list"]);
+        assert_eq!(host.headless_calls, 0);
     }
 
     #[test]

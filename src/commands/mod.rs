@@ -18,7 +18,7 @@ pub use host::{
     FileSearchCommandHost, HeadlessCommandHost, HotFolderCommandHost, JsonUtilityCommandHost,
     LauncherCommandHost,
     MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, OcrCommandHost,
-    RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult,
+    PinboardCommandHost, RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult,
     SearchReplaceCommandHost, SnippetPromptIntent, TodoCommandHost, XmlToolkitCommandHost,
 };
 pub use model::*;

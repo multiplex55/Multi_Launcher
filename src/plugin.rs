@@ -45,6 +45,7 @@ use crate::plugins::note::NotePlugin;
 use crate::plugins::ocr::OcrPlugin;
 use crate::plugins::omni_search::OmniSearchPlugin;
 use crate::plugins::paste_sequence::PasteSequencePlugin;
+use crate::plugins::pinboard::PinboardPlugin;
 use crate::plugins::processes::ProcessesPlugin;
 use crate::plugins::qr::QrPlugin;
 use crate::plugins::radial::RadialPlugin;
@@ -903,6 +904,7 @@ impl PluginManager {
         self.register_with_settings(EmojiPlugin::default(), plugin_settings);
         self.register_with_settings(TextCasePlugin, plugin_settings);
         self.register_with_settings(ScreenshotPlugin, plugin_settings);
+        self.register_with_settings(PinboardPlugin, plugin_settings);
         self.register_with_settings(ScreenDrawPlugin, plugin_settings);
         self.register_with_settings(CropPlugin, plugin_settings);
         self.register_with_settings(DataPlugin, plugin_settings);

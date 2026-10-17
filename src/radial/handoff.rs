@@ -105,6 +105,7 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         | Command::ScreenDraw(_)
         | Command::Macro(_)
         | Command::Screenshot(_)
+        | Command::Pinboard(crate::commands::PinboardCommand::Capture)
         | Command::MouseGesture(_)
         | Command::CoordinateTool(crate::commands::CoordinateToolCommand::Pick) => {
             InteractionRequirement::ExclusiveCapture
@@ -118,6 +119,9 @@ pub(crate) fn command_requirement(command: &Command) -> InteractionRequirement {
         )
         | Command::Query(_)
         | Command::Dialog(_)
+        | Command::Pinboard(
+            crate::commands::PinboardCommand::List | crate::commands::PinboardCommand::Unknown { .. },
+        )
         | Command::FileSearch(_)
         | Command::Diff(_) => InteractionRequirement::LauncherUi,
         Command::Note(crate::commands::NoteCommand::OpenLink { link })

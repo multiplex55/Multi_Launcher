@@ -24,14 +24,14 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 
-trait LauncherCaptureParking: Send {
+pub(super) trait LauncherCaptureParking: Send {
     fn verify_capture_safe(&mut self) -> Result<bool, String>;
     fn restore(&mut self) -> Result<(), String>;
     fn repark(&mut self) -> Result<(), String>;
     fn commit_hidden(&mut self);
 }
 
-trait LauncherCaptureParkingFactory: Send + Sync {
+pub(super) trait LauncherCaptureParkingFactory: Send + Sync {
     fn begin(
         &self,
         generation: PinCaptureGeneration,
@@ -225,6 +225,10 @@ impl PinboardCaptureLifecycle {
         self.windows.show_pin_list(ctx, &mut self.board, open);
     }
 
+    pub(super) fn request_pin_list_focus(&mut self) {
+        self.windows.request_pin_list_focus();
+    }
+
     pub(super) fn pin_windows_need_bootstrap(&self) -> bool {
         self.windows.needs_viewport_bootstrap(&self.board)
     }
@@ -250,6 +254,38 @@ impl PinboardCaptureLifecycle {
         }
         self.pin_windows = coordinator;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_window_presenter_for_test(&mut self, windows: PinWindowPresenter) {
+        assert!(self.session.is_none());
+        self.pin_windows = windows.visibility_coordinator();
+        self.windows = windows;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_parking_factory_for_test(
+        &mut self,
+        parking_factory: Arc<dyn LauncherCaptureParkingFactory>,
+    ) {
+        assert!(self.session.is_none());
+        self.parking_factory = parking_factory;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_pin_click_through_for_test(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        id: crate::pinboard::PinId,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.windows
+            .set_pin_click_through_for_test(ctx, &mut self.board, id, enabled)
+    }
+
+    #[cfg(test)]
+    pub(super) fn presenter_for_test(&self) -> &PinWindowPresenter {
+        &self.windows
     }
 
     /// Test and later native-window owner seam. Production M11-A starts with

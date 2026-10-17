@@ -7,9 +7,9 @@ use crate::commands::{
     DialogCommandHost, DiffCommandHost, FavoriteLogPolicy, FileSearchCommandHost,
     HeadlessCommandHost, HistoryPolicy, JsonUtilityCommandHost, LauncherCommandHost,
     MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, PendingQueryPolicy,
-    QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost, ScreenshotCommandHost,
-    ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup, ScreenshotMode, ToastPolicy,
-    TodoCommandHost, VisibilityPolicy, XmlToolkitCommandHost,
+    PinboardCommandHost, QueryPolicy, RadialCommandHost, ResultsPolicy, ScreenDrawCommandHost,
+    ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination, ScreenshotMarkup,
+    ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy, XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -778,6 +778,30 @@ impl ScreenshotCommandHost for LauncherApp {
     }
 }
 
+impl PinboardCommandHost for LauncherApp {
+    fn start_pinboard_capture(&mut self) -> Result<bool, String> {
+        let started = self.begin_pinboard_capture()?;
+        if started {
+            self.egui_ctx
+                .request_repaint_of(eframe::egui::ViewportId::ROOT);
+        }
+        Ok(started)
+    }
+
+    fn open_pinboard_list(&mut self) -> Result<(), String> {
+        self.pin_list_open = true;
+        self.focus_query = false;
+        self.pinboard_capture.request_pin_list_focus();
+        if self.visible_flag.load(Ordering::SeqCst) {
+            self.egui_ctx
+                .request_repaint_of(eframe::egui::ViewportId::ROOT);
+        } else {
+            self.request_launcher_state(Some(true), Some(true));
+        }
+        Ok(())
+    }
+}
+
 impl DataCommandHost for LauncherApp {
     fn open_data_dialog(&mut self, focus: crate::commands::DataDialogFocus) -> Result<(), String> {
         self.data_recovery_dialog.open(focus)?;
@@ -1125,6 +1149,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::BatchRename(_)
             | Command::HotFolder(_)
             | Command::HashGenerator(_)
+            | Command::Pinboard(_)
             | Command::ColorPick(_)
             | Command::Ocr(_)
             | Command::CoordinateTool(_)
@@ -1794,7 +1819,7 @@ fn allow_radial_queryexec_activation(
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::gui) mod tests {
     use super::*;
 
     #[test]
@@ -2032,7 +2057,7 @@ mod tests {
         );
     }
 
-    fn inert_test_app(root: &std::path::Path) -> LauncherApp {
+    pub(in crate::gui) fn inert_test_app(root: &std::path::Path) -> LauncherApp {
         let ctx = eframe::egui::Context::default();
         let mut settings = crate::settings::Settings::default();
         settings.hotkey = None;

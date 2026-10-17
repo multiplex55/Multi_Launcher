@@ -74,6 +74,7 @@ pub enum Command {
     Diff(DiffCommand),
     ClipboardModify(ClipboardModifyCommand),
     Screenshot(ScreenshotCommand),
+    Pinboard(PinboardCommand),
     ScreenDraw(ScreenDrawCommand),
     CoordinateTool(CoordinateToolCommand),
     Shell(ShellCommand),
@@ -118,6 +119,7 @@ impl Command {
             Self::Diff(_) => "diff",
             Self::ClipboardModify(_) => "clipboard_modify",
             Self::Screenshot(_) => "screenshot",
+            Self::Pinboard(_) => "pinboard",
             Self::ScreenDraw(_) => "screen_draw",
             Self::CoordinateTool(_) => "mouse",
             Self::Shell(_) => "shell",
@@ -161,6 +163,7 @@ impl Command {
             Self::Diff(v) => v.kind_name(),
             Self::ClipboardModify(v) => v.kind_name(),
             Self::Screenshot(v) => v.kind_name(),
+            Self::Pinboard(v) => v.kind_name(),
             Self::ScreenDraw(v) => v.kind_name(),
             Self::CoordinateTool(v) => v.kind_name(),
             Self::Shell(v) => v.kind_name(),
@@ -617,6 +620,13 @@ pub enum ScreenshotCommand {
     },
 }
 kinds!(ScreenshotCommand, Self::Capture { .. } => "capture", Self::UnknownMode { .. } => "unknown_mode");
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PinboardCommand {
+    Capture,
+    List,
+    Unknown { raw: String },
+}
+kinds!(PinboardCommand, Self::Capture => "capture", Self::List => "list", Self::Unknown { .. } => "unknown");
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellCommand {
     Dialog,
