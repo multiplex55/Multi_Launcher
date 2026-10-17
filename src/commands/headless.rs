@@ -119,6 +119,28 @@ mod screen_draw_headless_tests {
         );
         assert!(external_calls.is_empty());
     }
+
+    #[test]
+    fn search_replace_requires_the_launcher_interface_without_external_fallback() {
+        let original = Action {
+            label: "Open Search and Replace".into(),
+            desc: String::new(),
+            action: "replace:open".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::SearchReplace(SearchReplaceCommand::Open),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("require the launcher interface"));
+        assert!(external_calls.is_empty());
+    }
 }
 
 fn execute_with_external(
@@ -186,6 +208,9 @@ fn execute_with_external(
         }
         Command::BatchRename(_) => {
             anyhow::bail!("Batch Renamer commands require the launcher interface")
+        }
+        Command::SearchReplace(_) => {
+            anyhow::bail!("Search and Replace commands require the launcher interface")
         }
         Command::Radial(_) => anyhow::bail!("radial commands require the launcher interface"),
         Command::ScreenDraw(_) => {

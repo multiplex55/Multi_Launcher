@@ -80,7 +80,7 @@ impl HelpWindow {
                                 "All (Ctrl+1), Applications (Ctrl+2), Files (Ctrl+3), Notes (Ctrl+4), Commands (Ctrl+5). Focus the query field to use the shortcuts.",
                             );
                             ui.label(
-                                "Scope selection lasts for this launcher session and resets to All when a new session opens. Enabled explicit plugin prefixes such as fs, regex, cs, and mouse keep their existing command behavior; ordinary queries return to the selected scope.",
+                                "Scope selection lasts for this launcher session and resets to All when a new session opens. Enabled explicit plugin prefixes such as fs, regex, cs, mouse, and replace keep their existing command behavior; ordinary queries return to the selected scope.",
                             );
                             ui.label(
                                 "The existing app <query> catalog syntax and the file-search plugin's Global/Directory options are unchanged. Generic provider results without a specific category appear in Commands.",
@@ -245,6 +245,9 @@ impl HelpWindow {
                         ui.monospace(
                             "  cal add <date> <time|all-day> <title> @todo:<id> @note:<id>",
                         );
+                        ui.separator();
+                        ui.label(egui::RichText::new("Search and Replace").strong());
+                        ui.label("Type replace to open the explicit-root dialog. Opening it never starts a search. Approve stable individual match IDs, inspect each selected match's original and proposed text plus the bounded file diff, then explicitly confirm the frozen candidate. Long match previews disclose truncation. Search and preview do not write files; Apply rechecks captured sources and records durable backups and receipts. Partial outcomes remain available for explicit Restore or recovery.");
                         ui.label("UI linking:");
                         ui.monospace("  Notes dialog → right-click note → Link to todo");
                         ui.monospace("  Todos dialog → right-click todo → Link note");

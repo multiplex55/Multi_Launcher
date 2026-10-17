@@ -23,6 +23,7 @@ It’s designed to be “one hotkey away” from:
 - [Cookbook examples](#cookbook-examples)
 - [Date arithmetic](#date-arithmetic)
 - [File-search plugin](#file-search-plugin)
+- [Search & Replace](#search--replace)
 - [Batch Renamer](#batch-renamer)
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
@@ -100,6 +101,7 @@ Multi Launcher is centered around a **single query box**:
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
 | `xml` | Local XML tree, XPath, XSD, format and file utility | `xml` |
 | `regex` | Local Rust regex tester | `regex` |
+| `replace` | Explicit-root multi-file replacement with per-match approval and durable recovery | `replace` |
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
 | `mouse` | Mouse settings, coordinates, picking, and independent crosshair | `mouse settings` / `mouse coords copy` / `mouse crosshair toggle` |
 | `ocr` | Local English text recognition from a screen region | `ocr` |
@@ -477,6 +479,45 @@ receipts already marked Undone are dropped to make room. Undo requires the
 recorded file identity, bytes, size, and last-modified time to match, and refuses
 occupied original names. Content verification is limited to 1 GiB per file and
 4 GiB across one batch.
+
+---
+
+## Search & Replace
+
+Type `replace` and choose **Open Search and Replace**. The resizable dialog
+starts without a root or an active scan. Choose a folder explicitly; the
+default scope is its direct children, with recursion available as an explicit
+option. Extension filters, root-relative include globs, excluded paths, and
+excluded globs are applied when you press **Search / Refresh**. Search patterns
+can be literal text or Rust regular expressions with an optional case-sensitive
+mode. Replacement text can be literal or use Rust capture substitutions such
+as `$1`, `${name}`, and `$$`; unknown references and output limits are shown
+before Apply.
+
+Search reads supported UTF-8 text and UTF-8-with-BOM files. Binary and
+unsupported encodings are skipped and listed. Directories are never guessed,
+and opening or changing a filter does not silently start a search. Results
+retain stable match IDs from the captured search. Select individual matches or
+files; filtering and sorting change only the displayed rows. The exact proposed
+bytes and bounded original/proposed diff update from the captured source without
+rescanning. Select any match row to inspect that stable match's original and
+proposed text, including distant or multiline changes. Very long match previews
+are truncated with the omitted length disclosed; the bounded file diff may show
+only its first change. Unselected source bytes remain intact, including BOMs,
+line endings, and a missing final newline.
+
+**Review Apply** shows the roots, files, approved match counts, captured source
+hashes, and proposed output hashes. **Confirm and Apply** freezes that exact
+candidate before the guarded worker checks the current source identities and
+bytes again. A stale or inaccessible file is refused and reported; refresh and
+review a new candidate before trying it again. Each write records a durable
+backup and receipt in the application's `replace_recovery` data directory.
+Cancellation or a failure can leave a partial batch, which the receipt reports
+per file. Restore is explicit and only proceeds when the written file still
+matches its recorded post-write identity and bytes. Recovery reconciles only
+recorded staging identities; conflicting occupants are left in place and
+reported. Receipts remain available after closing the dialog or restarting the
+application.
 
 ---
 

@@ -51,6 +51,7 @@ pub mod reddit;
 pub mod regex_tester;
 pub mod runescape;
 pub mod screen_draw;
+pub mod search_replace;
 pub mod screenshot;
 pub mod settings;
 pub mod shell;

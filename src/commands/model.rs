@@ -88,6 +88,7 @@ pub enum Command {
     JsonUtility(JsonUtilityCommand),
     XmlToolkit(XmlToolkitCommand),
     BatchRename(BatchRenameCommand),
+    SearchReplace(SearchReplaceCommand),
     HashGenerator(HashGeneratorCommand),
     ColorPick(ColorPickCommand),
     Ocr(OcrCommand),
@@ -130,6 +131,7 @@ impl Command {
             Self::JsonUtility(_) => "json_utility",
             Self::XmlToolkit(_) => "xml_toolkit",
             Self::BatchRename(_) => "batch_rename",
+            Self::SearchReplace(_) => "search_replace",
             Self::HashGenerator(_) => "hash_generator",
             Self::ColorPick(_) => "color_pick",
             Self::Ocr(_) => "ocr",
@@ -171,6 +173,7 @@ impl Command {
             Self::JsonUtility(v) => v.kind_name(),
             Self::XmlToolkit(v) => v.kind_name(),
             Self::BatchRename(v) => v.kind_name(),
+            Self::SearchReplace(v) => v.kind_name(),
             Self::HashGenerator(v) => v.kind_name(),
             Self::ColorPick(v) => v.kind_name(),
             Self::Ocr(v) => v.kind_name(),
@@ -803,6 +806,13 @@ pub enum BatchRenameCommand {
 }
 
 kinds!(BatchRenameCommand, Self::Open => "open");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchReplaceCommand {
+    Open,
+}
+
+kinds!(SearchReplaceCommand, Self::Open => "open");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HashGeneratorCommand {

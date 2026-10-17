@@ -53,6 +53,7 @@ use crate::plugins::reddit::RedditPlugin;
 use crate::plugins::regex_tester::RegexTesterPlugin;
 use crate::plugins::runescape::RunescapeSearchPlugin;
 use crate::plugins::screen_draw::ScreenDrawPlugin;
+use crate::plugins::search_replace::SearchReplacePlugin;
 use crate::plugins::screenshot::ScreenshotPlugin;
 use crate::plugins::settings::SettingsPlugin;
 use crate::plugins::shell::ShellPlugin;
@@ -917,6 +918,7 @@ impl PluginManager {
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
         self.register_with_settings(BatchRenamePlugin, plugin_settings);
+        self.register_with_settings(SearchReplacePlugin, plugin_settings);
         self.register_with_settings(HashGeneratorPlugin, plugin_settings);
         self.register_with_settings(RegexTesterPlugin, plugin_settings);
         self.register_with_settings(QrPlugin, plugin_settings);

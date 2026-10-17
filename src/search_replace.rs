@@ -1304,6 +1304,41 @@ pub struct ReplacementDiffContext {
     truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplacementMatchOutputRange {
+    id: MatchId,
+    original: Range<usize>,
+    proposed: Range<usize>,
+}
+
+/// Exact original and proposed text for one explicitly selected match.
+/// The text borrows the candidate's captured source and output buffers, so
+/// callers can inspect distant changes without duplicating candidate bytes.
+#[derive(Debug, Clone, Copy)]
+pub struct ReplacementMatchOutput<'a> {
+    id: &'a MatchId,
+    original_text: &'a str,
+    proposed_text: &'a str,
+}
+
+impl<'a> ReplacementMatchOutput<'a> {
+    pub fn id(&self) -> &'a MatchId {
+        self.id
+    }
+
+    pub fn original_text(&self) -> &'a str {
+        self.original_text
+    }
+
+    pub fn proposed_text(&self) -> &'a str {
+        self.proposed_text
+    }
+
+    pub fn changed(&self) -> bool {
+        self.original_text != self.proposed_text
+    }
+}
+
 impl ReplacementDiffContext {
     pub fn original_excerpt(&self) -> &str {
         &self.original_excerpt
@@ -1331,6 +1366,7 @@ pub struct ReplacementFileCandidate {
     output_sha256: [u8; 32],
     replacement_revision: ReplacementRevision,
     selected_match_ids: Vec<MatchId>,
+    match_output_ranges: Vec<ReplacementMatchOutputRange>,
     readiness: ReplacementFileReadiness,
     diagnostic: Option<ReplacementDiagnostic>,
     changed_matches: Option<usize>,
@@ -1360,6 +1396,28 @@ impl ReplacementFileCandidate {
 
     pub fn selected_match_ids(&self) -> &[MatchId] {
         &self.selected_match_ids
+    }
+
+    /// Returns the exact captured and proposed text for a selected stable
+    /// match ID without copying either the source or candidate output.
+    pub fn match_output(&self, id: &MatchId) -> Option<ReplacementMatchOutput<'_>> {
+        let range = self
+            .match_output_ranges
+            .iter()
+            .find(|range| &range.id == id)?;
+        let original_text = std::str::from_utf8(
+            self.original_snapshot
+                .raw_bytes
+                .get(range.original.clone())?,
+        )
+        .ok()?;
+        let proposed_text =
+            std::str::from_utf8(self.output_bytes.get(range.proposed.clone())?).ok()?;
+        Some(ReplacementMatchOutput {
+            id: &range.id,
+            original_text,
+            proposed_text,
+        })
     }
 
     pub fn readiness(&self) -> ReplacementFileReadiness {
@@ -1442,6 +1500,7 @@ struct ComputedFileOutput {
     selected_noop_matches: usize,
     estimated_changed_bytes: u64,
     diff_context: Option<ReplacementDiffContext>,
+    match_output_ranges: Vec<ReplacementMatchOutputRange>,
 }
 
 fn build_replacement_candidate(
@@ -1576,6 +1635,7 @@ fn build_replacement_candidate(
                     output_sha256: computed.sha256,
                     replacement_revision: replacement.revision,
                     selected_match_ids: file_selection,
+                    match_output_ranges: computed.match_output_ranges,
                     readiness: if changed {
                         ReplacementFileReadiness::Ready
                     } else {
@@ -1598,6 +1658,7 @@ fn build_replacement_candidate(
                     output_sha256: snapshot.content_sha256,
                     replacement_revision: replacement.revision,
                     selected_match_ids: file_selection,
+                    match_output_ranges: Vec::new(),
                     readiness: ReplacementFileReadiness::Error,
                     diagnostic: Some(diagnostic),
                     changed_matches: None,
@@ -1730,6 +1791,7 @@ fn compute_file_output(
             selected_noop_matches: 0,
             estimated_changed_bytes: 0,
             diff_context: None,
+            match_output_ranges: Vec::new(),
         });
     }
 
@@ -1755,6 +1817,7 @@ fn compute_file_output(
     let mut changed_matches = 0usize;
     let mut selected_noop_matches = 0usize;
     let mut estimated_changed_bytes = 0u64;
+    let mut match_output_ranges = Vec::with_capacity(selected_match_ids.len());
 
     for span in &snapshot.matches {
         if !selected.contains(&span.id) {
@@ -1796,6 +1859,11 @@ fn compute_file_output(
                 "the replacement expansion produced invalid UTF-8",
             )
         })?;
+        match_output_ranges.push(ReplacementMatchOutputRange {
+            id: span.id.clone(),
+            original: range.clone(),
+            proposed: replacement_start..output.len(),
+        });
         if inserted == matched_text {
             selected_noop_matches = selected_noop_matches.saturating_add(1);
         } else {
@@ -1818,6 +1886,7 @@ fn compute_file_output(
             selected_noop_matches,
             estimated_changed_bytes,
             diff_context: None,
+            match_output_ranges,
         });
     }
 
@@ -1843,6 +1912,7 @@ fn compute_file_output(
         selected_noop_matches,
         estimated_changed_bytes,
         diff_context,
+        match_output_ranges,
     })
 }
 

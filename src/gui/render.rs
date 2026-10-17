@@ -2568,6 +2568,7 @@ impl LauncherApp {
         self.poll_screen_draw_region_picker(ctx);
         self.xml_toolkit_dialog.poll_closed_background(ctx);
         self.poll_batch_rename_runtime(ctx);
+        self.poll_search_replace_runtime(ctx);
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
         self.acquire_macro_prompt(ctx);
@@ -4479,6 +4480,17 @@ impl LauncherApp {
                 self.handle_batch_rename_ui_command(command);
             }
         }
+        let search_replace_commands = self.search_replace_dialog.ui(
+            &ctx,
+            first_ui_pass,
+            &self.replace_worker_snapshot,
+        );
+        if first_ui_pass {
+            for command in search_replace_commands {
+                self.handle_search_replace_ui_command(command);
+            }
+            self.submit_ready_search_replace_confirmation();
+        }
         self.diff_dialog.ui(&ctx);
         let mut notes_dlg = std::mem::take(&mut self.notes_dialog);
         notes_dlg.ui(&ctx, self);
@@ -4947,6 +4959,7 @@ impl eframe::App for LauncherApp {
         self.xml_toolkit_dialog.shutdown();
         self.hash_generator_dialog.shutdown();
         self.shutdown_batch_rename_scanner();
+        self.shutdown_search_replace_runtime();
         if let Some(plan) = self
             .sequence_playback
             .take_shutdown_restore_plan(std::time::Instant::now())

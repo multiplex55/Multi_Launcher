@@ -286,6 +286,17 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     if s == "rename:open" {
         return Ok(Command::BatchRename(BatchRenameCommand::Open));
     }
+    if s.starts_with("replace:") {
+        if s == "replace:open" && action.args.is_none() {
+            return Ok(Command::SearchReplace(SearchReplaceCommand::Open));
+        }
+        let message = if action.args.is_some() {
+            "replace:open does not accept a path or content payload"
+        } else {
+            "unknown Search and Replace command"
+        };
+        return Err(CommandError::new("search_replace", message).with_gui_failure_policy());
+    }
     if let Some(command) = parse_json_utility(s) {
         return Ok(Command::JsonUtility(command));
     }

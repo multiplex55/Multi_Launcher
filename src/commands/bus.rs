@@ -5,6 +5,7 @@ use crate::commands::handlers::{
     handle_file_search, handle_hash_generator, handle_headless_gui_with_history_query,
     handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
     handle_note, handle_ocr, handle_paste_sequence, handle_query, handle_radial,
+    handle_search_replace,
     handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo,
     handle_xml_toolkit,
 };
@@ -44,6 +45,7 @@ impl CommandBus {
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
             Command::XmlToolkit(command) => Ok(handle_xml_toolkit(host, *command)),
             Command::BatchRename(command) => Ok(handle_batch_rename(host, *command)),
+            Command::SearchReplace(command) => Ok(handle_search_replace(host, *command)),
             Command::HashGenerator(command) => Ok(handle_hash_generator(host, command)),
             Command::ColorPick(command) => handle_color_pick(host, command),
             Command::Ocr(command) => handle_ocr(host, command),
@@ -130,6 +132,7 @@ mod tests {
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
         xml_toolkit_opens: usize,
         batch_rename_opens: usize,
+        search_replace_opens: usize,
         hash_generator_opens: usize,
         radial_calls: usize,
     }
@@ -386,6 +389,11 @@ mod tests {
     impl crate::commands::BatchRenameCommandHost for FakeHost {
         fn open_batch_rename(&mut self) {
             self.batch_rename_opens += 1;
+        }
+    }
+    impl crate::commands::SearchReplaceCommandHost for FakeHost {
+        fn open_search_replace(&mut self) {
+            self.search_replace_opens += 1;
         }
     }
     impl crate::commands::ClipboardModifyCommandHost for FakeHost {
@@ -895,6 +903,57 @@ mod tests {
         let mut host = FakeHost::default();
         let outcome = CommandBus.dispatch(&invocation, &mut host).unwrap();
         assert_eq!(host.batch_rename_opens, 1);
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(outcome.query, QueryPolicy::Keep);
+        assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn search_replace_plugin_opens_once_through_the_typed_bus_without_a_path_payload() {
+        let mut manager = crate::plugin::PluginManager::new_inert_for_test();
+        manager.reload_from_dirs(
+            &[],
+            10,
+            crate::settings::NetUnit::Auto,
+            false,
+            &std::collections::HashMap::new(),
+            std::sync::Arc::new(Vec::new()),
+        );
+
+        let action = manager
+            .search_filtered("replace", None, None)
+            .into_iter()
+            .find(|action| action.action == "replace:open")
+            .expect("normal plugin construction registers Search and Replace");
+        assert!(action.args.is_none(), "the command carries no path or pattern");
+        assert!(manager
+            .commands()
+            .iter()
+            .any(|command| command.action == "query:replace"));
+        assert!(manager
+            .plugin_names()
+            .iter()
+            .any(|name| name == "search_replace"));
+        assert!(manager
+            .search_filtered("replacefoo", None, None)
+            .iter()
+            .all(|action| action.action != "replace:open"));
+
+        let invocation = crate::commands::parse_command(
+            action,
+            Some("must not become file content".into()),
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .expect("the plugin wire action has a typed command");
+        assert_eq!(
+            invocation.command,
+            Command::SearchReplace(crate::commands::SearchReplaceCommand::Open)
+        );
+        let mut host = FakeHost::default();
+        let outcome = CommandBus.dispatch(&invocation, &mut host).unwrap();
+        assert_eq!(host.search_replace_opens, 1);
         assert_eq!(host.headless_calls, 0);
         assert_eq!(outcome.query, QueryPolicy::Keep);
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);

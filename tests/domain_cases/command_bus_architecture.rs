@@ -20,6 +20,7 @@ fn typed_bus_has_no_legacy_or_wildcard_fallback() {
         "Todo",
         "MouseGesture",
         "MultiManager",
+        "SearchReplace",
         "FileSearch",
         "Diff",
         "ClipboardModify",

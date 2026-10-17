@@ -282,6 +282,9 @@ mod tests {
     impl crate::commands::BatchRenameCommandHost for Host {
         fn open_batch_rename(&mut self) {}
     }
+    impl crate::commands::SearchReplaceCommandHost for Host {
+        fn open_search_replace(&mut self) {}
+    }
     impl NoteCommandHost for Host {
         fn open_notes_dialog(&mut self) {}
         fn open_note_graph_dialog(&mut self, _: Option<&str>) {}

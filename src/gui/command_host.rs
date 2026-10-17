@@ -606,6 +606,12 @@ impl BatchRenameCommandHost for LauncherApp {
     }
 }
 
+impl crate::commands::SearchReplaceCommandHost for LauncherApp {
+    fn open_search_replace(&mut self) {
+        self.focus_panel(super::Panel::SearchReplaceDialog);
+    }
+}
+
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();

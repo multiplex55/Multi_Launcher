@@ -59,6 +59,7 @@ mod screen_draw_restore;
 mod screen_draw_toolbar;
 mod screenshot_editor;
 mod search;
+mod search_replace_dialog;
 mod shell_cmd_dialog;
 mod snippet_dialog;
 mod snippet_prompt_dialog;
@@ -100,6 +101,9 @@ pub use add_action_dialog::AddActionDialog;
 pub use add_bookmark_dialog::AddBookmarkDialog;
 pub use alias_dialog::AliasDialog;
 pub(crate) use batch_rename_dialog::{BatchRenameDialogState, BatchRenameUiCommand};
+pub(crate) use search_replace_dialog::{
+    ReplacementPreviewWorker, SearchReplaceDialogState, SearchReplaceUiCommand,
+};
 pub use bookmark_alias_dialog::BookmarkAliasDialog;
 pub use brightness_dialog::BRIGHTNESS_QUERIES;
 pub use brightness_dialog::BrightnessDialog;
@@ -642,6 +646,7 @@ pub enum Panel {
     JsonUtilityDialog,
     RegexTesterDialog,
     BatchRenameDialog,
+    SearchReplaceDialog,
     XmlToolkitDialog,
     QrDialog,
     ConvertPanel,
@@ -700,6 +705,7 @@ impl Panel {
             Self::JsonUtilityDialog => "JSON Utility",
             Self::RegexTesterDialog => "Regex Tester",
             Self::BatchRenameDialog => "Batch Renamer",
+            Self::SearchReplaceDialog => "Search and Replace",
             Self::XmlToolkitDialog => "XML Toolkit",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
@@ -759,6 +765,7 @@ struct PanelStates {
     json_utility_dialog: bool,
     regex_tester_dialog: bool,
     batch_rename_dialog: bool,
+    search_replace_dialog: bool,
     xml_toolkit_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
@@ -987,6 +994,12 @@ pub struct LauncherApp {
     file_search_coordinator: SearchCoordinator,
     batch_rename_dialog: BatchRenameDialogState,
     batch_rename_coordinator: Option<crate::file_operations::RenameScanCoordinator>,
+    search_replace_dialog: SearchReplaceDialogState,
+    replace_search_coordinator: Option<crate::search_replace::SearchCoordinator>,
+    replace_preview_worker: Option<ReplacementPreviewWorker>,
+    replace_executor_worker: Option<crate::replace_executor::ReplaceExecutorWorker>,
+    replace_operation_pending: bool,
+    replace_worker_snapshot: crate::replace_executor::ReplaceWorkerSnapshot,
     notes_dialog: NotesDialog,
     note_graph_dialog: NoteGraphDialog,
     unused_assets_dialog: UnusedAssetsDialog,
@@ -1797,6 +1810,269 @@ impl LauncherApp {
             }
             self.batch_rename_dialog.discard_finished_ticket();
         }
+    }
+
+    fn ensure_replace_executor(&mut self) -> Result<PathBuf, String> {
+        let recovery_directory = crate::platform::app_data::AppDataRoot::from_settings_path(
+            &self.settings_path,
+        )
+        .map_err(|error| format!("could not locate application data for replacement recovery: {error}"))?
+        .path()
+        .join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY);
+        self.search_replace_dialog
+            .set_recovery_directory(recovery_directory.clone());
+        if self.replace_executor_worker.is_none() {
+            let executor = crate::replace_executor::ReplaceExecutor::new(recovery_directory.clone())
+                .map_err(|error| format!("could not initialize replacement recovery: {error}"))?;
+            self.replace_executor_worker = Some(
+                crate::replace_executor::ReplaceExecutorWorker::new(executor)
+                    .map_err(|error| format!("could not start the guarded replace worker: {error}"))?,
+            );
+        }
+        self.search_replace_dialog.start_receipt_load()?;
+        Ok(recovery_directory)
+    }
+
+    fn ensure_search_replace_runtime(&mut self) -> Result<(), String> {
+        let _ = self.ensure_replace_executor()?;
+        if self.replace_search_coordinator.is_none() {
+            self.replace_search_coordinator = Some(
+                crate::search_replace::SearchCoordinator::new()
+                    .map_err(|error| format!("could not start the search worker: {error}"))?,
+            );
+        }
+        if self.replace_preview_worker.is_none() {
+            self.replace_preview_worker = Some(
+                ReplacementPreviewWorker::new()
+                    .map_err(|error| format!("could not start the preview worker: {error}"))?,
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn handle_search_replace_ui_command(
+        &mut self,
+        command: SearchReplaceUiCommand,
+    ) {
+        match command {
+            SearchReplaceUiCommand::SelectRoot(root) => self.search_replace_dialog.set_root(root),
+            SearchReplaceUiCommand::Search => self.start_search_replace_search(),
+            SearchReplaceUiCommand::CancelSearch => self.search_replace_dialog.cancel_search(),
+            SearchReplaceUiCommand::ReviewApply => {}
+            SearchReplaceUiCommand::ConfirmApply => {
+                let setup = self.ensure_search_replace_runtime();
+                if let Err(error) = setup {
+                    self.search_replace_dialog.confirm_request_failed(error);
+                    return;
+                }
+                let Some(job) = self.search_replace_dialog.take_confirm_job() else {
+                    self.search_replace_dialog.set_status_message(
+                        "The reviewed candidate is no longer current. Refresh and inspect it again.",
+                    );
+                    return;
+                };
+                let Some(worker) = self.replace_preview_worker.as_ref() else {
+                    self.search_replace_dialog.confirm_request_failed(
+                        "The preview worker is unavailable.".into(),
+                    );
+                    return;
+                };
+                if let Err(error) = worker.submit(job) {
+                    self.search_replace_dialog.confirm_request_failed(error);
+                }
+            }
+            SearchReplaceUiCommand::CancelApply
+            | SearchReplaceUiCommand::CancelRecoveryAction => {
+                self.search_replace_dialog.cancel_confirmation();
+            }
+            SearchReplaceUiCommand::ReviewRestore(transaction_id) => self
+                .search_replace_dialog
+                .review_recovery(transaction_id, search_replace_dialog::RecoveryAction::Restore),
+            SearchReplaceUiCommand::ReviewRecovery(transaction_id) => self
+                .search_replace_dialog
+                .review_recovery(transaction_id, search_replace_dialog::RecoveryAction::Recover),
+            SearchReplaceUiCommand::ConfirmRestore => self.submit_search_replace_recovery(
+                search_replace_dialog::RecoveryAction::Restore,
+            ),
+            SearchReplaceUiCommand::ConfirmRecovery => self.submit_search_replace_recovery(
+                search_replace_dialog::RecoveryAction::Recover,
+            ),
+            SearchReplaceUiCommand::CancelOperation => {
+                if let Some(worker) = self.replace_executor_worker.as_ref() {
+                    worker.cancel_active();
+                }
+            }
+            SearchReplaceUiCommand::Closed => {
+                self.end_search_replace_session();
+                self.panel_states.search_replace_dialog = false;
+                self.panel_stack
+                    .retain(|panel| *panel != Panel::SearchReplaceDialog);
+            }
+        }
+    }
+
+    fn start_search_replace_search(&mut self) {
+        if let Err(error) = self.ensure_search_replace_runtime() {
+            self.search_replace_dialog.fail_search(error);
+            return;
+        }
+        let request = match self.search_replace_dialog.build_search_request() {
+            Ok(request) => request,
+            Err(error) => {
+                self.search_replace_dialog.fail_search(error);
+                return;
+            }
+        };
+        let Some(coordinator) = self.replace_search_coordinator.as_ref() else {
+            self.search_replace_dialog
+                .fail_search("The search worker is unavailable.".into());
+            return;
+        };
+        match coordinator.submit(request) {
+            Ok(ticket) => self.search_replace_dialog.record_search_ticket(ticket),
+            Err(error) => self
+                .search_replace_dialog
+                .fail_search(format!("Could not start search: {error}")),
+        }
+    }
+
+    fn submit_ready_search_replace_confirmation(&mut self) {
+        let Some(request) = self.search_replace_dialog.take_confirmed_request() else {
+            return;
+        };
+        let Some(worker) = self.replace_executor_worker.as_ref() else {
+            self.search_replace_dialog
+                .confirm_request_failed("The guarded replace worker is unavailable.".into());
+            return;
+        };
+        let snapshot = worker.snapshot();
+        if snapshot.active || snapshot.result.is_some() || snapshot.shutdown_requested {
+            self.search_replace_dialog.confirm_request_failed(
+                "The guarded replace worker is busy. The reviewed candidate was not submitted; refresh and review it again.".into(),
+            );
+            return;
+        }
+        match worker.submit_apply(request) {
+            Ok(()) => {
+                self.replace_operation_pending = true;
+                self.search_replace_dialog.confirm_request_submitted();
+            }
+            Err(error) => self.search_replace_dialog.confirm_request_failed(format!(
+                "The guarded replace worker refused the reviewed request: {error}"
+            )),
+        }
+    }
+
+    fn submit_search_replace_recovery(
+        &mut self,
+        expected_action: search_replace_dialog::RecoveryAction,
+    ) {
+        let Some((transaction_id, action)) = self.search_replace_dialog.take_recovery_intent()
+        else {
+            return;
+        };
+        if action != expected_action {
+            self.search_replace_dialog.set_status_message(
+                "The recovery review changed. Reopen and confirm the intended receipt action.",
+            );
+            return;
+        }
+        if let Err(error) = self.ensure_replace_executor() {
+            self.search_replace_dialog.set_status_message(error);
+            return;
+        }
+        let Some(worker) = self.replace_executor_worker.as_ref() else {
+            self.search_replace_dialog.set_status_message(
+                "The guarded replace worker is unavailable; the receipt remains saved.",
+            );
+            return;
+        };
+        let result = match action {
+            search_replace_dialog::RecoveryAction::Restore => {
+                worker.submit_restore(transaction_id)
+            }
+            search_replace_dialog::RecoveryAction::Recover => {
+                worker.submit_recovery(transaction_id)
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.replace_operation_pending = true;
+                self.search_replace_dialog.complete_recovery_submission();
+            }
+            Err(error) => self.search_replace_dialog.set_status_message(format!(
+                "The requested recovery operation was not started: {error}"
+            )),
+        }
+    }
+
+    pub(crate) fn poll_search_replace_runtime(&mut self, ctx: &egui::Context) {
+        let replace_snapshot = self
+            .replace_operation_pending
+            .then(|| self.replace_executor_worker.as_ref().map(|worker| worker.snapshot()))
+            .flatten();
+        let changed = self.search_replace_dialog.poll_background(
+            self.replace_search_coordinator.as_ref(),
+            self.replace_preview_worker.as_ref(),
+            replace_snapshot.as_ref(),
+            self.replace_executor_worker.as_ref(),
+        );
+        if let Some(snapshot) = replace_snapshot {
+            if snapshot.result.is_some() || snapshot.worker_exited {
+                self.replace_operation_pending = false;
+                self.replace_worker_snapshot = crate::replace_executor::ReplaceWorkerSnapshot::default();
+                if snapshot.worker_exited && snapshot.result.is_none() {
+                    self.search_replace_dialog.set_status_message(
+                        "The guarded replace worker exited before returning a receipt. Existing recovery data remains on disk.",
+                    );
+                }
+            } else {
+                self.replace_worker_snapshot = snapshot;
+            }
+        } else {
+            self.replace_worker_snapshot = crate::replace_executor::ReplaceWorkerSnapshot::default();
+        }
+        if changed {
+            ctx.request_repaint();
+        }
+        if self.search_replace_dialog.has_background_work(
+            self.replace_preview_worker.as_ref(),
+            self.replace_operation_pending,
+        ) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
+    }
+
+    fn end_search_replace_session(&mut self) {
+        self.search_replace_dialog.end_session(
+            self.replace_search_coordinator.as_ref(),
+            self.replace_executor_worker.as_ref(),
+        );
+    }
+
+    pub(crate) fn shutdown_search_replace_runtime(&mut self) {
+        self.end_search_replace_session();
+        if let Some(coordinator) = self.replace_search_coordinator.take()
+            && let Err(error) = coordinator.shutdown()
+        {
+            tracing::warn!(%error, "search and replace scanner did not shut down cleanly");
+        }
+        if let Some(worker) = self.replace_preview_worker.take()
+            && let Err(error) = worker.shutdown()
+        {
+            tracing::warn!(%error, "replacement preview worker did not shut down cleanly");
+        }
+        if let Some(worker) = self.replace_executor_worker.take()
+            && let Err(error) = worker.shutdown()
+        {
+            tracing::warn!(%error, "guarded replace worker did not shut down cleanly");
+        }
+        if let Some(loader) = self.search_replace_dialog.take_receipt_loader()
+            && let Err(error) = loader.shutdown()
+        {
+            tracing::warn!(%error, "replacement receipt reader did not shut down cleanly");
+        }
+        self.replace_operation_pending = false;
     }
 
     pub(crate) fn save_file_search_ui_preferences_if_dirty(&mut self) {
@@ -2720,6 +2996,12 @@ impl LauncherApp {
             file_search_coordinator: SearchCoordinator::from_settings(file_search_settings),
             batch_rename_dialog: BatchRenameDialogState::default(),
             batch_rename_coordinator: None,
+            search_replace_dialog: SearchReplaceDialogState::default(),
+            replace_search_coordinator: None,
+            replace_preview_worker: None,
+            replace_executor_worker: None,
+            replace_operation_pending: false,
+            replace_worker_snapshot: crate::replace_executor::ReplaceWorkerSnapshot::default(),
             diff_dialog: DiffDialogState::default(),
             notes_dialog: NotesDialog::default(),
             note_graph_dialog: NoteGraphDialog::default(),
@@ -3398,7 +3680,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 53] = [
+    const TRACKED_PANELS: [Panel; 54] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -3435,6 +3717,7 @@ impl LauncherApp {
         Panel::JsonUtilityDialog,
         Panel::RegexTesterDialog,
         Panel::BatchRenameDialog,
+        Panel::SearchReplaceDialog,
         Panel::XmlToolkitDialog,
         Panel::QrDialog,
         Panel::ConvertPanel,
@@ -3492,6 +3775,7 @@ impl LauncherApp {
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
             Panel::BatchRenameDialog => self.batch_rename_dialog.open,
+            Panel::SearchReplaceDialog => self.search_replace_dialog.open,
             Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
@@ -3663,6 +3947,10 @@ impl LauncherApp {
             Panel::BatchRenameDialog => {
                 self.end_batch_rename_session();
                 self.panel_states.batch_rename_dialog = false;
+            }
+            Panel::SearchReplaceDialog => {
+                self.end_search_replace_session();
+                self.panel_states.search_replace_dialog = false;
             }
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
@@ -3907,6 +4195,10 @@ impl LauncherApp {
                 self.end_batch_rename_session();
                 self.panel_states.batch_rename_dialog = false;
             }
+            Panel::SearchReplaceDialog => {
+                self.end_search_replace_session();
+                self.panel_states.search_replace_dialog = false;
+            }
             Panel::NotesDialog => {
                 self.notes_dialog.open = false;
                 self.panel_states.notes_dialog = false;
@@ -4072,6 +4364,12 @@ impl LauncherApp {
             Panel::FavDialog => self.fav_dialog.ensure_open(),
             Panel::FileSearchDialog => self.file_search_dialog.open(),
             Panel::BatchRenameDialog => self.batch_rename_dialog.open(),
+            Panel::SearchReplaceDialog => {
+                if let Err(error) = self.ensure_search_replace_runtime() {
+                    self.search_replace_dialog.set_status_message(error);
+                }
+                self.search_replace_dialog.open();
+            }
             Panel::NotesDialog => self.notes_dialog.open = true,
             Panel::NoteGraphDialog => self.note_graph_dialog.open = true,
             Panel::UnusedAssetsDialog => self.unused_assets_dialog.ensure_open(),
@@ -4236,6 +4534,7 @@ impl LauncherApp {
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
         check!(batch_rename_dialog, Panel::BatchRenameDialog);
+        check!(search_replace_dialog, Panel::SearchReplaceDialog);
         check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
@@ -6297,6 +6596,120 @@ mod tests {
         assert!(!app.batch_rename_dialog.open);
         assert!(!app.panel_stack.contains(&Panel::BatchRenameDialog));
         app.shutdown_batch_rename_scanner();
+    }
+
+    #[test]
+    fn m9d_search_replace_command_opens_without_root_or_implicit_search() {
+        struct NotesDirectoryOverride(Option<std::ffi::OsString>);
+        impl NotesDirectoryOverride {
+            fn use_fixture(path: &Path) -> Self {
+                let previous = std::env::var_os("ML_NOTES_DIR");
+                unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+                Self(previous)
+            }
+        }
+        impl Drop for NotesDirectoryOverride {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", previous) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let fixture_parent = PathBuf::from("target/productivity_expansion");
+        std::fs::create_dir_all(&fixture_parent).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("replace_dialog_app_")
+            .tempdir_in(&fixture_parent)
+            .unwrap();
+        let app_directory = fixture.path().join("app-data");
+        let notes_directory = fixture.path().join("notes");
+        std::fs::create_dir_all(&app_directory).unwrap();
+        std::fs::create_dir_all(&notes_directory).unwrap();
+        let _notes_directory = NotesDirectoryOverride::use_fixture(&notes_directory);
+
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.dashboard.enabled = false;
+        settings.dashboard.config_path = Some(
+            app_directory
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test_at(&app_directory),
+            app_directory
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            app_directory
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.watchers.clear();
+        app.clipboard_modify_watcher = None;
+
+        let action = crate::actions::Action {
+            label: "Open Search and Replace".into(),
+            desc: String::new(),
+            action: "replace:open".into(),
+            args: None,
+        };
+        let invocation = crate::commands::parse_command(
+            action,
+            None,
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .unwrap();
+        crate::commands::CommandBus
+            .dispatch(&invocation, &mut app)
+            .unwrap();
+        app.update_panel_stack();
+        assert!(app.search_replace_dialog.open);
+        assert!(app.search_replace_dialog.explicit_root().is_none());
+        assert!(!app.search_replace_dialog.has_pending_search());
+        assert!(app.replace_search_coordinator.is_some());
+        assert!(app.replace_executor_worker.is_some());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::SearchReplaceDialog)
+                .count(),
+            1
+        );
+
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(Panel::SearchReplaceDialog));
+        assert!(app.replace_executor_worker.is_some());
+        app.ensure_open(Panel::SearchReplaceDialog);
+        app.update_panel_stack();
+        assert!(app.search_replace_dialog.explicit_root().is_none());
+        assert!(!app.search_replace_dialog.has_pending_search());
+        app.force_close_panel(Panel::SearchReplaceDialog);
+        app.shutdown_search_replace_runtime();
+        assert!(app.replace_search_coordinator.is_none());
+        assert!(app.replace_preview_worker.is_none());
+        assert!(app.replace_executor_worker.is_none());
     }
 
     #[test]
