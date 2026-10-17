@@ -301,6 +301,7 @@ pub(crate) struct VerifiedReadSnapshot {
     modified: SystemTime,
     bytes: Arc<[u8]>,
     content_sha256: [u8; 32],
+    evidence: Arc<VerifiedReadEvidence>,
 }
 
 impl VerifiedReadSnapshot {
@@ -338,6 +339,10 @@ impl VerifiedReadSnapshot {
 
     pub(crate) fn content_sha256(&self) -> [u8; 32] {
         self.content_sha256
+    }
+
+    pub(crate) fn evidence(&self) -> &Arc<VerifiedReadEvidence> {
+        &self.evidence
     }
 }
 
@@ -935,6 +940,15 @@ struct EntryProof {
 struct ScanProof {
     root: RootProof,
     entries: HashMap<SnapshotEntryRef, EntryProof>,
+}
+
+/// Opaque proof retained from the scan that produced a verified content read.
+/// It carries the exact root and full parent chain needed by a later mutation
+/// boundary without granting authority to mutate by itself.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedReadEvidence {
+    proof: Arc<ScanProof>,
+    entry_ref: SnapshotEntryRef,
 }
 
 struct OpenDirectory<H> {
@@ -2372,6 +2386,325 @@ pub(crate) fn read_verified_scan_file(
     }
 }
 
+/// Reopen the root, every retained parent directory, and the exact source
+/// handle for one selected replacement candidate. The returned handle is the
+/// only authority to relocate the source and create a separate output stage.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_guarded_replace_file(
+    evidence: &VerifiedReadEvidence,
+    expected_root: &Path,
+    expected_root_identity: NativeFileIdentity,
+    expected_path: &Path,
+    expected_identity: NativeFileIdentity,
+    expected_parent_identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_modified: SystemTime,
+    expected_sha256: [u8; 32],
+    expected_bytes: &[u8],
+    cancellation: &ScanCancellation,
+) -> Result<GuardedReplaceFile, VerifiedReplaceFailure> {
+    let invalid = |message: &str| VerifiedReplaceFailure {
+        kind: VerifiedReplaceFailureKind::InvalidEvidence,
+        message: message.to_owned(),
+    };
+    if cancellation.is_cancelled() {
+        return Err(VerifiedReplaceFailure {
+            kind: VerifiedReplaceFailureKind::Cancelled,
+            message: "replacement was cancelled before source admission".to_owned(),
+        });
+    }
+    if expected_bytes.len() as u64 != expected_length
+        || <[u8; 32]>::from(Sha256::digest(expected_bytes)) != expected_sha256
+    {
+        return Err(invalid(
+            "the approved source bytes do not match their captured length and hash",
+        ));
+    }
+    let root = &evidence.proof.root;
+    let Some(entry) = evidence.proof.entries.get(&evidence.entry_ref) else {
+        return Err(invalid("the replacement source proof has no matching scan entry"));
+    };
+    let recorded_parent = entry.parent_chain.last();
+    if root.identity != expected_root_identity
+        || batch_rename::compare_paths_windows_ordinal(&root.canonical_path, expected_root)
+            != std::cmp::Ordering::Equal
+        || batch_rename::compare_paths_windows_ordinal(&entry.path, expected_path)
+            != std::cmp::Ordering::Equal
+        || entry.identity != expected_identity
+        || entry.length != Some(expected_length)
+        || entry.modified != Some(expected_modified)
+        || recorded_parent.is_none_or(|parent| {
+            parent.identity != expected_parent_identity
+                || expected_path.parent().is_none_or(|expected_parent| {
+                    batch_rename::compare_paths_windows_ordinal(
+                        &parent.canonical_path,
+                        expected_parent,
+                    ) != std::cmp::Ordering::Equal
+                })
+        })
+    {
+        return Err(invalid(
+            "the approved source metadata does not match its retained native scan evidence",
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        prepare_guarded_replace_file_native(
+            evidence,
+            expected_path,
+            expected_identity,
+            expected_parent_identity,
+            expected_length,
+            expected_modified,
+            expected_sha256,
+            expected_bytes,
+            cancellation,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            expected_path,
+            expected_identity,
+            expected_parent_identity,
+            expected_length,
+            expected_modified,
+            expected_sha256,
+            expected_bytes,
+        );
+        Err(VerifiedReplaceFailure {
+            kind: VerifiedReplaceFailureKind::Unsupported,
+            message: "safe replacement writes are available only on Windows".to_owned(),
+        })
+    }
+}
+
+#[cfg(windows)]
+fn prepare_guarded_replace_file_native(
+    evidence: &VerifiedReadEvidence,
+    expected_path: &Path,
+    expected_identity: NativeFileIdentity,
+    expected_parent_identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_modified: SystemTime,
+    expected_sha256: [u8; 32],
+    expected_bytes: &[u8],
+    cancellation: &ScanCancellation,
+) -> Result<GuardedReplaceFile, VerifiedReplaceFailure> {
+    let root = &evidence.proof.root;
+    let entry = evidence
+        .proof
+        .entries
+        .get(&evidence.entry_ref)
+        .ok_or_else(|| VerifiedReplaceFailure {
+            kind: VerifiedReplaceFailureKind::InvalidEvidence,
+            message: "the replacement source proof has no matching scan entry".to_owned(),
+        })?;
+    let backend = NativeRenameScanBackend;
+    let root_guards = backend
+        .reopen_chain(&root.chain, root, DirectoryOpenAccess::Enumerate)
+        .map_err(|error| replace_backend_failure(error, true))?;
+    if root_guards
+        .last()
+        .is_none_or(|directory| directory.identity != root.identity)
+    {
+        return Err(VerifiedReplaceFailure {
+            kind: VerifiedReplaceFailureKind::RootChanged,
+            message: "the selected replacement root changed since preview".to_owned(),
+        });
+    }
+    let parent_guards = backend
+        .reopen_chain(&entry.parent_chain, root, DirectoryOpenAccess::Enumerate)
+        .map_err(|error| replace_backend_failure(error, false))?;
+    let parent = parent_guards.last().ok_or_else(|| VerifiedReplaceFailure {
+        kind: VerifiedReplaceFailureKind::ParentChanged,
+        message: "the replacement source parent directory is missing".to_owned(),
+    })?;
+    if parent.identity != expected_parent_identity
+        || expected_path.parent().is_none_or(|expected_parent| {
+            batch_rename::compare_paths_windows_ordinal(
+                &parent.canonical_path,
+                expected_parent,
+            ) != std::cmp::Ordering::Equal
+        })
+    {
+        return Err(VerifiedReplaceFailure {
+            kind: VerifiedReplaceFailureKind::ParentChanged,
+            message: "the replacement source parent directory changed since preview".to_owned(),
+        });
+    }
+    if cancellation.is_cancelled() {
+        return Err(VerifiedReplaceFailure {
+            kind: VerifiedReplaceFailureKind::Cancelled,
+            message: "replacement was cancelled before opening its source".to_owned(),
+        });
+    }
+    let opened = open_native_replace_file(expected_path).map_err(|error| {
+        replace_io_failure(
+            "could not open the selected source for guarded replacement",
+            error,
+        )
+    })?;
+    if opened.kind != SnapshotEntryKind::File
+        || opened.reparse_point
+        || opened.identity != expected_identity
+        || opened.length != Some(expected_length)
+        || opened.modified != Some(expected_modified)
+        || batch_rename::compare_paths_windows_ordinal(&opened.canonical_path, expected_path)
+            != std::cmp::Ordering::Equal
+        || opened.canonical_path.file_name() != expected_path.file_name()
+        || opened.canonical_path.parent().is_none_or(|actual_parent| {
+            batch_rename::compare_paths_windows_ordinal(actual_parent, &parent.canonical_path)
+                != std::cmp::Ordering::Equal
+        })
+        || !batch_rename::path_is_within_windows_ordinal(
+            &root.canonical_path,
+            &opened.canonical_path,
+        )
+    {
+        return Err(VerifiedReplaceFailure {
+            kind: VerifiedReplaceFailureKind::SourceChanged,
+            message: "the selected source identity, path, type, or metadata changed since preview"
+                .to_owned(),
+        });
+    }
+    let native = GuardedReplaceHandle {
+        current_path: expected_path.to_path_buf(),
+        parent_path: parent.canonical_path.clone(),
+        parent_identity: parent.identity,
+        identity: opened.identity,
+        root: root.clone(),
+        parent_chain: entry.parent_chain.clone(),
+        file: opened.handle,
+        root_guards,
+        parent_guards,
+    };
+    ensure_unnamed_stream_only(&native.file).map_err(|error| VerifiedReplaceFailure {
+        kind: VerifiedReplaceFailureKind::Unsupported,
+        message: format!(
+            "the selected source has named streams or its stream set cannot be verified; replacement refused to preserve all original data ({error})"
+        ),
+    })?;
+    let original_state = native
+        .verify_at(
+            expected_path,
+            expected_length,
+            Some(expected_modified),
+            expected_sha256,
+            Some(expected_bytes),
+            cancellation,
+        )
+        .map_err(|error| {
+            replace_io_failure("the selected source changed during guarded verification", error)
+        })?;
+    Ok(GuardedReplaceFile {
+        original_path: expected_path.to_path_buf(),
+        original_state,
+        native,
+    })
+}
+
+#[cfg(windows)]
+fn ensure_unnamed_stream_only(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
+        WIN32_FIND_STREAM_DATA,
+    };
+    use windows::core::PCWSTR;
+
+    let exact_path = final_path_for_handle(file)?;
+    let mut wide_path = extended_local_path(&exact_path)?;
+    wide_path.push(0);
+    let mut stream = WIN32_FIND_STREAM_DATA::default();
+    let find = unsafe {
+        FindFirstStreamW(
+            PCWSTR(wide_path.as_ptr()),
+            FindStreamInfoStandard,
+            &mut stream as *mut WIN32_FIND_STREAM_DATA as *mut std::ffi::c_void,
+            0,
+        )
+    }
+    .map_err(windows_error_to_io)?;
+
+    let result = (|| {
+        let name_end = stream
+            .cStreamName
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(stream.cStreamName.len());
+        let first_name = String::from_utf16(&stream.cStreamName[..name_end]).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "native stream enumeration returned an invalid UTF-16 name",
+            )
+        })?;
+        if !first_name.eq_ignore_ascii_case("::$DATA") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the source's first stream is not its ordinary unnamed data stream",
+            ));
+        }
+        match unsafe {
+            FindNextStreamW(
+                find,
+                &mut stream as *mut WIN32_FIND_STREAM_DATA as *mut std::ffi::c_void,
+            )
+        } {
+            Ok(()) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the source contains an additional named data stream",
+            )),
+            Err(error) if error.code().0 as u32 == 0x8007_0026 => Ok(()),
+            Err(error) => Err(windows_error_to_io(error)),
+        }
+    })();
+    let close = unsafe { FindClose(find) }.map_err(windows_error_to_io);
+    match (result, close) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+#[cfg(windows)]
+fn replace_backend_failure(
+    error: BackendFailure,
+    root_check: bool,
+) -> VerifiedReplaceFailure {
+    let kind = match error.kind {
+        BackendFailureKind::RootChanged => VerifiedReplaceFailureKind::RootChanged,
+        BackendFailureKind::Cancelled => VerifiedReplaceFailureKind::Cancelled,
+        BackendFailureKind::UnsupportedIdentity => VerifiedReplaceFailureKind::Unsupported,
+        BackendFailureKind::Inaccessible => VerifiedReplaceFailureKind::Inaccessible,
+        BackendFailureKind::ParentChanged => VerifiedReplaceFailureKind::ParentChanged,
+        _ if root_check => VerifiedReplaceFailureKind::RootChanged,
+        _ => VerifiedReplaceFailureKind::ParentChanged,
+    };
+    VerifiedReplaceFailure {
+        kind,
+        message: error.message,
+    }
+}
+
+#[cfg(windows)]
+fn replace_io_failure(operation: &'static str, error: std::io::Error) -> VerifiedReplaceFailure {
+    let kind = match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData => {
+            VerifiedReplaceFailureKind::SourceChanged
+        }
+        std::io::ErrorKind::PermissionDenied => VerifiedReplaceFailureKind::Inaccessible,
+        std::io::ErrorKind::Interrupted => VerifiedReplaceFailureKind::Cancelled,
+        std::io::ErrorKind::Unsupported => VerifiedReplaceFailureKind::Unsupported,
+        _ => VerifiedReplaceFailureKind::Inaccessible,
+    };
+    VerifiedReplaceFailure {
+        kind,
+        message: format!("{operation}: {error}"),
+    }
+}
+
 fn verified_read_failure(kind: VerifiedReadFailureKind, message: String) -> VerifiedReadFailure {
     VerifiedReadFailure { kind, message }
 }
@@ -2581,6 +2914,15 @@ fn read_verified_scan_file_native(
         modified,
         bytes: Arc::from(bytes.into_boxed_slice()),
         content_sha256,
+        evidence: Arc::new(VerifiedReadEvidence {
+            proof: Arc::clone(scan.proof.as_ref().ok_or_else(|| {
+                verified_read_failure(
+                    VerifiedReadFailureKind::InvalidEvidence,
+                    "the complete scan did not retain native evidence".to_owned(),
+                )
+            })?),
+            entry_ref: row.entry_ref,
+        }),
     })
 }
 
@@ -3902,6 +4244,1289 @@ fn open_native_mutation_file(path: &Path) -> std::io::Result<OpenedObject<std::f
     })
 }
 
+#[cfg(windows)]
+fn open_native_replace_file(path: &Path) -> std::io::Result<OpenedObject<std::fs::File>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_READ_DATA, FILE_SHARE_READ, OPEN_EXISTING, READ_CONTROL,
+    };
+    use windows::core::PCWSTR;
+
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    let desired_access = DELETE.0
+        | FILE_READ_DATA.0
+        | FILE_READ_ATTRIBUTES.0
+        | READ_CONTROL.0;
+    // The retained handle denies write/delete sharing and can read the source
+    // security descriptor. The original bytes are never changed in place.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            desired_access,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error(
+            "CreateFileW(DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL)",
+            windows_error_to_io(error),
+        )
+    })?;
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| native_contextual_io_error("File::metadata", error))?;
+    let attributes = metadata.file_attributes();
+    let reparse_point = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let kind = if reparse_point {
+        SnapshotEntryKind::Other
+    } else if is_directory {
+        SnapshotEntryKind::Directory
+    } else if metadata.is_file() {
+        SnapshotEntryKind::File
+    } else {
+        SnapshotEntryKind::Other
+    };
+    Ok(OpenedObject {
+        lookup_path: path.to_path_buf(),
+        canonical_path: final_path_for_handle(&file)
+            .map_err(|error| native_contextual_io_error("GetFinalPathNameByHandleW", error))?,
+        identity: native_file_identity(&file)
+            .map_err(|error| native_contextual_io_error("FILE_ID_INFO query", error))?,
+        kind,
+        reparse_point,
+        length: (!is_directory).then_some(metadata.len()),
+        modified: metadata.modified().ok(),
+        handle: file,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifiedReplaceFailureKind {
+    InvalidEvidence,
+    RootChanged,
+    ParentChanged,
+    SourceChanged,
+    Inaccessible,
+    Unsupported,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedReplaceFailure {
+    kind: VerifiedReplaceFailureKind,
+    message: String,
+}
+
+/// Create a durable, CREATE_NEW appdata backup and verify its exact bytes and
+/// native identity before it can authorize source relocation.
+pub(crate) fn create_verified_replace_backup(
+    path: &Path,
+    bytes: &[u8],
+    expected_sha256: [u8; 32],
+    cancellation: &ScanCancellation,
+) -> std::io::Result<VerifiedReplaceBackup> {
+    if bytes.len() as u64 > MAX_RENAME_HASH_BYTES_PER_FILE
+        || <[u8; 32]>::from(Sha256::digest(bytes)) != expected_sha256
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "replacement backup bytes exceed limits or do not match their approved hash",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        create_verified_replace_backup_native(path, bytes, expected_sha256, cancellation)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, cancellation);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "safe replacement backups are available only on Windows",
+        ))
+    }
+}
+
+/// Reopen a recorded backup without following a final reparse point, then
+/// require its recorded native ID, length, and hash before exposing bytes.
+pub(crate) fn open_verified_replace_backup(
+    path: &Path,
+    expected_identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_sha256: [u8; 32],
+    cancellation: &ScanCancellation,
+) -> std::io::Result<VerifiedReplaceBackup> {
+    if expected_length > MAX_RENAME_HASH_BYTES_PER_FILE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "replacement backup exceeds the content verification limit",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        open_verified_replace_backup_native(
+            path,
+            expected_identity,
+            expected_length,
+            expected_sha256,
+            cancellation,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, expected_identity, expected_length, expected_sha256, cancellation);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "safe replacement backups are available only on Windows",
+        ))
+    }
+}
+
+impl VerifiedReplaceFailure {
+    pub(crate) fn kind(&self) -> VerifiedReplaceFailureKind {
+        self.kind
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GuardedReplaceState {
+    pub(crate) identity: NativeFileIdentity,
+    pub(crate) length: u64,
+    pub(crate) modified: SystemTime,
+    pub(crate) content_sha256: [u8; 32],
+}
+
+/// A source opened from retained M8 evidence. Its content remains intact until
+/// the separately staged output has been flushed and verified.
+pub(crate) struct GuardedReplaceFile {
+    original_path: PathBuf,
+    original_state: GuardedReplaceState,
+    #[cfg(windows)]
+    native: GuardedReplaceHandle,
+}
+
+/// A CREATE_NEW sibling containing exact, flushed output bytes and the source
+/// file's copied security descriptor/properties.
+pub(crate) struct GuardedReplaceStage {
+    state: GuardedReplaceState,
+    #[cfg(windows)]
+    native: GuardedReplaceHandle,
+}
+
+/// Durable app-owned copy of an original payload, pinned by file ID and SHA.
+pub(crate) struct VerifiedReplaceBackup {
+    path: PathBuf,
+    state: GuardedReplaceState,
+    bytes: Arc<[u8]>,
+    #[cfg(windows)]
+    file: std::fs::File,
+}
+
+impl VerifiedReplaceBackup {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn state(&self) -> GuardedReplaceState {
+        self.state
+    }
+
+    pub(crate) fn bytes(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+}
+
+#[cfg(windows)]
+struct GuardedReplaceHandle {
+    current_path: PathBuf,
+    parent_path: PathBuf,
+    parent_identity: NativeFileIdentity,
+    identity: NativeFileIdentity,
+    root: RootProof,
+    parent_chain: Vec<DirectoryProof>,
+    file: std::fs::File,
+    root_guards: OpenDirectoryChain<std::fs::File>,
+    parent_guards: OpenDirectoryChain<std::fs::File>,
+}
+
+impl GuardedReplaceFile {
+    pub(crate) fn original_path(&self) -> &Path {
+        &self.original_path
+    }
+
+    pub(crate) fn current_path(&self) -> &Path {
+        #[cfg(windows)]
+        return &self.native.current_path;
+        #[cfg(not(windows))]
+        &self.original_path
+    }
+
+    pub(crate) fn identity(&self) -> NativeFileIdentity {
+        self.original_state.identity
+    }
+
+    pub(crate) fn original_state(&self) -> GuardedReplaceState {
+        self.original_state
+    }
+
+    pub(crate) fn verify_at(
+        &self,
+        expected_path: &Path,
+        expected_length: u64,
+        expected_modified: Option<SystemTime>,
+        expected_sha256: [u8; 32],
+        expected_bytes: Option<&[u8]>,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<GuardedReplaceState> {
+        #[cfg(windows)]
+        return self.native.verify_at(
+            expected_path,
+            expected_length,
+            expected_modified,
+            expected_sha256,
+            expected_bytes,
+            cancellation,
+        );
+        #[cfg(not(windows))]
+        {
+            let _ = (
+                expected_path,
+                expected_length,
+                expected_modified,
+                expected_sha256,
+                expected_bytes,
+                cancellation,
+            );
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe replacement writes are available only on Windows",
+            ))
+        }
+    }
+
+    pub(crate) fn rename_to_leaf(
+        &mut self,
+        leaf: &OsStr,
+        expected_state: GuardedReplaceState,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<PathBuf> {
+        #[cfg(windows)]
+        return self.native.rename_to_leaf(leaf, expected_state, cancellation);
+        #[cfg(not(windows))]
+        {
+            let _ = (leaf, expected_state, cancellation);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe replacement writes are available only on Windows",
+            ))
+        }
+    }
+
+    pub(crate) fn delete_if_matches(
+        &self,
+        expected_state: GuardedReplaceState,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            ensure_unnamed_stream_only(&self.native.file)?;
+            return self.native.delete_if_matches(expected_state, cancellation);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (expected_state, cancellation);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe replacement cleanup is available only on Windows",
+            ))
+        }
+    }
+
+    pub(crate) fn create_output_stage(
+        &self,
+        leaf: &OsStr,
+        bytes: &[u8],
+        sha256: [u8; 32],
+        modified: Option<SystemTime>,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<GuardedReplaceStage> {
+        #[cfg(windows)]
+        {
+            self.verify_at(
+                &self.native.current_path,
+                self.original_state.length,
+                Some(self.original_state.modified),
+                self.original_state.content_sha256,
+                None,
+                cancellation,
+            )?;
+            self.native.create_output_stage(leaf, bytes, sha256, modified, cancellation)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (leaf, bytes, sha256, modified, cancellation);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe replacement writes are available only on Windows",
+            ))
+        }
+    }
+}
+
+impl GuardedReplaceStage {
+    pub(crate) fn path(&self) -> &Path {
+        #[cfg(windows)]
+        return &self.native.current_path;
+        #[cfg(not(windows))]
+        Path::new("")
+    }
+
+    pub(crate) fn state(&self) -> GuardedReplaceState {
+        self.state
+    }
+
+    pub(crate) fn verify_at(
+        &self,
+        expected_path: &Path,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<GuardedReplaceState> {
+        #[cfg(windows)]
+        return self.native.verify_at(
+            expected_path,
+            self.state.length,
+            Some(self.state.modified),
+            self.state.content_sha256,
+            None,
+            cancellation,
+        );
+        #[cfg(not(windows))]
+        {
+            let _ = (expected_path, cancellation);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe replacement writes are available only on Windows",
+            ))
+        }
+    }
+
+    pub(crate) fn rename_to_leaf(
+        &mut self,
+        leaf: &OsStr,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<PathBuf> {
+        #[cfg(windows)]
+        return self.native.rename_to_leaf(leaf, self.state, cancellation);
+        #[cfg(not(windows))]
+        {
+            let _ = (leaf, cancellation);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe replacement writes are available only on Windows",
+            ))
+        }
+    }
+
+    pub(crate) fn delete_if_matches(
+        &self,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<()> {
+        #[cfg(windows)]
+        return self.native.delete_if_matches(self.state, cancellation);
+        #[cfg(not(windows))]
+        {
+            let _ = cancellation;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "safe replacement cleanup is available only on Windows",
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl GuardedReplaceHandle {
+    fn capture_current_state(&self) -> std::io::Result<GuardedReplaceState> {
+        self.verify_location(&self.current_path)?;
+        let metadata = self.file.metadata()?;
+        let bytes = read_handle_bytes(&self.file, metadata.len(), &ScanCancellation::new())?;
+        Ok(GuardedReplaceState {
+            identity: self.identity,
+            length: metadata.len(),
+            modified: metadata.modified()?,
+            content_sha256: Sha256::digest(&bytes).into(),
+        })
+    }
+
+    fn verify_at(
+        &self,
+        expected_path: &Path,
+        expected_length: u64,
+        expected_modified: Option<SystemTime>,
+        expected_sha256: [u8; 32],
+        expected_bytes: Option<&[u8]>,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<GuardedReplaceState> {
+        self.verify_location(expected_path)?;
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "replacement verification was cancelled",
+            ));
+        }
+        let metadata = self.file.metadata()?;
+        if metadata.len() != expected_length
+            || expected_modified.is_some_and(|modified| metadata.modified().ok() != Some(modified))
+            || native_file_identity(&self.file)? != self.identity
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement file identity, length, or metadata changed",
+            ));
+        }
+        let bytes = read_handle_bytes(&self.file, expected_length, cancellation)?;
+        let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+        if sha256 != expected_sha256
+            || expected_bytes.is_some_and(|expected| expected != bytes.as_slice())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement file content changed",
+            ));
+        }
+        let metadata_after = self.file.metadata()?;
+        if metadata_after.len() != expected_length
+            || expected_modified.is_some_and(|modified| metadata_after.modified().ok() != Some(modified))
+            || native_file_identity(&self.file)? != self.identity
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement file changed while it was verified",
+            ));
+        }
+        Ok(GuardedReplaceState {
+            identity: self.identity,
+            length: expected_length,
+            modified: metadata_after.modified()?,
+            content_sha256: sha256,
+        })
+    }
+
+    fn rename_to_leaf(
+        &mut self,
+        leaf: &OsStr,
+        expected_state: GuardedReplaceState,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<PathBuf> {
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "replacement was cancelled before its next rename",
+            ));
+        }
+        validate_replace_leaf(leaf)?;
+        if expected_state.identity != self.identity {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "replacement rename state has a different file identity",
+            ));
+        }
+        self.verify_at(
+            &self.current_path,
+            expected_state.length,
+            Some(expected_state.modified),
+            expected_state.content_sha256,
+            None,
+            cancellation,
+        )?;
+        let (root_guards, parent_guards) = self.reopen_guards()?;
+        let parent = parent_guards
+            .last()
+            .ok_or_else(|| std::io::Error::other("replacement parent guard is missing"))?;
+        rename_open_file_no_replace(&self.file, parent, leaf)?;
+        self.current_path = parent.canonical_path.join(leaf);
+        self.root_guards = root_guards;
+        self.parent_guards = parent_guards;
+        self.verify_at(
+            &self.current_path,
+            expected_state.length,
+            Some(expected_state.modified),
+            expected_state.content_sha256,
+            None,
+            cancellation,
+        )?;
+        Ok(self.current_path.clone())
+    }
+
+    fn delete_if_matches(
+        &self,
+        expected_state: GuardedReplaceState,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<()> {
+        self.verify_at(
+            &self.current_path,
+            expected_state.length,
+            Some(expected_state.modified),
+            expected_state.content_sha256,
+            None,
+            cancellation,
+        )?;
+        let (root_guards, parent_guards) = self.reopen_guards()?;
+        let parent = parent_guards
+            .last()
+            .ok_or_else(|| std::io::Error::other("replacement parent guard is missing"))?;
+        if parent.identity != self.parent_identity {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement stage parent changed before cleanup",
+            ));
+        }
+        delete_open_file(&self.file)
+    }
+
+    fn create_output_stage(
+        &self,
+        leaf: &OsStr,
+        bytes: &[u8],
+        sha256: [u8; 32],
+        modified: Option<SystemTime>,
+        cancellation: &ScanCancellation,
+    ) -> std::io::Result<GuardedReplaceStage> {
+        validate_replace_leaf(leaf)?;
+        let actual_sha256: [u8; 32] = Sha256::digest(bytes).into();
+        if actual_sha256 != sha256 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "replacement output bytes do not match their confirmed hash",
+            ));
+        }
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "replacement was cancelled before staging output bytes",
+            ));
+        }
+        let (root_guards, parent_guards) = self.reopen_guards()?;
+        let parent = parent_guards
+            .last()
+            .ok_or_else(|| std::io::Error::other("replacement parent guard is missing"))?;
+        let path = parent.canonical_path.join(leaf);
+        let output = create_native_replace_stage(&path)?;
+        let identity = match native_file_identity(&output) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let cleanup = delete_open_file(&output);
+                return match cleanup {
+                    Ok(()) => Err(error),
+                    Err(cleanup) => Err(std::io::Error::other(format!(
+                        "could not identify new replacement stage at {} ({error}); the CREATE_NEW stage remains ({cleanup})",
+                        path.display()
+                    ))),
+                };
+            }
+        };
+        let native = GuardedReplaceHandle {
+            current_path: path,
+            parent_path: parent.canonical_path.clone(),
+            parent_identity: parent.identity,
+            identity,
+            root: self.root.clone(),
+            parent_chain: self.parent_chain.clone(),
+            file: output,
+            root_guards,
+            parent_guards,
+        };
+        let mut stage = GuardedReplaceStage {
+            state: GuardedReplaceState {
+                identity,
+                length: 0,
+                modified: SystemTime::UNIX_EPOCH,
+                content_sha256: Sha256::digest([]).into(),
+            },
+            native,
+        };
+        if let Err(error) = initialize_replace_stage(
+            &self.file,
+            &stage.native.file,
+            bytes,
+            modified,
+            cancellation,
+        ) {
+            match stage.native.capture_current_state() {
+                Ok(state) => {
+                    stage.state = state;
+                    if let Err(cleanup) = stage.delete_if_matches(&ScanCancellation::new()) {
+                        return Err(std::io::Error::other(format!(
+                            "could not prepare replacement stage ({error}); its owned stage remains at {} ({cleanup})",
+                            stage.path().display()
+                        )));
+                    }
+                }
+                Err(cleanup) => {
+                    return Err(std::io::Error::other(format!(
+                        "could not prepare replacement stage ({error}); its owned stage remains at {} and could not be verified for cleanup ({cleanup})",
+                        stage.path().display()
+                    )));
+                }
+            }
+            return Err(error);
+        }
+        let state = stage.native.verify_at(
+            stage.path(),
+            bytes.len() as u64,
+            modified,
+            sha256,
+            Some(bytes),
+            &ScanCancellation::new(),
+        )?;
+        stage.state = state;
+        Ok(stage)
+    }
+
+    fn verify_location(&self, expected_path: &Path) -> std::io::Result<()> {
+        let (root_guards, parent_guards) = self.reopen_guards()?;
+        let root = root_guards
+            .last()
+            .ok_or_else(|| std::io::Error::other("replacement root guard is missing"))?;
+        let parent = parent_guards
+            .last()
+            .ok_or_else(|| std::io::Error::other("replacement parent guard is missing"))?;
+        let source_path = final_path_for_handle(&self.file)?;
+        if root.identity != self.root.identity
+            || parent.identity != self.parent_identity
+            || batch_rename::compare_paths_windows_ordinal(
+                &parent.canonical_path,
+                &self.parent_path,
+            ) != std::cmp::Ordering::Equal
+            || native_file_identity(&self.file)? != self.identity
+            || batch_rename::compare_paths_windows_ordinal(&source_path, expected_path)
+                != std::cmp::Ordering::Equal
+            || source_path.file_name() != expected_path.file_name()
+            || source_path.parent().is_none_or(|actual_parent| {
+                batch_rename::compare_paths_windows_ordinal(actual_parent, &self.parent_path)
+                    != std::cmp::Ordering::Equal
+            })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement root, parent, or file identity changed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn reopen_guards(
+        &self,
+    ) -> std::io::Result<(
+        OpenDirectoryChain<std::fs::File>,
+        OpenDirectoryChain<std::fs::File>,
+    )> {
+        let backend = NativeRenameScanBackend;
+        let root_guards = backend
+            .reopen_chain(&self.root.chain, &self.root, DirectoryOpenAccess::Enumerate)
+            .map_err(|error| std::io::Error::other(error.message))?;
+        let parent_guards = backend
+            .reopen_chain(&self.parent_chain, &self.root, DirectoryOpenAccess::Enumerate)
+            .map_err(|error| std::io::Error::other(error.message))?;
+        if root_guards
+            .last()
+            .is_none_or(|root| root.identity != self.root.identity)
+            || parent_guards.last().is_none_or(|parent| {
+                parent.identity != self.parent_identity
+                    || batch_rename::compare_paths_windows_ordinal(
+                        &parent.canonical_path,
+                        &self.parent_path,
+                    ) != std::cmp::Ordering::Equal
+            })
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement root or full parent chain changed",
+            ));
+        }
+        Ok((root_guards, parent_guards))
+    }
+}
+
+
+#[cfg(windows)]
+fn create_verified_replace_backup_native(
+    path: &Path,
+    bytes: &[u8],
+    expected_sha256: [u8; 32],
+    cancellation: &ScanCancellation,
+) -> std::io::Result<VerifiedReplaceBackup> {
+    use std::io::Write;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_WRITE_DATA,
+    };
+    use windows::core::PCWSTR;
+
+    validate_replace_leaf(path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "backup path has no filename")
+    })?)?;
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_READ_DATA.0 | FILE_WRITE_DATA.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ,
+            None,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| windows_error_to_io(error))?;
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.file_attributes() & windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        || batch_rename::compare_paths_windows_ordinal(
+            &final_path_for_handle(&file)?,
+            path,
+        ) != std::cmp::Ordering::Equal
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "CREATE_NEW replacement backup did not resolve to its exact ordinary file path",
+        ));
+    }
+    for chunk in bytes.chunks(64 * 1024) {
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "replacement was cancelled while writing its durable backup",
+            ));
+        }
+        (&file).write_all(chunk)?;
+    }
+    file.sync_all()?;
+    let identity = native_file_identity(&file)?;
+    let verified = read_handle_bytes(&file, bytes.len() as u64, cancellation)?;
+    let content_sha256: [u8; 32] = Sha256::digest(&verified).into();
+    if verified.as_slice() != bytes || content_sha256 != expected_sha256 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "durable replacement backup failed exact-byte verification",
+        ));
+    }
+    Ok(VerifiedReplaceBackup {
+        path: path.to_path_buf(),
+        state: GuardedReplaceState {
+            identity,
+            length: bytes.len() as u64,
+            modified: file.metadata()?.modified()?,
+            content_sha256,
+        },
+        bytes: Arc::from(verified),
+        file,
+    })
+}
+
+#[cfg(windows)]
+fn open_verified_replace_backup_native(
+    path: &Path,
+    expected_identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_sha256: [u8; 32],
+    cancellation: &ScanCancellation,
+) -> std::io::Result<VerifiedReplaceBackup> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    validate_replace_leaf(path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "backup path has no filename")
+    })?)?;
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_READ_DATA.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| windows_error_to_io(error))?;
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        || native_file_identity(&file)? != expected_identity
+        || metadata.len() != expected_length
+        || batch_rename::compare_paths_windows_ordinal(&final_path_for_handle(&file)?, path)
+            != std::cmp::Ordering::Equal
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "replacement backup identity, type, length, or path changed",
+        ));
+    }
+    let bytes = read_handle_bytes(&file, expected_length, cancellation)?;
+    let content_sha256: [u8; 32] = Sha256::digest(&bytes).into();
+    if content_sha256 != expected_sha256 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "replacement backup content changed",
+        ));
+    }
+    Ok(VerifiedReplaceBackup {
+        path: path.to_path_buf(),
+        state: GuardedReplaceState {
+            identity: expected_identity,
+            length: expected_length,
+            modified: metadata.modified()?,
+            content_sha256,
+        },
+        bytes: Arc::from(bytes),
+        file,
+    })
+}
+
+#[cfg(windows)]
+fn validate_replace_leaf(leaf: &OsStr) -> std::io::Result<()> {
+    let path = Path::new(leaf);
+    if leaf.is_empty()
+        || leaf.to_string_lossy().contains(':')
+        || path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "replacement stage name must be one ordinary path component",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_native_replace_stage(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, CREATE_NEW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES,
+        FILE_WRITE_DATA, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    };
+    use windows::core::PCWSTR;
+
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    let desired_access = DELETE.0
+        | FILE_READ_DATA.0
+        | FILE_WRITE_DATA.0
+        | FILE_READ_ATTRIBUTES.0
+        | FILE_WRITE_ATTRIBUTES.0
+        | READ_CONTROL.0
+        | WRITE_DAC.0
+        | WRITE_OWNER.0;
+    // CREATE_NEW ensures a collision is never opened or truncated. The stage
+    // handle allows reading, writing, security/property application, and a
+    // handle-bound no-replace rename, while denying other writers/deleters.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            desired_access,
+            FILE_SHARE_READ,
+            None,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error(
+            "CreateFileW(CREATE_NEW replacement stage)",
+            windows_error_to_io(error),
+        )
+    })?;
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file.metadata()?;
+    let attributes = metadata.file_attributes();
+    if attributes & (FILE_ATTRIBUTE_DIRECTORY.0 | FILE_ATTRIBUTE_REPARSE_POINT.0) != 0
+        || !metadata.is_file()
+    {
+        let cleanup = delete_open_file(&file);
+        return Err(std::io::Error::other(match cleanup {
+            Ok(()) => "CREATE_NEW replacement stage is not a regular file".to_owned(),
+            Err(error) => format!(
+                "CREATE_NEW replacement stage is not a regular file and could not be removed ({error})"
+            ),
+        }));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn initialize_replace_stage(
+    source: &std::fs::File,
+    output: &std::fs::File,
+    bytes: &[u8],
+    modified: Option<SystemTime>,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let source_properties = query_replace_basic_info(source)?;
+    validate_replace_basic_attributes(source_properties.FileAttributes)?;
+    if bytes.len() as u64 > MAX_RENAME_HASH_BYTES_PER_FILE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "replacement output exceeds the content staging limit",
+        ));
+    }
+    let mut writer = output.try_clone()?;
+    writer.set_len(0)?;
+    writer.seek(SeekFrom::Start(0))?;
+    for chunk in bytes.chunks(64 * 1024) {
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "replacement was cancelled while staging output bytes",
+            ));
+        }
+        writer.write_all(chunk)?;
+    }
+    writer.flush()?;
+    writer.set_len(bytes.len() as u64)?;
+    writer.sync_all()?;
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "replacement was cancelled after staging output bytes",
+        ));
+    }
+
+    // Supported file security: owner, primary group, DACL, and DACL-protected
+    // state are copied by handle. Failure is returned before source relocation.
+    copy_replace_security(source, output)?;
+
+    // Preserve creation/access times and supported basic flags. Apply/restore
+    // supplies an exact source write time; ordinary apply keeps the stage's
+    // freshly generated write time. Sparse, compressed, encrypted, reparse,
+    // readonly, and other special-property files are refused above.
+    let staged = query_replace_basic_info(output)?;
+    let mut properties = source_properties;
+    if let Some(modified) = modified {
+        properties.LastWriteTime = system_time_to_windows_ticks(modified)?;
+    } else {
+        properties.LastWriteTime = staged.LastWriteTime;
+    }
+    properties.ChangeTime = 0;
+    set_replace_basic_info(output, properties)?;
+    output.sync_all()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_replace_basic_attributes(attributes: u32) -> std::io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, FILE_ATTRIBUTE_SYSTEM,
+    };
+
+    let supported = FILE_ATTRIBUTE_ARCHIVE.0
+        | FILE_ATTRIBUTE_HIDDEN.0
+        | FILE_ATTRIBUTE_SYSTEM.0
+        | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED.0;
+    if attributes != FILE_ATTRIBUTE_NORMAL.0
+        && (attributes & !supported != 0 || attributes & FILE_ATTRIBUTE_NORMAL.0 != 0)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "replacement refuses a file with unsupported Windows attributes",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn query_replace_basic_info(file: &std::fs::File) -> std::io::Result<windows::Win32::Storage::FileSystem::FILE_BASIC_INFO> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandleEx, FileBasicInfo, FILE_BASIC_INFO,
+    };
+
+    let mut info = FILE_BASIC_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle() as _),
+            FileBasicInfo,
+            std::ptr::from_mut(&mut info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .map_err(|error| windows_error_to_io(error))?;
+    Ok(info)
+}
+
+#[cfg(windows)]
+fn set_replace_basic_info(
+    file: &std::fs::File,
+    info: windows::Win32::Storage::FileSystem::FILE_BASIC_INFO,
+) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        SetFileInformationByHandle, FileBasicInfo, FILE_BASIC_INFO,
+    };
+
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle() as _),
+            FileBasicInfo,
+            std::ptr::from_ref(&info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    }
+    .map_err(|error| windows_error_to_io(error))
+}
+
+#[cfg(windows)]
+fn system_time_to_windows_ticks(time: SystemTime) -> std::io::Result<i64> {
+    const WINDOWS_EPOCH_OFFSET_SECONDS: u64 = 11_644_473_600;
+    let duration = time.duration_since(std::time::UNIX_EPOCH).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "pre-epoch file timestamps cannot be preserved safely",
+        )
+    })?;
+    let seconds = duration
+        .as_secs()
+        .checked_add(WINDOWS_EPOCH_OFFSET_SECONDS)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow"))?;
+    let ticks = seconds
+        .checked_mul(10_000_000)
+        .and_then(|ticks| ticks.checked_add(u64::from(duration.subsec_nanos() / 100)))
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow"))?;
+    i64::try_from(ticks)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow"))
+}
+
+#[cfg(windows)]
+struct ReplaceSecurityDescriptor(windows::Win32::Security::PSECURITY_DESCRIPTOR);
+
+#[cfg(windows)]
+impl Drop for ReplaceSecurityDescriptor {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::HLOCAL;
+
+        if !self.0.is_invalid() {
+            unsafe {
+                windows::Win32::Foundation::LocalFree(HLOCAL(self.0.0));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ReplaceSecurityParts {
+    owner: windows::Win32::Security::PSID,
+    group: windows::Win32::Security::PSID,
+    dacl: *mut windows::Win32::Security::ACL,
+    dacl_present: windows::Win32::Foundation::BOOL,
+    dacl_protected: bool,
+}
+
+#[cfg(windows)]
+fn query_replace_security(
+    file: &std::fs::File,
+) -> std::io::Result<(ReplaceSecurityDescriptor, ReplaceSecurityParts)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{BOOL, HANDLE};
+    use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SE_DACL_PROTECTED,
+    };
+
+    let handle = HANDLE(file.as_raw_handle() as _);
+    let mut owner = PSID::default();
+    let mut group = PSID::default();
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    let status = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            Some(&mut owner),
+            Some(&mut group),
+            Some(&mut dacl),
+            None,
+            Some(&mut descriptor),
+        )
+    };
+    if status.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(status.0 as i32));
+    }
+    let guard = ReplaceSecurityDescriptor(descriptor);
+    if descriptor.is_invalid() || owner.is_invalid() || group.is_invalid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "replacement cannot preserve a missing owner or primary group",
+        ));
+    }
+    let mut dacl_present = BOOL(0);
+    let mut descriptor_dacl = std::ptr::null_mut();
+    let mut defaulted = BOOL(0);
+    unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut descriptor_dacl,
+            &mut defaulted,
+        )
+    }
+    .map_err(|error| windows_error_to_io(error))?;
+    if dacl_present.0 == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "replacement cannot preserve a file with no DACL",
+        ));
+    }
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }
+        .map_err(|error| windows_error_to_io(error))?;
+    let _ = (defaulted, revision);
+    Ok((
+        guard,
+        ReplaceSecurityParts {
+            owner,
+            group,
+            dacl: descriptor_dacl,
+            dacl_present,
+            dacl_protected: control & SE_DACL_PROTECTED.0 != 0,
+        },
+    ))
+}
+
+#[cfg(windows)]
+fn copy_replace_security(source: &std::fs::File, output: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
+    use windows::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let (_source_descriptor, source_parts) = query_replace_security(source)?;
+    let mut security_information =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    security_information |= if source_parts.dacl_protected {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
+    let status = unsafe {
+        SetSecurityInfo(
+            HANDLE(output.as_raw_handle() as _),
+            SE_FILE_OBJECT,
+            security_information,
+            source_parts.owner,
+            source_parts.group,
+            Some(source_parts.dacl.cast_const()),
+            None,
+        )
+    };
+    if status.0 != 0 {
+        return Err(std::io::Error::from_raw_os_error(status.0 as i32));
+    }
+    let (_output_descriptor, output_parts) = query_replace_security(output)?;
+    let owner_matches = unsafe { windows::Win32::Security::EqualSid(source_parts.owner, output_parts.owner) }.is_ok();
+    let group_matches = unsafe { windows::Win32::Security::EqualSid(source_parts.group, output_parts.group) }.is_ok();
+    let dacl_matches = unsafe { replace_dacl_equal(&source_parts, &output_parts) };
+    if !owner_matches
+        || !group_matches
+        || !dacl_matches
+        || source_parts.dacl_present != output_parts.dacl_present
+        || source_parts.dacl_protected != output_parts.dacl_protected
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "replacement stage security does not match the source owner, group, or DACL",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+unsafe fn replace_dacl_equal(
+    left: &ReplaceSecurityParts,
+    right: &ReplaceSecurityParts,
+) -> bool {
+    if left.dacl.is_null() || right.dacl.is_null() {
+        return left.dacl.is_null() && right.dacl.is_null();
+    }
+    let left_length = unsafe { (*left.dacl).AclSize } as usize;
+    let right_length = unsafe { (*right.dacl).AclSize } as usize;
+    if left_length != right_length || left_length < std::mem::size_of::<windows::Win32::Security::ACL>() {
+        return false;
+    }
+    let left_bytes = unsafe { std::slice::from_raw_parts(left.dacl.cast::<u8>(), left_length) };
+    let right_bytes = unsafe { std::slice::from_raw_parts(right.dacl.cast::<u8>(), right_length) };
+    left_bytes == right_bytes
+}
+
+#[cfg(windows)]
+fn delete_open_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{BOOLEAN, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle() as _),
+            FileDispositionInfo,
+            std::ptr::from_ref(&disposition).cast(),
+            std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    }
+    .map_err(|error| windows_error_to_io(error))
+}
+
 /// Open a content file with read access only. Write and delete sharing are
 /// withheld while the snapshot is captured, but the handle has no mutation
 /// authority and is never returned from the read boundary.
@@ -4191,6 +5816,69 @@ fn rename_open_file_no_replace(
             windows_error_to_io(error),
         )
     })
+}
+
+#[cfg(windows)]
+fn read_handle_bytes(
+    file: &std::fs::File,
+    expected_length: u64,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if expected_length > MAX_RENAME_HASH_BYTES_PER_FILE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "replacement source exceeds the content verification limit",
+        ));
+    }
+    let capacity = usize::try_from(expected_length).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "replacement source length cannot be represented in memory",
+        )
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        std::io::Error::other(format!("could not reserve replacement verification memory: {error}"))
+    })?;
+    let mut reader = file.try_clone()?;
+    reader.seek(SeekFrom::Start(0))?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "replacement source verification was cancelled",
+            ));
+        }
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let next_length = (bytes.len() as u64)
+            .checked_add(count as u64)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "replacement source byte count overflowed",
+                )
+            })?;
+        if next_length > expected_length {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "replacement source grew while being verified",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+    if bytes.len() as u64 != expected_length || file.metadata()?.len() != expected_length {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "replacement source length changed while being verified",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn hash_file_contents(

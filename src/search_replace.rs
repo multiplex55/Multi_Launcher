@@ -6,7 +6,7 @@ use crate::batch_rename::{self, ExplicitDirectoryRoot, SnapshotEntryKind};
 use crate::file_operations::{
     self, NativeFileIdentity, RenameScanGeneration, RenameScanIssueKind, RenameScanRequest,
     RenameScanResult, RenameScanRow, RenameScanStatus, ScanCancellation, VerifiedReadFailureKind,
-    VerifiedReadSnapshot,
+    VerifiedReadEvidence, VerifiedReadSnapshot,
 };
 use regex::{Regex, RegexBuilder};
 use sha2::{Digest, Sha256};
@@ -789,6 +789,7 @@ pub struct SearchFileSnapshot {
     modified: SystemTime,
     raw_bytes: Arc<[u8]>,
     content_sha256: [u8; 32],
+    source_evidence: Option<Arc<VerifiedReadEvidence>>,
     encoding: TextEncoding,
     bom_offset: usize,
     matches: Vec<MatchSpan>,
@@ -850,6 +851,10 @@ impl SearchFileSnapshot {
 
     pub fn matches(&self) -> &[MatchSpan] {
         &self.matches
+    }
+
+    pub(crate) fn source_evidence(&self) -> Option<&Arc<VerifiedReadEvidence>> {
+        self.source_evidence.as_ref()
     }
 }
 
@@ -2503,6 +2508,7 @@ fn execute_search(
                     modified: read.modified(),
                     raw_bytes: Arc::clone(read.bytes()),
                     content_sha256: read.content_sha256(),
+                    source_evidence: Some(Arc::clone(read.evidence())),
                     encoding,
                     bom_offset,
                     matches,
@@ -3104,6 +3110,7 @@ mod tests {
                 modified: SystemTime::UNIX_EPOCH,
                 raw_bytes: Arc::from(raw.to_vec()),
                 content_sha256,
+                source_evidence: None,
                 encoding,
                 bom_offset,
                 matches: built.matches,
@@ -3132,6 +3139,81 @@ mod tests {
             },
             matched_files,
         }
+    }
+
+    #[test]
+    fn replace_safety_boundaries_reject_synthetic_sources() {
+        let result = in_memory_search_result(
+            b"needle",
+            "needle",
+            SearchPatternMode::Literal,
+            SearchGeneration(40),
+            "synthetic.txt",
+        );
+        let selected = result.matched_files()[0]
+            .matches()
+            .iter()
+            .map(|matched| matched.id().clone())
+            .collect::<Vec<_>>();
+        let replacement = ReplacementSpec::new(
+            "changed",
+            ReplacementMode::Literal,
+            ReplacementRevision(6),
+        )
+        .compile(result.pattern())
+        .expect("literal replacement compiles");
+        let candidate = result
+            .preview_replacement(&replacement, &selected)
+            .expect("synthetic candidate computes exact output bytes");
+
+        let error = crate::replace_executor::ConfirmedReplacementRequest::confirm(candidate)
+            .expect_err("a synthetic snapshot cannot authorize filesystem mutation");
+        assert!(error.message().contains("opaque native scan evidence"));
+
+        let mut mixed = in_memory_search_result(
+            b"bb",
+            "a|bb",
+            SearchPatternMode::RustRegex,
+            SearchGeneration(41),
+            "noop.txt",
+        );
+        let changed = in_memory_search_result(
+            b"a",
+            "a|bb",
+            SearchPatternMode::RustRegex,
+            SearchGeneration(41),
+            "changed.txt",
+        );
+        mixed.matched_files.extend(changed.matched_files);
+        mixed.summary.files_examined = 2;
+        mixed.summary.files_searched = 2;
+        mixed.summary.files_matched = 2;
+        mixed.summary.matches_found = 2;
+        mixed.summary.bytes_read = u64::try_from(b"bb".len() + b"a".len())
+            .expect("fixture byte count fits u64");
+        let mixed_ids = mixed
+            .matched_files()
+            .iter()
+            .flat_map(|file| file.matches())
+            .map(|matched| matched.id().clone())
+            .collect::<Vec<_>>();
+        let replacement = ReplacementSpec::new(
+            "bb",
+            ReplacementMode::Literal,
+            ReplacementRevision(7),
+        )
+        .compile(mixed.pattern())
+        .expect("mixed replacement compiles");
+        let mixed_candidate = mixed
+            .preview_replacement(&replacement, &mixed_ids)
+            .expect("mixed candidate retains the selected no-op match");
+        assert_eq!(
+            mixed_candidate.files()[0].readiness(),
+            ReplacementFileReadiness::NoOp
+        );
+        let error = crate::replace_executor::ConfirmedReplacementRequest::confirm(mixed_candidate)
+            .expect_err("synthetic changed source still cannot authorize mutation");
+        assert!(error.message().contains("opaque native scan evidence"));
     }
 
     #[test]
@@ -3603,4 +3685,5 @@ mod tests {
         assert_eq!(cancelled.status(), SearchStatus::Cancelled);
         assert!(!cancelled.summary().match_list_complete());
     }
+
 }

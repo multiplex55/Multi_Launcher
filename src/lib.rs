@@ -66,6 +66,7 @@ pub mod radial;
 pub mod regex_tester;
 pub mod search_scope;
 pub mod search_replace;
+pub mod replace_executor;
 pub mod screen_draw;
 pub mod settings;
 pub mod settings_editor;

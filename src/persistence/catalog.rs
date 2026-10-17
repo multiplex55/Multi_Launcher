@@ -61,10 +61,11 @@ pub enum PersistentStoreId {
     RadialDocument,
     RadialAssets,
     BatchRenameRecovery,
+    SearchReplaceRecovery,
 }
 
 impl PersistentStoreId {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 40] = [
         Self::Settings,
         Self::Actions,
         Self::Bookmarks,
@@ -104,6 +105,7 @@ impl PersistentStoreId {
         Self::RadialDocument,
         Self::RadialAssets,
         Self::BatchRenameRecovery,
+        Self::SearchReplaceRecovery,
     ];
 }
 
@@ -717,6 +719,15 @@ fn spec(id: PersistentStoreId) -> StoreSpec {
             false,
             json_value,
         ),
+        Id::SearchReplaceRecovery => s(
+            "Search and replace recovery journal",
+            Directory,
+            Runtime,
+            Sensitive,
+            Session,
+            false,
+            ProbeKind::AssetsDirectory,
+        ),
     }
 }
 
@@ -847,6 +858,10 @@ fn descriptor_for(
         Id::BatchRenameRecovery => (
             root.path()
                 .join(crate::batch_rename_transaction::RECOVERY_JOURNAL_FILE),
+            false,
+        ),
+        Id::SearchReplaceRecovery => (
+            root.path().join(crate::replace_executor::REPLACE_RECOVERY_DIRECTORY),
             false,
         ),
     };
