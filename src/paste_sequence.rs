@@ -32,7 +32,7 @@ pub(crate) use playback::{
 pub(crate) use playback::{
     ClipboardRestorePlan, NativeSequencePlaybackPlatform, SequencePlaybackController,
     SequencePlaybackError, SequencePlaybackPlatform, SequencePlaybackStatus,
-    SequenceShutdownCleanup,
+    SequenceShutdownCleanup, SessionInputLease, StartedSequence,
 };
 
 /// Read-only acknowledgement from the main hotkey owner. This metadata never

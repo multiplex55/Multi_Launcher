@@ -2,7 +2,7 @@
 //! controller owns sessions and explicitly publishes executor readiness.
 use crate::hotkey::launcher_invocation::{InputProvenance, KeyEvent, KeyTransition};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,11 +27,22 @@ struct Session {
     generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SessionCapabilities {
+    pub paste: bool,
+    pub escape: bool,
+}
+
 #[derive(Default)]
 struct State {
     observer_live: bool,
     session: Option<Session>,
+    capabilities: SessionCapabilities,
+    cancelled: Option<Session>,
+    cancel_notice: Option<Session>,
     invalidated: Option<Session>,
+    epoch: u64,
+    cancel_applied_epoch: u64,
     next_permit: u64,
     in_flight: Option<u64>,
     busy_reported: bool,
@@ -44,6 +55,9 @@ struct State {
 pub struct PasteAdmissionBridge {
     state: Mutex<State>,
     armed: AtomicBool,
+    published_epoch: AtomicU64,
+    escape_epoch: AtomicU64,
+    cancel_epoch: AtomicU64,
     contended: AtomicBool,
     hook_wake: OnceLock<mpsc::Sender<()>>,
 }
@@ -78,6 +92,7 @@ impl Drop for Permit {
                 "Physical paste delivery was lost; restart the sequence.",
             );
             bridge.armed.store(false, Ordering::Release);
+            bridge.escape_epoch.store(0, Ordering::Release);
         }
     }
 }
@@ -86,6 +101,10 @@ impl Drop for Permit {
 pub enum PhysicalPasteNotice {
     Paste(PhysicalPasteAdmission),
     Busy {
+        owner: u64,
+        generation: u64,
+    },
+    Cancel {
         owner: u64,
         generation: u64,
     },
@@ -102,36 +121,79 @@ fn fail(state: &mut State, reason: &'static str) {
         state.failure = Some((session.owner, session.generation, reason));
     }
     state.in_flight = None;
+    state.capabilities = SessionCapabilities::default();
     state.busy_reported = false;
     // Do not drop queued permits while holding their bridge lock.
 }
 
 impl PasteAdmissionBridge {
-    pub(crate) fn arm(&self, owner: u64, generation: u64) -> Result<(), &'static str> {
-        self.publish(owner, Some(generation), true);
+    pub(crate) fn configure_session(
+        &self,
+        owner: u64,
+        generation: u64,
+        requested: SessionCapabilities,
+    ) -> Result<SessionCapabilities, &'static str> {
+        self.publish_session(owner, Some(generation), requested);
         let state = self
             .state
             .lock()
-            .map_err(|_| "Physical paste admission is unavailable.")?;
-        if !state.observer_live {
+            .map_err(|_| "Session input admission is unavailable.")?;
+        if state.session != Some(Session { owner, generation }) {
+            return Err("Session input admission was cancelled or invalidated.");
+        }
+        if requested.paste && !state.capabilities.paste {
             return Err(
                 "Physical paste observer is unavailable; restart after input service recovery.",
             );
         }
-        if state.session != Some(Session { owner, generation }) {
-            return Err("Physical paste session could not be armed; restart the sequence.");
-        }
-        Ok(())
+        Ok(state.capabilities)
+    }
+
+    pub(crate) fn session_execution_valid(&self, owner: u64, generation: u64) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            self.cancel_epoch.load(Ordering::Acquire) != state.epoch
+                && state.session == Some(Session { owner, generation })
+        })
+    }
+
+    pub(crate) fn cancellation_for(&self, owner: u64, generation: u64) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        self.apply_pending_cancel(&mut state);
+        state.cancelled == Some(Session { owner, generation })
+    }
+
+    pub(crate) fn escape_available(&self, owner: u64, generation: u64) -> bool {
+        self.escape_epoch.load(Ordering::Acquire) != 0
+            && self.state.lock().is_ok_and(|state| {
+                state.session == Some(Session { owner, generation }) && state.capabilities.escape
+            })
+    }
+    #[cfg(test)]
+    pub(crate) fn arm(&self, owner: u64, generation: u64) -> Result<(), &'static str> {
+        self.configure_session(
+            owner,
+            generation,
+            SessionCapabilities {
+                paste: true,
+                escape: false,
+            },
+        )
+        .map(|_| ())
     }
     pub fn observer_live(&self, live: bool) {
         if let Ok(mut state) = self.state.lock() {
             state.observer_live = live;
             if !live {
                 self.armed.store(false, Ordering::Release);
-                fail(
-                    &mut state,
-                    "Physical paste observer stopped; restart the sequence.",
-                );
+                self.escape_epoch.store(0, Ordering::Release);
+                if state.capabilities.paste || state.capabilities.escape {
+                    fail(
+                        &mut state,
+                        "Physical paste observer stopped; restart the sequence.",
+                    );
+                }
             }
         }
     }
@@ -145,22 +207,69 @@ impl PasteAdmissionBridge {
     /// Only a successfully started controller with a checked executor may arm.
     /// Preparing/Ready and the transport-only M5-B checkpoint pass `false`.
     pub fn publish(&self, owner: u64, generation: Option<u64>, executor_ready: bool) {
+        self.publish_session(
+            owner,
+            generation.filter(|_| executor_ready),
+            SessionCapabilities {
+                paste: executor_ready,
+                escape: false,
+            },
+        );
+    }
+
+    pub(crate) fn publish_session(
+        &self,
+        owner: u64,
+        generation: Option<u64>,
+        requested: SessionCapabilities,
+    ) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        self.apply_pending_cancel(&mut state);
         self.apply_contention(&mut state);
         let candidate = generation
-            .filter(|_| executor_ready && state.observer_live)
             .map(|generation| Session { owner, generation })
             .filter(|candidate| Some(*candidate) != state.invalidated);
         if state.session.is_some_and(|session| session.owner != owner) {
             return;
         }
+        let live = state.observer_live && state.wake.is_some();
+        state.capabilities = if candidate.is_some() {
+            SessionCapabilities {
+                paste: requested.paste && live,
+                escape: requested.escape && live,
+            }
+        } else {
+            SessionCapabilities::default()
+        };
+        self.armed
+            .store(state.capabilities.paste, Ordering::Release);
+        if state.session != candidate {
+            let Some(epoch) = state.epoch.checked_add(1) else {
+                fail(
+                    &mut state,
+                    "Session input identity was exhausted; restart the launcher.",
+                );
+                self.armed.store(false, Ordering::Release);
+                self.escape_epoch.store(0, Ordering::Release);
+                return;
+            };
+            state.epoch = epoch;
+            self.published_epoch.store(epoch, Ordering::Release);
+        }
+        self.escape_epoch.store(
+            if state.capabilities.escape {
+                state.epoch
+            } else {
+                0
+            },
+            Ordering::Release,
+        );
         if state.session == candidate {
             return;
         }
         state.session = candidate;
-        self.armed.store(candidate.is_some(), Ordering::Release);
         state.in_flight = None;
         state.busy_reported = false;
         let retired = std::mem::take(&mut state.notices);
@@ -170,6 +279,7 @@ impl PasteAdmissionBridge {
 
     pub fn invalidate(&self) {
         self.armed.store(false, Ordering::Release);
+        self.escape_epoch.store(0, Ordering::Release);
         if let Ok(mut state) = self.state.lock() {
             fail(
                 &mut state,
@@ -183,6 +293,7 @@ impl PasteAdmissionBridge {
             && state.session.is_some_and(|session| session.owner == owner)
         {
             self.armed.store(false, Ordering::Release);
+            self.escape_epoch.store(0, Ordering::Release);
             fail(&mut state, "The sequence event owner closed.");
         }
     }
@@ -214,6 +325,7 @@ impl PasteAdmissionBridge {
 
     pub fn delivery_failed(&self) {
         self.armed.store(false, Ordering::Release);
+        self.escape_epoch.store(0, Ordering::Release);
         if let Ok(mut state) = self.state.lock() {
             fail(
                 &mut state,
@@ -222,14 +334,35 @@ impl PasteAdmissionBridge {
         }
     }
 
+    pub fn delivery_failed_for(&self, owner: u64, generation: u64) {
+        if let Ok(mut state) = self.state.lock()
+            && state.session == Some(Session { owner, generation })
+        {
+            self.armed.store(false, Ordering::Release);
+            self.escape_epoch.store(0, Ordering::Release);
+            fail(
+                &mut state,
+                "Session input could not reach its playback owner; restart the sequence.",
+            );
+        }
+    }
+
     pub fn take_notice(&self) -> Option<PhysicalPasteNotice> {
         let mut state = self.state.lock().ok()?;
+        self.apply_pending_cancel(&mut state);
         self.apply_contention(&mut state);
+        if let Some(session) = state.cancel_notice.take() {
+            return Some(PhysicalPasteNotice::Cancel {
+                owner: session.owner,
+                generation: session.generation,
+            });
+        }
         state.notices.pop_front()
     }
 
     pub fn take_failure(&self) -> Option<(u64, u64, &'static str)> {
         let mut state = self.state.lock().ok()?;
+        self.apply_pending_cancel(&mut state);
         self.apply_contention(&mut state);
         state.failure.take()
     }
@@ -237,6 +370,7 @@ impl PasteAdmissionBridge {
     fn apply_contention(&self, state: &mut State) {
         if self.contended.swap(false, Ordering::AcqRel) {
             self.armed.store(false, Ordering::Release);
+            self.escape_epoch.store(0, Ordering::Release);
             fail(
                 state,
                 "Physical paste admission was busy; restart the sequence.",
@@ -244,12 +378,53 @@ impl PasteAdmissionBridge {
         }
     }
 
+    fn apply_pending_cancel(&self, state: &mut State) {
+        let epoch = self.cancel_epoch.load(Ordering::Acquire);
+        if epoch == 0 || epoch != state.epoch || epoch == state.cancel_applied_epoch {
+            return;
+        }
+        state.cancel_applied_epoch = epoch;
+        // Route/lifecycle invalidation can win the lock after a hook captured
+        // this epoch. Retain its exact Cancel; a replacement has a new epoch.
+        if let Some(session) = state.session.take().or(state.invalidated) {
+            state.cancelled = Some(session);
+            state.invalidated = Some(session);
+            state.cancel_notice = Some(session);
+        }
+        state.capabilities = SessionCapabilities::default();
+        state.in_flight = None;
+        state.busy_reported = false;
+        self.armed.store(false, Ordering::Release);
+        self.escape_epoch.store(0, Ordering::Release);
+    }
+
+    fn reserve_cancel(&self) -> bool {
+        let epoch = self.escape_epoch.swap(0, Ordering::AcqRel);
+        if epoch == 0 {
+            return false;
+        }
+        // Exact immutable admission identity: a delayed old key callback can
+        // neither cancel a replacement session nor overwrite its newer intent.
+        self.cancel_epoch.fetch_max(epoch, Ordering::AcqRel);
+        if let Ok(mut state) = self.state.try_lock() {
+            self.apply_pending_cancel(&mut state);
+        }
+        // One cancel intent has its own bounded slot and never waits for a
+        // paste permit or the main/GUI owner to finish clipboard settling.
+        self.hook_wake
+            .get()
+            .is_some_and(|wake| wake.send(()).is_ok())
+    }
+
     /// Called only from the hook. Reservation, bounded enqueue and wake happen
     /// before the V cycle is claimed. Active lock contention claims only the
     /// physical cycle and defers one explicit failure, never a stale OS paste.
     fn reserve(self: &Arc<Self>, focus: PasteFocus) -> bool {
         let Ok(mut state) = self.state.try_lock() else {
-            if !self.armed.load(Ordering::Acquire) {
+            if !self.armed.load(Ordering::Acquire)
+                || self.cancel_epoch.load(Ordering::Acquire)
+                    == self.published_epoch.load(Ordering::Acquire)
+            {
                 return false;
             }
             // Never let an active physical paste silently become a normal OS
@@ -266,8 +441,12 @@ impl PasteAdmissionBridge {
         let Some(session) = state.session else {
             return false;
         };
+        if !state.capabilities.paste || self.cancel_epoch.load(Ordering::Acquire) == state.epoch {
+            return false;
+        }
         if state.notices.len() >= 2 && !(state.in_flight.is_some() && state.busy_reported) {
             self.armed.store(false, Ordering::Release);
+            self.escape_epoch.store(0, Ordering::Release);
             fail(
                 &mut state,
                 "Physical paste queue is full; restart the sequence.",
@@ -307,6 +486,7 @@ impl PasteAdmissionBridge {
             .is_none_or(|wake| wake.send(()).is_err())
         {
             self.armed.store(false, Ordering::Release);
+            self.escape_epoch.store(0, Ordering::Release);
             fail(
                 &mut state,
                 "Physical paste wake failed; restart the sequence.",
@@ -324,28 +504,38 @@ pub(crate) struct PhysicalPasteReducer {
     injected_modifiers: [bool; 8],
     known: bool,
     owned_v: bool,
+    escape_down: bool,
+    owned_escape: bool,
 }
 
 const KEYS: [u32; 9] = [0xA2, 0xA3, 0xA0, 0xA1, 0xA4, 0xA5, 0x5B, 0x5C, 0x56];
 
 impl PhysicalPasteReducer {
+    #[cfg(test)]
     pub(crate) fn new(down: [bool; 9]) -> Self {
+        Self::with_escape_baseline(down, false)
+    }
+
+    pub(crate) fn with_escape_baseline(down: [bool; 9], escape_down: bool) -> Self {
         Self {
             injected_modifiers: [false; 8],
-            known: !down.iter().any(|down| *down),
+            known: !escape_down && !down.iter().any(|down| *down),
             down,
             owned_v: false,
+            escape_down,
+            owned_escape: false,
         }
     }
 
     pub(crate) fn has_owned_cycle(&self) -> bool {
-        self.owned_v
+        self.owned_v || self.owned_escape
     }
 
     pub(crate) fn invalidate(&mut self, continuity: bool) {
         self.known = false;
         if !continuity {
             self.owned_v = false;
+            self.owned_escape = false;
         }
     }
 
@@ -357,6 +547,37 @@ impl PhysicalPasteReducer {
         eligible_owner: bool,
         bridge: &Arc<PasteAdmissionBridge>,
     ) -> bool {
+        if event.vk == 0x1B {
+            if event.provenance != InputProvenance::Physical {
+                return false;
+            }
+            let was_down = self.escape_down;
+            self.escape_down = event.transition != KeyTransition::Up;
+            let consumed = if self.owned_escape {
+                if event.transition == KeyTransition::Up {
+                    self.owned_escape = false;
+                }
+                true
+            } else {
+                let safe_foreground = focus.is_some_and(|focus| {
+                    focus.hwnd != 0 && focus.process_id != 0 && focus.thread_id != 0
+                });
+                let admit = self.known
+                    && !was_down
+                    && event.transition == KeyTransition::Down
+                    && eligible_owner
+                    && safe_foreground
+                    && bridge.reserve_cancel();
+                if admit {
+                    self.owned_escape = true;
+                }
+                admit
+            };
+            if self.clean() {
+                self.known = true;
+            }
+            return consumed;
+        }
         let Some(index) = KEYS.iter().position(|key| *key == event.vk) else {
             return false;
         };
@@ -399,7 +620,9 @@ impl PhysicalPasteReducer {
     }
 
     fn clean(&self) -> bool {
-        !self.down.iter().any(|down| *down) && !self.injected_modifiers.iter().any(|down| *down)
+        !self.escape_down
+            && !self.down.iter().any(|down| *down)
+            && !self.injected_modifiers.iter().any(|down| *down)
     }
 }
 
@@ -408,6 +631,11 @@ pub(crate) fn physical_baseline() -> [bool; 9] {
     KEYS.map(|key| unsafe {
         windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(key as i32) < 0
     })
+}
+
+#[cfg(all(windows, not(test)))]
+pub(crate) fn escape_baseline() -> bool {
+    unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x1B) < 0 }
 }
 
 /// Title-free hook snapshot. Full protected-control validation belongs to the
@@ -483,6 +711,302 @@ mod tests {
             PhysicalPasteNotice::Paste(admission) => admission,
             other => panic!("expected paste, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn session_escape_busy_paste_cancels_once_and_drains_both_owned_cycles() {
+        let (bridge, mut reducer, _wake) = fixture();
+        bridge
+            .configure_session(
+                4,
+                7,
+                SessionCapabilities {
+                    paste: true,
+                    escape: true,
+                },
+            )
+            .unwrap();
+        physical(&mut reducer, &bridge, 0xA2, KeyTransition::Down);
+        assert!(physical(&mut reducer, &bridge, 0x56, KeyTransition::Down));
+        let paste = take_paste(&bridge);
+        assert!(physical(&mut reducer, &bridge, 0x1B, KeyTransition::Down));
+        assert!(!bridge.valid(&paste));
+        assert!(matches!(
+            bridge.take_notice(),
+            Some(PhysicalPasteNotice::Cancel {
+                owner: 4,
+                generation: 7
+            })
+        ));
+        assert!(bridge.cancellation_for(4, 7));
+        bridge
+            .configure_session(
+                4,
+                8,
+                SessionCapabilities {
+                    paste: true,
+                    escape: true,
+                },
+            )
+            .unwrap();
+        assert!(physical(&mut reducer, &bridge, 0x1B, KeyTransition::Repeat));
+        assert!(physical(&mut reducer, &bridge, 0x56, KeyTransition::Repeat));
+        assert!(
+            bridge.take_notice().is_none(),
+            "held keys cannot acquire the replacement generation"
+        );
+        assert!(!event(
+            &mut reducer,
+            &bridge,
+            0x1B,
+            KeyTransition::Up,
+            InputProvenance::SelfInjected
+        ));
+        assert!(physical(&mut reducer, &bridge, 0x56, KeyTransition::Up));
+        assert!(reducer.has_owned_cycle());
+        assert!(physical(&mut reducer, &bridge, 0x1B, KeyTransition::Up));
+        assert!(!reducer.has_owned_cycle());
+        drop(paste);
+        assert!(bridge.session_execution_valid(4, 8));
+    }
+
+    #[test]
+    fn session_escape_preferences_preserve_permit_and_cannot_resurrect_cancelled_identity() {
+        let (bridge, mut reducer, _wake) = fixture();
+        physical(&mut reducer, &bridge, 0xA2, KeyTransition::Down);
+        physical(&mut reducer, &bridge, 0x56, KeyTransition::Down);
+        let paste = take_paste(&bridge);
+        for escape in [true, false, true] {
+            bridge
+                .configure_session(
+                    4,
+                    7,
+                    SessionCapabilities {
+                        paste: true,
+                        escape,
+                    },
+                )
+                .unwrap();
+            assert!(
+                bridge.valid(&paste),
+                "capability changes preserve the same in-flight step"
+            );
+            assert_eq!(bridge.escape_available(4, 7), escape);
+        }
+        assert!(physical(&mut reducer, &bridge, 0x1B, KeyTransition::Down));
+        bridge.invalidate();
+        bridge.publish_session(4, None, Default::default());
+        for escape in [false, true] {
+            assert!(
+                bridge
+                    .configure_session(
+                        4,
+                        7,
+                        SessionCapabilities {
+                            paste: true,
+                            escape
+                        }
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            matches!(
+                bridge.take_notice(),
+                Some(PhysicalPasteNotice::Cancel {
+                    owner: 4,
+                    generation: 7
+                })
+            ),
+            "Cancel survives disarm and route changes"
+        );
+    }
+
+    #[test]
+    fn session_escape_delayed_old_epoch_cannot_cancel_or_fence_replacement() {
+        let (bridge, _reducer, _wake) = fixture();
+        let capabilities = SessionCapabilities {
+            paste: true,
+            escape: true,
+        };
+        bridge.configure_session(4, 7, capabilities).unwrap();
+        // Pause the hook after its atomic capability capture, before enqueue.
+        let old = bridge.escape_epoch.swap(0, Ordering::AcqRel);
+        bridge.configure_session(4, 8, capabilities).unwrap();
+        let newer = bridge.escape_epoch.load(Ordering::Acquire);
+        bridge.cancel_epoch.fetch_max(old, Ordering::AcqRel);
+        assert!(bridge.session_execution_valid(4, 8));
+        assert!(!bridge.cancellation_for(4, 8));
+        assert!(bridge.take_notice().is_none());
+        assert!(bridge.escape_available(4, 8));
+        // A delayed old store must also preserve a newer accepted cancellation.
+        bridge.cancel_epoch.fetch_max(newer, Ordering::AcqRel);
+        bridge.cancel_epoch.fetch_max(old, Ordering::AcqRel);
+        assert!(!bridge.session_execution_valid(4, 8));
+        assert!(matches!(
+            bridge.take_notice(),
+            Some(PhysicalPasteNotice::Cancel {
+                owner: 4,
+                generation: 8
+            })
+        ));
+        assert!(bridge.cancellation_for(4, 8));
+        assert!(bridge.take_notice().is_none(), "Cancel is coalesced");
+
+        bridge.configure_session(4, 9, capabilities).unwrap();
+        let epoch = bridge.escape_epoch.swap(0, Ordering::AcqRel);
+        bridge.invalidate();
+        bridge.cancel_epoch.fetch_max(epoch, Ordering::AcqRel);
+        assert!(matches!(
+            bridge.take_notice(),
+            Some(PhysicalPasteNotice::Cancel {
+                owner: 4,
+                generation: 9
+            })
+        ));
+        assert!(bridge.cancellation_for(4, 9));
+        assert!(bridge.take_notice().is_none());
+    }
+
+    #[test]
+    fn session_escape_lock_contention_has_independent_bounded_cancel_delivery() {
+        let (bridge, mut reducer, wake) = fixture();
+        bridge
+            .configure_session(
+                4,
+                7,
+                SessionCapabilities {
+                    paste: true,
+                    escape: true,
+                },
+            )
+            .unwrap();
+        let guard = bridge.state.lock().unwrap();
+        assert!(physical(&mut reducer, &bridge, 0x1B, KeyTransition::Down));
+        for _ in 0..4 {
+            assert!(physical(&mut reducer, &bridge, 0x1B, KeyTransition::Repeat));
+        }
+        assert_eq!(bridge.cancel_epoch.load(Ordering::Acquire), guard.epoch);
+        assert_eq!(wake.try_iter().count(), 1);
+        drop(guard);
+        assert!(matches!(
+            bridge.take_notice(),
+            Some(PhysicalPasteNotice::Cancel { .. })
+        ));
+        assert!(!bridge.session_execution_valid(4, 7));
+        assert!(physical(&mut reducer, &bridge, 0x1B, KeyTransition::Up));
+        assert!(bridge.take_notice().is_none());
+    }
+
+    #[test]
+    fn session_escape_idle_unknown_injected_exclusive_and_held_startup_pass_through() {
+        let (bridge, mut reducer, _wake) = fixture();
+        assert!(!physical(&mut reducer, &bridge, 0x1B, KeyTransition::Down));
+        physical(&mut reducer, &bridge, 0x1B, KeyTransition::Up);
+        bridge
+            .configure_session(
+                4,
+                7,
+                SessionCapabilities {
+                    paste: false,
+                    escape: true,
+                },
+            )
+            .unwrap();
+        for provenance in [
+            InputProvenance::SelfInjected,
+            InputProvenance::ExternalInjected,
+        ] {
+            assert!(!event(
+                &mut reducer,
+                &bridge,
+                0x1B,
+                KeyTransition::Down,
+                provenance
+            ));
+        }
+        for focus in [None, Some(PasteFocus { hwnd: 0, ..FOCUS })] {
+            assert!(!reducer.process(
+                KeyEvent {
+                    vk: 0x1B,
+                    transition: KeyTransition::Down,
+                    provenance: InputProvenance::Physical,
+                    at: 0
+                },
+                focus,
+                1,
+                true,
+                &bridge
+            ));
+            physical(&mut reducer, &bridge, 0x1B, KeyTransition::Up);
+        }
+        assert!(!reducer.process(
+            KeyEvent {
+                vk: 0x1B,
+                transition: KeyTransition::Down,
+                provenance: InputProvenance::Physical,
+                at: 0
+            },
+            Some(FOCUS),
+            1,
+            false,
+            &bridge
+        ));
+        physical(&mut reducer, &bridge, 0x1B, KeyTransition::Up);
+        let mut held = PhysicalPasteReducer::with_escape_baseline([false; 9], true);
+        assert!(!physical(&mut held, &bridge, 0x1B, KeyTransition::Down));
+        assert!(!physical(&mut held, &bridge, 0x1B, KeyTransition::Up));
+        assert!(
+            held.process(
+                KeyEvent {
+                    vk: 0x1B,
+                    transition: KeyTransition::Down,
+                    provenance: InputProvenance::Physical,
+                    at: 0
+                },
+                Some(PasteFocus {
+                    process_id: 1,
+                    ..FOCUS
+                }),
+                1,
+                true,
+                &bridge
+            ),
+            "launcher focus is safe for cancellation"
+        );
+    }
+
+    #[test]
+    fn session_escape_optional_unavailable_has_no_interception_and_failed_wake_disarms() {
+        let bridge = Arc::new(PasteAdmissionBridge::default());
+        let capabilities = bridge
+            .configure_session(
+                4,
+                7,
+                SessionCapabilities {
+                    paste: false,
+                    escape: true,
+                },
+            )
+            .unwrap();
+        assert!(!capabilities.escape);
+        assert!(bridge.session_execution_valid(4, 7));
+        let (bridge, mut reducer, wake) = fixture();
+        bridge
+            .configure_session(
+                4,
+                7,
+                SessionCapabilities {
+                    paste: false,
+                    escape: true,
+                },
+            )
+            .unwrap();
+        drop(wake);
+        assert!(!physical(&mut reducer, &bridge, 0x1B, KeyTransition::Down));
+        assert!(!reducer.has_owned_cycle());
+        assert!(bridge.cancellation_for(4, 7));
+        assert!(!bridge.escape_available(4, 7));
     }
 
     #[test]

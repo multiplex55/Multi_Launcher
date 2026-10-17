@@ -142,6 +142,7 @@ pub(crate) trait SequencePlaybackPlatform {
 }
 
 struct PlaybackSession {
+    input_lease: Option<SessionInputLease>,
     physical_paste: Option<PendingPhysicalPaste>,
     generation: u64,
     run: PreparedSequenceRun,
@@ -153,6 +154,19 @@ struct PlaybackSession {
     next_step_at: Option<Instant>,
     cleanup_at: Option<Instant>,
     target_wait_deadline: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StartedSequence {
+    pub generation: u64,
+    pub mode: PlaybackMode,
+}
+
+#[derive(Clone)]
+pub(crate) struct SessionInputLease {
+    pub owner: u64,
+    pub generation: u64,
+    pub bridge: Arc<PasteAdmissionBridge>,
 }
 
 struct PendingPhysicalPaste {
@@ -182,19 +196,50 @@ impl Default for SequencePlaybackController {
 }
 
 impl SequencePlaybackController {
+    pub(crate) fn started_run(&self) -> Option<StartedSequence> {
+        self.session
+            .as_ref()
+            .filter(|_| {
+                matches!(
+                    self.status,
+                    SequencePlaybackStatus::Running
+                        | SequencePlaybackStatus::AwaitAdvance
+                        | SequencePlaybackStatus::AwaitTarget
+                        | SequencePlaybackStatus::AwaitPaste
+                )
+            })
+            .map(|session| StartedSequence {
+                generation: session.generation,
+                mode: session.run.mode(),
+            })
+    }
+
+    pub(crate) fn set_input_lease(&mut self, lease: Option<SessionInputLease>) {
+        if let Some(session) = self.session.as_mut() {
+            session.input_lease = lease.filter(|lease| lease.generation == session.generation);
+        }
+    }
+
+    pub(crate) fn has_input_lease(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.input_lease.is_some())
+    }
+
+    pub(crate) fn escape_cancel_available(&self) -> bool {
+        self.started_run().is_some()
+            && self
+                .session
+                .as_ref()
+                .and_then(|session| session.input_lease.as_ref())
+                .is_some_and(|lease| lease.bridge.escape_available(lease.owner, lease.generation))
+    }
     /// A session generation is published only after Start succeeds. Preflight
     /// and prepared previews never own physical input.
     pub(crate) fn physical_paste_generation(&self) -> Option<u64> {
-        self.session
-            .as_ref()
-            .filter(|session| {
-                session.run.mode() == PlaybackMode::PasteToAdvance
-                    && matches!(
-                        self.status,
-                        SequencePlaybackStatus::AwaitPaste | SequencePlaybackStatus::Running
-                    )
-            })
-            .map(|session| session.generation)
+        self.started_run()
+            .filter(|run| run.mode == PlaybackMode::PasteToAdvance)
+            .map(|run| run.generation)
     }
 
     pub(crate) fn status(&self) -> SequencePlaybackStatus {
@@ -273,9 +318,18 @@ impl SequencePlaybackController {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn start(
         &mut self,
         platform: &mut impl SequencePlaybackPlatform,
+    ) -> Result<(), SequencePlaybackError> {
+        self.start_with_admission(platform, |_| Ok(None))
+    }
+
+    pub(crate) fn start_with_admission(
+        &mut self,
+        platform: &mut impl SequencePlaybackPlatform,
+        admit: impl FnOnce(StartedSequence) -> Result<Option<SessionInputLease>, SequencePlaybackError>,
     ) -> Result<(), SequencePlaybackError> {
         if self.status != SequencePlaybackStatus::Ready {
             return Err(SequencePlaybackError::InvalidState);
@@ -298,6 +352,7 @@ impl SequencePlaybackController {
         };
 
         self.session = Some(PlaybackSession {
+            input_lease: None,
             physical_paste: None,
             generation: self.generation,
             run,
@@ -310,15 +365,28 @@ impl SequencePlaybackController {
             cleanup_at: None,
             target_wait_deadline: None,
         });
-        if self
+        let physical = self
             .session
             .as_ref()
-            .is_some_and(|session| session.run.mode() == PlaybackMode::PasteToAdvance)
-        {
-            self.status = SequencePlaybackStatus::AwaitPaste;
+            .is_some_and(|session| session.run.mode() == PlaybackMode::PasteToAdvance);
+        self.status = if physical {
+            SequencePlaybackStatus::AwaitPaste
+        } else {
+            SequencePlaybackStatus::Running
+        };
+        let started = self
+            .started_run()
+            .ok_or(SequencePlaybackError::InvalidState)?;
+        match admit(started) {
+            Ok(lease) => self.set_input_lease(lease),
+            Err(error) => {
+                self.fail(error, platform.now());
+                return Err(error);
+            }
+        }
+        if physical {
             return Ok(());
         }
-        self.status = SequencePlaybackStatus::Running;
         if let Err(error) = self.paste_next_step(platform) {
             self.fail(error, platform.now());
             return Err(error);
@@ -354,6 +422,13 @@ impl SequencePlaybackController {
     }
 
     pub(crate) fn cancel(&mut self, now: Instant) {
+        if let Some(lease) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.input_lease.as_ref())
+        {
+            lease.bridge.invalidate_owner(lease.owner);
+        }
         if let Some(pending) = self
             .session
             .as_ref()
@@ -587,8 +662,18 @@ impl SequencePlaybackController {
         target: &SequenceTarget,
         physical: Option<(&PhysicalPasteAdmission, &Arc<PasteAdmissionBridge>)>,
     ) -> Result<(), SequencePlaybackError> {
+        let input_lease = self
+            .session
+            .as_ref()
+            .and_then(|session| session.input_lease.clone());
         let check_lease = || {
-            if physical.is_none_or(|(admission, bridge)| bridge.valid(admission)) {
+            if physical.is_none_or(|(admission, bridge)| bridge.valid(admission))
+                && input_lease.as_ref().is_none_or(|lease| {
+                    lease
+                        .bridge
+                        .session_execution_valid(lease.owner, lease.generation)
+                })
+            {
                 Ok(())
             } else {
                 Err(SequencePlaybackError::InvalidState)
@@ -658,6 +743,7 @@ impl SequencePlaybackController {
         if !platform.clipboard_sequence_matches(published_sequence) {
             return Err(SequencePlaybackError::ClipboardChanged);
         }
+        check_lease()?;
         let input_result = platform.paste_chord();
         let pasted_at = platform.now();
 
@@ -668,6 +754,7 @@ impl SequencePlaybackController {
         session.target_wait_deadline = None;
         session.last_paste_at = Some(pasted_at);
         input_result?;
+        check_lease()?;
         if physical.is_some() {
             if let Some(pending) = session.physical_paste.as_mut() {
                 pending.settle_at = Some(pasted_at + CLIPBOARD_CONSUMPTION_SETTLE);
@@ -679,6 +766,11 @@ impl SequencePlaybackController {
         }
         session.next_step += 1;
         if session.next_step >= session.run.step_count() {
+            if let Some(lease) = session.input_lease.take() {
+                lease
+                    .bridge
+                    .publish_session(lease.owner, None, Default::default());
+            }
             session.next_step_at = None;
             session.cleanup_at = Some(pasted_at + CLIPBOARD_CONSUMPTION_SETTLE);
             self.status = SequencePlaybackStatus::Completed;
@@ -764,6 +856,22 @@ impl SequencePlaybackController {
     }
 
     fn fail(&mut self, error: SequencePlaybackError, now: Instant) {
+        if self
+            .session
+            .as_ref()
+            .and_then(|session| session.input_lease.as_ref())
+            .is_some_and(|lease| lease.bridge.cancellation_for(lease.owner, lease.generation))
+        {
+            self.cancel(now);
+            return;
+        }
+        if let Some(lease) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.input_lease.as_ref())
+        {
+            lease.bridge.invalidate_owner(lease.owner);
+        }
         self.status = SequencePlaybackStatus::Failed(error);
         let mut drop_session = false;
         if let Some(session) = self.session.as_mut() {
@@ -939,6 +1047,7 @@ mod tests {
     }
 
     struct FakePlatform {
+        on_publish: Option<Box<dyn FnOnce()>>,
         zero_publication: bool,
         external_after_publish: bool,
         external_after_paste: bool,
@@ -966,6 +1075,7 @@ mod tests {
     impl FakePlatform {
         fn at(clock: Instant) -> Self {
             Self {
+                on_publish: None,
                 zero_publication: false,
                 external_after_publish: false,
                 external_after_paste: false,
@@ -1098,6 +1208,9 @@ mod tests {
             } else {
                 self.sequence
             };
+            if let Some(on_publish) = self.on_publish.take() {
+                on_publish();
+            }
             if self.external_after_publish {
                 self.external_copy("external after publish");
             }
@@ -1510,6 +1623,176 @@ mod tests {
         let at = platform.clock + Duration::from_millis(180);
         tick(&mut controller, &mut platform, at);
         assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+    }
+
+    #[test]
+    fn session_escape_arms_after_start_before_first_publication_in_every_mode() {
+        use crate::hotkey::launcher_invocation::{InputProvenance, KeyEvent, KeyTransition};
+        use crate::paste_sequence::admission::{
+            PasteAdmissionBridge, PhysicalPasteReducer, SessionCapabilities,
+        };
+        for mode in [
+            PlaybackMode::Automatic,
+            PlaybackMode::ManualAdvance,
+            PlaybackMode::PasteToAdvance,
+        ] {
+            let bridge = std::sync::Arc::new(PasteAdmissionBridge::default());
+            let (wake, _rx) = std::sync::mpsc::channel();
+            bridge.install_wake(wake);
+            bridge.observer_live(true);
+            let mut controller = ready_controller(prepared_run(mode, 0, &["one", "two"]));
+            assert!(controller.started_run().is_none());
+            let mut platform = FakePlatform::at(Instant::now());
+            let cancel_bridge = std::sync::Arc::clone(&bridge);
+            platform.on_publish = Some(Box::new(move || {
+                let mut reducer = PhysicalPasteReducer::new([false; 9]);
+                assert!(reducer.process(
+                    KeyEvent {
+                        vk: 0x1B,
+                        transition: KeyTransition::Down,
+                        provenance: InputProvenance::Physical,
+                        at: 0
+                    },
+                    Some(crate::paste_sequence::admission::PasteFocus {
+                        hwnd: 99,
+                        process_id: 999,
+                        thread_id: 90
+                    }),
+                    999,
+                    true,
+                    &cancel_bridge
+                ));
+            }));
+            let result = controller.start_with_admission(&mut platform, |run| {
+                bridge
+                    .configure_session(
+                        4,
+                        run.generation,
+                        SessionCapabilities {
+                            paste: mode == PlaybackMode::PasteToAdvance,
+                            escape: true,
+                        },
+                    )
+                    .unwrap();
+                Ok(Some(super::SessionInputLease {
+                    owner: 4,
+                    generation: run.generation,
+                    bridge: std::sync::Arc::clone(&bridge),
+                }))
+            });
+            if mode == PlaybackMode::PasteToAdvance {
+                result.unwrap();
+                let mut reducer = PhysicalPasteReducer::new([false; 9]);
+                physical_event(
+                    &mut reducer,
+                    &bridge,
+                    &platform.foreground,
+                    0xA2,
+                    KeyTransition::Down,
+                );
+                let admission = human_paste(&mut reducer, &bridge, &platform.foreground);
+                assert!(
+                    controller
+                        .physical_paste(admission, std::sync::Arc::clone(&bridge), &mut platform)
+                        .is_err()
+                );
+            } else {
+                assert!(result.is_err());
+            }
+            assert_eq!(controller.status(), SequencePlaybackStatus::Cancelled);
+            assert_eq!(
+                platform.paste_count(),
+                0,
+                "accepted Esc between publication and injection fences the first step"
+            );
+            let at = platform.clock + Duration::from_millis(180);
+            tick(&mut controller, &mut platform, at);
+            assert_eq!(platform.clipboard.as_deref(), Some("user clipboard"));
+            assert!(!controller.needs_tick());
+        }
+    }
+
+    #[test]
+    fn session_escape_await_target_and_settling_cancel_preserve_external_clipboard() {
+        use crate::hotkey::launcher_invocation::KeyTransition;
+        use crate::paste_sequence::admission::{
+            PasteAdmissionBridge, PhysicalPasteNotice, PhysicalPasteReducer, SessionCapabilities,
+        };
+        for mode in [
+            PlaybackMode::Automatic,
+            PlaybackMode::ManualAdvance,
+            PlaybackMode::PasteToAdvance,
+        ] {
+            let bridge = std::sync::Arc::new(PasteAdmissionBridge::default());
+            let (wake, _rx) = std::sync::mpsc::channel();
+            bridge.install_wake(wake);
+            bridge.observer_live(true);
+            let mut controller = ready_controller(prepared_run(mode, 0, &["one", "two"]));
+            let mut platform = FakePlatform::at(Instant::now());
+            if mode != PlaybackMode::PasteToAdvance {
+                platform.target = TargetObservation::Unavailable;
+            }
+            controller
+                .start_with_admission(&mut platform, |run| {
+                    bridge
+                        .configure_session(
+                            4,
+                            run.generation,
+                            SessionCapabilities {
+                                paste: mode == PlaybackMode::PasteToAdvance,
+                                escape: true,
+                            },
+                        )
+                        .unwrap();
+                    Ok(Some(super::SessionInputLease {
+                        owner: 4,
+                        generation: run.generation,
+                        bridge: std::sync::Arc::clone(&bridge),
+                    }))
+                })
+                .unwrap();
+            let mut reducer = PhysicalPasteReducer::new([false; 9]);
+            if mode == PlaybackMode::PasteToAdvance {
+                physical_event(
+                    &mut reducer,
+                    &bridge,
+                    &platform.foreground,
+                    0xA2,
+                    KeyTransition::Down,
+                );
+                let admission = human_paste(&mut reducer, &bridge, &platform.foreground);
+                controller
+                    .physical_paste(admission, std::sync::Arc::clone(&bridge), &mut platform)
+                    .unwrap();
+            } else {
+                assert_eq!(controller.status(), SequencePlaybackStatus::AwaitTarget);
+            }
+            platform.foreground = other_target(88);
+            assert!(physical_event(
+                &mut reducer,
+                &bridge,
+                &platform.foreground,
+                0x1B,
+                KeyTransition::Down
+            ));
+            let Some(PhysicalPasteNotice::Cancel { generation, .. }) = bridge.take_notice() else {
+                panic!("expected cancellation")
+            };
+            assert_eq!(controller.started_run().unwrap().generation, generation);
+            controller.cancel(platform.clock);
+            platform.external_copy("external during cancellation");
+            let at = platform.clock + Duration::from_millis(500);
+            tick(&mut controller, &mut platform, at);
+            assert_eq!(
+                platform.clipboard.as_deref(),
+                Some("external during cancellation")
+            );
+            assert_eq!(
+                platform.paste_count(),
+                usize::from(mode == PlaybackMode::PasteToAdvance)
+            );
+            assert!(!controller.needs_tick());
+        }
     }
 
     #[test]

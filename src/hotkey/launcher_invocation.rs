@@ -2304,8 +2304,9 @@ mod native_service {
                         }
                     };
                     *slot = Some(State {
-                        physical_paste: crate::paste_sequence::admission::PhysicalPasteReducer::new(
+                        physical_paste: crate::paste_sequence::admission::PhysicalPasteReducer::with_escape_baseline(
                             crate::paste_sequence::admission::physical_baseline(),
+                            crate::paste_sequence::admission::escape_baseline(),
                         ),
                         adapter,
                         owner,
@@ -2388,8 +2389,9 @@ mod native_service {
                     && let Some(state) = slot.as_mut()
                 {
                     state.physical_paste =
-                        crate::paste_sequence::admission::PhysicalPasteReducer::new(
+                        crate::paste_sequence::admission::PhysicalPasteReducer::with_escape_baseline(
                             crate::paste_sequence::admission::physical_baseline(),
+                            crate::paste_sequence::admission::escape_baseline(),
                         );
                 }
                 crate::paste_sequence::admission::physical_paste_bridge().observer_live(true);

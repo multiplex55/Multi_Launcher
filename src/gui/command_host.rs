@@ -349,6 +349,47 @@ impl DialogCommandHost for LauncherApp {
 }
 
 impl LauncherApp {
+    fn sequence_escape_requested(&self) -> bool {
+        self.sequence_routes.as_ref().map_or(
+            self.settings_editor
+                .baseline_settings
+                .paste_sequence
+                .escape_cancel_enabled,
+            |routes| routes.escape_cancel_enabled,
+        )
+    }
+
+    fn sequence_input_lease(
+        owner: u64,
+        queue_live: bool,
+        enabled: bool,
+        escape: bool,
+        run: crate::paste_sequence::StartedSequence,
+    ) -> Result<
+        Option<crate::paste_sequence::SessionInputLease>,
+        crate::paste_sequence::SequencePlaybackError,
+    > {
+        use crate::paste_sequence::admission::{SessionCapabilities, physical_paste_bridge};
+        use crate::paste_sequence::{PlaybackMode, SequencePlaybackError, SessionInputLease};
+        let paste = run.mode == PlaybackMode::PasteToAdvance;
+        if !queue_live || !enabled {
+            return if paste {
+                Err(SequencePlaybackError::ObserverUnavailable)
+            } else {
+                Ok(None)
+            };
+        }
+        let bridge = physical_paste_bridge();
+        bridge
+            .configure_session(owner, run.generation, SessionCapabilities { paste, escape })
+            .map_err(|_| SequencePlaybackError::ObserverUnavailable)?;
+        Ok(Some(SessionInputLease {
+            owner,
+            generation: run.generation,
+            bridge: std::sync::Arc::clone(bridge),
+        }))
+    }
+
     fn execute_physical_paste_using(
         &mut self,
         admission: crate::paste_sequence::admission::PhysicalPasteAdmission,
@@ -373,19 +414,33 @@ impl LauncherApp {
             .as_ref()
             .is_none_or(|plugins| plugins.contains("paste_sequence"));
         let bridge = crate::paste_sequence::admission::physical_paste_bridge();
-        let generation = enabled
-            .then(|| self.sequence_playback.physical_paste_generation())
-            .flatten();
-        if let Some(generation) = generation {
-            if !self.event_sink.owns_live_queue()
-                || bridge.arm(self.event_sink.owner_id(), generation).is_err()
-            {
-                bridge.invalidate_owner(self.event_sink.owner_id());
-                self.sequence_playback.cancel(std::time::Instant::now());
-                return Err(crate::paste_sequence::SequencePlaybackError::ObserverUnavailable);
+        let owner = self.event_sink.owner_id();
+        if (!enabled || !self.event_sink.owns_live_queue())
+            && self.sequence_playback.has_input_lease()
+        {
+            self.cancel_sequence_playback();
+            return Ok(());
+        }
+        if let Some(run) = self.sequence_playback.started_run() {
+            if bridge.cancellation_for(owner, run.generation) {
+                self.cancel_sequence_playback();
+                return Ok(());
+            }
+            match Self::sequence_input_lease(
+                owner,
+                self.event_sink.owns_live_queue(),
+                enabled,
+                self.sequence_escape_requested(),
+                run,
+            ) {
+                Ok(lease) => self.sequence_playback.set_input_lease(lease),
+                Err(error) => {
+                    self.cancel_sequence_playback();
+                    return Err(error);
+                }
             }
         } else {
-            bridge.publish(self.event_sink.owner_id(), None, true);
+            bridge.publish_session(owner, None, Default::default());
         }
         Ok(())
     }
@@ -425,13 +480,26 @@ impl LauncherApp {
                     );
                 }
             }
+            PhysicalPasteNotice::Cancel { owner, generation } => {
+                if owner == self.event_sink.owner_id()
+                    && self
+                        .sequence_playback
+                        .started_run()
+                        .is_some_and(|run| run.generation == generation)
+                {
+                    self.cancel_active_paste_sequence();
+                }
+            }
             PhysicalPasteNotice::Failed {
                 owner,
                 generation,
                 reason,
             } => {
                 if owner == self.event_sink.owner_id()
-                    && self.sequence_playback.physical_paste_generation() == Some(generation)
+                    && self
+                        .sequence_playback
+                        .started_run()
+                        .is_some_and(|run| run.generation == generation)
                 {
                     self.cancel_active_paste_sequence();
                     self.report_error_message("paste_sequence.physical", reason);
@@ -1467,8 +1535,30 @@ impl LauncherApp {
         if self.sequence_exit_requested {
             return Err(crate::paste_sequence::SequencePlaybackError::Busy);
         }
-        let result = self.sequence_playback.start(platform);
+        let owner = self.event_sink.owner_id();
+        let queue_live = self.event_sink.owns_live_queue();
+        let enabled = self.plugin_enabled("paste_sequence");
+        let escape = self.sequence_escape_requested();
+        let result = self
+            .sequence_playback
+            .start_with_admission(platform, |run| {
+                Self::sequence_input_lease(owner, queue_live, enabled, escape, run)
+            });
+        let result = if self.sequence_playback.status()
+            == crate::paste_sequence::SequencePlaybackStatus::Cancelled
+        {
+            Ok(())
+        } else {
+            result
+        };
         let result = result.and_then(|_| self.sync_physical_paste_admission());
+        if result.is_ok()
+            && escape
+            && self.sequence_playback.started_run().is_some()
+            && !self.sequence_playback.escape_cancel_available()
+        {
+            self.report_error_message("paste_sequence.escape", "Session Escape cancellation is unavailable. Use the configured Cancel shortcut or Cancel Run.");
+        }
         self.schedule_sequence_playback_wake(platform.now());
         result
     }
@@ -1488,6 +1578,13 @@ impl LauncherApp {
         now: std::time::Instant,
     ) -> Result<(), crate::paste_sequence::SequencePlaybackError> {
         let result = self.sequence_playback.next(platform, now);
+        let result = if self.sequence_playback.status()
+            == crate::paste_sequence::SequencePlaybackStatus::Cancelled
+        {
+            Ok(())
+        } else {
+            result
+        };
         self.schedule_sequence_playback_wake(platform.now());
         result
     }
@@ -2056,6 +2153,13 @@ pub(in crate::gui) mod tests {
     }
 
     fn started_physical_app(root: &std::path::Path) -> (LauncherApp, AppPastePlatform) {
+        started_session_app(root, crate::paste_sequence::PlaybackMode::PasteToAdvance)
+    }
+
+    fn started_session_app(
+        root: &std::path::Path,
+        mode: crate::paste_sequence::PlaybackMode,
+    ) -> (LauncherApp, AppPastePlatform) {
         use crate::paste_sequence::*;
         let mut app = inert_test_app(root);
         app.enabled_plugins = None;
@@ -2079,9 +2183,16 @@ pub(in crate::gui) mod tests {
                 id: SequenceId::from_raw(1).unwrap(),
                 name: "Physical app fixture".into(),
                 hotkey: None,
-                mode: PlaybackMode::PasteToAdvance,
+                mode,
                 delay_ms: 0,
-                steps: vec![Step::LiteralText { text: "one".into() }],
+                steps: vec![
+                    Step::LiteralText { text: "one".into() };
+                    if mode == PlaybackMode::PasteToAdvance {
+                        1
+                    } else {
+                        2
+                    }
+                ],
             },
             &[],
             &[],
@@ -2093,8 +2204,86 @@ pub(in crate::gui) mod tests {
         app.sequence_playback.begin_preparing().unwrap();
         app.sequence_playback.set_ready(run).unwrap();
         let mut platform = AppPastePlatform::new(target);
-        app.sequence_playback.start(&mut platform).unwrap();
+        if mode == PlaybackMode::PasteToAdvance {
+            app.sequence_playback.start(&mut platform).unwrap();
+        } else {
+            app.start_sequence_playback_using(&mut platform).unwrap();
+        }
         (app, platform)
+    }
+
+    #[test]
+    fn session_escape_app_uses_persisted_then_acknowledged_preferences_and_exact_cancel() {
+        use crate::paste_sequence::admission::*;
+        use crate::paste_sequence::*;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bridge = physical_paste_bridge();
+        let (wake, _rx) = std::sync::mpsc::channel();
+        bridge.install_wake(wake);
+        bridge.observer_live(true);
+        let (mut app, _) = started_physical_app(root.path());
+        app.settings_editor
+            .baseline_settings
+            .paste_sequence
+            .escape_cancel_enabled = false;
+        app.sync_physical_paste_admission().unwrap();
+        assert!(!app.sequence_playback.escape_cancel_available());
+        app.sequence_routes = Some(SequenceRoutePresentation {
+            generation: 9,
+            next: SequenceShortcutPresentation::Disabled,
+            cancel: SequenceShortcutPresentation::Disabled,
+            starts: vec![],
+            tooltip_enabled: false,
+            escape_cancel_enabled: true,
+        });
+        app.sync_physical_paste_admission().unwrap();
+        assert!(app.sequence_playback.escape_cancel_available());
+        let generation = app.sequence_playback.started_run().unwrap().generation;
+        let owner = app.event_sink.owner_id();
+        for (owner, generation) in [(owner + 1, generation), (owner, generation.wrapping_sub(1))] {
+            app.handle_physical_paste_notice(PhysicalPasteNotice::Cancel { owner, generation });
+            assert_eq!(
+                app.sequence_playback.status(),
+                SequencePlaybackStatus::AwaitPaste
+            );
+        }
+        app.handle_physical_paste_notice(PhysicalPasteNotice::Cancel { owner, generation });
+        assert_eq!(
+            app.sequence_playback.status(),
+            SequencePlaybackStatus::Cancelled
+        );
+        assert!(!app.sequence_playback.escape_cancel_available());
+        bridge.observer_live(false);
+    }
+
+    #[test]
+    fn session_escape_app_optional_observer_fallback_preserves_configured_cancel() {
+        use crate::paste_sequence::*;
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let bridge = admission::physical_paste_bridge();
+        bridge.observer_live(false);
+        let (mut app, platform) = started_session_app(root.path(), PlaybackMode::ManualAdvance);
+        app.sync_physical_paste_admission().unwrap();
+        assert_eq!(platform.pastes, 1);
+        assert_eq!(
+            app.sequence_playback.status(),
+            SequencePlaybackStatus::AwaitAdvance
+        );
+        assert!(!app.sequence_playback.escape_cancel_available());
+        app.settings_editor
+            .baseline_settings
+            .paste_sequence
+            .escape_cancel_enabled = false;
+        app.handle_paste_sequence_hotkey_using(
+            crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction::Cancel,
+            |_| panic!("Cancel must not invoke Next"),
+        );
+        assert_eq!(
+            app.sequence_playback.status(),
+            SequencePlaybackStatus::Cancelled
+        );
     }
 
     #[test]

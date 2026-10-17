@@ -1510,19 +1510,29 @@ fn drain_physical_paste_notices(route_transition: bool) {
     use multi_launcher::paste_sequence::admission::{PhysicalPasteNotice, physical_paste_bridge};
     let bridge = physical_paste_bridge();
     while let Some(notice) = bridge.take_notice() {
-        let owner = match &notice {
+        let (owner, generation) = match &notice {
             PhysicalPasteNotice::Paste(admission) => {
                 if route_transition || !bridge.valid(admission) {
-                    bridge.delivery_failed();
+                    if route_transition {
+                        bridge.delivery_failed_for(admission.owner, admission.generation);
+                    }
                     continue;
                 }
-                admission.owner
+                (admission.owner, admission.generation)
             }
-            PhysicalPasteNotice::Busy { owner, .. } => *owner,
-            PhysicalPasteNotice::Failed { owner, .. } => *owner,
+            PhysicalPasteNotice::Busy { owner, generation }
+            | PhysicalPasteNotice::Cancel { owner, generation }
+            | PhysicalPasteNotice::Failed {
+                owner, generation, ..
+            } => (*owner, *generation),
         };
         if multi_launcher::gui::send_physical_paste_event(owner, notice).is_err() {
-            bridge.delivery_failed();
+            bridge.delivery_failed_for(owner, generation);
+            tracing::warn!(
+                owner,
+                generation,
+                "session input event owner is unavailable"
+            );
         }
     }
     if let Some((owner, generation, reason)) = bridge.take_failure() {
