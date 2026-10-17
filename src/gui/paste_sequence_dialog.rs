@@ -10,6 +10,35 @@ use std::path::PathBuf;
 const SNIPPETS_FILE: &str = crate::plugins::snippets::SNIPPETS_FILE;
 const CLIPBOARD_FILE: &str = crate::plugins::clipboard::CLIPBOARD_FILE;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+struct DialogLayout {
+    window: egui::Rect,
+    body: egui::Rect,
+    body_content: egui::Vec2,
+    steps: egui::Rect,
+    steps_content: egui::Vec2,
+    steps_id: Option<egui::Id>,
+    steps_offset: f32,
+    footer: egui::Rect,
+}
+
+#[cfg(test)]
+impl Default for DialogLayout {
+    fn default() -> Self {
+        Self {
+            window: egui::Rect::NOTHING,
+            body: egui::Rect::NOTHING,
+            body_content: egui::Vec2::ZERO,
+            steps: egui::Rect::NOTHING,
+            steps_content: egui::Vec2::ZERO,
+            steps_id: None,
+            steps_offset: 0.0,
+            footer: egui::Rect::NOTHING,
+        }
+    }
+}
+
 #[derive(Clone)]
 enum SequenceEditorUpdate {
     Saved {
@@ -34,6 +63,8 @@ enum RouteActivationFailure {
 
 pub(crate) struct PasteSequenceDialog {
     pub(crate) open: bool,
+    #[cfg(test)]
+    layout: DialogLayout,
     store_path: PathBuf,
     snapshot: Option<SequenceSnapshot>,
     draft: SequenceDraft,
@@ -56,6 +87,8 @@ impl Default for PasteSequenceDialog {
     fn default() -> Self {
         Self {
             open: false,
+            #[cfg(test)]
+            layout: DialogLayout::default(),
             store_path: PathBuf::from(PASTE_SEQUENCES_FILE),
             snapshot: None,
             draft: SequenceDraft::new("New sequence", Vec::new()),
@@ -184,38 +217,77 @@ impl PasteSequenceDialog {
         }
         self.poll_hotkey_update(ctx);
         let mut window_open = self.open;
-        egui::Window::new("Paste Sequences")
+        let window = egui::Window::new("Paste Sequences")
             .default_size((760.0, 640.0))
             .min_width(520.0)
             .min_height(420.0)
             .resizable(true)
             .open(&mut window_open)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Saved sequences");
-                    if ui.button("New").clicked() {
-                        self.selected_id = None;
-                        self.selected_step = None;
-                        self.remove_confirmation = None;
-                        self.draft = SequenceDraft::new("New sequence", Vec::new());
-                        self.hotkey_text.clear();
-                        self.inline_error = None;
-                    }
-                    if ui
-                        .add_enabled(
-                            self.selected_id.is_some() && self.hotkey_update.is_none(),
-                            egui::Button::new("Remove Saved"),
-                        )
-                        .clicked()
-                    {
-                        self.remove_confirmation = self.selected_id;
-                    }
-                });
-                self.saved_sequence_list(ui);
-                self.saved_sequence_remove_confirmation(ui, ctx, app);
+                // Reserve two action rows and the run status before the body requests space.
+                // A list-only cap cannot bound the sum of controls, preview and saved rows.
+                let row_height = ui
+                    .spacing()
+                    .interact_size
+                    .y
+                    .max(ui.text_style_height(&egui::TextStyle::Body));
+                let footer_height = row_height * 3.0 + ui.spacing().item_spacing.y * 4.0;
+                let body_height = (ui.available_height() - footer_height).max(0.0);
+                let step_height = (body_height * 0.6).min(260.0);
+                let body = egui::ScrollArea::vertical()
+                    .id_salt("paste_sequence_body")
+                    .min_scrolled_height(0.0)
+                    .max_height(body_height)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Saved sequences");
+                            if ui.button("New").clicked() {
+                                self.selected_id = None;
+                                self.selected_step = None;
+                                self.remove_confirmation = None;
+                                self.draft = SequenceDraft::new("New sequence", Vec::new());
+                                self.hotkey_text.clear();
+                                self.inline_error = None;
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.selected_id.is_some() && self.hotkey_update.is_none(),
+                                    egui::Button::new("Remove Saved"),
+                                )
+                                .clicked()
+                            {
+                                self.remove_confirmation = self.selected_id;
+                            }
+                        });
+                        self.saved_sequence_list(ui);
+                        self.saved_sequence_remove_confirmation(ui, ctx, app);
+                        ui.separator();
+                        self.editor(ui, app, step_height);
+                    });
+                #[cfg(test)]
+                {
+                    self.layout.body = body.inner_rect;
+                    self.layout.body_content = body.content_size;
+                }
+                #[cfg(not(test))]
+                let _ = body;
                 ui.separator();
-                self.editor(ui, ctx, app);
+                let footer = ui.scope(|ui| self.editor_footer(ui, ctx, app));
+                #[cfg(test)]
+                {
+                    self.layout.footer = footer.response.rect;
+                }
+                #[cfg(not(test))]
+                let _ = footer;
             });
+        #[cfg(test)]
+        if let Some(window) = &window {
+            self.layout.window = window.response.rect;
+        }
+        #[cfg(not(test))]
+        let _ = window;
         if self.open && !window_open {
             self.close_from_window(app);
         }
@@ -317,7 +389,7 @@ impl PasteSequenceDialog {
         );
     }
 
-    fn editor(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, app: &mut super::LauncherApp) {
+    fn editor(&mut self, ui: &mut egui::Ui, app: &mut super::LauncherApp, step_height: f32) {
         if let Some(context) = &self.context {
             let label = context
                 .target()
@@ -340,9 +412,9 @@ impl PasteSequenceDialog {
         }
         ui.horizontal(|ui| {
             ui.label("Optional hotkey");
-            ui.text_edit_singleline(&mut self.hotkey_text);
-            ui.weak("uses the application's existing chord syntax");
+            ui.add(egui::TextEdit::singleline(&mut self.hotkey_text).desired_width(180.0));
         });
+        ui.weak("Uses the application's existing chord syntax");
         ui.horizontal(|ui| {
             ui.label("Playback");
             ui.selectable_value(&mut self.draft.mode, PlaybackMode::Automatic, "Automatic");
@@ -429,7 +501,7 @@ impl PasteSequenceDialog {
             }
         });
         ui.label("Ordered steps");
-        self.step_editor(ui);
+        self.step_editor(ui, step_height);
 
         if let Some(error) = &self.inline_error {
             ui.colored_label(ui.visuals().error_fg_color, error);
@@ -437,6 +509,17 @@ impl PasteSequenceDialog {
         if let Some(status) = &self.status {
             ui.weak(status);
         }
+        if let Some(preview) = app.sequence_playback.prepared_preview() {
+            self.show_preview(ui, &preview);
+        }
+    }
+
+    fn editor_footer(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        app: &mut super::LauncherApp,
+    ) {
         let state = app.sequence_playback.status();
         ui.horizontal(|ui| {
             if ui
@@ -466,6 +549,8 @@ impl PasteSequenceDialog {
             {
                 self.save_draft(ctx, app);
             }
+        });
+        ui.horizontal(|ui| {
             if ui
                 .add_enabled(
                     state == crate::paste_sequence::SequencePlaybackStatus::Ready,
@@ -515,64 +600,79 @@ impl PasteSequenceDialog {
             }
         });
         self.show_run_status(ui, app);
-        if let Some(preview) = app.sequence_playback.prepared_preview() {
-            self.show_preview(ui, &preview);
-        }
     }
 
-    fn step_editor(&mut self, ui: &mut egui::Ui) {
+    fn step_editor(&mut self, ui: &mut egui::Ui, max_height: f32) {
         let mut remove = None;
-        egui::ScrollArea::vertical()
-            .id_salt("paste_sequence_step_editor")
-            .max_height(210.0)
-            .show(ui, |ui| {
-                for (index, step) in self.draft.steps.iter_mut().enumerate() {
-                    let selected = self.selected_step == Some(index);
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(selected, format!("{}.", index + 1))
-                                .clicked()
-                            {
-                                self.selected_step = Some(index);
-                            }
-                            match step {
-                                Step::SnippetRef { alias } => {
-                                    ui.label("Snippet");
-                                    ui.monospace(alias.as_str());
-                                    if self
-                                        .snippets
-                                        .iter()
-                                        .any(|entry| entry.alias == *alias && entry.hide_contents)
-                                    {
-                                        ui.weak("hidden contents");
-                                    }
+        let steps =
+            egui::ScrollArea::vertical()
+                .id_salt("paste_sequence_step_editor")
+                // The outer body owns overflow from the preceding controls. Reserve
+                // this viewport rather than letting their remaining height collapse it.
+                .min_scrolled_height(max_height)
+                .max_height(max_height)
+                .show(ui, |ui| {
+                    for (index, step) in self.draft.steps.iter_mut().enumerate() {
+                        let selected = self.selected_step == Some(index);
+                        ui.group(|ui| {
+                            ui.set_max_width(ui.available_width());
+                            ui.horizontal_wrapped(|ui| {
+                                if ui
+                                    .selectable_label(selected, format!("{}.", index + 1))
+                                    .clicked()
+                                {
+                                    self.selected_step = Some(index);
                                 }
-                                Step::ClipboardSnapshotOrRef { .. } => {
-                                    ui.label("Clipboard history item");
-                                    ui.weak(
+                                match step {
+                                    Step::SnippetRef { alias } => {
+                                        ui.label("Snippet");
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(alias.as_str()).monospace(),
+                                            )
+                                            .wrap(),
+                                        );
+                                        if self.snippets.iter().any(|entry| {
+                                            entry.alias == *alias && entry.hide_contents
+                                        }) {
+                                            ui.weak("hidden contents");
+                                        }
+                                    }
+                                    Step::ClipboardSnapshotOrRef { .. } => {
+                                        ui.label("Clipboard history item");
+                                        ui.weak(
                                         "payload is not stored; the history reference can expire",
                                     );
+                                    }
+                                    Step::LiteralText { .. } => {
+                                        ui.label("Temporary text");
+                                        ui.weak("saved sequences store this text in plaintext");
+                                    }
                                 }
-                                Step::LiteralText { .. } => {
-                                    ui.label("Temporary text");
-                                    ui.weak("saved sequences store this text in plaintext");
+                                if ui.small_button("Remove").clicked() {
+                                    remove = Some(index);
                                 }
-                            }
-                            if ui.small_button("Remove").clicked() {
-                                remove = Some(index);
+                            });
+                            if let Step::LiteralText { text } = step {
+                                ui.add(
+                                    egui::TextEdit::multiline(text)
+                                        .desired_rows(2)
+                                        .desired_width(ui.available_width())
+                                        .hint_text("Text pasted only when the run starts"),
+                                );
                             }
                         });
-                        if let Step::LiteralText { text } = step {
-                            ui.add(
-                                egui::TextEdit::multiline(text)
-                                    .desired_rows(2)
-                                    .hint_text("Text pasted only when the run starts"),
-                            );
-                        }
-                    });
-                }
-            });
+                    }
+                });
+        #[cfg(test)]
+        {
+            self.layout.steps = steps.inner_rect;
+            self.layout.steps_content = steps.content_size;
+            self.layout.steps_id = Some(steps.id);
+            self.layout.steps_offset = steps.state.offset.y;
+        }
+        #[cfg(not(test))]
+        let _ = steps;
         if let Some(index) = remove {
             self.draft.steps.remove(index);
             if self.selected_step == Some(index) {
@@ -600,9 +700,9 @@ impl PasteSequenceDialog {
             Status::Failed(error) => format!("Failed: {}", error.message()),
         };
         if let Some((current, total)) = app.sequence_playback.current_step_number() {
-            ui.label(format!("{label} · step {current} of {total}"));
+            ui.add(egui::Label::new(format!("{label} · step {current} of {total}")).truncate());
         } else {
-            ui.label(format!("Run status: {label}"));
+            ui.add(egui::Label::new(format!("Run status: {label}")).truncate());
         }
     }
 
@@ -952,6 +1052,145 @@ fn reconcile_editor_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn layout_app(ctx: &egui::Context, root: &std::path::Path) -> super::super::LauncherApp {
+        use std::sync::{Arc, atomic::AtomicBool};
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.dashboard.enabled = false;
+        settings.enable_toasts = false;
+        super::super::LauncherApp::new(
+            ctx,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            root.join("actions.json").to_string_lossy().into_owned(),
+            root.join("settings.json").to_string_lossy().into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            Some(std::collections::HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    fn layout_frame(
+        dialog: &mut PasteSequenceDialog,
+        ctx: &egui::Context,
+        app: &mut super::super::LauncherApp,
+        size: egui::Vec2,
+    ) {
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        });
+        dialog.ui(ctx, app);
+        ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn ordered_steps_layout_bounds_actual_dialog_and_scroll_range() {
+        for size in [egui::vec2(900.0, 760.0), egui::vec2(600.0, 420.0)] {
+            for count in [1, 50, 100] {
+                let ctx = egui::Context::default();
+                let directory = tempfile::tempdir().unwrap();
+                let mut app = layout_app(&ctx, directory.path());
+                let mut dialog = PasteSequenceDialog {
+                    open: true,
+                    ..Default::default()
+                };
+                let mut saved = SequenceStore::new(directory.path().join(PASTE_SEQUENCES_FILE))
+                    .load()
+                    .unwrap();
+                for index in 0..12 {
+                    saved
+                        .upsert(SequenceDraft::new(
+                            format!("Saved {index} {}", "long name ".repeat(7)),
+                            vec![Step::LiteralText {
+                                text: "saved".into(),
+                            }],
+                        ))
+                        .unwrap();
+                }
+                dialog.snapshot = Some(saved);
+                dialog.draft.steps = (0..count)
+                    .map(|index| {
+                        if index % 2 == 0 {
+                            Step::LiteralText {
+                                text: format!("{}\n", "long temporary text ".repeat(30)).repeat(20),
+                            }
+                        } else {
+                            Step::SnippetRef {
+                                alias: "long_alias".repeat(80),
+                            }
+                        }
+                    })
+                    .collect();
+                dialog.selected_step = Some(count - 1);
+                let original = dialog.draft.steps.clone();
+                // Include the first measurement pass and settled frames: parent growth must
+                // never be required before the independent list starts clipping content.
+                for _ in 0..4 {
+                    layout_frame(&mut dialog, &ctx, &mut app, size);
+                    let layout = dialog.layout;
+                    assert!(
+                        layout.window.height() <= size.y + 1.0,
+                        "{count} {size:?}: {layout:?}"
+                    );
+                    assert!(layout.window.width() <= size.x + 1.0, "{layout:?}");
+                    assert!(layout.steps.height() <= 261.0, "{layout:?}");
+                    assert!(
+                        layout.steps.width() <= layout.body.width() + 1.0,
+                        "{layout:?}"
+                    );
+                    assert!(
+                        layout.footer.bottom() <= layout.window.bottom(),
+                        "{layout:?}"
+                    );
+                    assert!(layout.footer.bottom() <= size.y + 1.0, "{layout:?}");
+                    assert!(layout.footer.top() >= layout.body.bottom(), "{layout:?}");
+                }
+                let layout = dialog.layout;
+                assert!(
+                    layout.steps_content.y > layout.steps.height(),
+                    "multiline step must scroll: {layout:?}"
+                );
+                assert!(
+                    layout.body_content.y > layout.body.height(),
+                    "all controls remain reachable through body scroll: {layout:?}"
+                );
+                if size.y > 700.0 {
+                    assert!(
+                        layout.steps.height() >= 240.0,
+                        "normal viewport: {layout:?}"
+                    );
+                } else {
+                    assert!(
+                        layout.steps.height() < 240.0,
+                        "short viewport must shrink: {layout:?}"
+                    );
+                }
+                let id = layout.steps_id.unwrap();
+                let mut state = egui::scroll_area::State::load(&ctx, id).unwrap();
+                state.offset.y = layout.steps_content.y - layout.steps.height() + 100.0;
+                state.store(&ctx, id);
+                layout_frame(&mut dialog, &ctx, &mut app, size);
+                let scrolled = dialog.layout;
+                let range = scrolled.steps_content.y - scrolled.steps.height();
+                assert!(
+                    (scrolled.steps_offset - range).abs() <= 1.0,
+                    "last row must be reachable: {scrolled:?}"
+                );
+                assert_eq!(dialog.draft.steps, original);
+                assert_eq!(dialog.selected_step, Some(count - 1));
+            }
+        }
+    }
 
     fn hotkey_draft(name: &str) -> SequenceDraft {
         let mut draft = SequenceDraft::new(
