@@ -7,8 +7,8 @@ Evidence/fixtures: ignored `target/refinement-evidence/` (owned fixtures only).
 
 | Milestone | Status | Checkpoints / evidence |
 | --- | --- | --- |
-| M0 | complete | M0-A: source/manifest/status inspection; Nextest 0.9.135; rustc 1.99.0, x86_64-pc-windows-msvc |
-| M1 | pending | Unified launcher search |
+| M0 | complete | M0-A: source/manifest/status inspection; Nextest 0.9.135; rustc 1.99.0, x86_64-pc-windows-msvc; commit `513e89a4ca0292017b348735ce33cb896f25cd12` |
+| M1 | in_progress | M1-A implemented in `src/gui/render.rs`: removed launcher scope strip, Ctrl+1–5 routing, scoped empty-state message and new-session scope reset; query/results layout now follows visible query geometry. `cargo nextest run --lib launcher_query_frame_has_no_scope_strip_or_ctrl_number_scope_changes`: 1 passed, 5,687 skipped. `rustfmt --edition 2024 src/gui/render.rs` and `git diff --check` passed. M1-B state/filter work remains pending. |
 | M2 | pending | Shared rectangle-picker input shield |
 | M3 | pending | Ordered-step layout |
 | M4 | pending | Playback settings / atomic hotkey routes |
@@ -35,7 +35,8 @@ M8-D only: maintained-target Clippy with `-D warnings`; final successful lint is
 
 ## Commit index
 
-- M0-A: this ledger initialization (hash recorded at next checkpoint).
+- M0-A: `513e89a4ca0292017b348735ce33cb896f25cd12`.
+- M1-A: source and verification complete; parent checkpoint commit pending.
 
 ## Limitations / unresolved issues
 
