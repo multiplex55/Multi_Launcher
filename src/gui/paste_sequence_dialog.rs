@@ -51,19 +51,55 @@ impl Default for DialogLayout {
 
 #[derive(Clone)]
 enum SequenceEditorUpdate {
-    Saved {
-        id: SequenceId,
-        draft: SequenceDraft,
-    },
-    Removed {
-        id: SequenceId,
-    },
+    Saved { id: SequenceId },
+    Removed { id: SequenceId },
 }
 
 struct HotkeyUpdateCompletion {
-    result: Result<bool, String>,
+    result: Result<SequenceCommitOutcome, String>,
     snapshot: Option<SequenceSnapshot>,
     editor_update: SequenceEditorUpdate,
+}
+
+#[derive(Debug)]
+enum SequenceCommitOutcome {
+    ContentOnly,
+    BindingApplied {
+        plugin_enabled: bool,
+    },
+    ContentSavedBindingRejected {
+        message: String,
+        routes_uncertain: bool,
+    },
+}
+
+fn binding_update_status(update: &SequenceEditorUpdate, plugin_enabled: bool) -> &'static str {
+    match (update, plugin_enabled) {
+        (SequenceEditorUpdate::Saved { .. }, true) => {
+            "Sequence saved; start shortcut routes are active. Global playback settings were unchanged."
+        }
+        (SequenceEditorUpdate::Saved { .. }, false) => {
+            "Sequence saved; shortcuts are inactive while the Paste Sequences plugin is disabled."
+        }
+        (SequenceEditorUpdate::Removed { .. }, true) => {
+            "Sequence removed; its start shortcut was removed. Remaining routes are active."
+        }
+        (SequenceEditorUpdate::Removed { .. }, false) => {
+            "Sequence removed; its start shortcut was removed. Shortcuts remain inactive while the Paste Sequences plugin is disabled."
+        }
+    }
+}
+
+enum StartShortcutUpdate {
+    Keep,
+    Set(Option<HotkeyChord>),
+    Invalid,
+}
+
+#[derive(Debug)]
+struct RouteUpdateFailure {
+    message: String,
+    uncertain: bool,
 }
 
 enum RouteActivationFailure {
@@ -416,6 +452,7 @@ impl PasteSequenceDialog {
             previous,
             candidate,
             SequenceEditorUpdate::Removed { id },
+            StartShortcutUpdate::Keep,
         );
     }
 
@@ -847,27 +884,33 @@ impl PasteSequenceDialog {
     fn save_draft(&mut self, ctx: &egui::Context, app: &mut super::LauncherApp) {
         self.inline_error = None;
         let mut draft = self.current_draft();
-        if !self.hotkey_text.trim().is_empty() && draft.hotkey.is_none() {
-            self.inline_error = Some("Hotkey chord is invalid.".into());
-            return;
-        }
+        let requested_start = if !self.hotkey_text.trim().is_empty() && draft.hotkey.is_none() {
+            StartShortcutUpdate::Invalid
+        } else {
+            StartShortcutUpdate::Set(draft.hotkey.clone())
+        };
         let Some(previous) = self.snapshot.as_ref().cloned() else {
             self.inline_error = Some(
                 "Saved sequences are unavailable because the store could not be loaded.".into(),
             );
             return;
         };
+        // Content persistence must not depend on accepting a new start route.
+        draft.hotkey = draft
+            .id
+            .and_then(|id| previous.sequence(id))
+            .and_then(|sequence| sequence.hotkey.clone());
         let mut candidate = previous.clone();
         match candidate.upsert(draft.clone()) {
             Ok(id) => {
-                draft.id = Some(id);
-                self.status = Some("Preparing sequence and shortcut update…".into());
+                self.status = Some("Saving sequence content…".into());
                 self.begin_hotkey_update(
                     ctx,
                     app,
                     previous,
                     candidate,
-                    SequenceEditorUpdate::Saved { id, draft },
+                    SequenceEditorUpdate::Saved { id },
+                    requested_start,
                 );
             }
             Err(error) => self.inline_error = Some(store_error_text(&error)),
@@ -881,6 +924,7 @@ impl PasteSequenceDialog {
         previous: SequenceSnapshot,
         mut candidate: SequenceSnapshot,
         editor_update: SequenceEditorUpdate,
+        requested_start: StartShortcutUpdate,
     ) {
         let settings_path = app.settings_path.clone();
         let store = SequenceStore::new(self.store_path.clone());
@@ -890,10 +934,12 @@ impl PasteSequenceDialog {
             let ticket = std::cell::RefCell::new(None);
             let settings_for_apply = std::cell::RefCell::new(None);
             let plugin_enabled = std::cell::Cell::new(false);
-            let result = commit_sequence_candidate_with_route_update(
+            let result = commit_sequence_editor_update(
                 &store,
                 &previous,
                 &mut candidate,
+                &editor_update,
+                requested_start,
                 |bindings| {
                 use crate::hotkey::reconfiguration::{
                     prepare_hotkey_reconfiguration_with_sequence_bindings,
@@ -956,9 +1002,7 @@ impl PasteSequenceDialog {
                     ))),
                 }
             });
-            if result.is_err()
-                && let Some(mut staged) = ticket.borrow_mut().take()
-            {
+            if let Some(mut staged) = ticket.borrow_mut().take() {
                 use std::time::Duration;
                 if staged.cancel().is_ok() {
                     let _ = staged.wait_terminal_disposition(Duration::from_secs(5));
@@ -1004,13 +1048,41 @@ impl PasteSequenceDialog {
                     );
                 }
                 match completion.result {
-                    Ok(true) => {
-                        self.status = Some("Sequence saved; shortcut routes are active.".into());
+                    Ok(SequenceCommitOutcome::ContentOnly) => {
+                        self.status = Some(
+                            if matches!(
+                                completion.editor_update,
+                                SequenceEditorUpdate::Removed { .. }
+                            ) {
+                                "Sequence removed; shortcut routes were unchanged."
+                            } else {
+                                "Sequence content saved; shortcut routes were unchanged."
+                            }
+                            .into(),
+                        );
                         self.inline_error = None;
                     }
-                    Ok(false) => {
-                        self.status = Some("Sequence saved; shortcuts are inactive while the Paste Sequences plugin is disabled.".into());
+                    Ok(SequenceCommitOutcome::BindingApplied { plugin_enabled }) => {
+                        self.status = Some(
+                            binding_update_status(&completion.editor_update, plugin_enabled).into(),
+                        );
                         self.inline_error = None;
+                    }
+                    Ok(SequenceCommitOutcome::ContentSavedBindingRejected {
+                        message,
+                        routes_uncertain,
+                    }) => {
+                        self.status = Some(
+                            "Sequence content saved; start shortcut update was not accepted."
+                                .into(),
+                        );
+                        self.inline_error = Some(if routes_uncertain {
+                            format!(
+                                "{message} Shortcut state is uncertain; reopen Settings to reconcile before using shortcuts."
+                            )
+                        } else {
+                            message
+                        });
                     }
                     Err(error) => {
                         self.status = None;
@@ -1033,39 +1105,125 @@ impl PasteSequenceDialog {
     }
 }
 
+fn commit_sequence_editor_update(
+    store: &SequenceStore,
+    previous: &SequenceSnapshot,
+    candidate: &mut SequenceSnapshot,
+    update: &SequenceEditorUpdate,
+    requested_start: StartShortcutUpdate,
+    prepare: impl FnOnce(&[SequenceHotkeyBinding]) -> Result<(), String>,
+    apply: impl FnOnce() -> Result<bool, RouteActivationFailure>,
+) -> Result<SequenceCommitOutcome, String> {
+    if let SequenceEditorUpdate::Saved { id } = update {
+        store.commit(candidate).map_err(|error| {
+            format!(
+                "Sequence content could not be saved: {}",
+                store_error_text(&error)
+            )
+        })?;
+        let requested = match requested_start {
+            StartShortcutUpdate::Invalid => return Ok(SequenceCommitOutcome::ContentSavedBindingRejected {
+                message: "Start shortcut is invalid. Saved content retains its previous start shortcut (or disabled route).".into(),
+                routes_uncertain: false,
+            }),
+            StartShortcutUpdate::Set(requested) => requested,
+            StartShortcutUpdate::Keep => return Ok(SequenceCommitOutcome::ContentOnly),
+        };
+        let saved = candidate
+            .sequence(*id)
+            .ok_or("Saved sequence could not be found after content commit")?;
+        if saved.hotkey == requested {
+            return Ok(SequenceCommitOutcome::ContentOnly);
+        }
+        let content_saved = candidate.clone();
+        let mut binding_draft = SequenceDraft::from_sequence(saved);
+        binding_draft.hotkey = requested;
+        if let Err(error) = candidate.upsert(binding_draft) {
+            return Ok(SequenceCommitOutcome::ContentSavedBindingRejected {
+                message: format!(
+                    "Start shortcut could not be saved: {}. Authored content was saved with its previous shortcut.",
+                    store_error_text(&error)
+                ),
+                routes_uncertain: false,
+            });
+        }
+        return Ok(
+            match commit_sequence_candidate_with_route_update(
+                store,
+                &content_saved,
+                candidate,
+                prepare,
+                apply,
+            ) {
+                Ok(plugin_enabled) => SequenceCommitOutcome::BindingApplied { plugin_enabled },
+                Err(error) => SequenceCommitOutcome::ContentSavedBindingRejected {
+                    message: format!("Content saved. {}", error.message),
+                    routes_uncertain: error.uncertain,
+                },
+            },
+        );
+    }
+
+    if previous.hotkey_bindings() == candidate.hotkey_bindings() {
+        store.commit(candidate).map_err(|error| {
+            format!(
+                "Sequence removal could not be saved: {}",
+                store_error_text(&error)
+            )
+        })?;
+        return Ok(SequenceCommitOutcome::ContentOnly);
+    }
+    commit_sequence_candidate_with_route_update(store, previous, candidate, prepare, apply)
+        .map(|plugin_enabled| SequenceCommitOutcome::BindingApplied { plugin_enabled })
+        .map_err(|error| error.message)
+}
+
 fn commit_sequence_candidate_with_route_update(
     store: &SequenceStore,
     previous: &SequenceSnapshot,
     candidate: &mut SequenceSnapshot,
     prepare: impl FnOnce(&[SequenceHotkeyBinding]) -> Result<(), String>,
     apply: impl FnOnce() -> Result<bool, RouteActivationFailure>,
-) -> Result<bool, String> {
+) -> Result<bool, RouteUpdateFailure> {
     let bindings = candidate.hotkey_bindings();
-    prepare(&bindings).map_err(|error| {
-        format!("Shortcut preparation failed; the sequence was not saved: {error}")
+    prepare(&bindings).map_err(|error| RouteUpdateFailure {
+        message: format!(
+            "Shortcut preparation failed; the requested binding change was not saved: {error}"
+        ),
+        uncertain: false,
     })?;
     store
         .commit(candidate)
-        .map_err(|error| format!("Sequence could not be saved: {}", store_error_text(&error)))?;
+        .map_err(|error| RouteUpdateFailure {
+            message: format!("Sequence could not be saved: {}", store_error_text(&error)),
+            uncertain: false,
+        })?;
 
     match apply() {
         Ok(plugin_enabled) => Ok(plugin_enabled),
         Err(RouteActivationFailure::Confirmed(error)) => {
             store
                 .rollback_if_revision(candidate.revision(), previous)
-                .map_err(|rollback| {
-                    format!(
+                .map_err(|rollback| RouteUpdateFailure {
+                    message: format!(
                         "Shortcut activation failed ({error}); rollback could not be completed: {}",
                         store_error_text(&rollback)
-                    )
+                    ),
+                    uncertain: true,
                 })?;
-            Err(format!(
-                "Shortcut activation failed; the sequence change was rolled back: {error}"
-            ))
+            Err(RouteUpdateFailure {
+                message: format!(
+                    "Shortcut activation failed; the requested binding change was rolled back: {error}"
+                ),
+                uncertain: false,
+            })
         }
-        Err(RouteActivationFailure::Uncertain(error)) => Err(format!(
-            "Shortcut activation could not be confirmed; the saved sequence was retained: {error}"
-        )),
+        Err(RouteActivationFailure::Uncertain(error)) => Err(RouteUpdateFailure {
+            message: format!(
+                "Shortcut activation could not be confirmed; the saved sequence was retained: {error}"
+            ),
+            uncertain: true,
+        }),
     }
 }
 
@@ -1077,23 +1235,35 @@ fn reconcile_editor_update(
     hotkey_text: &mut String,
     snapshot: SequenceSnapshot,
     update: &SequenceEditorUpdate,
-    transaction_applied: bool,
+    content_committed: bool,
 ) {
-    let should_apply_update = transaction_applied
-        || match update {
-            SequenceEditorUpdate::Saved { id, .. } => snapshot.sequence(*id).is_some(),
-            SequenceEditorUpdate::Removed { id } => snapshot.sequence(*id).is_none(),
-        };
+    // A failed write must retain its original revision while its sequence
+    // still exists. Otherwise the old draft is silently rebased on retry.
+    let should_apply_update = match update {
+        SequenceEditorUpdate::Saved { .. } => content_committed,
+        SequenceEditorUpdate::Removed { id } => snapshot.sequence(*id).is_none(),
+    };
+    if !should_apply_update {
+        return;
+    }
     if should_apply_update {
         match update {
-            SequenceEditorUpdate::Saved { id, draft: saved } => {
-                *draft = saved.clone();
-                *selected_id = Some(*id);
-                *hotkey_text = saved
-                    .hotkey
-                    .as_ref()
-                    .map(|chord| chord.as_str().to_owned())
-                    .unwrap_or_default();
+            SequenceEditorUpdate::Saved { id } => {
+                if let Some(saved) = snapshot.sequence(*id) {
+                    *draft = SequenceDraft::from_sequence(saved);
+                    *selected_id = Some(*id);
+                    *selected_step = selected_step.filter(|index| *index < saved.steps.len());
+                    *hotkey_text = saved
+                        .hotkey
+                        .as_ref()
+                        .map(|chord| chord.as_str().to_owned())
+                        .unwrap_or_default();
+                } else {
+                    *draft = SequenceDraft::new("New sequence", Vec::new());
+                    *selected_id = None;
+                    *selected_step = None;
+                    hotkey_text.clear();
+                }
             }
             SequenceEditorUpdate::Removed { .. } => {
                 *draft = SequenceDraft::new("New sequence", Vec::new());
@@ -1614,6 +1784,297 @@ mod tests {
     }
 
     #[test]
+    fn paste_sequence_content_only_save_ignores_conflicting_defaults_and_preserves_binding() {
+        for binding in [None, Some(HotkeyChord::new("Ctrl+F9").unwrap())] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SequenceStore::new(directory.path().join(PASTE_SEQUENCES_FILE));
+            let mut settings = crate::settings::Settings::default();
+            settings.hotkey = Some("Shift+Alt+Win+End".into());
+            let settings_path = directory.path().join("settings.json");
+            settings.save(settings_path.to_str().unwrap()).unwrap();
+            let settings_bytes = std::fs::read(&settings_path).unwrap();
+            let mut previous = store.load().unwrap();
+            let mut draft = hotkey_draft("Saved");
+            draft.hotkey = binding.clone();
+            let id = previous.upsert(draft).unwrap();
+            store.commit(&mut previous).unwrap();
+            let mut candidate = previous.clone();
+            let mut edited = SequenceDraft::from_sequence(previous.sequence(id).unwrap());
+            edited.name = "Content changed".into();
+            edited.mode = PlaybackMode::ManualAdvance;
+            edited.delay_ms = 123;
+            edited.steps = vec![Step::LiteralText {
+                text: "New Unicode 🦀\ncontent".into(),
+            }];
+            candidate.upsert(edited).unwrap();
+            let result = commit_sequence_editor_update(
+                &store,
+                &previous,
+                &mut candidate,
+                &SequenceEditorUpdate::Saved { id },
+                StartShortcutUpdate::Set(binding.clone()),
+                |_| panic!("content-only save must not prepare global routes"),
+                || panic!("content-only save must not apply global routes"),
+            )
+            .unwrap();
+            assert!(matches!(result, SequenceCommitOutcome::ContentOnly));
+            let saved = store.load().unwrap();
+            assert_eq!(saved.sequence(id).unwrap().name, "Content changed");
+            assert_eq!(saved.sequence(id).unwrap().hotkey, binding);
+            assert_eq!(
+                saved.sequence(id).unwrap().mode,
+                PlaybackMode::ManualAdvance
+            );
+            assert_eq!(saved.sequence(id).unwrap().delay_ms, 123);
+            assert_eq!(std::fs::read(&settings_path).unwrap(), settings_bytes);
+        }
+    }
+
+    #[test]
+    fn paste_sequence_rejected_start_keeps_authored_content_and_reconciles_actual_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join(PASTE_SEQUENCES_FILE));
+        let mut previous = store.load().unwrap();
+        let id = previous.upsert(hotkey_draft("Original")).unwrap();
+        store.commit(&mut previous).unwrap();
+        let mut candidate = previous.clone();
+        let mut edited = SequenceDraft::from_sequence(previous.sequence(id).unwrap());
+        edited.name = "Authored changes".into();
+        candidate.upsert(edited.clone()).unwrap();
+        let result = commit_sequence_editor_update(
+            &store,
+            &previous,
+            &mut candidate,
+            &SequenceEditorUpdate::Saved { id },
+            StartShortcutUpdate::Set(Some(HotkeyChord::new("Ctrl+F9").unwrap())),
+            |_| Err("start conflicts with launcher".into()),
+            || panic!("rejected start must not apply"),
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            SequenceCommitOutcome::ContentSavedBindingRejected {
+                routes_uncertain: false,
+                ..
+            }
+        ));
+        let actual = store.load().unwrap();
+        assert_eq!(actual.sequence(id).unwrap().name, "Authored changes");
+        assert_eq!(
+            actual.sequence(id).unwrap().hotkey,
+            previous.sequence(id).unwrap().hotkey
+        );
+        edited.hotkey = Some(HotkeyChord::new("Ctrl+F9").unwrap());
+        let mut slot = Some(previous);
+        let mut selected = Some(id);
+        let mut step = Some(99);
+        let mut hotkey = "Ctrl+F9".into();
+        reconcile_editor_update(
+            &mut slot,
+            &mut edited,
+            &mut selected,
+            &mut step,
+            &mut hotkey,
+            actual,
+            &SequenceEditorUpdate::Saved { id },
+            true,
+        );
+        assert_eq!(hotkey, "Ctrl+Shift+K");
+        assert_eq!(edited.hotkey.as_ref().unwrap().as_str(), "Ctrl+Shift+K");
+        assert_eq!(edited.name, "Authored changes");
+        assert!(step.is_none());
+    }
+
+    #[test]
+    fn paste_sequence_binding_rollback_retains_content_and_uncertainty_is_explicit() {
+        for uncertain in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = SequenceStore::new(directory.path().join(PASTE_SEQUENCES_FILE));
+            let previous = store.load().unwrap();
+            let mut candidate = previous.clone();
+            let mut draft = hotkey_draft("New authored sequence");
+            draft.hotkey = None;
+            let id = candidate.upsert(draft).unwrap();
+            let result = commit_sequence_editor_update(
+                &store,
+                &previous,
+                &mut candidate,
+                &SequenceEditorUpdate::Saved { id },
+                StartShortcutUpdate::Set(Some(HotkeyChord::new("Ctrl+F9").unwrap())),
+                |_| Ok(()),
+                || {
+                    if uncertain {
+                        Err(RouteActivationFailure::Uncertain(
+                            "route status unavailable".into(),
+                        ))
+                    } else {
+                        Err(RouteActivationFailure::Confirmed("route rejected".into()))
+                    }
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(result, SequenceCommitOutcome::ContentSavedBindingRejected { routes_uncertain, .. } if routes_uncertain == uncertain)
+            );
+            let mut saved = store.load().unwrap();
+            let sequence = saved.sequence(id).unwrap();
+            assert_eq!(sequence.name, "New authored sequence");
+            assert_eq!(sequence.hotkey.is_some(), uncertain);
+            let next_id = saved.upsert(hotkey_draft("Next")).unwrap();
+            assert!(next_id.get() > id.get());
+        }
+    }
+
+    #[test]
+    fn paste_sequence_stale_content_and_binding_updates_never_overwrite_concurrent_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SequenceStore::new(directory.path().join(PASTE_SEQUENCES_FILE));
+        let mut previous = store.load().unwrap();
+        let id = previous.upsert(hotkey_draft("Original")).unwrap();
+        store.commit(&mut previous).unwrap();
+        let mut candidate = previous.clone();
+        let mut draft = SequenceDraft::from_sequence(previous.sequence(id).unwrap());
+        draft.name = "Authored content".into();
+        candidate.upsert(draft).unwrap();
+        let result = commit_sequence_editor_update(
+            &store,
+            &previous,
+            &mut candidate,
+            &SequenceEditorUpdate::Saved { id },
+            StartShortcutUpdate::Set(None),
+            |_| {
+                let mut concurrent = store.load().unwrap();
+                let mut draft = SequenceDraft::from_sequence(concurrent.sequence(id).unwrap());
+                draft.name = "Concurrent content".into();
+                concurrent.upsert(draft).unwrap();
+                store.commit(&mut concurrent).unwrap();
+                Ok(())
+            },
+            || panic!("stale binding candidate must not apply"),
+        )
+        .unwrap();
+        assert!(matches!(
+            result,
+            SequenceCommitOutcome::ContentSavedBindingRejected { .. }
+        ));
+        let bytes = std::fs::read(store.path()).unwrap();
+        assert_eq!(
+            store.load().unwrap().sequence(id).unwrap().name,
+            "Concurrent content"
+        );
+        let error = commit_sequence_editor_update(
+            &store,
+            &previous,
+            &mut candidate,
+            &SequenceEditorUpdate::Saved { id },
+            StartShortcutUpdate::Keep,
+            |_| panic!("stale content must not prepare"),
+            || panic!("stale content must not apply"),
+        )
+        .unwrap_err();
+        assert!(error.contains("changed elsewhere"));
+        assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+        let mut slot = Some(previous.clone());
+        let mut attempted = SequenceDraft::from_sequence(previous.sequence(id).unwrap());
+        attempted.name = "Unsaved stale draft".into();
+        let mut selected = Some(id);
+        let mut step = Some(0);
+        let mut hotkey = "Ctrl+Shift+K".into();
+        reconcile_editor_update(
+            &mut slot,
+            &mut attempted,
+            &mut selected,
+            &mut step,
+            &mut hotkey,
+            store.load().unwrap(),
+            &SequenceEditorUpdate::Saved { id },
+            false,
+        );
+        assert_eq!(slot.as_ref().unwrap().revision(), previous.revision());
+        assert_eq!(attempted.name, "Unsaved stale draft");
+        reconcile_editor_update(
+            &mut slot,
+            &mut attempted,
+            &mut selected,
+            &mut step,
+            &mut hotkey,
+            store.load().unwrap(),
+            &SequenceEditorUpdate::Removed { id },
+            false,
+        );
+        assert_eq!(slot.as_ref().unwrap().revision(), previous.revision());
+        assert_eq!(attempted.name, "Unsaved stale draft");
+        let mut retry = slot.as_ref().unwrap().clone();
+        retry.upsert(attempted).unwrap();
+        assert!(
+            commit_sequence_editor_update(
+                &store,
+                slot.as_ref().unwrap(),
+                &mut retry,
+                &SequenceEditorUpdate::Saved { id },
+                StartShortcutUpdate::Keep,
+                |_| panic!("retry must still be stale"),
+                || panic!("retry must not apply")
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn paste_sequence_gui_invalid_start_saves_content_and_unbound_remove_needs_no_routes() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = layout_app(&ctx, directory.path());
+        // Neither operation should load settings or contact a hotkey owner.
+        std::fs::write(
+            directory.path().join("settings.json"),
+            "invalid settings fixture",
+        )
+        .unwrap();
+        let store_path = directory.path().join(PASTE_SEQUENCES_FILE);
+        let store = SequenceStore::new(&store_path);
+        let mut dialog = PasteSequenceDialog {
+            open: true,
+            store_path,
+            snapshot: Some(store.load().unwrap()),
+            draft: hotkey_draft("Authored content"),
+            hotkey_text: "Ctrl+invalid".into(),
+            ..Default::default()
+        };
+        dialog.save_draft(&ctx, &mut app);
+        let drain = |dialog: &mut PasteSequenceDialog| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while dialog.hotkey_update.is_some() && std::time::Instant::now() < deadline {
+                dialog.poll_hotkey_update(&ctx);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert!(dialog.hotkey_update.is_none(), "worker did not complete");
+        };
+        drain(&mut dialog);
+        assert!(dialog.status.as_deref().unwrap().contains("content saved"));
+        assert!(dialog.inline_error.as_deref().unwrap().contains("invalid"));
+        assert!(dialog.hotkey_text.is_empty());
+        let id = dialog.selected_id.unwrap();
+        assert_eq!(
+            store.load().unwrap().sequence(id).unwrap().name,
+            "Authored content"
+        );
+        dialog.remove_saved_sequence(&ctx, &mut app, id);
+        drain(&mut dialog);
+        assert!(store.load().unwrap().sequences().is_empty());
+        assert!(dialog.selected_id.is_none());
+        assert!(dialog.inline_error.is_none());
+        assert!(dialog.status.as_deref().unwrap().contains("removed"));
+        for plugin_enabled in [true, false] {
+            let status =
+                binding_update_status(&SequenceEditorUpdate::Removed { id }, plugin_enabled);
+            assert!(status.contains("start shortcut was removed"));
+            assert!(!status.contains("start shortcut routes are active"));
+        }
+    }
+
+    #[test]
     fn paste_sequence_prepare_conflict_does_not_write_candidate() {
         let directory = tempfile::tempdir().unwrap();
         let store = SequenceStore::new(directory.path().join(PASTE_SEQUENCES_FILE));
@@ -1629,7 +2090,7 @@ mod tests {
             || panic!("apply must not be reached after rejected preparation"),
         );
 
-        assert!(result.unwrap_err().contains("was not saved"));
+        assert!(result.unwrap_err().message.contains("was not saved"));
         let on_disk = store.load().unwrap();
         assert!(on_disk.sequences().is_empty());
         assert_eq!(on_disk.revision(), previous.revision());
@@ -1651,7 +2112,7 @@ mod tests {
             || Err(RouteActivationFailure::Confirmed("route rejected".into())),
         );
 
-        assert!(result.unwrap_err().contains("rolled back"));
+        assert!(result.unwrap_err().message.contains("rolled back"));
         let mut restored = store.load().unwrap();
         assert!(restored.sequences().is_empty());
         assert_eq!(restored.revision(), 2);
@@ -1682,7 +2143,7 @@ mod tests {
             },
         );
 
-        assert!(result.unwrap_err().contains("changed"));
+        assert!(result.unwrap_err().message.contains("changed"));
         let current = store.load().unwrap();
         assert_eq!(current.sequence(id).unwrap().name, "Concurrent edit");
     }
