@@ -525,6 +525,18 @@ Do not silently incorporate unrelated pre-existing changes into a milestone comm
 
 ---
 
+## Best-Effort Push After Commits
+
+The agent responsible for Git commits (normally the parent/orchestration agent) is authorized to push commits for the current task without requesting separate user approval, unless the current task explicitly forbids pushing. This does not change agent ownership, branch discipline, or the existing commit cadence.
+
+After each required milestone or checkpoint commit, attempt one normal, non-force push of the current task branch when an appropriate remote is configured and the environment permits it. Prefer the configured upstream (`git push`). If no upstream is configured and `origin` clearly belongs to the intended repository, `git push -u origin HEAD` is permitted. Never push unrelated branches or use force-push.
+
+**Commit locally first.** Pushing is best-effort, never a prerequisite for continuing implementation, verification, review, subsequent checkpoint commits, or task completion. If the push fails or is unavailable for any reason (including network, authentication, permissions, missing remote, missing upstream, or remote rejection), preserve the successful local commit and continue the existing workflow without asking the user to intervene.
+
+Do not reset, rebase, merge, pull, rewrite history, change branches, or enter repeated retry loops merely to make a failed push succeed. Later checkpoint commits may each receive their normal single push attempt. In the final report, distinguish commits successfully pushed from commits retained locally, and briefly identify any push failure.
+
+---
+
 # Commit Message Standard
 
 Commit messages should be concise but informative.
