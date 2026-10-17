@@ -9,10 +9,23 @@ const MAX_SCHEMA_DEPTH: usize = 16;
 const MAX_SCHEMA_FILE_BYTES: usize = 1024 * 1024;
 const MAX_SCHEMA_GRAPH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_XPATH_RESULTS: usize = 10_000;
+const MAX_XPATH_RESULT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NAMESPACE_BINDINGS: usize = 64;
 const MAX_NAMESPACE_BYTES: usize = 32 * 1024;
 const MAX_RETAINED_DOCUMENTS: usize = 16;
 const MAX_RETAINED_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FORMAT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FORMAT_INDENT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_FORMAT_DEPTH: usize = 256;
+const MAX_FORMAT_NODES: usize = 200_000;
+
+/// Formatting runs over a clone of the already parsed document. It never
+/// changes the source tree; callers must explicitly apply returned text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum XmlFormatMode {
+    Pretty,
+    Minify,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct XmlDocumentId(u64);
@@ -44,6 +57,7 @@ pub enum XmlEngineError {
     RetentionLimit(&'static str),
     UnknownDocument,
     Parse(XmlDiagnostic),
+    Format(String),
     XPath(String),
     SchemaPolicy(String),
     SchemaLoad(XmlDiagnostic),
@@ -68,6 +82,72 @@ pub enum XmlXPathResult {
     ScalarText(String),
 }
 
+fn validate_utf8_declaration(source: &str) -> Result<(), XmlEngineError> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let Some(after_start) = source.strip_prefix("<?xml") else {
+        return Ok(());
+    };
+    if !after_start.chars().next().is_some_and(char::is_whitespace) {
+        // This includes processing instructions such as xml-stylesheet; the
+        // XML parser remains responsible for reporting malformed declarations.
+        return Ok(());
+    }
+    let Some(end) = source.find("?>") else {
+        return Ok(());
+    };
+    let declaration = &source[5..end];
+    let bytes = declaration.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let start = cursor;
+        while bytes.get(cursor).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b':' || *byte == b'-'
+        }) {
+            cursor += 1;
+        }
+        if start == cursor {
+            break;
+        }
+        let name = &declaration[start..cursor];
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'=') {
+            break;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let Some(quote @ (b'\'' | b'"')) = bytes.get(cursor).copied() else {
+            break;
+        };
+        cursor += 1;
+        let value_start = cursor;
+        while bytes.get(cursor).is_some_and(|byte| *byte != quote) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&quote) {
+            break;
+        }
+        let value = &declaration[value_start..cursor];
+        cursor += 1;
+        if name == "encoding" && !value.eq_ignore_ascii_case("UTF-8") {
+            return Err(XmlEngineError::Parse(XmlDiagnostic {
+                line: Some(1),
+                column: Some(u32::try_from(value_start + 6).unwrap_or(u32::MAX)),
+                message:
+                    "string input is UTF-8; the XML declaration must use UTF-8 or omit encoding"
+                        .into(),
+            }));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(windows)]
 mod windows_backend {
     use super::*;
@@ -80,7 +160,8 @@ mod windows_backend {
     use std::thread::{self, JoinHandle};
     use windows::Win32::Data::Xml::MsXml::{
         DOMDocument60, IXMLDOMDocument2, IXMLDOMDocument3, IXMLDOMElement, IXMLDOMNode,
-        IXMLDOMNodeList, IXMLDOMSchemaCollection2, XMLSchemaCache60,
+        IXMLDOMNodeList, IXMLDOMSchemaCollection2, NODE_CDATA_SECTION, NODE_ELEMENT, NODE_TEXT,
+        XMLSchemaCache60,
     };
     use windows::Win32::Foundation::{HANDLE, VARIANT_BOOL};
     use windows::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_DOS};
@@ -94,6 +175,11 @@ mod windows_backend {
         Parse {
             source: String,
             reply: Sender<Result<XmlDocumentId, XmlEngineError>>,
+        },
+        Format {
+            document: XmlDocumentId,
+            mode: XmlFormatMode,
+            reply: Sender<Result<String, XmlEngineError>>,
         },
         Query {
             document: XmlDocumentId,
@@ -115,6 +201,7 @@ mod windows_backend {
 
     /// A synchronous request handle backed by one COM apartment thread.
     /// Calls return owned snapshots; no COM interface leaves that thread.
+    /// UI callers should submit work through `XmlEngineSession` instead.
     pub struct XmlEngineWorker {
         sender: Sender<Request>,
         join: Option<JoinHandle<()>>,
@@ -140,6 +227,20 @@ mod windows_backend {
 
         pub fn parse(&self, source: String) -> Result<XmlDocumentId, XmlEngineError> {
             self.request(|reply| Request::Parse { source, reply })
+        }
+
+        /// Formats a clone of the parsed document on the COM apartment thread.
+        /// The retained source document stays available for queries/validation.
+        pub fn format(
+            &self,
+            document: XmlDocumentId,
+            mode: XmlFormatMode,
+        ) -> Result<String, XmlEngineError> {
+            self.request(|reply| Request::Format {
+                document,
+                mode,
+                reply,
+            })
         }
 
         pub fn query(
@@ -242,6 +343,7 @@ mod windows_backend {
 
         fn parse(&mut self, source: String) -> Result<XmlDocumentId, XmlEngineError> {
             check_input_size(&source)?;
+            validate_utf8_declaration(&source)?;
             if self.documents.len() >= MAX_RETAINED_DOCUMENTS {
                 return Err(XmlEngineError::RetentionLimit("document count"));
             }
@@ -255,6 +357,18 @@ mod windows_backend {
             self.retained_source_bytes = self.retained_source_bytes.saturating_add(source.len());
             self.documents.insert(id, DocumentState { dom, source });
             Ok(id)
+        }
+
+        fn format(
+            &self,
+            document: XmlDocumentId,
+            mode: XmlFormatMode,
+        ) -> Result<String, XmlEngineError> {
+            let state = self
+                .documents
+                .get(&document)
+                .ok_or(XmlEngineError::UnknownDocument)?;
+            format_existing_document(&state.dom, mode)
         }
 
         fn close_document(&mut self, document: XmlDocumentId) -> Result<(), XmlEngineError> {
@@ -388,6 +502,13 @@ mod windows_backend {
             match request {
                 Request::Parse { source, reply } => {
                     let _ = reply.send(engine.parse(source));
+                }
+                Request::Format {
+                    document,
+                    mode,
+                    reply,
+                } => {
+                    let _ = reply.send(engine.format(document, mode));
                 }
                 Request::Query {
                     document,
@@ -639,29 +760,243 @@ mod windows_backend {
             ));
         }
         let mut result = Vec::with_capacity(count.max(0) as usize);
+        let mut pending_identities = Vec::with_capacity(count.max(0) as usize);
+        let mut next_ordinal = *next_node;
+        let mut result_bytes = 0usize;
         for index in 0..count {
             let node = unsafe { list.get_item(index) }
                 .map_err(|_| XmlEngineError::XPath("MSXML could not read XPath result".into()))?;
             let id = XmlNodeId {
                 document,
-                ordinal: *next_node,
+                ordinal: next_ordinal,
             };
-            *next_node = next_node.saturating_add(1);
+            next_ordinal = next_ordinal.saturating_add(1);
+            let value = unsafe { node.text() }
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            result_bytes = result_bytes.saturating_add(value.len());
+            if result_bytes > MAX_XPATH_RESULT_BYTES {
+                return Err(XmlEngineError::RetentionLimit("XPath result bytes"));
+            }
+            let kind = unsafe { node.nodeTypeString() }
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            result_bytes = result_bytes.saturating_add(kind.len());
+            if result_bytes > MAX_XPATH_RESULT_BYTES {
+                return Err(XmlEngineError::RetentionLimit("XPath result bytes"));
+            }
+            let qualified_name = unsafe { node.nodeName() }
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            result_bytes = result_bytes.saturating_add(qualified_name.len());
+            if result_bytes > MAX_XPATH_RESULT_BYTES {
+                return Err(XmlEngineError::RetentionLimit("XPath result bytes"));
+            }
             result.push(XmlNodeSnapshot {
                 id,
-                kind: unsafe { node.nodeTypeString() }
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-                qualified_name: unsafe { node.nodeName() }
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
-                value: unsafe { node.text() }
-                    .map(|value| value.to_string())
-                    .unwrap_or_default(),
+                kind,
+                qualified_name,
+                value,
             });
-            identities.insert(id, node);
+            pending_identities.push((id, node));
+        }
+        *next_node = next_ordinal;
+        identities.extend(pending_identities);
+        Ok(result)
+    }
+
+    fn format_existing_document(
+        document: &IXMLDOMDocument2,
+        mode: XmlFormatMode,
+    ) -> Result<String, XmlEngineError> {
+        // Clone the parsed tree instead of parsing its retained source again.
+        // Formatting only mutates this clone, so XPath and schema requests keep
+        // addressing the authoritative source document.
+        let clone = unsafe { document.cloneNode(VARIANT_BOOL(-1)) }
+            .map_err(|_| XmlEngineError::Format("MSXML could not clone the XML document".into()))?
+            .cast::<IXMLDOMDocument2>()
+            .map_err(|_| {
+                XmlEngineError::Format("MSXML returned an invalid document clone".into())
+            })?;
+        let root: IXMLDOMNode = clone.cast().map_err(|_| {
+            XmlEngineError::Format("MSXML returned an invalid document clone".into())
+        })?;
+        let mut visited = 0usize;
+        let children = format_children(&root, &mut visited)?;
+        let mut indent_bytes = 0usize;
+        for child in children {
+            if unsafe { child.nodeType() }.map_err(|_| {
+                XmlEngineError::Format("MSXML could not identify an XML node".into())
+            })? == NODE_ELEMENT
+            {
+                format_element(
+                    &clone,
+                    &child,
+                    0,
+                    false,
+                    false,
+                    mode,
+                    &mut visited,
+                    &mut indent_bytes,
+                )?;
+            }
+        }
+        let output = unsafe { clone.xml() }
+            .map_err(|_| {
+                XmlEngineError::Format("MSXML could not serialize the XML document".into())
+            })?
+            .to_string();
+        if output.len() > MAX_FORMAT_OUTPUT_BYTES {
+            return Err(XmlEngineError::Format(format!(
+                "formatted output exceeds the {MAX_FORMAT_OUTPUT_BYTES}-byte limit"
+            )));
+        }
+        Ok(output)
+    }
+
+    fn format_element(
+        document: &IXMLDOMDocument2,
+        element: &IXMLDOMNode,
+        depth: usize,
+        inherited_space_preserve: bool,
+        protected_by_ancestor: bool,
+        mode: XmlFormatMode,
+        visited: &mut usize,
+        indent_bytes: &mut usize,
+    ) -> Result<(), XmlEngineError> {
+        if depth > MAX_FORMAT_DEPTH {
+            return Err(XmlEngineError::Format(format!(
+                "element nesting exceeds the {MAX_FORMAT_DEPTH}-level formatting limit"
+            )));
+        }
+        let preserve = xml_space_preserve(element, inherited_space_preserve)?;
+        let children = format_children(element, visited)?;
+        let mut has_character_data = false;
+        for child in &children {
+            let node_type = unsafe { child.nodeType() }.map_err(|_| {
+                XmlEngineError::Format("MSXML could not identify an XML node".into())
+            })?;
+            has_character_data |= node_type == NODE_TEXT || node_type == NODE_CDATA_SECTION;
+        }
+        // A mixed-content ancestor must protect every nested subtree: adding
+        // indentation several levels below its direct text would still alter
+        // that ancestor's string value. `xml:space` is carried independently
+        // so a descendant's explicit `default` can resume formatting.
+        let protect_descendants = protected_by_ancestor || has_character_data;
+        for child in &children {
+            if unsafe { child.nodeType() }.map_err(|_| {
+                XmlEngineError::Format("MSXML could not identify an XML node".into())
+            })? == NODE_ELEMENT
+            {
+                format_element(
+                    document,
+                    child,
+                    depth + 1,
+                    preserve,
+                    protect_descendants,
+                    mode,
+                    visited,
+                    indent_bytes,
+                )?;
+            }
+        }
+
+        if mode == XmlFormatMode::Pretty
+            && !protected_by_ancestor
+            && !preserve
+            && !children.is_empty()
+            && !has_character_data
+        {
+            // Existing text and CDATA nodes are never trimmed or rewritten.
+            // New indentation is added only where the parsed parent has no
+            // character data, so mixed content and whitespace-only text remain
+            // byte-for-byte represented in the cloned tree.
+            let before_each = 1usize.saturating_add(2usize.saturating_mul(depth + 1));
+            let trailing = 1usize.saturating_add(2usize.saturating_mul(depth));
+            let added = before_each
+                .saturating_mul(children.len())
+                .saturating_add(trailing);
+            *indent_bytes = (*indent_bytes).saturating_add(added);
+            if *indent_bytes > MAX_FORMAT_INDENT_BYTES {
+                return Err(XmlEngineError::Format(format!(
+                    "pretty indentation exceeds the {MAX_FORMAT_INDENT_BYTES}-byte limit"
+                )));
+            }
+            for child in &children {
+                let whitespace = format!("\n{}", "  ".repeat(depth + 1));
+                let text =
+                    unsafe { document.createTextNode(&BSTR::from(whitespace)) }.map_err(|_| {
+                        XmlEngineError::Format("MSXML could not create indentation".into())
+                    })?;
+                let reference = VARIANT::from(IUnknown::from(child.clone()));
+                unsafe { element.insertBefore(&text, &reference) }.map_err(|_| {
+                    XmlEngineError::Format("MSXML could not insert indentation".into())
+                })?;
+            }
+            let trailing_text = format!("\n{}", "  ".repeat(depth));
+            let text = unsafe { document.createTextNode(&BSTR::from(trailing_text)) }
+                .map_err(|_| XmlEngineError::Format("MSXML could not create indentation".into()))?;
+            unsafe { element.appendChild(&text) }
+                .map_err(|_| XmlEngineError::Format("MSXML could not finish indentation".into()))?;
+        }
+        Ok(())
+    }
+
+    fn format_children(
+        parent: &IXMLDOMNode,
+        visited: &mut usize,
+    ) -> Result<Vec<IXMLDOMNode>, XmlEngineError> {
+        let children = unsafe { parent.childNodes() }
+            .map_err(|_| XmlEngineError::Format("MSXML could not inspect XML children".into()))?;
+        let count = unsafe { children.length() }
+            .map_err(|_| XmlEngineError::Format("MSXML could not count XML children".into()))?;
+        let count = usize::try_from(count)
+            .map_err(|_| XmlEngineError::Format("MSXML returned an invalid child count".into()))?;
+        *visited = (*visited).saturating_add(count);
+        if *visited > MAX_FORMAT_NODES {
+            return Err(XmlEngineError::Format(format!(
+                "document exceeds the {MAX_FORMAT_NODES}-node formatting limit"
+            )));
+        }
+        let mut result = Vec::with_capacity(count);
+        for index in 0..count {
+            result.push(
+                unsafe { children.get_item(index as i32) }.map_err(|_| {
+                    XmlEngineError::Format("MSXML could not read an XML child".into())
+                })?,
+            );
         }
         Ok(result)
+    }
+
+    fn xml_space_preserve(element: &IXMLDOMNode, inherited: bool) -> Result<bool, XmlEngineError> {
+        let attributes = unsafe { element.attributes() }
+            .map_err(|_| XmlEngineError::Format("MSXML could not inspect xml:space".into()))?;
+        let count = unsafe { attributes.length() }.map_err(|_| {
+            XmlEngineError::Format("MSXML could not count element attributes".into())
+        })?;
+        for index in 0..count {
+            let attribute = unsafe { attributes.get_item(index) }.map_err(|_| {
+                XmlEngineError::Format("MSXML could not read an element attribute".into())
+            })?;
+            if unsafe { attribute.nodeName() }
+                .map(|name| name.to_string())
+                .ok()
+                .as_deref()
+                != Some("xml:space")
+            {
+                continue;
+            }
+            let value = unsafe { attribute.text() }
+                .map(|value| value.to_string())
+                .map_err(|_| XmlEngineError::Format("MSXML could not read xml:space".into()))?;
+            return Ok(match value.as_str() {
+                "preserve" => true,
+                "default" => false,
+                _ => inherited,
+            });
+        }
+        Ok(inherited)
     }
 
     struct SecureSchemaSnapshot {
