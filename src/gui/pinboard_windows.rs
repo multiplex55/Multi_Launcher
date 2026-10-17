@@ -39,6 +39,7 @@ enum PinActionStatus {
 struct PinWindowRuntime {
     pin_id: PinId,
     lifetime: u64,
+    process_id: u32,
     viewport_id: egui::ViewportId,
     title: String,
     image: PinImageHandle,
@@ -62,8 +63,41 @@ struct PinWindowState {
     pending_request_id: Option<u64>,
     action_status: PinActionStatus,
     native: Option<NativeWindowBinding>,
+    native_error: Option<String>,
     native_destroyed: bool,
     capture_visibility: Option<CaptureVisibilityState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PinControlChange {
+    always_on_top: Option<bool>,
+    click_through: Option<bool>,
+}
+
+#[derive(Clone)]
+struct PinListEntry {
+    pin_id: PinId,
+    lifetime: u64,
+    dimensions: (u32, u32),
+    always_on_top: bool,
+    click_through: bool,
+    texture: Option<egui::TextureHandle>,
+    native_status: String,
+    controls_available: bool,
+}
+
+enum PinListAction {
+    Control {
+        pin_id: PinId,
+        lifetime: u64,
+        change: PinControlChange,
+    },
+    RecoverAll,
+    Close {
+        pin_id: PinId,
+        lifetime: u64,
+    },
+    CloseAll,
 }
 
 #[derive(Clone)]
@@ -193,6 +227,9 @@ impl PinWindowPresenter {
 
     /// Updates the owner from the domain model and registers its retained child callbacks.
     pub(crate) fn show(&mut self, ctx: &egui::Context, board: &Pinboard) {
+        if ctx.embed_viewports() {
+            return;
+        }
         let mut callbacks = Vec::new();
         let mut close_viewports = Vec::new();
         let mut removed_retired = false;
@@ -251,6 +288,7 @@ impl PinWindowPresenter {
                     Arc::new(PinWindowRuntime {
                         pin_id: pin.id(),
                         lifetime,
+                        process_id,
                         viewport_id,
                         title,
                         image: pin.snapshot().image_handle(),
@@ -271,6 +309,7 @@ impl PinWindowPresenter {
                             pending_request_id: None,
                             action_status: PinActionStatus::Idle,
                             native: None,
+                            native_error: None,
                             native_destroyed: false,
                             capture_visibility: None,
                         }),
@@ -278,8 +317,20 @@ impl PinWindowPresenter {
                 });
                 if let Ok(mut state) = runtime.state.lock() {
                     state.display_bounds = pin.display_bounds();
+                    if runtime.viewport_id == egui::ViewportId::ROOT
+                        || runtime.viewport_id != pin_viewport_id(runtime.pin_id, runtime.lifetime)
+                    {
+                        state.root_registered = false;
+                        state.native_error = Some("pin child viewport identity is invalid".into());
+                        continue;
+                    }
                     if state.close_requested || state.native_destroyed {
-                        if !state.close_command_sent && !state.native_destroyed {
+                        if !state.close_command_sent
+                            && !state.native_destroyed
+                            && runtime.viewport_id != egui::ViewportId::ROOT
+                            && runtime.viewport_id
+                                == pin_viewport_id(runtime.pin_id, runtime.lifetime)
+                        {
                             state.close_command_sent = true;
                             close_viewports.push(runtime.viewport_id);
                         }
@@ -297,7 +348,6 @@ impl PinWindowPresenter {
                 Arc::clone(&registry.native_api),
             )
         };
-        self.actions.set_root_context(ctx.clone());
         for viewport_id in close_viewports {
             if !ctx.embed_viewports() {
                 ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Visible(false));
@@ -312,7 +362,7 @@ impl PinWindowPresenter {
             }
             let action_client = self.actions.client();
             let callback_native_api = Arc::clone(&native_api);
-            let root_context = ctx.clone();
+            let callback_registry = Arc::downgrade(&self.registry);
             ctx.show_viewport_deferred(runtime.viewport_id, builder, move |ui, class| {
                 render_pin_viewport(
                     ui,
@@ -321,7 +371,7 @@ impl PinWindowPresenter {
                     &action_client,
                     &callback_native_api,
                     root_native_identity,
-                    &root_context,
+                    &callback_registry,
                     capture_suppressed || shutting_down,
                 );
             });
@@ -332,6 +382,302 @@ impl PinWindowPresenter {
             // enclosing root UI pass completes.
             self.pending_parent_cleanup = false;
         }
+    }
+
+    pub(crate) fn show_pin_list(
+        &mut self,
+        ctx: &egui::Context,
+        board: &mut Pinboard,
+        open: &mut bool,
+    ) {
+        if !*open || ctx.embed_viewports() || ctx.viewport_id() != egui::ViewportId::ROOT {
+            return;
+        }
+        let (entries, native_api, root_hwnd, shutting_down) = {
+            let Ok(registry) = self.registry.lock() else {
+                return;
+            };
+            let entries = board
+                .pins()
+                .filter_map(|pin| {
+                    let runtime = registry.pins.get(&pin.id())?;
+                    let state = runtime.state.lock().ok()?;
+                    Some(PinListEntry {
+                        pin_id: pin.id(),
+                        lifetime: runtime.lifetime,
+                        dimensions: runtime.dimensions,
+                        always_on_top: state.always_on_top,
+                        click_through: state.click_through,
+                        texture: state.texture.clone(),
+                        native_status: if state.close_requested || state.native_destroyed {
+                            "Closing".into()
+                        } else if let Some(error) = state.native_error.clone() {
+                            error
+                        } else if state.native.is_some() {
+                            "Owned child window observed; control values below are desired state"
+                                .into()
+                        } else {
+                            "Waiting for the owned child window".into()
+                        },
+                        controls_available: state.root_registered
+                            && !state.close_requested
+                            && !state.native_destroyed
+                            && state.native.is_some(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                entries,
+                Arc::clone(&registry.native_api),
+                registry.root_native_identity.0,
+                registry.shutting_down,
+            )
+        };
+
+        let mut actions = Vec::new();
+        egui::Window::new("Screenshot Pins")
+            .id(egui::Id::new("screenshot-pin-list"))
+            .open(open)
+            .resizable(true)
+            .default_size([620.0, 420.0])
+            .show(ctx, |ui| {
+                ui.label(
+                    "Tab or Shift+Tab moves between controls; Space or Enter activates a focused control.",
+                );
+                let has_recoverable = entries
+                    .iter()
+                    .any(|entry| entry.click_through && entry.controls_available);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(has_recoverable && !shutting_down, egui::Button::new("Recover All"))
+                        .clicked()
+                    {
+                        actions.push(PinListAction::RecoverAll);
+                    }
+                    if ui
+                        .add_enabled(!entries.is_empty() && !shutting_down, egui::Button::new("Close All"))
+                        .clicked()
+                    {
+                        actions.push(PinListAction::CloseAll);
+                    }
+                });
+                ui.separator();
+                if entries.is_empty() {
+                    ui.label("No screenshot pins are open.");
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for entry in &entries {
+                        ui.push_id(("pin-list-row", entry.pin_id.get(), entry.lifetime), |ui| {
+                            ui.group(|ui| {
+                                ui.horizontal(|ui| {
+                                    if let Some(texture) = &entry.texture {
+                                        ui.add(egui::Image::new((
+                                            texture.id(),
+                                            egui::vec2(112.0, 72.0),
+                                        )));
+                                    } else {
+                                        ui.allocate_ui(egui::vec2(112.0, 72.0), |ui| {
+                                            ui.centered_and_justified(|ui| {
+                                                ui.label("Preparing preview…");
+                                            });
+                                        });
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.label(format!(
+                                            "Pin {} · {} × {}",
+                                            entry.pin_id.get(),
+                                            entry.dimensions.0,
+                                            entry.dimensions.1
+                                        ));
+                                        ui.label(format!("{}", entry.native_status));
+                                        ui.horizontal(|ui| {
+                                            let mut topmost = entry.always_on_top;
+                                            if ui
+                                                .add_enabled(
+                                                    entry.controls_available && !shutting_down,
+                                                    egui::Checkbox::new(&mut topmost, "Topmost"),
+                                                )
+                                                .changed()
+                                            {
+                                                actions.push(PinListAction::Control {
+                                                    pin_id: entry.pin_id,
+                                                    lifetime: entry.lifetime,
+                                                    change: PinControlChange {
+                                                        always_on_top: Some(topmost),
+                                                        click_through: None,
+                                                    },
+                                                });
+                                            }
+                                            let mut click_through = entry.click_through;
+                                            if ui
+                                                .add_enabled(
+                                                    entry.controls_available && !shutting_down,
+                                                    egui::Checkbox::new(
+                                                        &mut click_through,
+                                                        "Click-Through",
+                                                    ),
+                                                )
+                                                .changed()
+                                            {
+                                                actions.push(PinListAction::Control {
+                                                    pin_id: entry.pin_id,
+                                                    lifetime: entry.lifetime,
+                                                    change: PinControlChange {
+                                                        always_on_top: None,
+                                                        click_through: Some(click_through),
+                                                    },
+                                                });
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    entry.click_through
+                                                        && entry.controls_available
+                                                        && !shutting_down,
+                                                    egui::Button::new("Recover"),
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.push(PinListAction::Control {
+                                                    pin_id: entry.pin_id,
+                                                    lifetime: entry.lifetime,
+                                                    change: PinControlChange {
+                                                        always_on_top: None,
+                                                        click_through: Some(false),
+                                                    },
+                                                });
+                                            }
+                                            if ui
+                                                .add_enabled(!shutting_down, egui::Button::new("Close"))
+                                                .clicked()
+                                            {
+                                                actions.push(PinListAction::Close {
+                                                    pin_id: entry.pin_id,
+                                                    lifetime: entry.lifetime,
+                                                });
+                                            }
+                                        });
+                                    });
+                                });
+                            });
+                        });
+                    }
+                });
+            });
+
+        for action in actions {
+            match action {
+                PinListAction::Control {
+                    pin_id,
+                    lifetime,
+                    change,
+                } => {
+                    if let Err(error) = self.apply_list_control(
+                        ctx,
+                        board,
+                        pin_id,
+                        lifetime,
+                        change,
+                        native_api.as_ref(),
+                        root_hwnd,
+                    ) {
+                        tracing::debug!(pin_id = pin_id.get(), %error, "pin-list control request was rejected");
+                    }
+                }
+                PinListAction::RecoverAll => {
+                    for entry in &entries {
+                        if entry.click_through {
+                            if let Err(error) = self.apply_list_control(
+                                ctx,
+                                board,
+                                entry.pin_id,
+                                entry.lifetime,
+                                PinControlChange {
+                                    always_on_top: None,
+                                    click_through: Some(false),
+                                },
+                                native_api.as_ref(),
+                                root_hwnd,
+                            ) {
+                                if let Ok(registry) = self.registry.lock()
+                                    && let Some(runtime) = registry
+                                        .pins
+                                        .get(&entry.pin_id)
+                                        .filter(|runtime| runtime.lifetime == entry.lifetime)
+                                    && let Ok(mut state) = runtime.state.lock()
+                                {
+                                    state.native_error = Some(error);
+                                }
+                            }
+                        }
+                    }
+                }
+                PinListAction::Close { pin_id, lifetime } => {
+                    self.close_lifetime(board, pin_id, lifetime);
+                }
+                PinListAction::CloseAll => {
+                    for entry in &entries {
+                        self.close_lifetime(board, entry.pin_id, entry.lifetime);
+                    }
+                }
+            }
+        }
+        // Style requests do not show or focus a pin. Wake the root owner so its
+        // next parent pass can apply the latest desired builder state.
+        ctx.request_repaint_of(egui::ViewportId::ROOT);
+    }
+
+    fn apply_list_control(
+        &mut self,
+        ctx: &egui::Context,
+        board: &mut Pinboard,
+        pin_id: PinId,
+        lifetime: u64,
+        change: PinControlChange,
+        native_api: &dyn PinNativeApi,
+        root_hwnd: usize,
+    ) -> Result<(), String> {
+        if ctx.embed_viewports() || ctx.viewport_id() != egui::ViewportId::ROOT {
+            return Err("pin controls require the launcher root viewport".into());
+        }
+        if board.get(pin_id).is_none() {
+            return Err("pin control belongs to a closed pin".into());
+        }
+        let runtime = {
+            let registry = self
+                .registry
+                .lock()
+                .map_err(|_| "pin window registry lock was poisoned".to_owned())?;
+            if registry.shutting_down {
+                return Err("pin window owner is shutting down".into());
+            }
+            registry
+                .pins
+                .get(&pin_id)
+                .filter(|runtime| runtime.lifetime == lifetime)
+                .cloned()
+                .ok_or_else(|| "pin control lifetime is stale".to_owned())?
+        };
+        if let Err(error) = apply_pin_control_change(ctx, &runtime, native_api, root_hwnd, change) {
+            if let Ok(mut state) = runtime.state.lock() {
+                state.native_error = Some(error.clone());
+            }
+            return Err(error);
+        }
+        ctx.request_repaint_of(runtime.viewport_id);
+        Ok(())
+    }
+
+    fn close_lifetime(&mut self, board: &mut Pinboard, pin_id: PinId, lifetime: u64) -> bool {
+        let is_current = self.registry.lock().is_ok_and(|registry| {
+            registry
+                .pins
+                .get(&pin_id)
+                .is_some_and(|runtime| runtime.lifetime == lifetime)
+        });
+        is_current && self.close(pin_id, board)
     }
 
     pub(crate) fn needs_viewport_bootstrap(&self, board: &Pinboard) -> bool {
@@ -366,7 +712,6 @@ impl PinWindowPresenter {
     pub(crate) fn poll(&mut self, ctx: &egui::Context, board: &mut Pinboard) {
         if let Ok(mut registry) = self.registry.lock() {
             registry.root_context = Some(ctx.clone());
-            self.actions.set_root_context(ctx.clone());
         }
         let mut close_ids = Vec::new();
         let mut destroyed_retired = Vec::new();
@@ -384,13 +729,11 @@ impl PinWindowPresenter {
         };
 
         for runtime in pins.iter().chain(retired.iter()) {
-            let (title, lifetime, root_registered, existing, closing) = {
+            let (root_registered, existing, closing) = {
                 let Ok(state) = runtime.state.lock() else {
                     continue;
                 };
                 (
-                    runtime.title.clone(),
-                    runtime.lifetime,
                     state.root_registered,
                     state.native.clone(),
                     state.close_requested || state.native_destroyed,
@@ -400,11 +743,17 @@ impl PinWindowPresenter {
             if closing && !is_retired {
                 close_ids.push(runtime.pin_id);
             }
-            match native_api.lookup(&title, lifetime, existing.as_ref(), root_hwnd) {
+            match lookup_owned_pin_window(
+                native_api.as_ref(),
+                runtime,
+                existing.as_ref(),
+                root_hwnd,
+            ) {
                 NativeLookup::Found(binding) => {
                     let bounds = native_api.bounds(&binding);
                     if let Ok(mut state) = runtime.state.lock() {
                         state.native = Some(binding);
+                        state.native_error = None;
                         state.native_destroyed = false;
                     }
                     if !closing && let Some(bounds) = bounds {
@@ -413,6 +762,8 @@ impl PinWindowPresenter {
                 }
                 NativeLookup::Destroyed => {
                     if let Ok(mut state) = runtime.state.lock() {
+                        state.native = None;
+                        state.native_error = None;
                         state.native_destroyed = true;
                         state.close_requested = true;
                     }
@@ -429,11 +780,27 @@ impl PinWindowPresenter {
                     // viewport; an exact native lookup confirms no HWND remains.
                     destroyed_retired.push(runtime.pin_id);
                 }
-                NativeLookup::Missing | NativeLookup::Unsupported => {
+                NativeLookup::Missing => {
                     // A missing window is not treated as closed unless its exact native
                     // identity was previously bound and Windows confirmed that HWND died.
+                    if let Ok(mut state) = runtime.state.lock() {
+                        state.native = None;
+                        state.native_error =
+                            Some("waiting for the owned pin window to appear".into());
+                    }
+                }
+                NativeLookup::Unsupported => {
+                    if let Ok(mut state) = runtime.state.lock() {
+                        state.native = None;
+                        state.native_error =
+                            Some("native pin-window controls are unavailable".into());
+                    }
                 }
                 NativeLookup::Failed(error) => {
+                    if let Ok(mut state) = runtime.state.lock() {
+                        state.native = None;
+                        state.native_error = Some(error.clone());
+                    }
                     tracing::warn!(pin_id = runtime.pin_id.get(), %error, "pin native window lookup failed");
                 }
             }
@@ -540,28 +907,39 @@ impl PinWindowPresenter {
                 .lock()
                 .map_err(|_| "pin window registry lock was poisoned".to_owned())?;
             registry.shutting_down = true;
-            (
-                registry.root_context.clone(),
-                registry
-                    .pins
-                    .values()
-                    .chain(registry.retired.values())
-                    .filter_map(|runtime| {
-                        runtime
-                            .state
-                            .lock()
-                            .is_ok_and(|state| !state.native_destroyed && !state.close_command_sent)
-                            .then_some(runtime.viewport_id)
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            registry.hide_identity = None;
+            registry.restore_identity = None;
+            let viewport_ids = registry
+                .pins
+                .values()
+                .chain(registry.retired.values())
+                .filter_map(|runtime| {
+                    if runtime.viewport_id == egui::ViewportId::ROOT
+                        || runtime.viewport_id != pin_viewport_id(runtime.pin_id, runtime.lifetime)
+                    {
+                        return None;
+                    }
+                    let Ok(mut state) = runtime.state.lock() else {
+                        return None;
+                    };
+                    let should_close = !state.native_destroyed && !state.close_command_sent;
+                    state.close_requested = true;
+                    state.desired_visible = false;
+                    state.root_registered = false;
+                    state.close_command_sent = true;
+                    state.capture_visibility = None;
+                    state.native_error = None;
+                    should_close.then_some(runtime.viewport_id)
+                })
+                .collect::<Vec<_>>();
+            (registry.root_context.clone(), viewport_ids)
         };
         if let Some(ctx) = root_context.filter(|ctx| !ctx.embed_viewports()) {
             for viewport_id in viewport_ids {
                 ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Close);
             }
         }
-        self.actions.shutdown_and_join()?;
+        let action_result = self.actions.shutdown_and_join();
         if let Ok(mut registry) = self.registry.lock() {
             registry.pins.clear();
             registry.retired.clear();
@@ -569,7 +947,8 @@ impl PinWindowPresenter {
             registry.restore_identity = None;
             registry.root_context = None;
         }
-        Ok(())
+        self.pending_parent_cleanup = false;
+        action_result
     }
 }
 
@@ -584,18 +963,25 @@ fn retire_pin_runtime(
     registry: &mut PinWindowRegistry,
     runtime: Arc<PinWindowRuntime>,
 ) -> Option<egui::ViewportId> {
+    let pin_id = runtime.pin_id;
     let mut should_close = false;
     if let Ok(mut state) = runtime.state.lock() {
         state.close_requested = true;
         state.desired_visible = false;
+        state.root_registered = false;
+        state.capture_visibility = None;
         if !state.native_destroyed && !state.close_command_sent {
             state.close_command_sent = true;
             should_close = true;
         }
     }
     let viewport_id = runtime.viewport_id;
-    registry.retired.insert(runtime.pin_id, runtime);
-    should_close.then_some(viewport_id)
+    registry.retired.insert(pin_id, runtime);
+    let valid_child = registry.retired.get(&pin_id).is_some_and(|runtime| {
+        viewport_id != egui::ViewportId::ROOT
+            && runtime.viewport_id == pin_viewport_id(runtime.pin_id, runtime.lifetime)
+    });
+    (should_close && valid_child).then_some(viewport_id)
 }
 
 fn should_suppress_pin(
@@ -673,26 +1059,47 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
             )
         };
         for runtime in entries {
-            let (title, lifetime, existing, never_registered, desired_visible) = {
+            let (existing, never_registered, desired_visible, closed) = {
                 let state = runtime
                     .state
                     .lock()
                     .map_err(|_| "pin window state lock was poisoned".to_owned())?;
                 (
-                    runtime.title.clone(),
-                    runtime.lifetime,
                     state.native.clone(),
                     !state.root_registered && !state.callback_entered && state.native.is_none(),
                     state.desired_visible,
+                    state.close_requested || state.native_destroyed,
                 )
             };
             let mut capture = CaptureVisibilityState {
                 identity: Some(identity),
                 ..Default::default()
             };
-            match native_api.lookup(&title, lifetime, existing.as_ref(), root_identity.0) {
+            match lookup_owned_pin_window(
+                native_api.as_ref(),
+                &runtime,
+                existing.as_ref(),
+                root_identity.0,
+            ) {
                 NativeLookup::Found(binding) => {
                     let prior_visible = native_api.is_visible(&binding)?;
+                    if closed {
+                        capture.prior_visible = Some(false);
+                        capture.hide_requested = true;
+                        if let Ok(mut state) = runtime.state.lock() {
+                            state.desired_visible = false;
+                            state.native = Some(binding);
+                            state.capture_visibility = Some(capture);
+                        }
+                        let ctx = ctx.as_ref().ok_or_else(|| {
+                            "pin viewport context is unavailable for capture exclusion".to_owned()
+                        })?;
+                        ctx.send_viewport_cmd_to(
+                            runtime.viewport_id,
+                            egui::ViewportCommand::Visible(false),
+                        );
+                        continue;
+                    }
                     capture.prior_visible = Some(prior_visible);
                     capture.hide_requested = true;
                     if let Ok(mut state) = runtime.state.lock() {
@@ -765,31 +1172,62 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
         };
         let mut pending = false;
         for runtime in entries {
-            let (title, lifetime, existing, callback_entered, desired_visible, capture) =
-                match runtime.state.lock() {
-                    Ok(state) => (
-                        runtime.title.clone(),
-                        runtime.lifetime,
-                        state.native.clone(),
-                        state.callback_entered,
-                        state.desired_visible,
-                        state.capture_visibility,
-                    ),
-                    Err(_) => {
-                        return PinVisibilityAck::Failed(
-                            "pin window state lock was poisoned".into(),
-                        );
-                    }
-                };
+            let (existing, callback_entered, desired_visible, closed, capture) = match runtime
+                .state
+                .lock()
+            {
+                Ok(state) => (
+                    state.native.clone(),
+                    state.callback_entered,
+                    state.desired_visible,
+                    state.close_requested || state.native_destroyed,
+                    state.capture_visibility,
+                ),
+                Err(_) => {
+                    return PinVisibilityAck::Failed("pin window state lock was poisoned".into());
+                }
+            };
             if capture.is_some_and(|state| state.identity != Some(identity)) {
                 return PinVisibilityAck::Failed("pin hide ticket identity changed".into());
             }
-            match native_api.lookup(&title, lifetime, existing.as_ref(), root_identity.0) {
+            match lookup_owned_pin_window(
+                native_api.as_ref(),
+                &runtime,
+                existing.as_ref(),
+                root_identity.0,
+            ) {
                 NativeLookup::Found(binding) => {
                     let visible = match native_api.is_visible(&binding) {
                         Ok(visible) => visible,
                         Err(error) => return PinVisibilityAck::Failed(error),
                     };
+                    if closed {
+                        if let Ok(mut state) = runtime.state.lock() {
+                            state.native = Some(binding);
+                            state.desired_visible = false;
+                            if let Some(ticket) = state.capture_visibility.as_mut() {
+                                ticket.prior_visible = Some(false);
+                                ticket.hide_requested = true;
+                                ticket.restore_intent = true;
+                                ticket.restore_acknowledged = true;
+                                ticket.hide_acknowledged = !visible;
+                            }
+                        }
+                        if visible {
+                            let Some(ctx) = ctx.as_ref() else {
+                                return PinVisibilityAck::Failed(
+                                    "pin viewport context is unavailable for capture exclusion"
+                                        .into(),
+                                );
+                            };
+                            ctx.send_viewport_cmd_to(
+                                runtime.viewport_id,
+                                egui::ViewportCommand::Visible(false),
+                            );
+                            pending = true;
+                        }
+                        continue;
+                    }
                     let Some(ticket) = capture.filter(|ticket| ticket.identity == Some(identity))
                     else {
                         pending = true;
@@ -916,14 +1354,12 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
             )
         };
         for runtime in entries {
-            let (title, lifetime, existing, closed, desired_visible, capture) = {
+            let (existing, closed, desired_visible, capture) = {
                 let state = runtime
                     .state
                     .lock()
                     .map_err(|_| "pin window state lock was poisoned".to_owned())?;
                 (
-                    runtime.title.clone(),
-                    runtime.lifetime,
                     state.native.clone(),
                     state.close_requested || state.native_destroyed,
                     state.desired_visible,
@@ -943,7 +1379,12 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                 continue;
             }
             let target = capture.prior_visible.unwrap_or(desired_visible);
-            match native_api.lookup(&title, lifetime, existing.as_ref(), root_identity.0) {
+            match lookup_owned_pin_window(
+                native_api.as_ref(),
+                &runtime,
+                existing.as_ref(),
+                root_identity.0,
+            ) {
                 NativeLookup::Found(binding) => {
                     let visible = native_api.is_visible(&binding)?;
                     let restore_requested =
@@ -1014,13 +1455,8 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
         };
         let mut pending = false;
         for runtime in entries {
-            let (title, lifetime, existing, closed, desired_visible, capture) = match runtime
-                .state
-                .lock()
-            {
+            let (existing, closed, desired_visible, capture) = match runtime.state.lock() {
                 Ok(state) => (
-                    runtime.title.clone(),
-                    runtime.lifetime,
                     state.native.clone(),
                     state.close_requested || state.native_destroyed,
                     state.desired_visible,
@@ -1046,7 +1482,12 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
                 continue;
             }
             let target = capture.prior_visible.unwrap_or(desired_visible);
-            match native_api.lookup(&title, lifetime, existing.as_ref(), root_identity.0) {
+            match lookup_owned_pin_window(
+                native_api.as_ref(),
+                &runtime,
+                existing.as_ref(),
+                root_identity.0,
+            ) {
                 NativeLookup::Found(binding) => {
                     let visible = match native_api.is_visible(&binding) {
                         Ok(visible) => visible,
@@ -1156,13 +1597,22 @@ impl PinWindowVisibilityCoordinator for PinWindowVisibilityOwner {
 }
 
 fn pin_viewport_id(pin_id: PinId, lifetime: u64) -> egui::ViewportId {
-    egui::ViewportId::from_hash_of(("screenshot-pin", pin_id.get(), lifetime))
+    let viewport_id = egui::ViewportId::from_hash_of(("screenshot-pin", pin_id.get(), lifetime));
+    if viewport_id == egui::ViewportId::ROOT {
+        egui::ViewportId::from_hash_of(("screenshot-pin-child", pin_id.get(), lifetime))
+    } else {
+        viewport_id
+    }
 }
 
 fn pin_viewport_builder(runtime: &PinWindowRuntime) -> egui::ViewportBuilder {
     let width = runtime.dimensions.0.min(DEFAULT_PINNER_WIDTH as u32) as f32;
     let height = runtime.dimensions.1.min(DEFAULT_PINNER_HEIGHT as u32) as f32;
-    let always_on_top = runtime.state.lock().is_ok_and(|state| state.always_on_top);
+    let (always_on_top, click_through) = runtime
+        .state
+        .lock()
+        .map(|state| (state.always_on_top, state.click_through))
+        .unwrap_or((true, false));
     egui::ViewportBuilder::default()
         .with_title(runtime.title.clone())
         .with_inner_size([width.max(220.0), height.max(160.0)])
@@ -1173,6 +1623,100 @@ fn pin_viewport_builder(runtime: &PinWindowRuntime) -> egui::ViewportBuilder {
         } else {
             egui::WindowLevel::Normal
         })
+        .with_mouse_passthrough(click_through)
+}
+
+fn apply_pin_control_change(
+    ctx: &egui::Context,
+    runtime: &PinWindowRuntime,
+    native_api: &dyn PinNativeApi,
+    root_hwnd: usize,
+    change: PinControlChange,
+) -> Result<(), String> {
+    if ctx.embed_viewports() || ctx.viewport_id() == egui::ViewportId::ROOT {
+        if ctx.embed_viewports() {
+            return Err("pin controls require independent native viewports".into());
+        }
+        if runtime.viewport_id == egui::ViewportId::ROOT {
+            return Err("pin control cannot target the launcher root viewport".into());
+        }
+    } else if ctx.viewport_id() != runtime.viewport_id {
+        return Err("pin control caller does not own this child viewport".into());
+    }
+    if runtime.viewport_id != pin_viewport_id(runtime.pin_id, runtime.lifetime) {
+        return Err("pin control viewport identity is stale".into());
+    }
+    let (existing, current_topmost, current_click_through, root_registered) = {
+        let state = runtime
+            .state
+            .lock()
+            .map_err(|_| "pin window state lock was poisoned".to_owned())?;
+        if state.close_requested || state.native_destroyed {
+            return Err("pin control belongs to a closed child".into());
+        }
+        (
+            state.native.clone(),
+            state.always_on_top,
+            state.click_through,
+            state.root_registered,
+        )
+    };
+    if !root_registered {
+        return Err("pin child is not registered by the launcher root".into());
+    }
+    let binding = match lookup_owned_pin_window(native_api, runtime, existing.as_ref(), root_hwnd) {
+        NativeLookup::Found(binding) => binding,
+        NativeLookup::Destroyed => return Err("pin child window was destroyed".into()),
+        NativeLookup::Missing => return Err("pin child window is not yet available".into()),
+        NativeLookup::Unsupported => {
+            return Err("native pin-window controls are unavailable".into());
+        }
+        NativeLookup::Failed(error) => return Err(error),
+    };
+
+    let next_topmost = change.always_on_top.unwrap_or(current_topmost);
+    let next_click_through = change.click_through.unwrap_or(current_click_through);
+    let topmost_changed = next_topmost != current_topmost;
+    let click_through_changed = next_click_through != current_click_through;
+    {
+        let mut state = runtime
+            .state
+            .lock()
+            .map_err(|_| "pin window state lock was poisoned".to_owned())?;
+        if state.close_requested
+            || state.native_destroyed
+            || !state.root_registered
+            || state.native.as_ref().is_some_and(|current| {
+                current.hwnd != binding.hwnd
+                    || current.lifetime != runtime.lifetime
+                    || current.title != runtime.title
+            })
+        {
+            return Err("pin child binding changed while applying its control".into());
+        }
+        state.native = Some(binding);
+        state.native_error = None;
+        state.always_on_top = next_topmost;
+        state.click_through = next_click_through;
+    }
+    if topmost_changed {
+        ctx.send_viewport_cmd_to(
+            runtime.viewport_id,
+            egui::ViewportCommand::WindowLevel(if next_topmost {
+                egui::WindowLevel::AlwaysOnTop
+            } else {
+                egui::WindowLevel::Normal
+            }),
+        );
+    }
+    if click_through_changed {
+        ctx.send_viewport_cmd_to(
+            runtime.viewport_id,
+            egui::ViewportCommand::MousePassthrough(next_click_through),
+        );
+    }
+    ctx.request_repaint_of(egui::ViewportId::ROOT);
+    Ok(())
 }
 
 fn render_pin_viewport(
@@ -1182,12 +1726,31 @@ fn render_pin_viewport(
     actions: &PinActionClient,
     native_api: &Arc<dyn PinNativeApi>,
     root_native_identity: (usize, u64),
-    root_context: &egui::Context,
+    callback_registry: &std::sync::Weak<Mutex<PinWindowRegistry>>,
     capture_suppressed: bool,
 ) {
     let ctx = ui.ctx().clone();
-    if class == egui::ViewportClass::EmbeddedWindow {
+    let Some(registry) = callback_registry.upgrade() else {
+        return;
+    };
+    let root_context = registry
+        .lock()
+        .ok()
+        .and_then(|registry| registry.root_context.clone());
+    drop(registry);
+    let Some(root_context) = root_context else {
+        return;
+    };
+    if ctx.embed_viewports() || class != egui::ViewportClass::Deferred {
         ui.label("Screenshot pins require an independent native window.");
+        return;
+    }
+    if ctx.viewport_id() != runtime.viewport_id
+        || runtime.viewport_id == egui::ViewportId::ROOT
+        || runtime.viewport_id != pin_viewport_id(runtime.pin_id, runtime.lifetime)
+        || root_context.embed_viewports()
+    {
+        ui.label("Screenshot pin ownership could not be verified.");
         return;
     }
     let existing_native = if let Ok(mut state) = runtime.state.lock() {
@@ -1210,41 +1773,66 @@ fn render_pin_viewport(
         )
     };
     let mut native_destroyed = false;
-    match native_api.lookup(
-        &runtime.title,
-        runtime.lifetime,
+    let native_ready = match lookup_owned_pin_window(
+        native_api.as_ref(),
+        runtime,
         existing_native.as_ref(),
         root_native_identity.0,
     ) {
         NativeLookup::Found(binding) => {
             if let Ok(mut state) = runtime.state.lock() {
                 state.native = Some(binding);
+                state.native_error = None;
                 state.native_destroyed = false;
             }
+            true
         }
         NativeLookup::Destroyed => {
             native_destroyed = true;
             if let Ok(mut state) = runtime.state.lock() {
+                state.native = None;
+                state.native_error = None;
                 state.native_destroyed = true;
                 state.close_requested = true;
             }
             root_context.request_repaint_of(egui::ViewportId::ROOT);
+            false
         }
         NativeLookup::Failed(error) => {
+            if let Ok(mut state) = runtime.state.lock() {
+                state.native = None;
+                state.native_error = Some(error.clone());
+            }
             tracing::warn!(pin_id = runtime.pin_id.get(), %error, "pin child native identity validation failed");
+            ui.colored_label(egui::Color32::LIGHT_RED, error);
+            return;
         }
-        NativeLookup::Missing | NativeLookup::Unsupported => {}
-    }
+        NativeLookup::Missing => {
+            if let Ok(mut state) = runtime.state.lock() {
+                state.native = None;
+                state.native_error = Some("waiting for the owned pin window to appear".into());
+            }
+            false
+        }
+        NativeLookup::Unsupported => {
+            if let Ok(mut state) = runtime.state.lock() {
+                state.native = None;
+                state.native_error = Some("native pin-window controls are unavailable".into());
+            }
+            false
+        }
+    };
     if native_destroyed {
         return;
     }
     if capture_suppressed || close_requested {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        root_context
+            .send_viewport_cmd_to(runtime.viewport_id, egui::ViewportCommand::Visible(false));
         if close_requested {
             if let Ok(mut state) = runtime.state.lock() {
                 state.close_command_sent = true;
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            root_context.send_viewport_cmd_to(runtime.viewport_id, egui::ViewportCommand::Close);
             root_context.request_repaint_of(egui::ViewportId::ROOT);
         }
         return;
@@ -1261,16 +1849,25 @@ fn render_pin_viewport(
             state.close_requested = true;
             state.close_command_sent = true;
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        root_context.send_viewport_cmd_to(runtime.viewport_id, egui::ViewportCommand::Close);
         root_context.request_repaint_of(egui::ViewportId::ROOT);
         return;
     }
-    if first_pass && escape && click_through {
-        click_through = false;
-        if let Ok(mut state) = runtime.state.lock() {
-            state.click_through = false;
+    if first_pass && escape && click_through && native_ready {
+        if let Err(error) = apply_pin_control_change(
+            &ctx,
+            runtime,
+            native_api.as_ref(),
+            root_native_identity.0,
+            PinControlChange {
+                always_on_top: None,
+                click_through: Some(false),
+            },
+        ) {
+            if let Ok(mut state) = runtime.state.lock() {
+                state.native_error = Some(error);
+            }
         }
-        ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(false));
     }
 
     let texture = match ensure_pin_texture(&ctx, runtime) {
@@ -1284,6 +1881,7 @@ fn render_pin_viewport(
     let mut close_clicked = false;
     let mut copy_requested = false;
     let mut save_requested = false;
+    let mut control_change = PinControlChange::default();
     let mut next_mode = scale_mode;
     let mut next_zoom = zoom;
 
@@ -1320,26 +1918,30 @@ fn render_pin_viewport(
             if ui.button("Save As").clicked() && first_pass {
                 save_requested = true;
             }
+            let mut topmost = always_on_top;
             if ui
-                .selectable_label(always_on_top, "Always on Top")
-                .clicked()
+                .add_enabled(
+                    native_ready,
+                    egui::Checkbox::new(&mut topmost, "Always on Top"),
+                )
+                .changed()
                 && first_pass
             {
-                always_on_top = !always_on_top;
-                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(if always_on_top {
-                    egui::WindowLevel::AlwaysOnTop
-                } else {
-                    egui::WindowLevel::Normal
-                }));
+                control_change.always_on_top = Some(topmost);
+                always_on_top = topmost;
             }
+            let mut passthrough = click_through;
             if ui
-                .selectable_label(click_through, "Click-Through")
-                .on_hover_text("Press Escape while this pin is focused to turn click-through off.")
-                .clicked()
+                .add_enabled(
+                    native_ready,
+                    egui::Checkbox::new(&mut passthrough, "Click-Through"),
+                )
+                .on_hover_text("Use Pin List or Escape to recover a click-through pin.")
+                .changed()
                 && first_pass
             {
-                click_through = !click_through;
-                ctx.send_viewport_cmd(egui::ViewportCommand::MousePassthrough(click_through));
+                control_change.click_through = Some(passthrough);
+                click_through = passthrough;
             }
             if ui.button("Close").clicked() && first_pass {
                 close_clicked = true;
@@ -1405,6 +2007,7 @@ fn render_pin_viewport(
             } else if save_requested {
                 submit_pin_action(runtime, actions, request_id, PinActionKind::SaveAs);
             }
+            root_context.request_repaint_of(egui::ViewportId::ROOT);
         }
         if next_mode != scale_mode || (next_mode == PinScaleMode::Custom && next_zoom != zoom) {
             if let Ok(mut state) = runtime.state.lock() {
@@ -1413,37 +2016,28 @@ fn render_pin_viewport(
             }
             root_context.request_repaint_of(egui::ViewportId::ROOT);
         }
-        if always_on_top != runtime_state_bool(runtime, true) {
+        if control_change != PinControlChange::default()
+            && let Err(error) = apply_pin_control_change(
+                &ctx,
+                runtime,
+                native_api.as_ref(),
+                root_native_identity.0,
+                control_change,
+            )
+        {
             if let Ok(mut state) = runtime.state.lock() {
-                state.always_on_top = always_on_top;
+                state.native_error = Some(error);
             }
-            root_context.request_repaint_of(egui::ViewportId::ROOT);
-        }
-        if click_through != runtime_state_bool(runtime, false) {
-            if let Ok(mut state) = runtime.state.lock() {
-                state.click_through = click_through;
-            }
-            root_context.request_repaint_of(egui::ViewportId::ROOT);
         }
         if close_clicked {
             if let Ok(mut state) = runtime.state.lock() {
                 state.close_requested = true;
                 state.close_command_sent = true;
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            root_context.send_viewport_cmd_to(runtime.viewport_id, egui::ViewportCommand::Close);
             root_context.request_repaint_of(egui::ViewportId::ROOT);
         }
     }
-}
-
-fn runtime_state_bool(runtime: &PinWindowRuntime, topmost: bool) -> bool {
-    runtime.state.lock().map_or(false, |state| {
-        if topmost {
-            state.always_on_top
-        } else {
-            state.click_through
-        }
-    })
 }
 
 fn ensure_pin_texture(
@@ -1575,7 +2169,6 @@ struct PinActionQueue {
     wake: Condvar,
     completions: SyncSender<PinActionCompletion>,
     worker: Mutex<Option<JoinHandle<()>>>,
-    root_context: Mutex<Option<egui::Context>>,
     save_picker: Arc<dyn PinSavePicker>,
 }
 
@@ -1704,7 +2297,6 @@ impl PinActionWorker {
                 wake: Condvar::new(),
                 completions: sender,
                 worker: Mutex::new(None),
-                root_context: Mutex::new(None),
                 save_picker,
             }),
             completions: receiver,
@@ -1714,12 +2306,6 @@ impl PinActionWorker {
     fn client(&self) -> PinActionClient {
         PinActionClient {
             shared: Arc::clone(&self.shared),
-        }
-    }
-
-    fn set_root_context(&self, ctx: egui::Context) {
-        if let Ok(mut root_context) = self.shared.root_context.lock() {
-            *root_context = Some(ctx);
         }
     }
 
@@ -1744,23 +2330,16 @@ impl PinActionWorker {
             let queued_before = state.queue.len();
             state.queue.retain(|job| job.pin_id != pin_id);
             state.admitted_jobs -= queued_before - state.queue.len();
-            let active_picker = state
-                .active_job
-                .is_some_and(|(active_pin, _, _)| active_pin == pin_id)
-                .then(|| state.active_picker.clone())
-                .flatten();
-            drop(state);
-            if let Some(cancellation) = active_picker {
-                cancellation.cancel();
-            }
         }
     }
 
     fn has_pending_work(&self) -> bool {
+        // Admitted jobs include completions that the UI has not drained yet.
+        // Keep the owner repainting until it consumes those receipts.
         self.shared
             .state
             .lock()
-            .is_ok_and(|state| state.active || !state.queue.is_empty())
+            .is_ok_and(|state| state.admitted_jobs > 0)
     }
 
     fn shutdown_and_join(&mut self) -> Result<(), String> {
@@ -1791,9 +2370,6 @@ impl PinActionWorker {
             worker
                 .join()
                 .map_err(|_| "pin image action worker terminated unexpectedly".to_owned())?;
-        }
-        if let Ok(mut root_context) = self.shared.root_context.lock() {
-            *root_context = None;
         }
         Ok(())
     }
@@ -1884,11 +2460,6 @@ fn pin_action_worker(shared: Arc<PinActionQueue>) {
             state.active_job = None;
             state.active_picker = None;
             shared.wake.notify_all();
-        }
-        if let Ok(root_context) = shared.root_context.lock()
-            && let Some(ctx) = root_context.as_ref()
-        {
-            ctx.request_repaint_of(egui::ViewportId::ROOT);
         }
     }
 }
@@ -2017,6 +2588,50 @@ enum NativeLookup {
     Destroyed,
     Unsupported,
     Failed(String),
+}
+
+fn lookup_owned_pin_window(
+    native_api: &dyn PinNativeApi,
+    runtime: &PinWindowRuntime,
+    existing: Option<&NativeWindowBinding>,
+    root_hwnd: usize,
+) -> NativeLookup {
+    if root_hwnd == 0 || runtime.viewport_id == egui::ViewportId::ROOT {
+        return NativeLookup::Failed("pin window has no valid non-root native owner".into());
+    }
+    if runtime.viewport_id != pin_viewport_id(runtime.pin_id, runtime.lifetime)
+        || runtime.process_id != std::process::id()
+    {
+        return NativeLookup::Failed("pin runtime identity is stale or foreign".into());
+    }
+    if existing.is_some_and(|binding| {
+        binding.hwnd == 0
+            || binding.hwnd == root_hwnd
+            || binding.process_id != runtime.process_id
+            || binding.title != runtime.title
+            || binding.lifetime != runtime.lifetime
+            || binding.root_hwnd != root_hwnd
+    }) {
+        return NativeLookup::Failed("stored native pin binding is stale or foreign".into());
+    }
+    match native_api.lookup(&runtime.title, runtime.lifetime, existing, root_hwnd) {
+        NativeLookup::Found(binding)
+            if binding.hwnd != 0
+                && binding.hwnd != root_hwnd
+                && binding.process_id == runtime.process_id
+                && binding.process_id == std::process::id()
+                && binding.title == runtime.title
+                && binding.lifetime == runtime.lifetime
+                && binding.root_hwnd == root_hwnd
+                && runtime.viewport_id == pin_viewport_id(runtime.pin_id, runtime.lifetime) =>
+        {
+            NativeLookup::Found(binding)
+        }
+        NativeLookup::Found(_) => NativeLookup::Failed(
+            "native lookup returned a foreign, reused, or root window for this pin".into(),
+        ),
+        other => other,
+    }
 }
 
 #[cfg(windows)]
@@ -2444,14 +3059,12 @@ mod tests {
             cancellation: &PinPickerCancellation,
         ) -> Result<Option<PathBuf>, String> {
             let _ = self.started.send(0);
-            if !cancellation.wait_for_cancel_calls(1, std::time::Duration::from_secs(5)) {
-                return Err("fixture picker timed out awaiting close cancellation".into());
+            if cancellation.wait_for_cancel_calls(1, std::time::Duration::from_secs(5)) {
+                let _ = self.close_seen.send(());
+                Ok(None)
+            } else {
+                Err("fixture picker timed out awaiting shutdown cancellation".into())
             }
-            let _ = self.close_seen.send(());
-            if !cancellation.wait_for_cancel_calls(2, std::time::Duration::from_secs(5)) {
-                return Err("fixture picker timed out awaiting shutdown cancellation".into());
-            }
-            Ok(None)
         }
     }
 
@@ -2632,11 +3245,66 @@ mod tests {
         input
     }
 
+    fn root_input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+
+    fn key_event(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn assert_no_pin_control_commands(output: &egui::FullOutput, context: &str) {
+        for (viewport_id, viewport) in &output.viewport_output {
+            for command in &viewport.commands {
+                assert!(
+                    !matches!(
+                        command,
+                        egui::ViewportCommand::WindowLevel(_)
+                            | egui::ViewportCommand::MousePassthrough(_)
+                            | egui::ViewportCommand::Focus
+                            | egui::ViewportCommand::Visible(_)
+                            | egui::ViewportCommand::OuterPosition(_)
+                            | egui::ViewportCommand::InnerSize(_)
+                            | egui::ViewportCommand::MinInnerSize(_)
+                            | egui::ViewportCommand::MaxInnerSize(_)
+                            | egui::ViewportCommand::ResizeIncrements(_)
+                            | egui::ViewportCommand::BeginResize(_)
+                            | egui::ViewportCommand::Resizable(_)
+                            | egui::ViewportCommand::Minimized(_)
+                            | egui::ViewportCommand::Maximized(_)
+                            | egui::ViewportCommand::Fullscreen(_)
+                            | egui::ViewportCommand::SetMonitor(_)
+                            | egui::ViewportCommand::Decorations(_)
+                            | egui::ViewportCommand::StartDrag
+                            | egui::ViewportCommand::CursorPosition(_)
+                            | egui::ViewportCommand::CursorGrab(_)
+                            | egui::ViewportCommand::CursorVisible(_)
+                    ),
+                    "{context} emitted {command:?} for {viewport_id:?}"
+                );
+            }
+        }
+    }
+
     fn pin_callbacks(
         ctx: &egui::Context,
         presenter: &mut PinWindowPresenter,
         board: &Pinboard,
     ) -> BTreeMap<PinId, Arc<egui::DeferredViewportUiCallback>> {
+        presenter.set_root_native_identity((ROOT_HWND, 1));
         let mut root_input = egui::RawInput::default();
         root_input
             .viewports
@@ -2657,6 +3325,286 @@ mod tests {
             .collect();
         output.drop_without_applying_deltas();
         callbacks
+    }
+
+    #[test]
+    fn pin_controls_use_exact_child_commands_and_reject_invalid_owners() {
+        let mut board = Pinboard::default();
+        let first_rect = ScreenRect::new(-1600, -100, 2, 2);
+        let first = add_pin(&mut board, 1, first_rect);
+        let second = add_pin(&mut board, 2, ScreenRect::new(200, 100, 2, 2));
+        let original_zoom = board.get(first).unwrap().zoom();
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let fake_native = Arc::new(FakePinNativeApi::default());
+        let native_api: Arc<dyn PinNativeApi> = fake_native.clone();
+        let mut presenter = PinWindowPresenter::with_native_api(native_api);
+        let callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        drop(callbacks);
+
+        let (first_runtime, second_runtime) = {
+            let registry = presenter.registry.lock().unwrap();
+            (
+                registry.pins[&first].clone(),
+                registry.pins[&second].clone(),
+            )
+        };
+        assert_ne!(first_runtime.viewport_id, egui::ViewportId::ROOT);
+        assert_ne!(second_runtime.viewport_id, egui::ViewportId::ROOT);
+        assert_ne!(first_runtime.viewport_id, second_runtime.viewport_id);
+        assert_eq!(
+            first_runtime.state.lock().unwrap().always_on_top,
+            true,
+            "pins begin topmost"
+        );
+        assert!(!first_runtime.state.lock().unwrap().click_through);
+        let builder = pin_viewport_builder(&first_runtime);
+        assert_eq!(builder.window_level, Some(egui::WindowLevel::AlwaysOnTop));
+        assert_eq!(builder.mouse_passthrough, Some(false));
+
+        fake_native.add_window(&first_runtime, 0x201, true, first_rect);
+        fake_native.add_window(
+            &second_runtime,
+            0x202,
+            true,
+            ScreenRect::new(200, 100, 400, 300),
+        );
+        let mut control_result = None;
+        let output = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show(root.ctx(), &board);
+            control_result = Some(apply_pin_control_change(
+                root.ctx(),
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: Some(false),
+                    click_through: Some(true),
+                },
+            ));
+        });
+        assert_eq!(control_result.unwrap(), Ok(()));
+        let child_output = output
+            .viewport_output
+            .get(&first_runtime.viewport_id)
+            .expect("commands target the exact child viewport");
+        assert!(child_output.commands.iter().any(|command| matches!(
+            command,
+            egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal)
+        )));
+        assert!(
+            child_output
+                .commands
+                .iter()
+                .any(|command| matches!(command, egui::ViewportCommand::MousePassthrough(true)))
+        );
+        assert!(child_output.commands.iter().all(|command| !matches!(
+            command,
+            egui::ViewportCommand::Focus
+                | egui::ViewportCommand::Visible(_)
+                | egui::ViewportCommand::OuterPosition(_)
+                | egui::ViewportCommand::InnerSize(_)
+        )));
+        assert!(
+            output
+                .viewport_output
+                .get(&second_runtime.viewport_id)
+                .is_none_or(|output| output.commands.is_empty())
+        );
+        let first_state = first_runtime.state.lock().unwrap();
+        assert!(!first_state.always_on_top);
+        assert!(first_state.click_through);
+        assert_eq!(first_state.display_bounds, first_rect);
+        assert_eq!(first_state.zoom, original_zoom);
+        drop(first_state);
+        let second_state = second_runtime.state.lock().unwrap();
+        assert!(second_state.always_on_top);
+        assert!(!second_state.click_through);
+        drop(second_state);
+        output.drop_without_applying_deltas();
+
+        let embedded = egui::Context::default();
+        embedded.set_embed_viewports(true);
+        assert!(
+            apply_pin_control_change(
+                &embedded,
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: Some(false),
+                },
+            )
+            .is_err()
+        );
+
+        let foreign_viewport = egui::ViewportId::from_hash_of("unrelated-pin-child");
+        let mut foreign_result = None;
+        let foreign_output = ctx.run_ui(child_input(foreign_viewport, 1.0), |foreign| {
+            foreign_result = Some(apply_pin_control_change(
+                foreign.ctx(),
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: Some(false),
+                },
+            ));
+        });
+        assert!(foreign_result.unwrap().is_err());
+        assert_no_pin_control_commands(&foreign_output, "foreign child");
+        assert!(
+            foreign_output
+                .viewport_output
+                .get(&first_runtime.viewport_id)
+                .is_none_or(|output| output.commands.is_empty()),
+            "an unrelated child cannot receive commands for this pin"
+        );
+        foreign_output.drop_without_applying_deltas();
+
+        let mut stale_binding = first_runtime
+            .state
+            .lock()
+            .unwrap()
+            .native
+            .clone()
+            .expect("the accepted style request records its observed child binding");
+        stale_binding.hwnd = ROOT_HWND;
+        first_runtime.state.lock().unwrap().native = Some(stale_binding);
+        let mut stale_result = None;
+        let stale_output = ctx.run_ui(root_input(Vec::new()), |root| {
+            stale_result = Some(apply_pin_control_change(
+                root.ctx(),
+                &first_runtime,
+                fake_native.as_ref(),
+                ROOT_HWND,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: Some(false),
+                },
+            ));
+        });
+        assert!(stale_result.unwrap().is_err());
+        assert_no_pin_control_commands(&stale_output, "stale binding");
+        assert!(
+            stale_output
+                .viewport_output
+                .get(&first_runtime.viewport_id)
+                .is_none_or(|output| output.commands.is_empty()),
+            "a stale native binding cannot receive commands"
+        );
+        assert!(first_runtime.state.lock().unwrap().click_through);
+        stale_output.drop_without_applying_deltas();
+        presenter.shutdown().unwrap();
+    }
+
+    #[test]
+    fn pin_list_is_keyboard_focusable_and_stale_rows_cannot_reopen_closed_pins() {
+        let mut board = Pinboard::default();
+        let first = add_pin(&mut board, 1, ScreenRect::new(-1600, -100, 2, 2));
+        let second = add_pin(&mut board, 2, ScreenRect::new(200, 100, 2, 2));
+        board.get_mut(first).unwrap().set_click_through(true);
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let fake_native = Arc::new(FakePinNativeApi::default());
+        let native_api: Arc<dyn PinNativeApi> = fake_native.clone();
+        let mut presenter = PinWindowPresenter::with_native_api(native_api);
+        let callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        drop(callbacks);
+
+        let (first_runtime, second_runtime) = {
+            let registry = presenter.registry.lock().unwrap();
+            (
+                registry.pins[&first].clone(),
+                registry.pins[&second].clone(),
+            )
+        };
+        fake_native.add_window(
+            &first_runtime,
+            0x301,
+            true,
+            ScreenRect::new(-1600, -100, 400, 300),
+        );
+        fake_native.add_window(
+            &second_runtime,
+            0x302,
+            true,
+            ScreenRect::new(200, 100, 400, 300),
+        );
+        presenter.poll(&ctx, &mut board);
+        assert!(first_runtime.state.lock().unwrap().native.is_some());
+        assert!(second_runtime.state.lock().unwrap().native.is_some());
+
+        let first_lifetime = first_runtime.lifetime;
+        let mut open = true;
+        let first_frame = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut open);
+        });
+        assert!(open);
+        first_frame.drop_without_applying_deltas();
+
+        let tab = || root_input(vec![key_event(egui::Key::Tab)]);
+        let first_tab = ctx.run_ui(tab(), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut open);
+        });
+        let first_focused_widget = ctx.memory(|memory| memory.focused());
+        assert!(
+            first_focused_widget.is_some(),
+            "Tab reaches a Pin List control"
+        );
+        first_tab.drop_without_applying_deltas();
+        let second_tab = ctx.run_ui(tab(), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut open);
+        });
+        let second_focused_widget = ctx.memory(|memory| memory.focused());
+        assert!(second_focused_widget.is_some());
+        assert_ne!(first_focused_widget, second_focused_widget);
+        second_tab.drop_without_applying_deltas();
+
+        assert!(presenter.close_lifetime(&mut board, first, first_lifetime));
+        assert!(board.get(first).is_none());
+        let mut stale_control_result = None;
+        let stale_control = ctx.run_ui(root_input(Vec::new()), |root| {
+            presenter.show_pin_list(root.ctx(), &mut board, &mut open);
+            stale_control_result = Some(presenter.apply_list_control(
+                root.ctx(),
+                &mut board,
+                first,
+                first_lifetime,
+                PinControlChange {
+                    always_on_top: None,
+                    click_through: Some(false),
+                },
+                fake_native.as_ref(),
+                ROOT_HWND,
+            ));
+        });
+        assert!(stale_control_result.unwrap().is_err());
+        assert!(
+            !stale_control
+                .viewport_output
+                .contains_key(&first_runtime.viewport_id)
+        );
+        stale_control.drop_without_applying_deltas();
+
+        let remaining_callbacks = pin_callbacks(&ctx, &mut presenter, &board);
+        assert!(!remaining_callbacks.contains_key(&first));
+        assert!(remaining_callbacks.contains_key(&second));
+        drop(remaining_callbacks);
+
+        let registry_weak = Arc::downgrade(&presenter.registry);
+        presenter.shutdown().unwrap();
+        assert!(presenter.registry.lock().unwrap().pins.is_empty());
+        assert!(presenter.registry.lock().unwrap().retired.is_empty());
+        assert!(second_runtime.state.lock().unwrap().close_requested);
+        assert!(!second_runtime.state.lock().unwrap().root_registered);
+        assert!(!presenter.actions.has_pending_work());
+        drop(first_runtime);
+        drop(second_runtime);
+        drop(presenter);
+        assert!(registry_weak.upgrade().is_none());
     }
 
     #[test]
@@ -2695,6 +3643,8 @@ mod tests {
         let runtimes = presenter.registry.lock().unwrap();
         let first_runtime = runtimes.pins.get(&first).unwrap();
         let second_runtime = runtimes.pins.get(&second).unwrap();
+        assert!(first_runtime.state.lock().unwrap().callback_entered);
+        assert!(second_runtime.state.lock().unwrap().callback_entered);
         let first_texture = first_runtime
             .state
             .lock()
@@ -2803,7 +3753,7 @@ mod tests {
     }
 
     #[test]
-    fn native_hide_ack_and_bounded_worker_preserve_close_and_cancel_lifetimes() {
+    fn native_hide_ack_and_bounded_worker_preserve_close_and_finish_lifetimes() {
         let mut board = Pinboard::default();
         let first = add_pin(&mut board, 1, ScreenRect::new(-1600, -100, 2, 2));
         let second = add_pin(&mut board, 2, ScreenRect::new(200, 100, 2, 2));
@@ -2907,19 +3857,17 @@ mod tests {
             .active_picker
             .clone()
             .unwrap();
-        let cancelled_after_close = close_token.cancel_count() == 1
+        let preserved_after_close = close_token.cancel_count() == 0
             && presenter.actions.shared.state.lock().is_ok_and(|state| {
                 state.active && state.queue.is_empty() && state.admitted_jobs == 1
             });
-        let close_cancellation_reached_picker = close_seen_rx
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .is_ok();
+        let close_did_not_cancel_picker = close_seen_rx.try_recv().is_err();
         assert!(queue_rejected_overflow);
         assert!(submit_ok);
         assert_eq!(picker_started.unwrap(), 0);
         assert!(queue_at_limit);
-        assert!(cancelled_after_close);
-        assert!(close_cancellation_reached_picker);
+        assert!(preserved_after_close);
+        assert!(close_did_not_cancel_picker);
         // The closed pin's queued and active action references still own their
         // image budget until the blocked picker has safely completed.
         assert_eq!(board.image_bytes(), 32);
@@ -3005,7 +3953,12 @@ mod tests {
         assert_eq!(board.image_bytes(), 32);
 
         presenter.actions.shutdown_and_join().unwrap();
-        assert_eq!(close_token.cancel_count(), 2);
+        assert_eq!(close_token.cancel_count(), 1);
+        assert!(
+            close_seen_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok()
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut completion = None;
         while std::time::Instant::now() < deadline {
@@ -3022,8 +3975,8 @@ mod tests {
         assert_eq!(completion.result, Ok(None));
         assert_eq!(board.image_bytes(), 16);
 
-        // The active picker observes close cancellation and remains blocked
-        // until the presenter's worker shutdown sends its separate signal.
+        // The active picker is canceled at shutdown, while closing a pin only
+        // removes queued work and preserves an already-authorized snapshot.
         let not_admitted = PinPickerCancellation::default();
         not_admitted.cancel();
         assert!(!not_admitted.try_admit_dialog());
@@ -3115,10 +4068,19 @@ mod tests {
                 .unwrap();
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while backpressure_worker.has_pending_work() && std::time::Instant::now() < deadline {
+        while backpressure_worker
+            .shared
+            .state
+            .lock()
+            .is_ok_and(|state| state.active || !state.queue.is_empty())
+            && std::time::Instant::now() < deadline
+        {
             thread::yield_now();
         }
-        assert!(!backpressure_worker.has_pending_work());
+        assert!(backpressure_worker.shared.state.lock().is_ok_and(|state| {
+            !state.active && state.queue.is_empty() && state.admitted_jobs == MAX_PIN_ACTIONS
+        }));
+        assert!(backpressure_worker.has_pending_work());
         assert_eq!(
             backpressure_worker
                 .shared
@@ -3152,6 +4114,7 @@ mod tests {
                 .admitted_jobs,
             0
         );
+        assert!(!backpressure_worker.has_pending_work());
         backpressure_worker.shutdown_and_join().unwrap();
 
         assert!(presenter.close(second, &mut board));

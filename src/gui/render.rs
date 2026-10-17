@@ -3065,6 +3065,7 @@ impl LauncherApp {
 
         let ctx = ui.ctx().clone();
         self.show_screenshot_pins(&ctx);
+        self.pin_list_open = self.show_screenshot_pin_list(&ctx, self.pin_list_open);
         let mut frame_logic = self.root_frame_logic.clone().unwrap_or_default();
         let first_ui_pass = frame_logic.ui_passes == 0;
         frame_logic.ui_passes = frame_logic.ui_passes.saturating_add(1);
@@ -3217,6 +3218,10 @@ impl LauncherApp {
                             self.focus_panel(crate::gui::Panel::RadialEditor);
                         }
                     });
+                    if ui.button("Pin List").clicked() && first_ui_pass {
+                        self.pin_list_open = true;
+                        ctx.request_repaint_of(egui::ViewportId::ROOT);
+                    }
                     apps_menu_state = (
                         apps_menu.response.hovered(),
                         apps_menu.response.clicked(),

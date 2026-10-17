@@ -221,6 +221,10 @@ impl PinboardCaptureLifecycle {
         self.windows.show(ctx, &self.board);
     }
 
+    pub(super) fn show_pin_list(&mut self, ctx: &eframe::egui::Context, open: &mut bool) {
+        self.windows.show_pin_list(ctx, &mut self.board, open);
+    }
+
     pub(super) fn pin_windows_need_bootstrap(&self) -> bool {
         self.windows.needs_viewport_bootstrap(&self.board)
     }
@@ -954,6 +958,16 @@ impl LauncherApp {
     pub(super) fn show_screenshot_pins(&mut self, ctx: &eframe::egui::Context) {
         let root_identity = self.root_window_bridge.identity();
         self.pinboard_capture.show_pin_windows(ctx, root_identity);
+    }
+
+    pub(super) fn show_screenshot_pin_list(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        is_open: bool,
+    ) -> bool {
+        let mut open = is_open;
+        self.pinboard_capture.show_pin_list(ctx, &mut open);
+        open
     }
 
     pub(super) fn pin_windows_need_bootstrap(&self) -> bool {

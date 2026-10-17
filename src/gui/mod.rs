@@ -851,6 +851,7 @@ pub struct LauncherApp {
     color_pick: color_pick::ColorPickLifecycle,
     ocr: ocr::OcrLifecycle,
     pinboard_capture: pinboard::PinboardCaptureLifecycle,
+    pin_list_open: bool,
     screen_draw_launcher_parking: Option<
         crate::launcher_parking::LauncherParkingTransaction<
             crate::screen_draw::ScreenDrawGeneration,
@@ -2897,6 +2898,7 @@ impl LauncherApp {
                 mkmacro_dialog.visual_overlay_controller(),
                 pinboard_capture_backend,
             ),
+            pin_list_open: false,
             screen_draw_launcher_parking: None,
             screen_draw_restore_publication:
                 screen_draw_restore::ScreenDrawRestorePublication::default(),
@@ -3857,7 +3859,8 @@ impl LauncherApp {
     }
 
     fn any_panel_open(&self) -> bool {
-        self.ocr_surface_visible()
+        self.pin_list_open
+            || self.ocr_surface_visible()
             || Self::TRACKED_PANELS
                 .iter()
                 .copied()
@@ -3900,6 +3903,10 @@ impl LauncherApp {
     /// Close the top-most open dialog if any is visible.
     /// Returns `true` when a dialog was closed.
     pub fn close_front_dialog(&mut self) -> bool {
+        if self.pin_list_open {
+            self.pin_list_open = false;
+            return true;
+        }
         if self.ocr_surface_visible() {
             self.close_ocr_surface();
             return true;
