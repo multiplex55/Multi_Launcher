@@ -589,6 +589,17 @@ impl PluginManager {
                 .expect("open isolated test mkmacro store")
                 .0,
         );
+        Self::from_inert_test_store(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_inert_for_test_at(directory: impl AsRef<std::path::Path>) -> Self {
+        let store = Arc::new(crate::mkmacro::MkMacroStore::empty_for_test(directory));
+        Self::from_inert_test_store(store)
+    }
+
+    #[cfg(test)]
+    fn from_inert_test_store(store: Arc<crate::mkmacro::MkMacroStore>) -> Self {
         let mut manager = Self::from_macro_store(store);
         manager.inert_for_test = true;
         manager

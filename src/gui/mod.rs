@@ -6302,35 +6302,61 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn m8c_closed_batch_rename_scan_retains_its_owner_until_hidden_poll_and_shutdown() {
+        struct NotesDirectoryOverride(Option<std::ffi::OsString>);
+        impl NotesDirectoryOverride {
+            fn use_fixture(path: &Path) -> Self {
+                let previous = std::env::var_os("ML_NOTES_DIR");
+                unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+                Self(previous)
+            }
+        }
+        impl Drop for NotesDirectoryOverride {
+            fn drop(&mut self) {
+                if let Some(previous) = self.0.take() {
+                    unsafe { std::env::set_var("ML_NOTES_DIR", previous) };
+                } else {
+                    unsafe { std::env::remove_var("ML_NOTES_DIR") };
+                }
+            }
+        }
+
+        let _guard = TEST_MUTEX.lock().unwrap();
         let fixture_parent = PathBuf::from("target/productivity_expansion");
         std::fs::create_dir_all(&fixture_parent).unwrap();
         let fixture = tempfile::Builder::new()
             .prefix("batch_rename_app_")
             .tempdir_in(&fixture_parent)
             .unwrap();
-        let root = fixture.keep();
+        let root = fixture.path().join("selected-root");
+        std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("keep.txt"), "unchanged").unwrap();
 
         let ctx = egui::Context::default();
-        let app_directory = tempdir().unwrap();
+        let app_directory = fixture.path().join("app-data");
+        std::fs::create_dir_all(&app_directory).unwrap();
+        let _notes_directory = NotesDirectoryOverride::use_fixture(&fixture.path().join("notes"));
         let mut settings = Settings::default();
         settings.hotkey = None;
         settings.quit_hotkey = None;
         settings.help_hotkey = None;
         settings.enabled_plugins = Some(std::collections::HashSet::new());
         settings.dashboard.enabled = false;
+        settings.dashboard.config_path = Some(
+            app_directory
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
         let mut app = LauncherApp::new(
             &ctx,
             Arc::new(Vec::new()),
             0,
-            PluginManager::new_inert_for_test(),
+            PluginManager::new_inert_for_test_at(&app_directory),
             app_directory
-                .path()
                 .join("actions.json")
                 .to_string_lossy()
                 .into_owned(),
             app_directory
-                .path()
                 .join("settings.json")
                 .to_string_lossy()
                 .into_owned(),
@@ -6343,6 +6369,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
         );
+        app.watchers.clear();
+        app.clipboard_modify_watcher = None;
 
         app.ensure_open(Panel::BatchRenameDialog);
         app.update_panel_stack();
@@ -6375,7 +6403,6 @@ mod tests {
             std::fs::read_to_string(root.join("keep.txt")).unwrap(),
             "unchanged"
         );
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

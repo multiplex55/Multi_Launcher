@@ -901,6 +901,23 @@ impl BatchRenameDialogState {
         commands: &mut Vec<BatchRenameUiCommand>,
         process_interactions: bool,
     ) {
+        ui.collapsing("Batch rename safety and recovery", |ui| {
+            ui.label(
+                "Choose the root explicitly. Opening this dialog does not scan; direct children are included by default, and reparse points are excluded.",
+            );
+            ui.label(
+                "Rules run in the displayed order. Numbering uses deterministic path order even when rows are filtered or sorted. Extensions are protected by default.",
+            );
+            ui.label(
+                "Preview does not write and can become stale. Confirmation freezes the exact mapping; Apply rechecks source identities, parent folders, and destination names. Changed sources and newly occupied names are refused, and existing files are never overwritten. Same-folder staging supports case-only changes and rename cycles.",
+            );
+            ui.label(
+                "Cancellation is checked between file moves. A failure or cancellation can leave a partial result; the receipt reports each file and keeps recovery paths when safe compensation is not possible. This is not an all-or-nothing rollback guarantee.",
+            );
+            ui.label(
+                "Undo is available only while the recorded files still match their saved identities and bytes and each original name is free. Receipts persist in app data across restarts, with up to 32 retained; completed Undone receipts may be discarded to make room. Verification is limited to 1 GiB per file and 4 GiB per batch.",
+            );
+        });
         ui.horizontal_wrapped(|ui| {
             let choose_root = ui.button("Choose root folder…").clicked();
             if process_interactions && choose_root {
@@ -1848,10 +1865,24 @@ mod tests {
         context: &egui::Context,
         input: egui::RawInput,
     ) -> Vec<BatchRenameUiCommand> {
+        run_dialog_frame_with_runtime(
+            state,
+            context,
+            input,
+            &RenameRuntimeSnapshot::default(),
+        )
+    }
+
+    fn run_dialog_frame_with_runtime(
+        state: &mut BatchRenameDialogState,
+        context: &egui::Context,
+        input: egui::RawInput,
+        runtime: &RenameRuntimeSnapshot,
+    ) -> Vec<BatchRenameUiCommand> {
         let mut commands = Vec::new();
         let output = context.run_ui(input, |ctx| {
             let first_pass = ctx.current_pass_index() == 0;
-            commands = state.ui(ctx, first_pass, &RenameRuntimeSnapshot::default());
+            commands = state.ui(ctx, first_pass, runtime);
         });
         output.drop_without_applying_deltas();
         commands
@@ -1863,6 +1894,156 @@ mod tests {
             events,
             ..Default::default()
         }
+    }
+
+    #[cfg(windows)]
+    fn app_fixture_workspace() -> tempfile::TempDir {
+        let parent = PathBuf::from("target/productivity_expansion");
+        fs::create_dir_all(&parent).expect("create disposable M8-E parent");
+        tempfile::Builder::new()
+            .prefix("batch_rename_app_flow_")
+            .tempdir_in(parent)
+            .expect("create disposable M8-E app fixture")
+    }
+
+    #[cfg(windows)]
+    struct NotesDirectoryOverride(Option<std::ffi::OsString>);
+
+    #[cfg(windows)]
+    impl NotesDirectoryOverride {
+        fn use_fixture(path: &Path) -> Self {
+            let previous = std::env::var_os("ML_NOTES_DIR");
+            unsafe { std::env::set_var("ML_NOTES_DIR", path) };
+            Self(previous)
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for NotesDirectoryOverride {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                unsafe { std::env::set_var("ML_NOTES_DIR", previous) };
+            } else {
+                unsafe { std::env::remove_var("ML_NOTES_DIR") };
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn app_for_fixture(ctx: &egui::Context, fixture: &Path) -> crate::gui::LauncherApp {
+        let app_data = fixture.join("app-data");
+        fs::create_dir_all(&app_data).expect("create fixture app-data root");
+        let mut settings = crate::settings::Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.dashboard.enabled = false;
+        settings.dashboard.config_path = Some(
+            app_data
+                .join("dashboard.json")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let mut app = crate::gui::LauncherApp::new(
+            ctx,
+            std::sync::Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test_at(&app_data),
+            app_data
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            app_data
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        app.watchers.clear();
+        app.clipboard_modify_watcher = None;
+        app
+    }
+
+    #[cfg(windows)]
+    fn finish_app_scan(app: &mut crate::gui::LauncherApp, ctx: &egui::Context) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.batch_rename_dialog.has_pending_scan() && Instant::now() < deadline {
+            app.poll_batch_rename_runtime(ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        app.poll_batch_rename_runtime(ctx);
+        assert!(
+            !app.batch_rename_dialog.has_pending_scan(),
+            "the app-owned rename scan should complete"
+        );
+        assert!(app.batch_rename_dialog.has_accepted_snapshot());
+        assert!(app.batch_rename_runtime_snapshot().journal_ready);
+    }
+
+    #[cfg(windows)]
+    fn finish_app_operation(
+        app: &mut crate::gui::LauncherApp,
+        ctx: &egui::Context,
+    ) -> RenameRuntimeSnapshot {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            app.poll_batch_rename_runtime(ctx);
+            let runtime = app.batch_rename_runtime_snapshot();
+            if !runtime.operation_active && runtime.last_message.is_some() {
+                return runtime;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the app-owned rename operation should finish"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(windows)]
+    fn scan_identities(
+        state: &BatchRenameDialogState,
+    ) -> std::collections::HashMap<OsString, crate::file_operations::NativeFileIdentity> {
+        state
+            .scan_result
+            .as_ref()
+            .expect("complete scan result")
+            .rows()
+            .iter()
+            .filter(|row| row.kind() == SnapshotEntryKind::File)
+            .map(|row| {
+                (
+                    row.path()
+                        .file_name()
+                        .expect("file row has a name")
+                        .to_os_string(),
+                    row.identity(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(windows)]
+    fn file_bytes(root: &Path) -> std::collections::BTreeMap<OsString, Vec<u8>> {
+        fs::read_dir(root)
+            .expect("read fixture root")
+            .map(|entry| {
+                let entry = entry.expect("read fixture entry");
+                assert!(entry.file_type().expect("read fixture entry type").is_file());
+                (
+                    entry.file_name(),
+                    fs::read(entry.path()).expect("read fixture file bytes"),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -2246,6 +2427,304 @@ mod tests {
         }
         coordinator.shutdown().unwrap();
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn m8e_launcher_route_previews_applies_and_undoes_with_guarded_recovery() {
+        use crate::plugin::Plugin;
+
+        let _guard = crate::gui::TEST_MUTEX.lock().unwrap();
+        let fixture = app_fixture_workspace();
+        let root = fixture.path().join("selected-root");
+        fs::create_dir_all(&root).expect("create selected root");
+        let _notes_directory = NotesDirectoryOverride::use_fixture(&fixture.path().join("notes"));
+        fs::write(root.join("alpha.txt"), b"alpha bytes").expect("create alpha fixture");
+        fs::write(root.join("beta.txt"), b"beta bytes").expect("create beta fixture");
+        let original_bytes = file_bytes(&root);
+
+        let ctx = egui::Context::default();
+        let mut app = app_for_fixture(&ctx, fixture.path());
+        let action = crate::plugins::batch_rename::BatchRenamePlugin
+            .search("rename")
+            .into_iter()
+            .find(|action| action.action == "rename:open")
+            .expect("the built-in rename plugin exposes its searchable route");
+        assert!(action.args.is_none(), "the route carries no implicit root");
+        assert!(action.desc.contains("guarded Apply"));
+        let invocation = crate::commands::parse_command(
+            action,
+            None,
+            crate::commands::ActivationSource::Enter,
+        )
+        .expect("Enter activation parses the normal rename action");
+        assert_eq!(
+            invocation.command,
+            crate::commands::Command::BatchRename(
+                crate::commands::BatchRenameCommand::Open
+            )
+        );
+        crate::commands::CommandBus
+            .dispatch(&invocation, &mut app)
+            .expect("the real launcher host opens the batch renamer");
+        assert!(app.batch_rename_dialog.open);
+        assert!(app.batch_rename_dialog.root_path().is_none());
+        assert!(!app.batch_rename_dialog.has_pending_scan());
+        assert!(app.batch_rename_coordinator.is_none());
+        assert_eq!(file_bytes(&root), original_bytes);
+
+        let open_commands = run_dialog_frame(
+            &mut app.batch_rename_dialog,
+            &ctx,
+            screen_input(egui::vec2(1280.0, 900.0), Vec::new()),
+        );
+        assert!(open_commands.is_empty());
+        assert!(app.batch_rename_dialog.root_path().is_none());
+        assert!(app.batch_rename_coordinator.is_none());
+
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::SelectRoot(root.clone()));
+        finish_app_scan(&mut app, &ctx);
+        assert_eq!(app.batch_rename_dialog.root_path(), Some(root.as_path()));
+        assert_eq!(app.batch_rename_dialog.display_rows.len(), 2);
+        app.batch_rename_dialog.select_visible(true);
+        app.batch_rename_dialog.rules = vec![
+            RuleDraft {
+                id: 1,
+                rule: RenameRule::Prefix("renamed-".to_owned()),
+            },
+            RuleDraft {
+                id: 2,
+                rule: RenameRule::Suffix("-copy".to_owned()),
+            },
+        ];
+        app.batch_rename_dialog.next_rule_id = 3;
+        app.batch_rename_dialog.rules_revision = 2;
+        app.batch_rename_dialog.rebuild_preview();
+        assert_eq!(app.batch_rename_dialog.extension_policy, ExtensionPolicy::Preserve);
+        let original_identities = scan_identities(&app.batch_rename_dialog);
+        assert_eq!(original_identities.len(), 2);
+        let expected_bytes = file_bytes(&root);
+        assert_eq!(expected_bytes, original_bytes);
+
+        let runtime = app.batch_rename_runtime_snapshot();
+        let preview_commands = run_dialog_frame_with_runtime(
+            &mut app.batch_rename_dialog,
+            &ctx,
+            screen_input(egui::vec2(1280.0, 900.0), Vec::new()),
+            &runtime,
+        );
+        assert!(preview_commands.is_empty());
+        let preview = app
+            .batch_rename_dialog
+            .verified_preview
+            .as_ref()
+            .expect("the accepted explicit-root snapshot has a preview");
+        assert_eq!(preview.preview().readiness(), PreviewReadiness::Ready);
+        let expected_targets = preview
+            .verified_plan()
+            .expect("the selected preview has a verified plan")
+            .plan()
+            .actions()
+            .iter()
+            .map(|action| action.target_path().file_name().unwrap().to_os_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_targets,
+            [
+                OsString::from("renamed-alpha-copy.txt"),
+                OsString::from("renamed-beta-copy.txt"),
+            ]
+        );
+        assert_eq!(file_bytes(&root), original_bytes);
+        assert!(app.batch_rename_dialog.pending_intent().is_none());
+
+        assert!(app.batch_rename_dialog.freeze_confirmed_plan().is_some());
+        app.batch_rename_dialog.apply_confirmation_open = true;
+        let confirmation_commands = run_dialog_frame_with_runtime(
+            &mut app.batch_rename_dialog,
+            &ctx,
+            screen_input(egui::vec2(1280.0, 900.0), Vec::new()),
+            &runtime,
+        );
+        assert!(confirmation_commands.is_empty());
+        let confirmed_mappings = app
+            .batch_rename_dialog
+            .pending_intent()
+            .unwrap()
+            .plan()
+            .actions()
+            .iter()
+            .map(|action| {
+                (
+                    action.source_ref(),
+                    action.source_path().to_path_buf(),
+                    action.target_path().to_path_buf(),
+                )
+            })
+            .collect::<Vec<_>>();
+        app.batch_rename_dialog.cancel_apply_confirmation();
+        assert!(app.batch_rename_dialog.pending_intent().is_none());
+        assert_eq!(file_bytes(&root), original_bytes);
+
+        assert!(app.batch_rename_dialog.freeze_confirmed_plan().is_some());
+        assert_eq!(
+            app.batch_rename_dialog
+                .pending_intent()
+                .unwrap()
+                .plan()
+                .actions()
+                .iter()
+                .map(|action| {
+                    (
+                        action.source_ref(),
+                        action.source_path().to_path_buf(),
+                        action.target_path().to_path_buf(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            confirmed_mappings
+        );
+        app.batch_rename_dialog.apply_confirmation_open = false;
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::ApplyConfirmed);
+
+        // A second confirmation cannot enqueue another job after the frozen
+        // intent was consumed. A draft edit also cannot change that job.
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::ApplyConfirmed);
+        assert!(app
+            .batch_rename_dialog
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("no longer available")));
+        app.batch_rename_dialog.rules[0].rule =
+            RenameRule::Prefix("edited-after-confirmation-".to_owned());
+        app.batch_rename_dialog.rules_revision += 1;
+        app.batch_rename_dialog.rebuild_preview();
+
+        let applied = finish_app_operation(&mut app, &ctx);
+        let applied_receipt = applied
+            .receipts
+            .iter()
+            .find(|receipt| {
+                receipt.status()
+                    == crate::batch_rename_transaction::RenameTransactionStatus::Applied
+            })
+            .expect("the real app worker publishes the applied recovery receipt")
+            .clone();
+        assert_eq!(applied_receipt.entries().len(), 2);
+        assert!(app
+            .batch_rename_dialog
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("All confirmed filenames")));
+        assert_eq!(
+            file_bytes(&root),
+            std::collections::BTreeMap::from([
+                (OsString::from("renamed-alpha-copy.txt"), b"alpha bytes".to_vec()),
+                (OsString::from("renamed-beta-copy.txt"), b"beta bytes".to_vec()),
+            ])
+        );
+
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::Rescan);
+        finish_app_scan(&mut app, &ctx);
+        assert_eq!(
+            scan_identities(&app.batch_rename_dialog),
+            std::collections::HashMap::from([
+                (
+                    OsString::from("renamed-alpha-copy.txt"),
+                    original_identities[OsStr::new("alpha.txt")],
+                ),
+                (
+                    OsString::from("renamed-beta-copy.txt"),
+                    original_identities[OsStr::new("beta.txt")],
+                ),
+            ])
+        );
+
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::UndoConfirmed(
+            applied_receipt.id().to_owned(),
+        ));
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::UndoConfirmed(
+            applied_receipt.id().to_owned(),
+        ));
+        let undone = finish_app_operation(&mut app, &ctx);
+        let undone_receipt = undone
+            .receipts
+            .iter()
+            .find(|receipt| receipt.id() == applied_receipt.id())
+            .expect("Undo updates the same receipt rather than adding another job");
+        assert_eq!(
+            undone_receipt.status(),
+            crate::batch_rename_transaction::RenameTransactionStatus::Undone
+        );
+        assert_eq!(undone_receipt.remaining_undo_count(), 0);
+        assert!(app
+            .batch_rename_dialog
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Undo")));
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::UndoConfirmed(
+            applied_receipt.id().to_owned(),
+        ));
+        assert!(!app.batch_rename_runtime_snapshot().operation_active);
+        assert!(app
+            .batch_rename_dialog
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Undo was not started")));
+
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::Rescan);
+        finish_app_scan(&mut app, &ctx);
+        assert_eq!(scan_identities(&app.batch_rename_dialog), original_identities);
+        assert_eq!(file_bytes(&root), original_bytes);
+
+        app.batch_rename_dialog.select_visible(true);
+        app.batch_rename_dialog.rules = vec![RuleDraft {
+            id: 4,
+            rule: RenameRule::Prefix("occupied-".to_owned()),
+        }];
+        app.batch_rename_dialog.rules_revision += 1;
+        app.batch_rename_dialog.rebuild_preview();
+        assert_eq!(
+            app.batch_rename_dialog
+                .verified_preview
+                .as_ref()
+                .unwrap()
+                .preview()
+                .readiness(),
+            PreviewReadiness::Ready
+        );
+        fs::write(root.join("occupied-alpha.txt"), b"unrelated occupant")
+            .expect("create an unselected destination after preview");
+        assert!(app.batch_rename_dialog.freeze_confirmed_plan().is_some());
+        app.handle_batch_rename_ui_command(BatchRenameUiCommand::ApplyConfirmed);
+        let refused = finish_app_operation(&mut app, &ctx);
+        assert!(refused
+            .last_message
+            .as_deref()
+            .is_some_and(|message| message.contains("destination is occupied")));
+        assert!(app
+            .batch_rename_dialog
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("Refresh the preview")));
+        assert_eq!(fs::read(root.join("alpha.txt")).unwrap(), b"alpha bytes");
+        assert_eq!(fs::read(root.join("beta.txt")).unwrap(), b"beta bytes");
+        assert_eq!(
+            fs::read(root.join("occupied-alpha.txt")).unwrap(),
+            b"unrelated occupant"
+        );
+        assert_eq!(
+            refused.receipts.len(),
+            1,
+            "a refused no-move attempt does not replace or duplicate the Undo receipt"
+        );
+        assert_eq!(
+            refused.receipts[0].status(),
+            crate::batch_rename_transaction::RenameTransactionStatus::Undone
+        );
+
+        app.shutdown_batch_rename_scanner();
+        drop(app);
     }
 
     #[test]

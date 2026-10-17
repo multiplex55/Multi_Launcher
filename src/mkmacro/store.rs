@@ -60,6 +60,22 @@ pub struct MkMacroStore {
     _watcher: Option<JsonWatcher>,
 }
 impl MkMacroStore {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test(directory: impl AsRef<Path>) -> Self {
+        let inner = Arc::new(Inner {
+            path: directory.as_ref().join(MKMACROS_FILE),
+            transaction: Mutex::new(()),
+            asset_authoring: Mutex::new(()),
+            snapshot: RwLock::new(Arc::new(MkMacroDocument::default())),
+            diagnostics: RwLock::new(Arc::from([])),
+            last_external_error: RwLock::new(None),
+        });
+        Self {
+            inner,
+            _watcher: None,
+        }
+    }
+
     /// Canonical directory containing the document and its independently
     /// persisted authoring catalogs.
     pub(crate) fn data_directory(&self) -> PathBuf {

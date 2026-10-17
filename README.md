@@ -142,7 +142,7 @@ Multi Launcher is centered around a **single query box**:
 | `rs` / `osrs` | RuneScape helpers | `osrs wiki karamja gloves` |
 | `cal` | Calendar/reminders | `cal` / `cal add today 5pm Pay rent` |
 | `fs` | File-search plugin | `fs` / `fs file main` / `fs content TODO` |
-| `rename` | Read-only batch filename preview under an explicitly chosen folder; extensions are protected by default | `rename` |
+| `rename` | Explicit-root batch filename rename with preview, protected extensions, guarded Apply, and safe Undo | `rename` |
 | `data` | Data health, backups, and recovery | `data` / `data health` / `data backup` / `data folder` |
 
 ---
@@ -463,6 +463,14 @@ parent directories before publication, so case-only changes and selected-file
 cycles are supported. Existing or newly occupied names are never overwritten.
 If a move cannot be safely completed or reversed, the receipt keeps the known
 recovery paths for a later explicit Undo or recovery attempt.
+
+The preview is a snapshot, not a promise that the files remain unchanged while
+the dialog is open. Apply rechecks source identities, parent folders, and target
+occupancy; changed sources or newly occupied targets are refused instead of
+silently applying a different mapping. Cancellation is checked between file
+moves. A failed or cancelled batch can therefore be partial if safe
+compensation is blocked, and its receipt reports the exact outcomes rather
+than promising all-or-nothing rollback.
 
 Receipts persist across restarts, with a limit of 32. Before a new apply,
 receipts already marked Undone are dropped to make room. Undo requires the
