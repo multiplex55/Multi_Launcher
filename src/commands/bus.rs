@@ -106,12 +106,28 @@ mod tests {
         LauncherCommandHost, MultiManagerCommandHost, NoteCommandHost, QueryCommand, QueryPolicy,
         RadialCommandHost, TodoCommandHost, VisibilityPolicy,
     };
+    use crate::gui::hotfolder_dispatch::{
+        LauncherHotFolderActionAdapter, invoke_registered_action_from_catalog,
+        pump_launcher_completions_with,
+    };
+    use crate::hotfolder::{
+        ActionEnablement, HotFolderCandidateId,
+        HotFolderExternalActionRequest, HotFolderExternalEnableAuthorization,
+        HotFolderExternalFileEvidence, HotFolderExecutionPhase, HotFolderTerminalStatus,
+        RuleAction, RuleId, bind_registered_launcher_action,
+    };
+    use crate::universal_actions::{ActionTarget, ResolvedActionTarget};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
 
     #[derive(Default)]
     struct FakeHost {
         visible: bool,
         refocus: bool,
         headless_calls: usize,
+        headless_failure: bool,
+        headless_commands: Vec<(Command, Action)>,
         dialog_calls: usize,
         qr_calls: Vec<Option<String>>,
         crop_calls: usize,
@@ -454,8 +470,17 @@ mod tests {
         }
     }
     impl HeadlessCommandHost for FakeHost {
-        fn execute_headless_command(&mut self, _: &Command, _: &Action) -> anyhow::Result<()> {
+        fn execute_headless_command(
+            &mut self,
+            command: &Command,
+            original_action: &Action,
+        ) -> anyhow::Result<()> {
             self.headless_calls += 1;
+            self.headless_commands
+                .push((command.clone(), original_action.clone()));
+            if self.headless_failure {
+                anyhow::bail!("injected headless handler failure");
+            }
             Ok(())
         }
         fn spawn_headless_command(&mut self, _: Command, _: Action) {}
@@ -1016,5 +1041,145 @@ mod tests {
         assert_eq!(outcome.query, QueryPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Record);
+    }
+
+    fn registered_launcher_fixture() -> (ResolvedActionTarget, RuleAction) {
+        let selected = Action {
+            label: "Éditeur".into(),
+            desc: "Application".into(),
+            action: r"C:\Program Files\Éditeur\editor.exe".into(),
+            args: Some("--open".into()),
+        };
+        let target = ResolvedActionTarget {
+            target: ActionTarget::Generic {
+                action: selected.clone(),
+            },
+            selected_action: selected,
+            custom_action_index: None,
+        };
+        let binding =
+            bind_registered_launcher_action(&target).expect("stable exact launcher binding");
+        (target, binding)
+    }
+
+    fn launcher_request(action: RuleAction, operation_id: u128) -> HotFolderExternalActionRequest {
+        let rule_fingerprint = match &action {
+            RuleAction::RegisteredLauncherAction {
+                configuration_fingerprint,
+                ..
+            }
+            | RuleAction::MkMacro {
+                configuration_fingerprint,
+                ..
+            } => configuration_fingerprint.clone(),
+            RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. } => {
+                unreachable!("fixture requests must be external")
+            }
+        };
+        HotFolderExternalActionRequest {
+            operation_id,
+            candidate_id: HotFolderCandidateId::from_persisted(operation_id as u64),
+            rule_id: RuleId::parse(format!("{operation_id:032x}")).expect("valid rule ID"),
+            rule_fingerprint: rule_fingerprint.clone(),
+            action,
+            authorization: HotFolderExternalEnableAuthorization {
+                store_revision: 1,
+                epoch: 1,
+                rule_fingerprint,
+                enablement: ActionEnablement::StrongConfirmationRequired,
+            },
+            file: HotFolderExternalFileEvidence {
+                path: PathBuf::from(r"C:\watch\résumé.txt"),
+                root_identity: crate::file_operations::NativeFileIdentity::default(),
+                parent_identity: crate::file_operations::NativeFileIdentity::default(),
+                file_identity: crate::file_operations::NativeFileIdentity::default(),
+                length: 19,
+                modified: SystemTime::UNIX_EPOCH,
+                sha256: None,
+            },
+        }
+    }
+
+    #[test]
+    fn hotfolder_launcher_queue_revalidates_exact_target_and_uses_typed_bus() {
+        let macro_store = Arc::new(crate::mkmacro::MkMacroStore::empty_for_test(
+            std::env::temp_dir(),
+        ));
+        let (adapter, pump) = LauncherHotFolderActionAdapter::new(
+            eframe::egui::Context::default(),
+            macro_store,
+        );
+        let (target, action) = registered_launcher_fixture();
+        let entries = vec![target.clone()];
+        let request = launcher_request(action.clone(), 144);
+
+        let cancelled = adapter
+            .enqueue_launcher_request(launcher_request(action.clone(), 145))
+            .expect("pending launcher operation is queued");
+        assert!(cancelled.cancel_if_pending());
+        let mut cancelled_invocations = 0;
+        pump_launcher_completions_with(&pump, |_| {
+            cancelled_invocations += 1;
+            unreachable!("a pending cancellation must not reach the launcher")
+        });
+        let cancelled_outcome = cancelled
+            .receive_timeout(Duration::from_millis(1))
+            .expect("pump completes the revoked request");
+        assert_eq!(cancelled_outcome.status, HotFolderTerminalStatus::Cancelled);
+        assert_eq!(cancelled_outcome.phase, HotFolderExecutionPhase::Admission);
+        assert_eq!(cancelled_invocations, 0);
+
+        let queued = adapter
+            .enqueue_launcher_request(request.clone())
+            .expect("exact launcher operation is queued");
+        let mut host = FakeHost::default();
+        let mut command_outcome = None;
+        pump_launcher_completions_with(&pump, |pending| {
+            invoke_registered_action_from_catalog(pending, &entries, |invocation| {
+                assert_eq!(invocation.source, ActivationSource::HotFolder);
+                assert_eq!(invocation.query_override, None);
+                let outcome = CommandBus.dispatch(invocation, &mut host);
+                command_outcome = outcome.as_ref().ok().cloned();
+                outcome
+            })
+        });
+        let completed = queued
+            .receive_timeout(Duration::from_millis(1))
+            .expect("typed bus result completes the queued request");
+        assert_eq!(completed.operation_id, request.operation_id);
+        assert_eq!(completed.status, HotFolderTerminalStatus::Success);
+        assert_eq!(host.headless_calls, 1);
+        assert_eq!(
+            host.headless_commands,
+            vec![(
+                Command::External(crate::commands::ExternalCommand {
+                    target: r"C:\Program Files\Éditeur\editor.exe".into(),
+                    args: Some("--open".into()),
+                    namespace: None,
+                }),
+                target.selected_action.clone(),
+            )]
+        );
+        let command_outcome = command_outcome.expect("canonical CommandBus returned an outcome");
+        assert_eq!(command_outcome.query, QueryPolicy::Keep);
+        assert_eq!(command_outcome.visibility, VisibilityPolicy::Keep);
+
+        let deleted = invoke_registered_action_from_catalog(&request, &[], |_| {
+            unreachable!("a deleted target must be refused before typed dispatch")
+        });
+        assert_eq!(deleted.status, HotFolderTerminalStatus::Failure);
+        assert_eq!(host.headless_calls, 1);
+
+        let mut failing_host = FakeHost {
+            headless_failure: true,
+            ..FakeHost::default()
+        };
+        let failed = invoke_registered_action_from_catalog(&request, &entries, |invocation| {
+            CommandBus.dispatch(invocation, &mut failing_host)
+        });
+        assert_eq!(failed.status, HotFolderTerminalStatus::Failure);
+        assert_eq!(failing_host.headless_calls, 1);
+        assert_eq!(failing_host.headless_commands, host.headless_commands);
+        assert_eq!(request.file.path, PathBuf::from(r"C:\watch\résumé.txt"));
     }
 }

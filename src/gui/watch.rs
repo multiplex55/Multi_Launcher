@@ -304,6 +304,7 @@ fn track_c_gui_handler_release(
 
 impl LauncherApp {
     pub fn process_watch_events(&mut self) {
+        super::hotfolder_dispatch::pump_launcher_completions(self);
         #[cfg(test)]
         track_c3c_dispatch_receipt::drain_started();
         let mut timer = crate::performance::track_c::Timer::start(

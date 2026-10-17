@@ -22,7 +22,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Condvar, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -324,6 +324,116 @@ pub enum CommandResult {
     AlreadyRunning { active_macro_id: u64 },
     Rejected(ExecutionDiagnostic),
 }
+
+/// One terminal result for a runtime run admitted by a caller that owns its
+/// completion lifecycle. Started and queued states are deliberately absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OwnedMacroRunCompletion {
+    pub run_id: u64,
+    pub macro_id: u64,
+    pub state: RuntimeState,
+    pub failure_kind: Option<DiagnosticKind>,
+}
+
+/// Handle for one exact admitted run. Cancellation compares the ID and latches
+/// Stop under the same admission lock used by new runs.
+pub(crate) struct OwnedMacroRun {
+    runtime: Arc<MacroRuntime>,
+    run_id: u64,
+    start_gate: Arc<OwnedRunStartGate>,
+    completion: mpsc::Receiver<OwnedMacroRunCompletion>,
+}
+
+impl OwnedMacroRun {
+    pub(crate) fn run_id(&self) -> u64 {
+        self.run_id
+    }
+
+    pub(crate) fn try_completion(
+        &self,
+    ) -> Result<Option<OwnedMacroRunCompletion>, mpsc::TryRecvError> {
+        match self.completion.try_recv() {
+            Ok(completion) if completion.run_id == self.run_id => Ok(Some(completion)),
+            Ok(_) => Err(mpsc::TryRecvError::Disconnected),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn wait_completion(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<OwnedMacroRunCompletion, mpsc::RecvTimeoutError> {
+        let completion = self.completion.recv_timeout(timeout)?;
+        if completion.run_id == self.run_id {
+            Ok(completion)
+        } else {
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        }
+    }
+
+    pub(crate) fn stop_if_current(&self) -> bool {
+        self.runtime.stop_if_current(self.run_id)
+    }
+
+    /// Atomically choose whether this pending run may begin effects. A token
+    /// already cancelled at this boundary receives a terminal Stopped result
+    /// without entering the macro executor.
+    pub(crate) fn activate_if_not_cancelled(
+        &self,
+        cancellation: &crate::file_operations::ScanCancellation,
+    ) -> bool {
+        self.runtime
+            .activate_owned_if_current(self.run_id, &self.start_gate, cancellation)
+    }
+}
+
+const OWNED_RUN_PENDING: u8 = 0;
+const OWNED_RUN_STARTED: u8 = 1;
+const OWNED_RUN_CANCELLED: u8 = 2;
+
+struct OwnedRunStartGate {
+    state: AtomicU8,
+    lock: Mutex<()>,
+    wake: Condvar,
+}
+
+impl OwnedRunStartGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU8::new(OWNED_RUN_PENDING),
+            lock: Mutex::new(()),
+            wake: Condvar::new(),
+        })
+    }
+
+    fn transition(&self, next: u8) -> bool {
+        let _lock = self.lock.lock().unwrap();
+        let changed = self
+            .state
+            .compare_exchange(
+                OWNED_RUN_PENDING,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok();
+        if changed {
+            self.wake.notify_all();
+        }
+        changed
+    }
+
+    fn wait_for_start(&self) -> bool {
+        let mut lock = self.lock.lock().unwrap();
+        loop {
+            match self.state.load(Ordering::Acquire) {
+                OWNED_RUN_STARTED => return true,
+                OWNED_RUN_CANCELLED => return false,
+                _ => lock = self.wake.wait(lock).unwrap(),
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvocationDisposition {
     Submitted,
@@ -345,15 +455,20 @@ struct Shared {
     #[cfg(test)]
     test_worker_barrier: Mutex<Option<Arc<TestWorkerBarrierInner>>>,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 struct ActiveAdmission {
     macro_id: u64,
     origin: RuntimeOrigin,
+    run_id: u64,
+    owned_start_gate: Option<Arc<OwnedRunStartGate>>,
 }
 struct WorkerMessage {
     command: RuntimeCommand,
     program: Option<super::MkCompiledProgram>,
     origin: RuntimeOrigin,
+    run_id: Option<u64>,
+    owned_completion: Option<mpsc::SyncSender<OwnedMacroRunCompletion>>,
+    owned_start_gate: Option<Arc<OwnedRunStartGate>>,
 }
 static RUNTIME_GENERATIONS: AtomicU64 = AtomicU64::new(1);
 static NEXT_PREVIEW_TICKET: AtomicU64 = AtomicU64::new(1);
@@ -419,7 +534,7 @@ impl MacroRuntime {
                 "The macro runtime was replaced or closed",
             ));
         }
-        if let Some(active) = *admission {
+        if let Some(active) = admission.as_ref() {
             return Err(ExecutionDiagnostic::new(
                 DiagnosticKind::RuntimeUnavailable,
                 format!("Macro {} is already running", active.macro_id),
@@ -597,29 +712,62 @@ impl MacroRuntime {
         c: RuntimeCommand,
         program: Option<super::MkCompiledProgram>,
     ) -> CommandResult {
+        self.submit_command_with_owner(c, program, None, None, None).0
+    }
+
+    fn submit_command_with_owner(
+        &self,
+        c: RuntimeCommand,
+        program: Option<super::MkCompiledProgram>,
+        expected_macros: Option<Vec<super::MkMacro>>,
+        owned_completion: Option<mpsc::SyncSender<OwnedMacroRunCompletion>>,
+        owned_start_gate: Option<Arc<OwnedRunStartGate>>,
+    ) -> (CommandResult, Option<u64>) {
         #[cfg(test)]
         self.test_commands.lock().unwrap().push(c.clone());
         let request = run_request(&c);
         if matches!(&c, RuntimeCommand::RecordingPreview { .. }) && program.is_none() {
-            return CommandResult::Rejected(ExecutionDiagnostic::new(
+            return (CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidPlan,
                 "recording preview requires an ephemeral compiled program",
-            ));
+            )), None);
         }
         if request.is_some_and(|request| request.selection.is_some_and(<[u64]>::is_empty)) {
-            return CommandResult::Rejected(ExecutionDiagnostic::new(
+            return (CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidSelection,
                 "selection is empty",
-            ));
+            )), None);
         }
         // Admission serializes terminal publication with control commands and
         // new-run claims. Lock order is admission -> control/snapshot/operations.
         let mut admission = self.shared.admission.lock().unwrap();
         if !self.available.load(Ordering::Acquire) {
-            return CommandResult::Rejected(ExecutionDiagnostic::new(
+            return (CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::RuntimeUnavailable,
                 "macro worker is shut down",
-            ));
+            )), None);
+        }
+        if request.is_some()
+            && let Some(active) = admission.as_ref()
+        {
+            return (
+                CommandResult::AlreadyRunning {
+                    active_macro_id: active.macro_id,
+                },
+                None,
+            );
+        }
+        if let Some(expected_macros) = expected_macros.as_ref() {
+            let current = self.store.snapshot();
+            for expected in expected_macros {
+                let mut matching = current.macros.iter().filter(|macro_| macro_.id == expected.id);
+                if matching.next() != Some(expected) || matching.next().is_some() {
+                    return (CommandResult::Rejected(ExecutionDiagnostic::new(
+                        DiagnosticKind::InvalidTarget,
+                        "macro configuration changed before admission",
+                    )), None);
+                }
+            }
         }
         let active = admission.is_some();
         let state = self.snapshot().state;
@@ -631,24 +779,21 @@ impl MacroRuntime {
             _ => false,
         };
         if wrong_state {
-            return CommandResult::Rejected(ExecutionDiagnostic::new(
+            return (CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::InvalidTarget,
                 format!("command {c:?} is not valid while runtime is {state:?}"),
-            ));
+            )), None);
         }
+        let mut run_id = None;
         if let Some(request) = request {
-            if let Some(active) = *admission {
-                return CommandResult::AlreadyRunning {
-                    active_macro_id: active.macro_id,
-                };
-            }
             if !self.shared.operations.claim(Operation::Playback) {
-                return CommandResult::Rejected(ExecutionDiagnostic::new(
+                return (CommandResult::Rejected(ExecutionDiagnostic::new(
                     DiagnosticKind::InvalidTarget,
                     "recording is active",
-                ));
+                )), None);
             }
             self.shared.control.reset();
+            let admitted_run_id = self.shared.next_run_id.fetch_add(1, Ordering::Relaxed);
             let origin = match &c {
                 RuntimeCommand::RecordingPreview { ticket, .. } => {
                     RuntimeOrigin::RecordingPreview { ticket: *ticket }
@@ -658,7 +803,10 @@ impl MacroRuntime {
             *admission = Some(ActiveAdmission {
                 macro_id: request.macro_id,
                 origin,
+                run_id: admitted_run_id,
+                owned_start_gate: owned_start_gate.clone(),
             });
+            run_id = Some(admitted_run_id);
         }
         match c {
             RuntimeCommand::Pause => {
@@ -677,6 +825,12 @@ impl MacroRuntime {
                 }
             }
             RuntimeCommand::Stop => {
+                if let Some(gate) = admission
+                    .as_ref()
+                    .and_then(|active| active.owned_start_gate.as_ref())
+                {
+                    gate.transition(OWNED_RUN_CANCELLED);
+                }
                 self.shared.control.stop();
                 if admission.is_some() {
                     publish(&self.shared, |snapshot| {
@@ -698,18 +852,21 @@ impl MacroRuntime {
                 },
                 command: c,
                 program,
+                run_id,
+                owned_completion,
+                owned_start_gate,
             })
             .is_err()
         {
             self.shared.control.finish();
             self.shared.operations.release(Operation::Playback);
             *admission = None;
-            return CommandResult::Rejected(ExecutionDiagnostic::new(
+            return (CommandResult::Rejected(ExecutionDiagnostic::new(
                 DiagnosticKind::RuntimeUnavailable,
                 "macro worker is shut down",
-            ));
+            )), None);
         }
-        CommandResult::Accepted
+        (CommandResult::Accepted, run_id)
     }
     /// Idempotently cancel one admitted recording preview. The comparison and
     /// Stop latch share the admission lock, so a stale Review can neither miss
@@ -717,6 +874,7 @@ impl MacroRuntime {
     pub fn stop_recording_preview(&self, ticket: u64) -> bool {
         let admission = self.shared.admission.lock().unwrap();
         if !admission
+            .as_ref()
             .is_some_and(|active| active.origin == RuntimeOrigin::RecordingPreview { ticket })
         {
             return false;
@@ -733,6 +891,147 @@ impl MacroRuntime {
         }
         true
     }
+
+    /// Stop only the run whose ID is still admitted. The ID comparison and
+    /// Stop latch are atomic with respect to admission of another run.
+    fn stop_if_current(&self, run_id: u64) -> bool {
+        let admission = self.shared.admission.lock().unwrap();
+        let Some(active) = admission.as_ref().filter(|active| active.run_id == run_id) else {
+            return false;
+        };
+        if let Some(gate) = active.owned_start_gate.as_ref() {
+            gate.transition(OWNED_RUN_CANCELLED);
+        }
+        self.shared.control.stop();
+        let snapshot = self.snapshot();
+        if snapshot.run_id == run_id
+            && matches!(snapshot.state, RuntimeState::Running | RuntimeState::Paused)
+        {
+            publish(&self.shared, |snapshot| {
+                snapshot.state = RuntimeState::Stopping;
+                snapshot.pause_reason = None;
+            });
+        }
+        true
+    }
+
+    fn activate_owned_if_current(
+        &self,
+        run_id: u64,
+        gate: &OwnedRunStartGate,
+        cancellation: &crate::file_operations::ScanCancellation,
+    ) -> bool {
+        let admission = self.shared.admission.lock().unwrap();
+        if !admission.as_ref().is_some_and(|active| {
+            active.run_id == run_id
+                && active
+                    .owned_start_gate
+                    .as_ref()
+                    .is_some_and(|current| std::ptr::eq(current.as_ref(), gate))
+        }) {
+            return false;
+        }
+        if cancellation.is_cancelled() {
+            gate.transition(OWNED_RUN_CANCELLED);
+            self.shared.control.stop();
+            return false;
+        }
+        gate.transition(OWNED_RUN_STARTED)
+    }
+
+    fn is_available(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+    }
+
+    fn start_owned_hotfolder_macro(
+        self: &Arc<Self>,
+        expected_macro: &super::MkMacro,
+        expected_dependencies: &[super::MkMacro],
+    ) -> ExecResult<OwnedMacroRun> {
+        let document = self.store.snapshot();
+        let mut matching = document
+            .macros
+            .iter()
+            .filter(|macro_| macro_.id == expected_macro.id);
+        if matching.next() != Some(expected_macro) || matching.next().is_some() {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "macro configuration changed before execution",
+            ));
+        }
+
+        let mut invocation = MkInvocation::new(expected_macro.id);
+        let program = super::invocation::compile_invocation_program(&document, &invocation)?;
+        let plan = program.plan(expected_macro.id).ok_or_else(|| {
+            ExecutionDiagnostic::new(DiagnosticKind::InvalidPlan, "Macro program root is missing")
+        })?;
+        let prepared = super::prepare_parameters(
+            plan.signature.parameters(),
+            plan.signature.outputs(),
+            &invocation.arguments,
+        )?;
+        if !prepared.missing.is_empty() {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "macro requires invocation input that unattended execution cannot provide",
+            ));
+        }
+        invocation.arguments = prepared.values;
+        let mut expected_macros = Vec::with_capacity(program.macro_ids().len());
+        for macro_id in program.macro_ids() {
+            let mut matching = document.macros.iter().filter(|macro_| macro_.id == *macro_id);
+            let Some(macro_) = matching.next() else {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidPlan,
+                    "macro dependency disappeared during compilation",
+                ));
+            };
+            if matching.next().is_some() {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::InvalidPlan,
+                    "macro dependency is ambiguous during compilation",
+                ));
+            }
+            expected_macros.push(macro_.clone());
+        }
+        if expected_macros != expected_dependencies {
+            return Err(ExecutionDiagnostic::new(
+                DiagnosticKind::InvalidTarget,
+                "macro dependency closure changed after Hot Folder validation",
+            ));
+        }
+
+        let (completion_tx, completion_rx) = mpsc::sync_channel(1);
+        let start_gate = OwnedRunStartGate::new();
+        let (result, run_id) = self.submit_command_with_owner(
+            RuntimeCommand::Invoke(invocation),
+            Some(program),
+            Some(expected_macros),
+            Some(completion_tx),
+            Some(start_gate.clone()),
+        );
+        let run_id = match result {
+            CommandResult::Accepted => run_id.ok_or_else(|| {
+                ExecutionDiagnostic::new(
+                    DiagnosticKind::RuntimeUnavailable,
+                    "macro worker accepted a run without an admission ID",
+                )
+            })?,
+            CommandResult::AlreadyRunning { .. } => {
+                return Err(ExecutionDiagnostic::new(
+                    DiagnosticKind::RuntimeUnavailable,
+                    "macro runtime is busy with another run",
+                ));
+            }
+            CommandResult::Rejected(diagnostic) => return Err(diagnostic),
+        };
+        Ok(OwnedMacroRun {
+            runtime: self.clone(),
+            run_id,
+            start_gate,
+            completion: completion_rx,
+        })
+    }
     pub fn snapshot(&self) -> Arc<RuntimeSnapshot> {
         self.shared.snapshot.read().unwrap().clone()
     }
@@ -742,6 +1041,7 @@ impl MacroRuntime {
             .admission
             .lock()
             .unwrap()
+            .as_ref()
             .is_some_and(|admission| {
                 admission.origin == RuntimeOrigin::RecordingPreview { ticket }
             });
@@ -779,13 +1079,22 @@ impl MacroRuntime {
     }
     pub fn shutdown(&self) {
         {
-            let _admission = self.shared.admission.lock().unwrap();
+            let admission = self.shared.admission.lock().unwrap();
             self.available.store(false, Ordering::Release);
+            if let Some(gate) = admission
+                .as_ref()
+                .and_then(|active| active.owned_start_gate.as_ref())
+            {
+                gate.transition(OWNED_RUN_CANCELLED);
+            }
             self.shared.control.stop();
             let _ = self.tx.send(WorkerMessage {
                 command: RuntimeCommand::Shutdown,
                 program: None,
                 origin: RuntimeOrigin::Stored,
+                run_id: None,
+                owned_completion: None,
+                owned_start_gate: None,
             });
         }
         if let Some(h) = self.worker.lock().unwrap().take() {
@@ -1109,6 +1418,9 @@ fn worker_loop(
         command,
         program,
         origin,
+        run_id,
+        owned_completion,
+        owned_start_gate,
     }) = rx.recv()
     {
         match command {
@@ -1130,7 +1442,17 @@ fn worker_loop(
                         state = barrier.wake.wait(state).unwrap();
                     }
                 }
-                run_one(&store, &backends, &shared, request, program, origin)
+                run_one(
+                    &store,
+                    &backends,
+                    &shared,
+                    request,
+                    program,
+                    origin,
+                    run_id.expect("admitted run has an ID"),
+                    owned_completion,
+                    owned_start_gate,
+                )
             }
         }
     }
@@ -1146,13 +1468,14 @@ struct RootRunGuard<'a> {
     completed: bool,
 }
 impl RootRunGuard<'_> {
-    fn complete(mut self, publish_terminal: impl FnOnce()) {
+    fn complete<T>(mut self, publish_terminal: impl FnOnce() -> T) -> T {
         let mut admission = self.shared.admission.lock().unwrap();
         self.shared.control.finish();
-        publish_terminal();
+        let result = publish_terminal();
         self.shared.operations.release(Operation::Playback);
         *admission = None;
         self.completed = true;
+        result
     }
 }
 impl Drop for RootRunGuard<'_> {
@@ -1173,6 +1496,9 @@ fn run_one(
     request: RunRequest<'_>,
     prepared_program: Option<super::MkCompiledProgram>,
     origin: RuntimeOrigin,
+    run_id: u64,
+    owned_completion: Option<mpsc::SyncSender<OwnedMacroRunCompletion>>,
+    owned_start_gate: Option<Arc<OwnedRunStartGate>>,
 ) {
     let RunRequest {
         macro_id: mid,
@@ -1186,8 +1512,16 @@ fn run_one(
     };
     #[cfg(test)]
     shared.test_events.lock().unwrap().clear();
-    let run_id = shared.next_run_id.fetch_add(1, Ordering::Relaxed);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let start_cancelled = owned_start_gate
+        .as_ref()
+        .is_some_and(|gate| !gate.wait_for_start());
+    let result = if start_cancelled {
+        Err(ExecutionDiagnostic::new(
+            DiagnosticKind::Cancelled,
+            "Macro run was cancelled before start",
+        ))
+    } else {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let program = match prepared_program {
             Some(program) => program,
             None => {
@@ -1247,26 +1581,36 @@ fn run_one(
             options,
             &observer,
         )
-    }))
-    .unwrap_or_else(|payload| {
-        let message = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| {
-                payload
-                    .downcast_ref::<&str>()
-                    .map(|text| (*text).to_owned())
-            })
-            .unwrap_or_else(|| "non-string panic payload".into());
-        tracing::error!(macro_id = mid, %message, "macro execution panicked");
-        Err(ExecutionDiagnostic::new(
-            DiagnosticKind::Panic,
-            format!("Macro execution panicked: {message}"),
-        )
-        .context("macro_id", mid.to_string()))
-    });
-    run_guard.complete(|| {
+        }))
+        .unwrap_or_else(|payload| {
+            let message = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|text| (*text).to_owned())
+                })
+                .unwrap_or_else(|| "non-string panic payload".into());
+            tracing::error!(macro_id = mid, %message, "macro execution panicked");
+            Err(ExecutionDiagnostic::new(
+                DiagnosticKind::Panic,
+                format!("Macro execution panicked: {message}"),
+            )
+            .context("macro_id", mid.to_string()))
+        })
+    };
+    let failure_kind = result.as_ref().err().map(|diagnostic| diagnostic.kind);
+    let state = run_guard.complete(|| {
         let stopped = shared.control.is_stopped();
+        let state = match &result {
+            Ok(()) if stopped => RuntimeState::Stopped,
+            Ok(()) => RuntimeState::Completed,
+            Err(diagnostic) if diagnostic.kind == DiagnosticKind::Cancelled => {
+                RuntimeState::Stopped
+            }
+            Err(_) => RuntimeState::Failed,
+        };
         publish(shared, |s| {
             // Failed preparation still belongs to this admitted run, rather
             // than retaining the identity/status maps of an earlier macro.
@@ -1282,11 +1626,7 @@ fn run_one(
             }
             match result {
                 Ok(()) => {
-                    s.state = if stopped {
-                        RuntimeState::Stopped
-                    } else {
-                        RuntimeState::Completed
-                    }
+                    s.state = state;
                 }
                 Err(d) if d.kind == DiagnosticKind::Cancelled => s.state = RuntimeState::Stopped,
                 Err(d) => {
@@ -1312,7 +1652,16 @@ fn run_one(
             s.pause_reason = None;
             s.finished_at = Some(SystemTime::now());
         });
+        state
     });
+    if let Some(completion) = owned_completion {
+        let _ = completion.send(OwnedMacroRunCompletion {
+            run_id,
+            macro_id: mid,
+            state,
+            failure_kind,
+        });
+    }
 }
 
 static RUNTIME: Lazy<RwLock<Option<Arc<MacroRuntime>>>> = Lazy::new(|| RwLock::new(None));
@@ -1504,6 +1853,32 @@ fn global() -> Result<Arc<MacroRuntime>> {
         .clone()
         .ok_or_else(|| anyhow!("macro runtime is not initialized"))
 }
+
+pub(crate) fn hotfolder_runtime_available() -> bool {
+    RUNTIME
+        .read()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|runtime| runtime.is_available())
+}
+
+pub(crate) fn start_hotfolder_macro(
+    expected_macro: &super::MkMacro,
+    expected_dependencies: &[super::MkMacro],
+) -> ExecResult<OwnedMacroRun> {
+    let runtime = RUNTIME
+        .read()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| {
+            ExecutionDiagnostic::new(
+                DiagnosticKind::RuntimeUnavailable,
+                "macro runtime is not initialized",
+            )
+        })?;
+    runtime.start_owned_hotfolder_macro(expected_macro, expected_dependencies)
+}
+
 fn command_result(result: CommandResult) -> ExecResult {
     match result {
         CommandResult::Accepted => Ok(()),
@@ -4357,6 +4732,180 @@ mod run_mode_tests {
             )
             .unwrap();
         assert_eq!(recorder.stop().unwrap().target.macro_id, 1);
+    }
+
+    #[test]
+    fn owned_hotfolder_run_preserves_user_admission_and_cancels_exact_pending_id() {
+        let target = test_macro(
+            701,
+            true,
+            vec![step(
+                1,
+                MkAction::Text(MkTextPayload {
+                    text: "user run remains owned".into(),
+                    mode: MkTextMode::Type,
+                }),
+            )],
+        );
+
+        let (_user_dir, user_runtime, _user_guard, user_backend) =
+            runtime_with_effects(vec![target.clone()]);
+        let user_runtime = Arc::new(user_runtime);
+        let user_barrier = user_runtime.install_test_worker_barrier();
+        assert_eq!(
+            user_runtime.command(RuntimeCommand::Run(target.id)),
+            CommandResult::Accepted
+        );
+        user_barrier.wait_until_blocked();
+        let user_run_id = user_runtime
+            .shared
+            .admission
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("user run is admitted before worker start")
+            .run_id;
+        assert!(matches!(
+            user_runtime.start_owned_hotfolder_macro(&target, std::slice::from_ref(&target)),
+            Err(ExecutionDiagnostic {
+                kind: DiagnosticKind::RuntimeUnavailable,
+                ..
+            })
+        ));
+        assert_eq!(
+            user_runtime
+                .shared
+                .admission
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|active| active.run_id),
+            Some(user_run_id)
+        );
+        user_barrier.release();
+        let user_terminal = wait_for_terminal(&user_runtime);
+        assert_eq!(user_terminal.run_id, user_run_id);
+        assert_eq!(user_terminal.state, RuntimeState::Completed);
+        assert_eq!(user_backend.events(), ["text:user run remains owned"]);
+
+        let root = test_macro(
+            702,
+            true,
+            vec![step(
+                1,
+                MkAction::CallMacro(crate::mkmacro::MkCallMacroPayload {
+                    macro_id: 703,
+                    ..Default::default()
+                }),
+            )],
+        );
+        let child = test_macro(
+            703,
+            true,
+            vec![step(1, MkAction::Delay(MkDelayPayload::default()))],
+        );
+        let validated_document = crate::mkmacro::MkMacroDocument {
+            macros: vec![root.clone(), child.clone()],
+            ..Default::default()
+        };
+        let (validated_action, validated_dependencies) =
+            crate::hotfolder::bind_mkmacro_action_with_dependencies(
+                &validated_document,
+                root.id,
+            )
+            .expect("capture the validated dependency closure");
+        assert!(matches!(
+            validated_action,
+            crate::hotfolder::RuleAction::MkMacro { .. }
+        ));
+        let mut edited_child = child;
+        edited_child.steps[0].action = MkAction::Process(crate::mkmacro::MkProcessPayload {
+            program: r"C:\Fixture\unsafe.exe".into(),
+            arguments: Vec::new(),
+            working_directory: None,
+            wait: false,
+        });
+        let (_race_dir, raced_runtime, _race_guard, _race_backend) =
+            runtime_with_effects(vec![root.clone(), edited_child]);
+        let raced_runtime = Arc::new(raced_runtime);
+        assert!(matches!(
+            raced_runtime.start_owned_hotfolder_macro(&root, &validated_dependencies),
+            Err(ExecutionDiagnostic {
+                kind: DiagnosticKind::InvalidTarget,
+                ..
+            })
+        ));
+        assert!(
+            raced_runtime
+                .shared
+                .admission
+                .lock()
+                .unwrap()
+                .is_none(),
+            "an edited transitive dependency must fail before run admission"
+        );
+
+        let (_owned_dir, owned_runtime, _owned_guard, owned_backend) =
+            runtime_with_effects(vec![target.clone()]);
+        let owned_runtime = Arc::new(owned_runtime);
+        let owned_barrier = owned_runtime.install_test_worker_barrier();
+        let owned = owned_runtime
+            .start_owned_hotfolder_macro(&target, std::slice::from_ref(&target))
+            .expect("owned invocation is admitted");
+        owned_barrier.wait_until_blocked();
+        let owned_run_id = owned.run_id();
+        assert!(matches!(
+            owned_runtime.command(RuntimeCommand::Run(target.id)),
+            CommandResult::AlreadyRunning {
+                active_macro_id: 701
+            }
+        ));
+
+        let cancellation = crate::file_operations::ScanCancellation::new();
+        cancellation.cancel();
+        assert!(!owned.activate_if_not_cancelled(&cancellation));
+        assert!(owned.stop_if_current());
+        owned_barrier.release();
+        let terminal = owned
+            .wait_completion(Duration::from_secs(2))
+            .expect("owned invocation returns its exact terminal receipt");
+        assert_eq!(terminal.run_id, owned_run_id);
+        assert_eq!(terminal.macro_id, target.id);
+        assert_eq!(terminal.state, RuntimeState::Stopped);
+        assert!(owned_backend.events().is_empty());
+        assert_eq!(owned_runtime.snapshot().run_id, owned_run_id);
+
+        let next_barrier = owned_runtime.install_test_worker_barrier();
+        assert_eq!(
+            owned_runtime.command(RuntimeCommand::Run(target.id)),
+            CommandResult::Accepted
+        );
+        next_barrier.wait_until_blocked();
+        let next_run_id = owned_runtime
+            .shared
+            .admission
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("next user run is admitted")
+            .run_id;
+        assert!(next_run_id > owned_run_id);
+        assert!(!owned.stop_if_current());
+        assert_eq!(
+            owned_runtime
+                .shared
+                .admission
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|active| active.run_id),
+            Some(next_run_id)
+        );
+        next_barrier.release();
+        assert_eq!(
+            wait_for_terminal_after(&owned_runtime, owned_run_id).state,
+            RuntimeState::Completed
+        );
     }
 
     #[test]

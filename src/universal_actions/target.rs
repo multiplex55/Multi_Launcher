@@ -94,7 +94,7 @@ impl ActionTarget {
 
 /// Stable subset of [`ActionTarget`] identities that may be stored in future
 /// Universal Action configuration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PersistableActionTargetRef {
     LegacyAction { action: Action },
@@ -109,7 +109,7 @@ pub enum PersistableActionTargetRef {
 
 /// Stable reference to a semantic action, optionally scoped to a persistable
 /// target. A missing target supports future global/root-surface actions.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedUniversalActionRef {
     pub target: Option<PersistableActionTargetRef>,
     pub action_id: ActionId,

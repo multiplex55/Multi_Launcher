@@ -14,10 +14,13 @@ pub use capability::{
     ActionCapability, ActionEnablement, HotFolderCapabilityContext, RootAvailability,
     bind_mkmacro_action, bind_registered_launcher_action, evaluate_action_capability,
 };
+pub(crate) use capability::{bind_mkmacro_action_with_dependencies, is_registered_process_target};
 pub use execution::{
     HotFolderExecutionAction, HotFolderExecutionEngine, HotFolderExecutionError,
     HotFolderExecutionPhase, HotFolderExecutionReceipt, HotFolderExecutionSnapshot,
     HotFolderExternalActionAdapter, HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
+    HotFolderExternalEnableAuthorization, HotFolderExternalFileEvidence,
+    HotFolderExternalTargetReceipt,
     HotFolderOutputEvidence, HotFolderOutputKind, HotFolderRunDisposition, HotFolderTerminalStatus,
 };
 pub use model::{

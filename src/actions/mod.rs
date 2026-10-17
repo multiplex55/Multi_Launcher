@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 static ACTIONS_VERSION: AtomicU64 = AtomicU64::new(0);
 static ACTIONS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Action {
     pub label: String,
     pub desc: String,

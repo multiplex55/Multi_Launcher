@@ -46,6 +46,7 @@ mod ocr;
 mod ocr_view;
 mod paste_sequence_dialog;
 mod hash_generator_dialog;
+pub(crate) mod hotfolder_dispatch;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;
@@ -809,6 +810,8 @@ pub struct LauncherApp {
     /// actions are edited the entire `Arc` is replaced with a new one.
     pub actions: Arc<Vec<Action>>,
     command_bus: Arc<crate::commands::CommandBus>,
+    hotfolder_action_adapter: Arc<hotfolder_dispatch::LauncherHotFolderActionAdapter>,
+    hotfolder_action_pump: hotfolder_dispatch::LauncherActionCompletionPump,
     action_cache: Vec<CachedSearchEntry>,
     action_filter_metadata: Vec<ActionFilterMetadata>,
     actions_by_id: ActionIdLookup,
@@ -2811,9 +2814,16 @@ impl LauncherApp {
         mkmacro_timer.finish("startup.mkmacro");
         let screen_draw_recovery_bridge =
             Arc::new(crate::screen_draw::ScreenDrawRecoveryBridge::default());
+        let (hotfolder_action_adapter, hotfolder_action_pump) =
+            hotfolder_dispatch::LauncherHotFolderActionAdapter::new(
+                ctx.clone(),
+                Arc::clone(&plugins.internal_services().mkmacro_store),
+            );
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
+            hotfolder_action_adapter,
+            hotfolder_action_pump,
             query: String::new(),
             query_history: QueryHistoryNavigator::default(),
             results: (*actions).clone(),

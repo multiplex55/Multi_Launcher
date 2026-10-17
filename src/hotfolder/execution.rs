@@ -4,7 +4,9 @@
 //! rechecks its current rule and native evidence, and delegates all mutation to
 //! the shared native file-operation owner.
 
-use super::capability::{ActionCapability, HotFolderCapabilityContext, evaluate_action_capability};
+use super::capability::{
+    ActionCapability, ActionEnablement, HotFolderCapabilityContext, evaluate_action_capability,
+};
 use super::model::{
     ConfigurationFingerprint, HotFolderRule, MAX_RULES, RuleAction, RuleId, RuleTrigger,
 };
@@ -105,6 +107,13 @@ pub struct HotFolderExecutionReceipt {
     pub source_length: u64,
     pub source_modified: SystemTime,
     pub source_sha256: Option<[u8; 32]>,
+    /// Exact persisted target and selected definition used by an external
+    /// action. Arguments and macro bodies are intentionally excluded.
+    pub external_target: Option<HotFolderExternalTargetReceipt>,
+    /// Full structured source identity supplied to an external adapter.
+    pub external_input: Option<HotFolderExternalFileEvidence>,
+    /// Actual MkMacro runtime run ID, when this receipt belongs to a macro.
+    pub external_run_id: Option<u64>,
     pub outputs: Vec<HotFolderOutputEvidence>,
     pub phase: HotFolderExecutionPhase,
     pub status: HotFolderTerminalStatus,
@@ -156,9 +165,44 @@ impl From<HotFolderRuntimeError> for HotFolderExecutionError {
     }
 }
 
-/// Correlated handoff for the later launcher/MkMacro dispatch milestone.
-/// M10-C deliberately ships without a production adapter, so these actions
-/// remain unavailable and are never invoked here.
+/// Opaque evidence that the candidate was transferred from the currently
+/// enabled rule epoch after C revalidated its enable authorization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotFolderExternalEnableAuthorization {
+    pub store_revision: u64,
+    pub epoch: u64,
+    pub rule_fingerprint: ConfigurationFingerprint,
+    pub enablement: ActionEnablement,
+}
+
+/// Native file evidence passed as structured context; adapters must not
+/// append it to command text or supply it as an implicit macro argument.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotFolderExternalFileEvidence {
+    pub path: PathBuf,
+    pub root_identity: NativeFileIdentity,
+    pub parent_identity: NativeFileIdentity,
+    pub file_identity: NativeFileIdentity,
+    pub length: u64,
+    pub modified: SystemTime,
+    pub sha256: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HotFolderExternalTargetReceipt {
+    RegisteredLauncherAction {
+        reference: crate::universal_actions::PersistedUniversalActionRef,
+        configuration_fingerprint: ConfigurationFingerprint,
+    },
+    MkMacro {
+        macro_id: u64,
+        configuration_fingerprint: ConfigurationFingerprint,
+    },
+}
+
+/// Immutable action request handed from C to the adapter. Its operation ID is
+/// also the completion correlation key; C remains the execution state owner.
 #[derive(Clone, Debug)]
 pub struct HotFolderExternalActionRequest {
     pub operation_id: u128,
@@ -166,10 +210,14 @@ pub struct HotFolderExternalActionRequest {
     pub rule_id: RuleId,
     pub rule_fingerprint: ConfigurationFingerprint,
     pub action: RuleAction,
+    pub authorization: HotFolderExternalEnableAuthorization,
+    pub file: HotFolderExternalFileEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HotFolderExternalActionOutcome {
+    pub operation_id: u128,
+    pub macro_run_id: Option<u64>,
     pub status: HotFolderTerminalStatus,
     pub phase: HotFolderExecutionPhase,
     pub reason: Option<String>,
@@ -177,6 +225,10 @@ pub struct HotFolderExternalActionOutcome {
 
 /// Narrow integration seam for M10-D. Production remains `None` through M10-C.
 pub trait HotFolderExternalActionAdapter: Send + Sync {
+    /// True only while the actual completion-bearing target bridge is
+    /// installed. Target identity and fingerprint are validated separately.
+    fn supports(&self, action: &RuleAction) -> bool;
+
     fn dispatch(
         &self,
         request: HotFolderExternalActionRequest,
@@ -323,6 +375,7 @@ pub struct HotFolderExecutionEngine {
     journal_path: PathBuf,
     operation_port: Arc<dyn HotFolderOperationPort>,
     clock: Arc<dyn ExecutionClock>,
+    external_adapter: Option<Arc<dyn HotFolderExternalActionAdapter>>,
 }
 
 impl HotFolderExecutionEngine {
@@ -332,6 +385,26 @@ impl HotFolderExecutionEngine {
             Arc::new(NativeHotFolderOperationPort),
             Arc::new(SystemExecutionClock),
         )
+    }
+
+    /// Create an executor with the real typed launcher/MkMacro completion
+    /// bridge. Callers must use the same adapter when building capability
+    /// context so unavailable targets cannot be enabled.
+    pub fn new_with_external_adapter(
+        store: &HotFolderRulesStore,
+        external_adapter: Arc<dyn HotFolderExternalActionAdapter>,
+    ) -> Result<Self, HotFolderExecutionError> {
+        let mut engine = Self::new_with_dependencies(
+            store,
+            Arc::new(NativeHotFolderOperationPort),
+            Arc::new(SystemExecutionClock),
+        )?;
+        engine.external_adapter = Some(external_adapter);
+        Ok(engine)
+    }
+
+    pub fn external_action_adapter(&self) -> Option<Arc<dyn HotFolderExternalActionAdapter>> {
+        self.external_adapter.clone()
     }
 
     fn new_with_dependencies(
@@ -395,6 +468,7 @@ impl HotFolderExecutionEngine {
             journal_path,
             operation_port,
             clock,
+            external_adapter: None,
         })
     }
 
@@ -601,6 +675,10 @@ impl HotFolderExecutionEngine {
             source_length: candidate.evidence.length,
             source_modified: candidate.evidence.modified,
             source_sha256: None,
+            external_target: external_target_receipt(&rule.action),
+            external_input: is_external_action(&rule.action)
+                .then(|| external_file_evidence_from_candidate(&candidate, None)),
+            external_run_id: None,
             outputs,
             phase,
             status,
@@ -708,19 +786,29 @@ impl HotFolderExecutionEngine {
         };
         let current_fingerprint = ConfigurationFingerprint::of_serializable(current_rule)
             .map_err(|_| HotFolderExecutionError::InvalidJournal)?;
+        let action_capability = evaluate_action_capability(current_rule, context);
+        let adapter_available = match &current_rule.action {
+            RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. } => true,
+            external_action => self
+                .external_adapter
+                .as_ref()
+                .is_some_and(|adapter| adapter.supports(external_action)),
+        };
         if !current_rule.enabled
             || current_fingerprint != candidate.rule_fingerprint
             || candidate.rule_fingerprint
                 != ConfigurationFingerprint::of_serializable(&candidate.rule)
                     .map_err(|_| HotFolderExecutionError::InvalidJournal)?
-            || !matches!(
-                evaluate_action_capability(current_rule, context),
-                ActionCapability::Supported { .. }
-            )
+            || !adapter_available
+            || !matches!(&action_capability, ActionCapability::Supported { .. })
         {
             watcher.finish_lease(lease, HotFolderLeaseDisposition::RejectStale)?;
             return Ok(Some(HotFolderRunDisposition::StaleCandidate));
         }
+        let enablement = match &action_capability {
+            ActionCapability::Supported { enablement } => *enablement,
+            _ => unreachable!("unsupported actions are rejected before lease transfer"),
+        };
 
         let first = self.first_matching_rule(&rules, &candidate)?;
         if first.as_ref().is_none_or(|rule| rule.id != current_rule.id) {
@@ -1014,7 +1102,7 @@ impl HotFolderExecutionEngine {
                 .push_back(started);
         }
 
-        let operation_result = match action {
+        let (status, phase, outputs, reason, external_run_id) = match action {
             PlannedAction::Builtin {
                 action,
                 destination,
@@ -1022,7 +1110,7 @@ impl HotFolderExecutionEngine {
                 let mut record_progress = |progress| {
                     self.persist_native_progress(&key, &mut journal_row, progress)
                 };
-                self.operation_port.execute(
+                let result = self.operation_port.execute(
                     &root,
                     &candidate.path,
                     input,
@@ -1032,17 +1120,93 @@ impl HotFolderExecutionEngine {
                     operation_id,
                     &mut record_progress,
                     &cancellation,
-                )
+                );
+                let (status, phase, outputs, reason) = terminal_from_native(result);
+                (status, phase, outputs, reason, None)
             }
-            PlannedAction::ExternalUnavailable => Err(native_execution_error(
-                NativeHotFolderFailureKind::Io,
-                "external action dispatch is unavailable until M10-D",
-                Vec::new(),
-            )),
-            PlannedAction::Rejected(error) => Err(error),
+            PlannedAction::External => {
+                match self.external_adapter.as_ref() {
+                    None => {
+                        let (status, phase, outputs, reason) = terminal_from_native(Err(
+                            native_execution_error(
+                                NativeHotFolderFailureKind::Io,
+                                "external action dispatch is unavailable",
+                                Vec::new(),
+                            ),
+                        ));
+                        (status, phase, outputs, reason, None)
+                    }
+                    Some(adapter) => {
+                        let request = HotFolderExternalActionRequest {
+                            operation_id,
+                            candidate_id: candidate.correlation,
+                            rule_id: current_rule.id.clone(),
+                            rule_fingerprint: current_fingerprint.clone(),
+                            action: current_rule.action.clone(),
+                            authorization: HotFolderExternalEnableAuthorization {
+                                store_revision: candidate.store_revision,
+                                epoch: candidate.epoch,
+                                rule_fingerprint: current_fingerprint.clone(),
+                                enablement,
+                            },
+                            file: HotFolderExternalFileEvidence {
+                                path: candidate.path.clone(),
+                                root_identity: input.root_identity,
+                                parent_identity: input.parent_identity,
+                                file_identity: input.file_identity,
+                                length: input.length,
+                                modified: input.modified,
+                                sha256: Some(input.sha256),
+                            },
+                        };
+                        let outcome = adapter.dispatch(request, &cancellation);
+                        if outcome.operation_id != operation_id {
+                            (
+                                HotFolderTerminalStatus::Failure,
+                                HotFolderExecutionPhase::Admission,
+                                Vec::new(),
+                                Some("external action returned a mismatched completion".into()),
+                                None,
+                            )
+                        } else if !valid_external_correlation(
+                            &current_rule.action,
+                            &outcome,
+                        ) {
+                            (
+                                HotFolderTerminalStatus::Failure,
+                                HotFolderExecutionPhase::Admission,
+                                Vec::new(),
+                                Some("external action returned invalid target correlation".into()),
+                                None,
+                            )
+                        } else if outcome.status == HotFolderTerminalStatus::Success
+                            && outcome.phase != HotFolderExecutionPhase::Complete
+                        {
+                            (
+                                HotFolderTerminalStatus::Failure,
+                                HotFolderExecutionPhase::Admission,
+                                Vec::new(),
+                                Some("external action returned an invalid terminal phase".into()),
+                                None,
+                            )
+                        } else {
+                            (
+                                outcome.status,
+                                outcome.phase,
+                                Vec::new(),
+                                outcome.reason,
+                                outcome.macro_run_id,
+                            )
+                        }
+                    }
+                }
+            }
+            PlannedAction::Rejected(error) => {
+                let (status, phase, outputs, reason) = terminal_from_native(Err(error));
+                (status, phase, outputs, reason, None)
+            }
         };
         let finished = self.clock.now();
-        let (status, phase, outputs, reason) = terminal_from_native(operation_result);
         let receipt = HotFolderExecutionReceipt {
             operation_id,
             candidate_id: candidate.correlation,
@@ -1054,6 +1218,10 @@ impl HotFolderExecutionEngine {
             source_length: input.length,
             source_modified: input.modified,
             source_sha256: Some(input.sha256),
+            external_target: external_target_receipt(&current_rule.action),
+            external_input: is_external_action(&current_rule.action)
+                .then(|| external_file_evidence(&candidate, input)),
+            external_run_id,
             outputs,
             phase,
             status,
@@ -1197,7 +1365,7 @@ impl HotFolderExecutionEngine {
                 ))
             }
             RuleAction::RegisteredLauncherAction { .. } | RuleAction::MkMacro { .. } => Ok((
-                PlannedAction::ExternalUnavailable,
+                PlannedAction::External,
                 None,
                 source_leaf.to_os_string(),
                 candidate.path.clone(),
@@ -1217,7 +1385,7 @@ enum PlannedAction {
         action: NativeHotFolderAction,
         destination: Option<NativeWatchRoot>,
     },
-    ExternalUnavailable,
+    External,
     Rejected(NativeHotFolderError),
 }
 
@@ -1282,6 +1450,115 @@ fn execution_action(kind: &str) -> HotFolderExecutionAction {
         "rename" => HotFolderExecutionAction::Rename,
         "mkmacro" => HotFolderExecutionAction::MkMacro,
         _ => HotFolderExecutionAction::RegisteredLauncherAction,
+    }
+}
+
+fn is_external_action(action: &RuleAction) -> bool {
+    matches!(
+        action,
+        RuleAction::RegisteredLauncherAction { .. } | RuleAction::MkMacro { .. }
+    )
+}
+
+fn valid_external_correlation(
+    action: &RuleAction,
+    outcome: &HotFolderExternalActionOutcome,
+) -> bool {
+    match (action, outcome.macro_run_id) {
+        (RuleAction::RegisteredLauncherAction { .. }, None) => true,
+        (RuleAction::RegisteredLauncherAction { .. }, Some(_)) => false,
+        (RuleAction::MkMacro { .. }, Some(run_id)) => {
+            run_id != 0 && outcome.phase == HotFolderExecutionPhase::Complete
+        }
+        (RuleAction::MkMacro { .. }, None) => {
+            outcome.phase == HotFolderExecutionPhase::Admission
+                && matches!(
+                    outcome.status,
+                    HotFolderTerminalStatus::Failure | HotFolderTerminalStatus::Cancelled
+                )
+        }
+        (RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. }, _) => {
+            false
+        }
+    }
+}
+
+fn external_target_receipt(
+    action: &RuleAction,
+) -> Option<HotFolderExternalTargetReceipt> {
+    match action {
+        RuleAction::RegisteredLauncherAction {
+            reference,
+            configuration_fingerprint,
+        } => Some(HotFolderExternalTargetReceipt::RegisteredLauncherAction {
+            reference: reference.clone(),
+            configuration_fingerprint: configuration_fingerprint.clone(),
+        }),
+        RuleAction::MkMacro {
+            macro_id,
+            configuration_fingerprint,
+        } => Some(HotFolderExternalTargetReceipt::MkMacro {
+            macro_id: *macro_id,
+            configuration_fingerprint: configuration_fingerprint.clone(),
+        }),
+        RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. } => None,
+    }
+}
+
+fn external_file_evidence(
+    candidate: &HotFolderReadyCandidate,
+    input: NativeHotFolderInput,
+) -> HotFolderExternalFileEvidence {
+    HotFolderExternalFileEvidence {
+        path: candidate.path.clone(),
+        root_identity: input.root_identity,
+        parent_identity: input.parent_identity,
+        file_identity: input.file_identity,
+        length: input.length,
+        modified: input.modified,
+        sha256: Some(input.sha256),
+    }
+}
+
+fn external_file_evidence_from_candidate(
+    candidate: &HotFolderReadyCandidate,
+    sha256: Option<[u8; 32]>,
+) -> HotFolderExternalFileEvidence {
+    HotFolderExternalFileEvidence {
+        path: candidate.path.clone(),
+        root_identity: candidate.evidence.root_identity,
+        parent_identity: candidate.evidence.parent_identity,
+        file_identity: candidate.evidence.file_identity,
+        length: candidate.evidence.length,
+        modified: candidate.evidence.modified,
+        sha256,
+    }
+}
+
+fn valid_external_target(
+    target: &HotFolderExternalTargetReceipt,
+    action: HotFolderExecutionAction,
+) -> bool {
+    match (target, action) {
+        (
+            HotFolderExternalTargetReceipt::RegisteredLauncherAction {
+                reference,
+                configuration_fingerprint,
+            },
+            HotFolderExecutionAction::RegisteredLauncherAction,
+        ) => {
+            reference.action_id == crate::universal_actions::action_ids::RESULT_EXECUTE
+                && reference.target.is_some()
+                && configuration_fingerprint.is_valid()
+        }
+        (
+            HotFolderExternalTargetReceipt::MkMacro {
+                macro_id,
+                configuration_fingerprint,
+            },
+            HotFolderExecutionAction::MkMacro,
+        ) => *macro_id != 0 && configuration_fingerprint.is_valid(),
+        _ => false,
     }
 }
 
@@ -1790,6 +2067,12 @@ struct JournalReceipt {
     #[serde(with = "journal_u128_decimal")]
     source_modified_nanos: u128,
     source_sha256: Option<[u8; 32]>,
+    #[serde(default)]
+    external_target: Option<HotFolderExternalTargetReceipt>,
+    #[serde(default)]
+    external_input: Option<JournalExternalFileEvidence>,
+    #[serde(default)]
+    external_run_id: Option<u64>,
     outputs: Vec<JournalOutputEvidence>,
     phase: HotFolderExecutionPhase,
     status: HotFolderTerminalStatus,
@@ -1798,6 +2081,52 @@ struct JournalReceipt {
     duration_ms: u64,
     reason: Option<String>,
     durable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalExternalFileEvidence {
+    path: StoredPath,
+    root_identity: NativeFileIdentity,
+    parent_identity: NativeFileIdentity,
+    file_identity: NativeFileIdentity,
+    length: u64,
+    #[serde(with = "journal_u128_decimal")]
+    modified_unix_nanos: u128,
+    sha256: Option<[u8; 32]>,
+}
+
+impl JournalExternalFileEvidence {
+    fn from_evidence(evidence: &HotFolderExternalFileEvidence) -> Self {
+        Self {
+            path: StoredPath::from_path(&evidence.path),
+            root_identity: evidence.root_identity,
+            parent_identity: evidence.parent_identity,
+            file_identity: evidence.file_identity,
+            length: evidence.length,
+            modified_unix_nanos: system_time_nanos(evidence.modified),
+            sha256: evidence.sha256,
+        }
+    }
+
+    fn to_evidence(&self) -> Result<HotFolderExternalFileEvidence, HotFolderExecutionError> {
+        let path = self
+            .path
+            .to_path()
+            .ok_or(HotFolderExecutionError::InvalidJournal)?;
+        if !path.is_absolute() {
+            return Err(HotFolderExecutionError::InvalidJournal);
+        }
+        Ok(HotFolderExternalFileEvidence {
+            path,
+            root_identity: self.root_identity,
+            parent_identity: self.parent_identity,
+            file_identity: self.file_identity,
+            length: self.length,
+            modified: system_time_from_nanos(self.modified_unix_nanos),
+            sha256: self.sha256,
+        })
+    }
 }
 
 impl JournalReceipt {
@@ -1813,6 +2142,12 @@ impl JournalReceipt {
             source_length: receipt.source_length,
             source_modified_nanos: system_time_nanos(receipt.source_modified),
             source_sha256: receipt.source_sha256,
+            external_target: receipt.external_target.clone(),
+            external_input: receipt
+                .external_input
+                .as_ref()
+                .map(JournalExternalFileEvidence::from_evidence),
+            external_run_id: receipt.external_run_id,
             outputs: receipt
                 .outputs
                 .iter()
@@ -1834,6 +2169,7 @@ impl JournalReceipt {
             || self.reason.as_ref().is_some_and(|reason| {
                 reason.len() > MAX_RECEIPT_REASON_CHARS || reason.chars().any(char::is_control)
             })
+            || self.external_run_id.is_some_and(|run_id| run_id == 0)
         {
             return Err(HotFolderExecutionError::InvalidJournal);
         }
@@ -1842,6 +2178,30 @@ impl JournalReceipt {
             .to_path()
             .ok_or(HotFolderExecutionError::InvalidJournal)?;
         if !source_path.is_absolute() {
+            return Err(HotFolderExecutionError::InvalidJournal);
+        }
+        if self.external_target.as_ref().is_some_and(|target| {
+            !valid_external_target(target, self.action)
+        }) {
+            return Err(HotFolderExecutionError::InvalidJournal);
+        }
+        let external_input = self
+            .external_input
+            .as_ref()
+            .map(JournalExternalFileEvidence::to_evidence)
+            .transpose()?;
+        if external_input.as_ref().is_some_and(|input| {
+            input.path != source_path
+                || input.file_identity != self.source_identity
+                || input.length != self.source_length
+                || input.modified != system_time_from_nanos(self.source_modified_nanos)
+                || input.sha256 != self.source_sha256
+        }) || (self.external_run_id.is_some()
+            && !matches!(
+                self.external_target.as_ref(),
+                Some(HotFolderExternalTargetReceipt::MkMacro { .. })
+            ))
+        {
             return Err(HotFolderExecutionError::InvalidJournal);
         }
         Ok(HotFolderExecutionReceipt {
@@ -1855,6 +2215,9 @@ impl JournalReceipt {
             source_length: self.source_length,
             source_modified: system_time_from_nanos(self.source_modified_nanos),
             source_sha256: self.source_sha256,
+            external_target: self.external_target.clone(),
+            external_input,
+            external_run_id: self.external_run_id,
             outputs: self
                 .outputs
                 .iter()
@@ -1948,6 +2311,59 @@ mod tests {
     use crate::platform::app_data::AppDataRoot;
     use crate::universal_actions::{ActionResolutionContext, ActionSurface};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CorrelatedExternalAdapter {
+        calls: AtomicUsize,
+        last_request: Mutex<Option<HotFolderExternalActionRequest>>,
+        macro_run_id: u64,
+    }
+
+    impl HotFolderExternalActionAdapter for CorrelatedExternalAdapter {
+        fn supports(&self, action: &RuleAction) -> bool {
+            matches!(action, RuleAction::MkMacro { .. })
+        }
+
+        fn dispatch(
+            &self,
+            request: HotFolderExternalActionRequest,
+            _cancellation: &ScanCancellation,
+        ) -> HotFolderExternalActionOutcome {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_request.lock().expect("adapter request") = Some(request.clone());
+            HotFolderExternalActionOutcome {
+                operation_id: request.operation_id,
+                macro_run_id: Some(self.macro_run_id),
+                status: HotFolderTerminalStatus::Success,
+                phase: HotFolderExecutionPhase::Complete,
+                reason: None,
+            }
+        }
+    }
+
+    struct PreAdmissionExternalAdapter {
+        status: HotFolderTerminalStatus,
+        reason: &'static str,
+    }
+
+    impl HotFolderExternalActionAdapter for PreAdmissionExternalAdapter {
+        fn supports(&self, action: &RuleAction) -> bool {
+            matches!(action, RuleAction::MkMacro { .. })
+        }
+
+        fn dispatch(
+            &self,
+            request: HotFolderExternalActionRequest,
+            _cancellation: &ScanCancellation,
+        ) -> HotFolderExternalActionOutcome {
+            HotFolderExternalActionOutcome {
+                operation_id: request.operation_id,
+                macro_run_id: None,
+                status: self.status,
+                phase: HotFolderExecutionPhase::Admission,
+                reason: Some(self.reason.into()),
+            }
+        }
+    }
 
     struct FixedClock {
         now: Instant,
@@ -2149,6 +2565,189 @@ mod tests {
         engine
             .run_next_ready(&watcher, store, context)
             .expect("run candidate")
+    }
+
+    #[test]
+    fn external_terminal_is_correlated_and_finalized_once_by_c() {
+        let temp = tempfile::tempdir().expect("test workspace");
+        let data_root =
+            AppDataRoot::from_path(temp.path().join("target/productivity_expansion/app_data"));
+        let store = HotFolderRulesStore::new(&data_root);
+        store.load();
+
+        let watched = temp
+            .path()
+            .join("target/productivity_expansion/watch/incoming");
+        let mut macro_document = crate::mkmacro::MkMacroDocument::default();
+        macro_document.macros.push(crate::mkmacro::MkMacro {
+            signature: Default::default(),
+            id: 901,
+            name: "empty safe macro".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps: Vec::new(),
+        });
+        let action = super::super::capability::bind_mkmacro_action(&macro_document, 901)
+            .expect("bind safe macro closure");
+        let mut snapshot = store
+            .add_rule(0, HotFolderRule::new("macro", &watched, action))
+            .expect("add external rule");
+        let rule_id = snapshot.rules[0].id.clone();
+        let mut enabled = snapshot.rules[0].clone();
+        enabled.enabled = true;
+        snapshot = store
+            .replace_rule(snapshot.revision, enabled)
+            .expect("enable fixture rule");
+        let rule = snapshot.rules[0].clone();
+
+        let watched_root = test_native_watch_root(&watched, 7, test_native_identity(1).file_id());
+        let adapter = Arc::new(CorrelatedExternalAdapter {
+            calls: AtomicUsize::new(0),
+            last_request: Mutex::new(None),
+            macro_run_id: 7331,
+        });
+        let fake = Arc::new(FakeOperationPort {
+            roots: HashMap::from([(watched.clone(), watched_root.clone())]),
+            execute_calls: AtomicUsize::new(0),
+            journal_path: store
+                .path()
+                .parent()
+                .expect("app-data parent")
+                .join(JOURNAL_FILE),
+            fingerprint_failure: Mutex::new(None),
+        });
+        let mut engine = HotFolderExecutionEngine::new_with_dependencies(
+            &store,
+            fake.clone(),
+            Arc::new(FixedClock {
+                now: Instant::now(),
+                wall_now: UNIX_EPOCH + Duration::from_secs(100),
+            }),
+        )
+        .expect("execution engine");
+        engine.external_adapter = Some(adapter.clone());
+
+        let launcher_targets = [];
+        let roots = HashMap::from([(watched.clone(), crate::hotfolder::RootAvailability::ExistingDirectory)]);
+        let context = HotFolderCapabilityContext::new(
+            &launcher_targets,
+            ActionResolutionContext::new(ActionSurface::LauncherList, ""),
+            &macro_document,
+            &roots,
+        )
+        .with_external_action_adapter(adapter.as_ref());
+        let candidate = ready_candidate(
+            &rule,
+            watched.join("source-α.txt"),
+            watched_root.identity(),
+            watched_root.identity(),
+            33,
+            19,
+            snapshot.revision,
+            144,
+        );
+
+        let Some(HotFolderRunDisposition::Executed(receipt)) =
+            run_candidate(&engine, &store, &context, candidate.clone())
+        else {
+            panic!("external terminal must produce one C receipt")
+        };
+        let request = adapter
+            .last_request
+            .lock()
+            .expect("adapter request")
+            .clone()
+            .expect("one dispatched request");
+        assert_eq!(request.operation_id, receipt.operation_id);
+        assert_eq!(request.candidate_id, receipt.candidate_id);
+        assert_eq!(request.rule_id, rule_id);
+        assert_eq!(request.file.path, candidate.path);
+        assert_eq!(request.file.sha256, receipt.source_sha256);
+        assert_eq!(request.authorization.rule_fingerprint, receipt.rule_fingerprint);
+        assert_eq!(receipt.external_run_id, Some(7331));
+        assert_eq!(receipt.status, HotFolderTerminalStatus::Success);
+        assert_eq!(receipt.phase, HotFolderExecutionPhase::Complete);
+        assert!(receipt.durable);
+        assert_eq!(engine.snapshot().completed_runs, 1);
+
+        assert_eq!(
+            run_candidate(&engine, &store, &context, candidate),
+            Some(HotFolderRunDisposition::SuppressedDuplicate)
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(engine.snapshot().completed_runs, 1);
+        assert_eq!(fake.execute_calls.load(Ordering::SeqCst), 0);
+
+        let cancelled_adapter = Arc::new(PreAdmissionExternalAdapter {
+            status: HotFolderTerminalStatus::Cancelled,
+            reason: "runtime admission was cancelled",
+        });
+        engine.external_adapter = Some(cancelled_adapter.clone());
+        let cancelled_context = HotFolderCapabilityContext::new(
+            &launcher_targets,
+            ActionResolutionContext::new(ActionSurface::LauncherList, ""),
+            &macro_document,
+            &roots,
+        )
+        .with_external_action_adapter(cancelled_adapter.as_ref());
+        let cancelled_candidate = ready_candidate(
+            &rule,
+            watched.join("source-cancelled.txt"),
+            watched_root.identity(),
+            watched_root.identity(),
+            34,
+            20,
+            snapshot.revision,
+            145,
+        );
+        let Some(HotFolderRunDisposition::Executed(cancelled_receipt)) =
+            run_candidate(&engine, &store, &cancelled_context, cancelled_candidate)
+        else {
+            panic!("pre-admission cancellation must be journaled by C")
+        };
+        assert_eq!(cancelled_receipt.status, HotFolderTerminalStatus::Cancelled);
+        assert_eq!(cancelled_receipt.phase, HotFolderExecutionPhase::Admission);
+        assert_eq!(cancelled_receipt.external_run_id, None);
+        assert_eq!(
+            cancelled_receipt.reason.as_deref(),
+            Some("runtime admission was cancelled")
+        );
+
+        let busy_adapter = Arc::new(PreAdmissionExternalAdapter {
+            status: HotFolderTerminalStatus::Failure,
+            reason: "runtime is busy",
+        });
+        engine.external_adapter = Some(busy_adapter.clone());
+        let busy_context = HotFolderCapabilityContext::new(
+            &launcher_targets,
+            ActionResolutionContext::new(ActionSurface::LauncherList, ""),
+            &macro_document,
+            &roots,
+        )
+        .with_external_action_adapter(busy_adapter.as_ref());
+        let busy_candidate = ready_candidate(
+            &rule,
+            watched.join("source-busy.txt"),
+            watched_root.identity(),
+            watched_root.identity(),
+            35,
+            21,
+            snapshot.revision,
+            146,
+        );
+        let Some(HotFolderRunDisposition::Executed(busy_receipt)) =
+            run_candidate(&engine, &store, &busy_context, busy_candidate)
+        else {
+            panic!("pre-admission rejection must be journaled by C")
+        };
+        assert_eq!(busy_receipt.status, HotFolderTerminalStatus::Failure);
+        assert_eq!(busy_receipt.phase, HotFolderExecutionPhase::Admission);
+        assert_eq!(busy_receipt.external_run_id, None);
+        assert_eq!(busy_receipt.reason.as_deref(), Some("runtime is busy"));
     }
 
     #[test]

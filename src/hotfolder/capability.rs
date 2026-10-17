@@ -1,7 +1,8 @@
 use super::model::{ConfigurationFingerprint, HotFolderRule, RuleAction};
+use super::execution::HotFolderExternalActionAdapter;
 use crate::actions::Action;
 use crate::commands::{Command, ExternalCommand, parse_action};
-use crate::mkmacro::{MkMacro, MkMacroDocument};
+use crate::mkmacro::{MkAction, MkCondition, MkInvocation, MkMacro, MkMacroDocument};
 use crate::universal_actions::{
     ActionResolutionContext, ActionTarget, PersistableActionTargetRef, PersistedUniversalActionRef,
     ResolvedActionTarget, UniversalActionOperation, UniversalActionRegistry, action_ids,
@@ -31,6 +32,7 @@ pub struct HotFolderCapabilityContext<'a> {
     pub action_resolution: ActionResolutionContext<'a>,
     pub mkmacro_document: &'a MkMacroDocument,
     pub root_availability: &'a HashMap<PathBuf, RootAvailability>,
+    pub(crate) external_adapter: Option<&'a dyn HotFolderExternalActionAdapter>,
 }
 
 impl<'a> HotFolderCapabilityContext<'a> {
@@ -45,7 +47,16 @@ impl<'a> HotFolderCapabilityContext<'a> {
             action_resolution,
             mkmacro_document,
             root_availability,
+            external_adapter: None,
         }
+    }
+
+    pub fn with_external_action_adapter(
+        mut self,
+        adapter: &'a dyn HotFolderExternalActionAdapter,
+    ) -> Self {
+        self.external_adapter = Some(adapter);
+        self
     }
 }
 
@@ -81,13 +92,19 @@ pub fn bind_registered_launcher_action(
     })
 }
 
-/// Bind a macro by its current non-zero document ID and exact saved macro
-/// configuration. The document is only inspected; no compilation or execution
-/// is attempted at this boundary.
+/// Bind a macro by its current ID and the exact validated transitive definition
+/// closure that an unattended invocation would execute.
 pub fn bind_mkmacro_action(
     document: &MkMacroDocument,
     macro_id: u64,
 ) -> Result<RuleAction, &'static str> {
+    bind_mkmacro_action_with_dependencies(document, macro_id).map(|(action, _)| action)
+}
+
+pub(crate) fn bind_mkmacro_action_with_dependencies(
+    document: &MkMacroDocument,
+    macro_id: u64,
+) -> Result<(RuleAction, Vec<MkMacro>), &'static str> {
     if macro_id == 0 {
         return Err("MkMacro ID must be non-zero");
     }
@@ -95,16 +112,23 @@ pub fn bind_mkmacro_action(
         .macros
         .iter()
         .filter(|macro_| macro_.id == macro_id);
-    let macro_ = matches.next().ok_or("MkMacro no longer exists")?;
+    let _macro = matches.next().ok_or("MkMacro no longer exists")?;
     if matches.next().is_some() {
         return Err("MkMacro ID is ambiguous in the current document");
     }
-    let configuration_fingerprint = macro_configuration_fingerprint(macro_)
-        .map_err(|_| "MkMacro configuration could not be fingerprinted")?;
-    Ok(RuleAction::MkMacro {
-        macro_id,
-        configuration_fingerprint,
-    })
+    let invocation = MkInvocation::new(macro_id);
+    let program = crate::mkmacro::invocation::compile_invocation_program(document, &invocation)
+        .map_err(|_| "MkMacro dependency or parameter validation failed")?;
+    let dependency_definitions = macro_dependency_definitions(document, &program)?;
+    let configuration_fingerprint = macro_configuration_fingerprint(macro_id, &dependency_definitions)
+        .map_err(|_| "MkMacro dependency configuration could not be fingerprinted")?;
+    Ok((
+        RuleAction::MkMacro {
+            macro_id,
+            configuration_fingerprint,
+        },
+        dependency_definitions,
+    ))
 }
 
 pub fn evaluate_action_capability(
@@ -156,6 +180,7 @@ pub fn evaluate_action_capability(
             *macro_id,
             configuration_fingerprint,
             context.mkmacro_document,
+            context,
         ),
     }
 }
@@ -257,6 +282,19 @@ fn evaluate_registered_action(
         };
     }
 
+    let selected_action = RuleAction::RegisteredLauncherAction {
+        reference: reference.clone(),
+        configuration_fingerprint: saved_fingerprint.clone(),
+    };
+    if !context
+        .external_adapter
+        .is_some_and(|adapter| adapter.supports(&selected_action))
+    {
+        return ActionCapability::Unavailable {
+            reason: "registered launcher completion bridge is unavailable",
+        };
+    }
+
     ActionCapability::Supported {
         enablement: ActionEnablement::StrongConfirmationRequired,
     }
@@ -266,6 +304,7 @@ fn evaluate_mkmacro(
     macro_id: u64,
     saved_fingerprint: &ConfigurationFingerprint,
     document: &MkMacroDocument,
+    context: &HotFolderCapabilityContext<'_>,
 ) -> ActionCapability {
     let mut matches = document
         .macros
@@ -286,9 +325,28 @@ fn evaluate_mkmacro(
             reason: "MkMacro is disabled in the current document",
         };
     }
-    let Ok(current_fingerprint) = macro_configuration_fingerprint(current) else {
+    let invocation = MkInvocation::new(macro_id);
+    let program = match crate::mkmacro::invocation::compile_invocation_program(
+        document,
+        &invocation,
+    ) {
+        Ok(program) => program,
+        Err(_) => {
+            return ActionCapability::Unsupported {
+                reason: "MkMacro dependency or parameter validation failed",
+            };
+        }
+    };
+    let Ok(dependency_definitions) = macro_dependency_definitions(document, &program) else {
         return ActionCapability::Invalid {
-            reason: "MkMacro configuration could not be fingerprinted",
+            reason: "MkMacro dependency closure is invalid",
+        };
+    };
+    let Ok(current_fingerprint) =
+        macro_configuration_fingerprint(macro_id, &dependency_definitions)
+    else {
+        return ActionCapability::Invalid {
+            reason: "MkMacro dependency configuration could not be fingerprinted",
         };
     };
     if current_fingerprint != *saved_fingerprint {
@@ -297,11 +355,100 @@ fn evaluate_mkmacro(
         };
     }
 
-    // Transitive macro validation and correlated completion belong to the
-    // later runtime bridge. A resolved ID alone is not an unattended-safety
-    // claim.
-    ActionCapability::Unavailable {
-        reason: "MkMacro unattended capability requires runtime validation",
+    let action = RuleAction::MkMacro {
+        macro_id,
+        configuration_fingerprint: saved_fingerprint.clone(),
+    };
+    if !context
+        .external_adapter
+        .is_some_and(|adapter| adapter.supports(&action))
+    {
+        return ActionCapability::Unavailable {
+            reason: "MkMacro completion bridge is unavailable",
+        };
+    }
+
+    let Some(root_plan) = program.plan(macro_id) else {
+        return ActionCapability::Invalid {
+            reason: "MkMacro compiled root is missing",
+        };
+    };
+    let prepared = match crate::mkmacro::prepare_parameters(
+        root_plan.signature.parameters(),
+        root_plan.signature.outputs(),
+        &invocation.arguments,
+    ) {
+        Ok(prepared) if prepared.missing.is_empty() => prepared,
+        _ => {
+            return ActionCapability::Unsupported {
+                reason: "MkMacro requires invocation input with no unattended default",
+            };
+        }
+    };
+    if prepared
+        .clone()
+        .into_variables(root_plan.signature.parameters())
+        .is_err()
+    {
+        return ActionCapability::Unsupported {
+            reason: "MkMacro parameter defaults are invalid for unattended execution",
+        };
+    }
+
+    let mut strong_confirmation = false;
+    for macro_id in program.macro_ids() {
+        let Some(plan) = program.plan(*macro_id) else {
+            return ActionCapability::Invalid {
+                reason: "MkMacro dependency plan is missing",
+            };
+        };
+        for instruction in plan.instructions.iter().filter(|instruction| instruction.step.enabled) {
+            match &instruction.step.action {
+                MkAction::CallMacro(_)
+                | MkAction::Return(_)
+                | MkAction::Delay(_)
+                | MkAction::Notify(_)
+                | MkAction::PlaySound(_)
+                | MkAction::SetVariable { .. }
+                | MkAction::UnsetVariable { .. }
+                | MkAction::Else
+                | MkAction::EndIf
+                | MkAction::RepeatStart { .. }
+                | MkAction::RepeatEnd
+                | MkAction::WhileEnd
+                | MkAction::Break
+                | MkAction::Continue => {}
+                MkAction::If(condition) | MkAction::WhileStart { condition }
+                    if unattended_condition(condition) => {}
+                MkAction::Process(process) if !process.wait => {
+                    strong_confirmation = true;
+                }
+                _ => {
+                    return ActionCapability::Unsupported {
+                        reason: "MkMacro dependency requires an interactive or unsupported action",
+                    };
+                }
+            }
+        }
+    }
+
+    ActionCapability::Supported {
+        enablement: if strong_confirmation {
+            ActionEnablement::StrongConfirmationRequired
+        } else {
+            ActionEnablement::Standard
+        },
+    }
+}
+
+fn unattended_condition(condition: &MkCondition) -> bool {
+    match condition {
+        MkCondition::Variable { .. } => true,
+        MkCondition::All { conditions } | MkCondition::Any { conditions } => {
+            conditions.iter().all(unattended_condition)
+        }
+        MkCondition::Not { condition } => unattended_condition(condition),
+        _ => false,
     }
 }
 
@@ -323,13 +470,42 @@ fn action_configuration_fingerprint(
     })
 }
 
-fn macro_configuration_fingerprint(
-    macro_: &MkMacro,
-) -> Result<ConfigurationFingerprint, serde_json::Error> {
-    ConfigurationFingerprint::of_serializable(macro_)
+fn macro_dependency_definitions(
+    document: &MkMacroDocument,
+    program: &crate::mkmacro::MkCompiledProgram,
+) -> Result<Vec<MkMacro>, &'static str> {
+    let mut dependency_definitions = Vec::with_capacity(program.macro_ids().len());
+    for macro_id in program.macro_ids() {
+        let mut matching = document.macros.iter().filter(|macro_| macro_.id == *macro_id);
+        let Some(macro_) = matching.next() else {
+            return Err("macro dependency is missing");
+        };
+        if matching.next().is_some() {
+            return Err("macro dependency is ambiguous");
+        }
+        dependency_definitions.push(macro_.clone());
+    }
+    Ok(dependency_definitions)
 }
 
-fn is_registered_process_target(command: &ExternalCommand) -> bool {
+fn macro_configuration_fingerprint(
+    root_macro_id: u64,
+    dependency_definitions: &[MkMacro],
+) -> Result<ConfigurationFingerprint, &'static str> {
+    #[derive(Serialize)]
+    struct FingerprintSource<'a> {
+        root_macro_id: u64,
+        dependency_definitions: Vec<&'a MkMacro>,
+    }
+
+    ConfigurationFingerprint::of_serializable(&FingerprintSource {
+        root_macro_id,
+        dependency_definitions: dependency_definitions.iter().collect(),
+    })
+    .map_err(|_| "macro dependency configuration could not be serialized")
+}
+
+pub(crate) fn is_registered_process_target(command: &ExternalCommand) -> bool {
     if command.namespace.is_some() {
         return false;
     }
@@ -377,8 +553,37 @@ fn has_unknown_protocol_prefix(target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hotfolder::{
+        HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
+        HotFolderExecutionPhase, HotFolderTerminalStatus,
+    };
     use crate::universal_actions::{ActionResolutionContext, ActionSurface, ActionTarget};
     use std::collections::HashMap;
+
+    struct AvailableAdapter;
+
+    impl HotFolderExternalActionAdapter for AvailableAdapter {
+        fn supports(&self, action: &RuleAction) -> bool {
+            matches!(
+                action,
+                RuleAction::RegisteredLauncherAction { .. } | RuleAction::MkMacro { .. }
+            )
+        }
+
+        fn dispatch(
+            &self,
+            request: HotFolderExternalActionRequest,
+            _cancellation: &crate::file_operations::ScanCancellation,
+        ) -> HotFolderExternalActionOutcome {
+            HotFolderExternalActionOutcome {
+                operation_id: request.operation_id,
+                macro_run_id: None,
+                status: HotFolderTerminalStatus::Success,
+                phase: HotFolderExecutionPhase::Complete,
+                reason: None,
+            }
+        }
+    }
 
     fn root() -> PathBuf {
         std::env::temp_dir().join("target/productivity_expansion/watch/incoming")
@@ -426,12 +631,14 @@ mod tests {
 
     #[test]
     fn capability_resolves_only_exact_unattended_registered_process_actions() {
+        let adapter = AvailableAdapter;
         let document = MkMacroDocument::default();
         let roots = roots();
         let selected = target(external_action("Editor", Some("--open")));
         let bound = bind_registered_launcher_action(&selected).unwrap();
         let rules = [selected.clone()];
-        let context = capability_context(&rules, &document, &roots);
+        let context = capability_context(&rules, &document, &roots)
+            .with_external_action_adapter(&adapter);
         assert_eq!(
             evaluate_action_capability(&rule(bound.clone()), &context),
             ActionCapability::Supported {
@@ -448,14 +655,16 @@ mod tests {
         let mut changed = selected.clone();
         changed.selected_action.args = Some("--different".into());
         let changed_targets = [changed];
-        let changed_context = capability_context(&changed_targets, &document, &roots);
+        let changed_context = capability_context(&changed_targets, &document, &roots)
+            .with_external_action_adapter(&adapter);
         assert!(matches!(
             evaluate_action_capability(&rule(bound.clone()), &changed_context),
             ActionCapability::Unavailable { .. }
         ));
 
         let ambiguous_targets = [selected.clone(), selected.clone()];
-        let ambiguous_context = capability_context(&ambiguous_targets, &document, &roots);
+        let ambiguous_context = capability_context(&ambiguous_targets, &document, &roots)
+            .with_external_action_adapter(&adapter);
         assert!(matches!(
             evaluate_action_capability(&rule(bound), &ambiguous_context),
             ActionCapability::Invalid { .. }
@@ -469,7 +678,8 @@ mod tests {
         });
         let unknown_ref = bind_registered_launcher_action(&unknown).unwrap();
         let unknown_targets = [unknown];
-        let unknown_context = capability_context(&unknown_targets, &document, &roots);
+        let unknown_context = capability_context(&unknown_targets, &document, &roots)
+            .with_external_action_adapter(&adapter);
         assert!(matches!(
             evaluate_action_capability(&rule(unknown_ref), &unknown_context),
             ActionCapability::Unsupported { .. }
@@ -525,5 +735,97 @@ mod tests {
             evaluate_action_capability(&rule(macro_action), &changed_context),
             ActionCapability::Unavailable { .. }
         ));
+    }
+
+    #[test]
+    fn macro_transitive_change_invalidates_fingerprint_and_recomputes_strong_enablement() {
+        use crate::mkmacro::{
+            MkAction, MkCallMacroPayload, MkDelayPayload, MkMacro, MkMacroDocument,
+            MkProcessPayload, MkStep,
+        };
+
+        let step = |id, action| MkStep {
+            metadata: Default::default(),
+            id,
+            enabled: true,
+            breakpoint: false,
+            repeat: 1,
+            delay_after_ms: 0,
+            on_error: Default::default(),
+            action,
+        };
+        let parent = MkMacro {
+            signature: Default::default(),
+            id: 7,
+            name: "parent".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps: vec![step(
+                1,
+                MkAction::CallMacro(MkCallMacroPayload {
+                    macro_id: 8,
+                    ..Default::default()
+                }),
+            )],
+        };
+        let child = MkMacro {
+            signature: Default::default(),
+            id: 8,
+            name: "child".into(),
+            description: String::new(),
+            enabled: true,
+            hotkey: None,
+            hotkey_scope: Default::default(),
+            folder_id: None,
+            playback: Default::default(),
+            steps: vec![step(1, MkAction::Delay(MkDelayPayload::default()))],
+        };
+        let original = MkMacroDocument {
+            macros: vec![parent.clone(), child.clone()],
+            ..Default::default()
+        };
+        let old_action = bind_mkmacro_action(&original, 7).unwrap();
+        let adapter = AvailableAdapter;
+        let empty_targets = [];
+        let roots = roots();
+        let original_context = capability_context(&empty_targets, &original, &roots)
+            .with_external_action_adapter(&adapter);
+        assert_eq!(
+            evaluate_action_capability(&rule(old_action.clone()), &original_context),
+            ActionCapability::Supported {
+                enablement: ActionEnablement::Standard,
+            }
+        );
+
+        let mut changed_child = child;
+        changed_child.steps[0].action = MkAction::Process(MkProcessPayload {
+            program: "C:\\Tools\\worker.exe".into(),
+            arguments: Vec::new(),
+            working_directory: None,
+            wait: false,
+        });
+        let changed = MkMacroDocument {
+            macros: vec![parent, changed_child],
+            ..Default::default()
+        };
+        let changed_action = bind_mkmacro_action(&changed, 7).unwrap();
+        assert_ne!(old_action, changed_action);
+
+        let changed_context = capability_context(&empty_targets, &changed, &roots)
+            .with_external_action_adapter(&adapter);
+        assert!(matches!(
+            evaluate_action_capability(&rule(old_action), &changed_context),
+            ActionCapability::Unavailable { .. }
+        ));
+        assert_eq!(
+            evaluate_action_capability(&rule(changed_action), &changed_context),
+            ActionCapability::Supported {
+                enablement: ActionEnablement::StrongConfirmationRequired,
+            }
+        );
     }
 }
