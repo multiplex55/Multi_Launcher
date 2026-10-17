@@ -72,6 +72,7 @@ use crate::plugins::volume::VolumePlugin;
 use crate::plugins::weather::WeatherPlugin;
 use crate::plugins::wikipedia::WikipediaPlugin;
 use crate::plugins::windows::WindowsPlugin;
+use crate::plugins::xml_toolkit::XmlToolkitPlugin;
 use crate::plugins::youtube::YoutubePlugin;
 use crate::plugins_builtin::{CalculatorPlugin, WebSearchPlugin};
 use crate::search_scope::{LauncherSearchResult, SearchResultCategory};
@@ -902,6 +903,7 @@ impl PluginManager {
         self.register_with_settings(LoremPlugin, plugin_settings);
         self.register_with_settings(ConvertPanelPlugin, plugin_settings);
         self.register_with_settings(JsonUtilityPlugin, plugin_settings);
+        self.register_with_settings(XmlToolkitPlugin, plugin_settings);
         self.register_with_settings(HashGeneratorPlugin, plugin_settings);
         self.register_with_settings(RegexTesterPlugin, plugin_settings);
         self.register_with_settings(QrPlugin, plugin_settings);

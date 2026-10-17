@@ -18,7 +18,7 @@ pub use host::{
     HeadlessCommandHost, JsonUtilityCommandHost, LauncherCommandHost, MouseGestureCommandHost,
     MultiManagerCommandHost, NoteCommandHost, OcrCommandHost, RadialCommandHost,
     ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, SnippetPromptIntent,
-    TodoCommandHost,
+    TodoCommandHost, XmlToolkitCommandHost,
 };
 pub use model::*;
 pub use outcome::*;

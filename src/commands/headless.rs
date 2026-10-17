@@ -181,6 +181,9 @@ fn execute_with_external(
         Command::HashGenerator(_) => {
             anyhow::bail!("Hash Generator commands require the launcher interface")
         }
+        Command::XmlToolkit(_) => {
+            anyhow::bail!("XML Toolkit commands require the launcher interface")
+        }
         Command::Radial(_) => anyhow::bail!("radial commands require the launcher interface"),
         Command::ScreenDraw(_) => {
             anyhow::bail!("screen draw commands require the launcher interface")
@@ -215,6 +218,34 @@ fn headless_snippet_text(entry: &crate::plugins::snippets::SnippetEntry) -> Resu
         | crate::plugins::snippets::SnippetRunMode::Prompted(_) => {
             Err("snippet context and prompted fields require the launcher interface".into())
         }
+    }
+}
+
+#[cfg(test)]
+mod xml_toolkit_headless_tests {
+    use super::*;
+
+    #[test]
+    fn xml_toolkit_plugin_command_requires_the_launcher_interface() {
+        let original = Action {
+            label: "Open XML Toolkit".into(),
+            desc: String::new(),
+            action: "xml:open".into(),
+            args: None,
+        };
+        let mut external_calls = Vec::new();
+        let error = execute_with_external(
+            Command::XmlToolkit(XmlToolkitCommand::Open),
+            &original,
+            &mut |target, args| {
+                external_calls.push((target.to_owned(), args.map(str::to_owned)));
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("require the launcher interface"));
+        assert!(external_calls.is_empty());
     }
 }
 

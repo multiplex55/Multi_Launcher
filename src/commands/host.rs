@@ -111,6 +111,10 @@ pub trait JsonUtilityCommandHost {
     fn open_json_utility(&mut self, intent: super::JsonUtilityIntent);
 }
 
+pub trait XmlToolkitCommandHost {
+    fn open_xml_toolkit(&mut self);
+}
+
 pub trait CalendarCommandHost {
     fn calendar_dashboard_enabled(&self) -> bool;
     fn calendar_preserve_command(&self) -> bool;
@@ -280,6 +284,7 @@ pub trait CommandHost:
     + DialogCommandHost
     + CropCommandHost
     + JsonUtilityCommandHost
+    + XmlToolkitCommandHost
     + ColorPickCommandHost
     + OcrCommandHost
     + CalendarCommandHost
@@ -303,6 +308,7 @@ impl<T> CommandHost for T where
         + DialogCommandHost
         + CropCommandHost
         + JsonUtilityCommandHost
+        + XmlToolkitCommandHost
         + ColorPickCommandHost
         + OcrCommandHost
         + CalendarCommandHost

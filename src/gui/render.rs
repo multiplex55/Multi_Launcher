@@ -2566,6 +2566,7 @@ impl LauncherApp {
 
         self.poll_crop_screenshot(ctx);
         self.poll_screen_draw_region_picker(ctx);
+        self.xml_toolkit_dialog.poll_closed_background(ctx);
         self.poll_macro_launcher_query(ctx);
         self.poll_macro_launcher_commands(ctx);
         self.acquire_macro_prompt(ctx);
@@ -2982,12 +2983,13 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 4] {
+    fn viewport_bootstrap_state(&self) -> [bool; 5] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
             self.radial_placement_viewport.needs_viewport_bootstrap(),
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
+            self.xml_toolkit_dialog.needs_viewport_bootstrap(),
         ]
     }
 
@@ -3000,7 +3002,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 4],
+        previously_pending: [bool; 5],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -3054,6 +3056,7 @@ impl LauncherApp {
             self.show_macro_prompt(&ctx, first_ui_pass);
             self.macro_parameter_prompt.show(&ctx, first_ui_pass);
             self.show_screen_draw_toolbar_with_actions(&ctx, first_ui_pass);
+            self.xml_toolkit_dialog.show(&ctx);
             if first_ui_pass {
                 self.run_background_after_menu();
             }
@@ -4541,6 +4544,7 @@ impl LauncherApp {
         self.json_utility_dialog.show(&ctx);
         self.hash_generator_dialog.show(&ctx);
         self.regex_tester_dialog.show(&ctx);
+        self.xml_toolkit_dialog.show(&ctx);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
             let observation = self.qr_dialog.show_with_qa_observation(&ctx);
@@ -4928,6 +4932,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.xml_toolkit_dialog.shutdown();
         self.hash_generator_dialog.shutdown();
         if let Some(plan) = self
             .sequence_playback
@@ -8306,6 +8311,37 @@ mod tests {
                 | egui::ViewportCommand::InnerSize(_)
         )));
         output.drop_without_applying_deltas();
+        drop(app);
+        drop(workspace);
+    }
+
+    #[test]
+    fn m7f_hidden_root_bootstraps_the_xml_toolkit_child_viewport() {
+        let ctx = egui::Context::default();
+        let (workspace, mut app) = root_list_test_app(&ctx, Vec::new());
+        app.visible_flag.store(false, Ordering::SeqCst);
+        app.last_visible = false;
+        app.xml_toolkit_dialog.open();
+        assert!(app.needs_viewport_bootstrap());
+
+        let child = egui::ViewportId::from_hash_of("xml_toolkit_viewport");
+        let (output, _) = app.run_root_frame_for_test(
+            &ctx,
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 640.0),
+                )),
+                ..Default::default()
+            },
+            false,
+        );
+        assert!(output.viewport_output.contains_key(&child));
+        assert_retained_immediate_viewport(&ctx, child);
+        assert!(!app.needs_viewport_bootstrap());
+        assert!(!app.visible_flag.load(Ordering::SeqCst));
+        output.drop_without_applying_deltas();
+        app.xml_toolkit_dialog.shutdown();
         drop(app);
         drop(workspace);
     }

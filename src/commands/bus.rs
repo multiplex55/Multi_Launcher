@@ -2,11 +2,10 @@ use super::{Command, CommandError, CommandHost, CommandInvocation, CommandOutcom
 use crate::commands::handlers::{
     handle_calendar, handle_clipboard_modify_with_history_query, handle_color_pick,
     handle_coordinate_tool, handle_crop, handle_data, handle_diff, handle_file_search,
-    handle_headless_gui_with_history_query, handle_json_utility, handle_launcher, handle_link,
-    handle_hash_generator, handle_mouse_gesture, handle_multi_manager, handle_note, handle_ocr, handle_paste_sequence,
-    handle_query,
-    handle_radial, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run,
-    handle_todo,
+    handle_hash_generator, handle_headless_gui_with_history_query, handle_json_utility,
+    handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager, handle_note,
+    handle_ocr, handle_paste_sequence, handle_query, handle_radial, handle_screen_draw,
+    handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo, handle_xml_toolkit,
 };
 
 #[derive(Debug, Default)]
@@ -42,6 +41,7 @@ impl CommandBus {
             Command::Query(command) => Ok(handle_query(command, invocation.source)),
             Command::Crop(command) => Ok(handle_crop(host, command)),
             Command::JsonUtility(command) => Ok(handle_json_utility(host, command)),
+            Command::XmlToolkit(command) => Ok(handle_xml_toolkit(host, *command)),
             Command::HashGenerator(command) => Ok(handle_hash_generator(host, command)),
             Command::ColorPick(command) => handle_color_pick(host, command),
             Command::Ocr(command) => handle_ocr(host, command),
@@ -126,6 +126,7 @@ mod tests {
         color_pick_requests: usize,
         ocr_requests: usize,
         json_utility_intents: Vec<crate::commands::JsonUtilityIntent>,
+        xml_toolkit_opens: usize,
         hash_generator_opens: usize,
         radial_calls: usize,
     }
@@ -372,6 +373,11 @@ mod tests {
     impl crate::commands::JsonUtilityCommandHost for FakeHost {
         fn open_json_utility(&mut self, intent: crate::commands::JsonUtilityIntent) {
             self.json_utility_intents.push(intent);
+        }
+    }
+    impl crate::commands::XmlToolkitCommandHost for FakeHost {
+        fn open_xml_toolkit(&mut self) {
+            self.xml_toolkit_opens += 1;
         }
     }
     impl crate::commands::ClipboardModifyCommandHost for FakeHost {
@@ -761,6 +767,64 @@ mod tests {
         assert_eq!(host.hash_generator_opens, 1);
         assert_eq!(host.headless_calls, 0);
         assert_eq!(outcome.query, QueryPolicy::Keep);
+        assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
+        assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn xml_toolkit_plugin_command_routes_once_through_the_typed_bus() {
+        let mut manager = crate::plugin::PluginManager::new();
+        manager.reload_from_dirs(
+            &[],
+            10,
+            crate::settings::NetUnit::Auto,
+            false,
+            &std::collections::HashMap::new(),
+            std::sync::Arc::new(Vec::new()),
+        );
+
+        let actions = manager.search_filtered("xml", None, None);
+        let action = actions
+            .into_iter()
+            .find(|action| action.action == "xml:open")
+            .expect("normal plugin construction registers the XML provider");
+        assert!(
+            action.args.is_none(),
+            "the XML command carries no source payload"
+        );
+        assert!(
+            manager
+                .commands()
+                .iter()
+                .any(|command| command.action == "query:xml")
+        );
+        assert!(
+            !manager
+                .search_filtered("xmlfoo", None, None)
+                .iter()
+                .any(|action| action.action == "xml:open")
+        );
+
+        let invocation = crate::commands::parse_command(
+            action,
+            Some("must not become XML input".into()),
+            crate::commands::ActivationSource::Dashboard,
+        )
+        .expect("the plugin wire action has a typed command");
+        assert_eq!(
+            invocation.command,
+            Command::XmlToolkit(crate::commands::XmlToolkitCommand::Open)
+        );
+        let mut host = FakeHost::default();
+        let outcome = CommandBus.dispatch(&invocation, &mut host).unwrap();
+        assert_eq!(host.xml_toolkit_opens, 1);
+        assert_eq!(host.headless_calls, 0);
+        assert_eq!(outcome.query, QueryPolicy::Keep);
+        assert_eq!(
+            outcome.pending_query,
+            crate::commands::PendingQueryPolicy::Keep
+        );
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Skip);

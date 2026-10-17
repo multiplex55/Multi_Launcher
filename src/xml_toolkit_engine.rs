@@ -1,6 +1,10 @@
 //! The XML engine boundary. COM objects are created, used, and dropped on the
 //! dedicated worker thread; only owned Rust values cross its channel.
 
+#[cfg(windows)]
+use std::fs::File;
+#[cfg(windows)]
+use std::path::Path;
 use std::path::PathBuf;
 
 pub const MAX_XML_INPUT_BYTES: usize = 4 * 1024 * 1024;
@@ -25,6 +29,36 @@ const MAX_FORMAT_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FORMAT_INDENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_FORMAT_DEPTH: usize = 256;
 const MAX_FORMAT_NODES: usize = 200_000;
+
+/// Validate an already-opened local XML file against the same Windows path
+/// policy used by the local XSD resolver. The returned path comes from the
+/// opened handle, so callers can reject reparse targets that resolve to UNC.
+#[cfg(windows)]
+pub(crate) fn validate_local_opened_xml_file(path: &Path, file: &File) -> Result<PathBuf, String> {
+    windows_backend::validate_local_opened_xml_file(path, file).map_err(xml_path_policy_error)
+}
+
+/// Check the lexical Windows path policy without touching the filesystem.
+#[cfg(windows)]
+pub(crate) fn validate_xml_path_spelling(path: &Path) -> Result<(), String> {
+    windows_backend::validate_xml_path_spelling(path).map_err(xml_path_policy_error)
+}
+
+/// Reject path spellings and reparse components before opening a user-picked
+/// XML/XSD path. This performs filesystem metadata checks and belongs on a
+/// worker, never in the egui frame path.
+#[cfg(windows)]
+pub(crate) fn validate_local_xml_path(path: &Path) -> Result<(), String> {
+    windows_backend::validate_local_xml_path(path).map_err(xml_path_policy_error)
+}
+
+#[cfg(windows)]
+fn xml_path_policy_error(error: XmlEngineError) -> String {
+    match error {
+        XmlEngineError::SchemaPolicy(message) | XmlEngineError::Io(message) => message,
+        other => format!("{other:?}"),
+    }
+}
 
 /// Formatting runs over a clone of the already parsed document. It never
 /// changes the source tree; callers must explicitly apply returned text.
@@ -2361,6 +2395,46 @@ mod windows_backend {
         })
     }
 
+    pub(super) fn validate_local_xml_path(path: &Path) -> Result<(), XmlEngineError> {
+        validate_xml_path_spelling(path)?;
+        reject_reparse_components(path)
+    }
+
+    pub(super) fn validate_xml_path_spelling(path: &Path) -> Result<(), XmlEngineError> {
+        reject_network_or_device_path(path)
+    }
+
+    pub(super) fn validate_local_opened_xml_file(
+        path: &Path,
+        file: &File,
+    ) -> Result<PathBuf, XmlEngineError> {
+        reject_network_or_device_path(path)?;
+        reject_reparse_components(path)?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| XmlEngineError::Io(error.to_string()))?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || windows_reparse_point(&metadata)
+        {
+            return Err(XmlEngineError::SchemaPolicy(
+                "XML input handle is not a regular local file".into(),
+            ));
+        }
+        let opened_path = final_path_for_handle(file)?;
+        reject_network_or_device_path(&opened_path)?;
+        reject_reparse_components(&opened_path)?;
+        let expected_path = path
+            .canonicalize()
+            .map_err(|error| XmlEngineError::Io(error.to_string()))?;
+        if !windows_path_equals(&opened_path, &expected_path) {
+            return Err(XmlEngineError::SchemaPolicy(
+                "opened XML file resolved outside the selected local path".into(),
+            ));
+        }
+        Ok(opened_path)
+    }
+
     fn reject_network_or_device_path(path: &Path) -> Result<(), XmlEngineError> {
         let prefix_is_local = match path.components().next() {
             Some(Component::Prefix(prefix)) => {
@@ -2379,7 +2453,36 @@ mod windows_backend {
         }) {
             return Err(XmlEngineError::SchemaPolicy("alternate data stream paths are not allowed".into()));
         }
+        if path.components().any(|component| {
+            matches!(component, Component::Normal(value) if is_windows_device_component(value))
+        }) {
+            return Err(XmlEngineError::SchemaPolicy(
+                "Windows device names are not allowed as XML file paths".into(),
+            ));
+        }
         Ok(())
+    }
+
+    fn is_windows_device_component(value: &std::ffi::OsStr) -> bool {
+        let Some(value) = value.to_str() else {
+            return false;
+        };
+        let base = value
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(|character| character == ' ' || character == '.')
+            .to_ascii_uppercase();
+        matches!(
+            base.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CLOCK$" | "CONIN$" | "CONOUT$"
+        ) || base
+            .strip_prefix("COM")
+            .or_else(|| base.strip_prefix("LPT"))
+            .is_some_and(|suffix| {
+                matches!(suffix, "¹" | "²" | "³")
+                    || (suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
+            })
     }
 
     fn reject_reparse_components(path: &Path) -> Result<(), XmlEngineError> {

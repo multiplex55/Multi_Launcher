@@ -280,6 +280,9 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     if s == "color:pick" {
         return Ok(Command::ColorPick(ColorPickCommand::Pick));
     }
+    if s == "xml:open" {
+        return Ok(Command::XmlToolkit(XmlToolkitCommand::Open));
+    }
     if let Some(command) = parse_json_utility(s) {
         return Ok(Command::JsonUtility(command));
     }

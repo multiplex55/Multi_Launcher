@@ -9,6 +9,7 @@ use crate::commands::{
     NoteCommandHost, PendingQueryPolicy, QueryPolicy, RadialCommandHost, ResultsPolicy,
     ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult, ScreenshotDestination,
     ScreenshotMarkup, ScreenshotMode, ToastPolicy, TodoCommandHost, VisibilityPolicy,
+    XmlToolkitCommandHost,
 };
 
 use super::{LauncherApp, Toast, ToastKind, ToastOptions};
@@ -591,6 +592,13 @@ impl JsonUtilityCommandHost for LauncherApp {
     }
 }
 
+impl XmlToolkitCommandHost for LauncherApp {
+    fn open_xml_toolkit(&mut self) {
+        self.xml_toolkit_dialog.open();
+        self.focus_panel(super::Panel::XmlToolkitDialog);
+    }
+}
+
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
@@ -1070,6 +1078,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::Radial(_)
             | Command::ClipboardModify(_)
             | Command::JsonUtility(_)
+            | Command::XmlToolkit(_)
             | Command::HashGenerator(_)
             | Command::ColorPick(_)
             | Command::Ocr(_)
@@ -3182,6 +3191,13 @@ mod tests {
     fn hash_generator_commands_reject_query_override_reclassification() {
         assert!(!command_accepts_query_override(&Command::HashGenerator(
             crate::commands::HashGeneratorCommand::Open,
+        )));
+    }
+
+    #[test]
+    fn m7f_xml_toolkit_command_does_not_turn_query_override_into_source() {
+        assert!(!command_accepts_query_override(&Command::XmlToolkit(
+            crate::commands::XmlToolkitCommand::Open,
         )));
     }
 

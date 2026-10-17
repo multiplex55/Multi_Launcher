@@ -26,6 +26,7 @@ It’s designed to be “one hotkey away” from:
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
+- [XML Toolkit](#xml-toolkit)
 - [Hash Generator](#hash-generator)
 - [Mouse coordinates and crosshair](#mouse-coordinates-and-crosshair)
 - [Regex Tester](#regex-tester)
@@ -96,6 +97,7 @@ Multi Launcher is centered around a **single query box**:
 | `cb` | Clipboard history | `cb list` / `cb clear` |
 | `cm` | Clipboard Modify operations, templates, pipelines, and undo | `cm trim | uppercase` / `cm template prompt-context` |
 | `json` | Local JSON formatter and minifier | `json` / `json format` / `json minify` |
+| `xml` | Local XML tree, XPath, XSD, format and file utility | `xml` |
 | `regex` | Local Rust regex tester | `regex` |
 | `color` | HEX/RGB/HSL conversion and screen eyedropper | `color #ff0000` / `color pick` |
 | `mouse` | Mouse settings, coordinates, picking, and independent crosshair | `mouse settings` / `mouse coords copy` / `mouse crosshair toggle` |
@@ -597,6 +599,31 @@ copies decoded text, while **Copy Subtree** copies the quoted and escaped JSON
 string; container copies contain their JSON serialization.
 `cm json-pretty` and `cm json-minify` continue using the same JSON transformation
 implementation, including in saved Clipboard Modify pipelines.
+
+## XML Toolkit
+
+Type `xml` to open the resizable XML Toolkit. It accepts at most 4 MiB of UTF-8
+source text (UTF-8 files with a BOM are accepted), parses locally with DTD and
+external entity resolution disabled, and keeps Format/Minify output separate
+until **Apply Output to Source** is selected. Conservative minifying preserves
+all character data, mixed content, and `xml:space` semantics. Oversized output
+remains available through explicit Copy or Save As actions, while Apply is
+disabled above the source limit.
+
+**Open XML**, **Paste Clipboard**, **Copy Source**, **Copy Output**, and Save As
+are explicit actions; opening or rendering the utility never reads or writes
+the clipboard. Loading a file does not watch or modify it. File input is
+strictly decoded as UTF-8 with a bounded read. Save As writes UTF-8 to a chosen
+local path and asks before replacing an existing file. Closing preserves the
+authored draft for the next open but ends its XML worker session.
+
+XPath queries run against the accepted document snapshot. XML documents with a
+default namespace require a user-defined XPath prefix and namespace URI; the
+tool does not invent scalar booleans or numbers as text. XSD validation uses an
+explicitly chosen local schema. Relative `xs:include` and `xs:import` resources
+must remain under that schema's folder; imports need an explicit
+`schemaLocation`, and includes inside imported schemas are unsupported. Remote,
+absolute, and instance-provided schema references are not fetched.
 
 ## Hash Generator
 

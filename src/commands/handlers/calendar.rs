@@ -233,7 +233,7 @@ mod tests {
     use super::*;
     use crate::commands::{
         CalendarCommandHost, CropCommandHost, DialogCommandHost, HeadlessCommandHost,
-        LauncherCommandHost, NoteCommandHost, TodoCommandHost,
+        LauncherCommandHost, NoteCommandHost, TodoCommandHost, XmlToolkitCommandHost,
     };
 
     #[derive(Default)]
@@ -275,6 +275,9 @@ mod tests {
         fn refresh_calendar_cache(&mut self) {
             self.refreshes += 1;
         }
+    }
+    impl XmlToolkitCommandHost for Host {
+        fn open_xml_toolkit(&mut self) {}
     }
     impl NoteCommandHost for Host {
         fn open_notes_dialog(&mut self) {}

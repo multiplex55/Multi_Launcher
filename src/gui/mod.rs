@@ -79,6 +79,7 @@ mod unused_assets_dialog;
 pub(crate) mod volume_data;
 mod volume_dialog;
 mod watch;
+mod xml_toolkit_dialog;
 pub(crate) mod xml_toolkit_schema;
 pub(crate) mod xml_toolkit_tree;
 pub(crate) mod xml_toolkit_xpath;
@@ -151,6 +152,7 @@ pub use todo_dialog::TodoDialog;
 pub use todo_view_dialog::{TodoViewDialog, todo_view_layout_sizes, todo_view_window_constraints};
 pub use unused_assets_dialog::UnusedAssetsDialog;
 pub use volume_dialog::VolumeDialog;
+pub use xml_toolkit_dialog::XmlToolkitDialogState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScreenDrawRegionOperation {
@@ -637,6 +639,7 @@ pub enum Panel {
     ClipboardModifyDialog,
     JsonUtilityDialog,
     RegexTesterDialog,
+    XmlToolkitDialog,
     QrDialog,
     ConvertPanel,
     VolumeDialog,
@@ -693,6 +696,7 @@ impl Panel {
             Self::ClipboardModifyDialog => "Clipboard Modify",
             Self::JsonUtilityDialog => "JSON Utility",
             Self::RegexTesterDialog => "Regex Tester",
+            Self::XmlToolkitDialog => "XML Toolkit",
             Self::QrDialog => "QR Generator",
             Self::ConvertPanel => "Converter",
             Self::VolumeDialog => "Volume",
@@ -750,6 +754,7 @@ struct PanelStates {
     clipboard_modify_dialog: bool,
     json_utility_dialog: bool,
     regex_tester_dialog: bool,
+    xml_toolkit_dialog: bool,
     qr_dialog: bool,
     convert_panel: bool,
     volume_dialog: bool,
@@ -1002,6 +1007,7 @@ pub struct LauncherApp {
     pub clipboard_modify_dialog: ClipboardModifyDialogState,
     pub json_utility_dialog: JsonUtilityDialogState,
     pub regex_tester_dialog: RegexTesterDialogState,
+    pub xml_toolkit_dialog: XmlToolkitDialogState,
     pub qr_dialog: QrDialogState,
     pub clipboard_modify_config_diagnostic: Option<String>,
     clipboard_modify_watcher: Option<crate::clipboard_modify::watch::ClipboardModifyWatcher>,
@@ -2609,6 +2615,7 @@ impl LauncherApp {
             ),
             json_utility_dialog: JsonUtilityDialogState::default(),
             regex_tester_dialog,
+            xml_toolkit_dialog: XmlToolkitDialogState::default(),
             qr_dialog: QrDialogState::default(),
             clipboard_modify_config_diagnostic,
             clipboard_modify_watcher,
@@ -3255,7 +3262,7 @@ impl LauncherApp {
         self.move_cursor_end
     }
 
-    const TRACKED_PANELS: [Panel; 51] = [
+    const TRACKED_PANELS: [Panel; 52] = [
         Panel::AliasDialog,
         Panel::BookmarkAliasDialog,
         Panel::TempfileAliasDialog,
@@ -3291,6 +3298,7 @@ impl LauncherApp {
         Panel::ClipboardModifyDialog,
         Panel::JsonUtilityDialog,
         Panel::RegexTesterDialog,
+        Panel::XmlToolkitDialog,
         Panel::QrDialog,
         Panel::ConvertPanel,
         Panel::VolumeDialog,
@@ -3346,6 +3354,7 @@ impl LauncherApp {
             Panel::ClipboardModifyDialog => self.clipboard_modify_dialog.open,
             Panel::JsonUtilityDialog => self.json_utility_dialog.open,
             Panel::RegexTesterDialog => self.regex_tester_dialog.open,
+            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open,
             Panel::QrDialog => self.qr_dialog.open,
             Panel::ConvertPanel => self.convert_panel.open,
             Panel::VolumeDialog => self.volume_dialog.open,
@@ -3574,6 +3583,10 @@ impl LauncherApp {
             Panel::RegexTesterDialog => {
                 self.regex_tester_dialog.open = false;
                 self.panel_states.regex_tester_dialog = false;
+            }
+            Panel::XmlToolkitDialog => {
+                self.xml_toolkit_dialog.end_session();
+                self.panel_states.xml_toolkit_dialog = false;
             }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
@@ -3810,6 +3823,10 @@ impl LauncherApp {
                 self.regex_tester_dialog.open = false;
                 self.panel_states.regex_tester_dialog = false;
             }
+            Panel::XmlToolkitDialog => {
+                self.xml_toolkit_dialog.end_session();
+                self.panel_states.xml_toolkit_dialog = false;
+            }
             Panel::JsonUtilityDialog => {
                 self.json_utility_dialog.close();
                 self.panel_states.json_utility_dialog = false;
@@ -3928,6 +3945,7 @@ impl LauncherApp {
                     self.regex_tester_dialog.open();
                 }
             }
+            Panel::XmlToolkitDialog => self.xml_toolkit_dialog.open(),
             Panel::ConvertPanel => self.convert_panel.open = true,
             Panel::VolumeDialog => self.volume_dialog.ensure_open(),
             Panel::BrightnessDialog => self.brightness_dialog.open = true,
@@ -4070,6 +4088,7 @@ impl LauncherApp {
         check!(clipboard_modify_dialog, Panel::ClipboardModifyDialog);
         check!(json_utility_dialog, Panel::JsonUtilityDialog);
         check!(regex_tester_dialog, Panel::RegexTesterDialog);
+        check!(xml_toolkit_dialog, Panel::XmlToolkitDialog);
         check!(qr_dialog, Panel::QrDialog);
         check!(convert_panel, Panel::ConvertPanel);
         check!(volume_dialog, Panel::VolumeDialog);
@@ -5982,6 +6001,65 @@ mod tests {
         assert!(!app.regex_tester_dialog.open);
         assert!(!app.panel_stack.contains(&Panel::RegexTesterDialog));
         assert_eq!(app.regex_tester_dialog.session.draft, draft);
+    }
+
+    #[test]
+    fn m7f_xml_toolkit_panel_open_close_and_force_close_share_the_dialog_lifecycle() {
+        let ctx = egui::Context::default();
+        let directory = tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.hotkey = None;
+        settings.quit_hotkey = None;
+        settings.help_hotkey = None;
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        settings.dashboard.enabled = false;
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            PluginManager::new_inert_for_test(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            directory
+                .path()
+                .join("settings.json")
+                .to_string_lossy()
+                .into_owned(),
+            settings,
+            None,
+            None,
+            None,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.ensure_open(Panel::XmlToolkitDialog);
+        app.update_panel_stack();
+        app.ensure_open(Panel::XmlToolkitDialog);
+        app.update_panel_stack();
+
+        assert!(app.is_panel_open(Panel::XmlToolkitDialog));
+        assert!(app.xml_toolkit_dialog.needs_viewport_bootstrap());
+        assert_eq!(
+            app.panel_stack
+                .iter()
+                .filter(|panel| **panel == Panel::XmlToolkitDialog)
+                .count(),
+            1
+        );
+        assert!(app.close_front_dialog());
+        assert!(!app.is_panel_open(Panel::XmlToolkitDialog));
+        assert!(!app.panel_stack.contains(&Panel::XmlToolkitDialog));
+
+        app.ensure_open(Panel::XmlToolkitDialog);
+        app.update_panel_stack();
+        app.force_close_panel(Panel::XmlToolkitDialog);
+        assert!(!app.is_panel_open(Panel::XmlToolkitDialog));
+        assert!(!app.panel_stack.contains(&Panel::XmlToolkitDialog));
     }
 
     #[test]
