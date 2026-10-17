@@ -363,6 +363,7 @@ impl LauncherApp {
                         .is_none_or(|current| presentation.generation >= current.generation)
                     {
                         self.sequence_routes = Some(presentation);
+                        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
                     }
                 }
                 WatchEvent::PasteSequenceRuntimeDiagnostic(diagnostic) => {

@@ -1,4 +1,6 @@
-pub trait OverlayBackend: Send {
+/// Backends are constructed, used and dropped on the gesture worker.
+/// Only the factory crosses threads; native surfaces must remain thread-bound.
+pub trait OverlayBackend {
     fn draw_trail_segment(&mut self, from: (f32, f32), to: (f32, f32), color: [u8; 4], width: f32);
     fn clear_trail(&mut self);
     fn show_hint(&mut self, text: &str, position: (f32, f32));
@@ -663,9 +665,11 @@ impl DefaultOverlayBackend {
         self.trail_surface.as_mut()
     }
 
-    fn ensure_hint_tooltip(&mut self) -> Option<&mut HintTooltip> {
+    fn ensure_hint_tooltip(
+        &mut self,
+    ) -> Option<&mut crate::platform::passive_tooltip::PassiveTooltip> {
         if self.hint_tooltip.is_none() {
-            self.hint_tooltip = HintTooltip::new();
+            self.hint_tooltip = crate::platform::passive_tooltip::PassiveTooltip::new();
         }
         self.hint_tooltip.as_mut()
     }
@@ -729,33 +733,18 @@ impl OverlayBackend for DefaultOverlayBackend {
     }
 
     fn show_hint(&mut self, text: &str, position: (f32, f32)) {
-        // Decide + update cached text BEFORE borrowing tooltip mutably.
-        let text_changed = self.last_hint_text != text;
-        if text_changed {
-            self.last_hint_text.clear();
-            self.last_hint_text.push_str(text);
-        }
-
-        let Some(tt) = self.ensure_hint_tooltip() else {
+        let Some(tooltip) = self.ensure_hint_tooltip() else {
             return;
         };
-
-        // Always follow cursor (cheap)
-        tt.move_to(position);
-
-        // Only change text when it actually changes (prevents flicker/churn)
-        if text_changed {
-            tt.set_text(text);
-        }
-
-        tt.show();
+        tooltip.set_text(text);
+        tooltip.move_to(position);
+        let _ = tooltip.show();
     }
 
     fn hide_hint(&mut self) {
-        if let Some(tt) = self.hint_tooltip.as_mut() {
-            tt.hide();
+        if let Some(tooltip) = self.hint_tooltip.as_mut() {
+            tooltip.hide();
         }
-        self.last_hint_text.clear();
     }
 }
 
@@ -765,231 +754,7 @@ pub struct DefaultOverlayBackend {
     trail_surface: Option<TrailOverlaySurface>,
     /// Set to true when starting a new gesture so the overlay is re-raised to the top of the TOPMOST band.
     trail_needs_raise: bool,
-    hint_tooltip: Option<HintTooltip>,
-    last_hint_text: String,
-}
-
-#[cfg(windows)]
-#[derive(Debug)]
-struct HintTooltip {
-    owner_hwnd: windows::Win32::Foundation::HWND,
-    hwnd: windows::Win32::Foundation::HWND,
-    toolinfo: windows::Win32::UI::Controls::TTTOOLINFOW,
-    text_buf: Vec<u16>,
-    visible: bool,
-}
-
-#[cfg(windows)]
-unsafe impl Send for HintTooltip {}
-
-#[cfg(windows)]
-impl HintTooltip {
-    fn new() -> Option<Self> {
-        use std::mem;
-        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-        use windows::Win32::UI::Controls::{
-            ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, TOOLTIPS_CLASSW,
-            TTDT_AUTOPOP, TTDT_INITIAL, TTDT_RESHOW, TTF_ABSOLUTE, TTF_TRACK, TTM_ADDTOOLW,
-            TTM_SETDELAYTIME, TTM_SETMAXTIPWIDTH, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
-        };
-        use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, GetDesktopWindow, SW_HIDE, SendMessageW, ShowWindow, WINDOW_STYLE,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-        };
-        use windows::core::PCWSTR;
-
-        unsafe {
-            let icc = INITCOMMONCONTROLSEX {
-                dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-                dwICC: ICC_WIN95_CLASSES,
-            };
-            let _ = InitCommonControlsEx(&icc);
-
-            let hinstance = GetModuleHandleW(PCWSTR::null()).ok()?;
-            let _parent = GetDesktopWindow();
-            // Use a tool/owner window we actually own.
-            // Using GetDesktopWindow() here is tempting, but it belongs to another process.
-            let owner_class = widestring("STATIC");
-            let owner_hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                PCWSTR(owner_class.as_ptr()),
-                PCWSTR::null(),
-                WS_POPUP,
-                0,
-                0,
-                0,
-                0,
-                None,
-                None,
-                hinstance,
-                None,
-            )
-            .ok()?;
-            let _ = ShowWindow(owner_hwnd, SW_HIDE);
-
-            // Tooltip window (topmost, no-activate)
-            let hwnd = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                TOOLTIPS_CLASSW,
-                PCWSTR::null(),
-                // windows-rs wants WINDOW_STYLE, so wrap raw u32 bits
-                WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP) | WINDOW_STYLE(TTS_NOPREFIX),
-                0,
-                0,
-                0,
-                0,
-                owner_hwnd,
-                None,
-                hinstance,
-                None,
-            )
-            .ok()?;
-
-            // initial empty text
-            let mut text_buf: Vec<u16> = vec![0];
-
-            let mut toolinfo = TTTOOLINFOW::default();
-            toolinfo.cbSize =
-                (mem::size_of::<TTTOOLINFOW>() - mem::size_of::<*const core::ffi::c_void>()) as u32;
-            toolinfo.hwnd = owner_hwnd;
-            toolinfo.uId = 1;
-            toolinfo.uFlags = TTF_TRACK | TTF_ABSOLUTE;
-            toolinfo.lpszText = windows::core::PWSTR(text_buf.as_mut_ptr());
-
-            // REQUIRED: register the tool, otherwise TTM_TRACKACTIVATE won't show anything.
-            let _add_ok = SendMessageW(
-                hwnd,
-                TTM_ADDTOOLW,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(&toolinfo as *const _ as isize),
-            );
-
-            // Make it feel "live" while drawing gestures.
-            let _ = SendMessageW(
-                hwnd,
-                TTM_SETDELAYTIME,
-                windows::Win32::Foundation::WPARAM(TTDT_INITIAL as usize),
-                windows::Win32::Foundation::LPARAM(0),
-            );
-            let _ = SendMessageW(
-                hwnd,
-                TTM_SETDELAYTIME,
-                windows::Win32::Foundation::WPARAM(TTDT_RESHOW as usize),
-                windows::Win32::Foundation::LPARAM(0),
-            );
-            let _ = SendMessageW(
-                hwnd,
-                TTM_SETDELAYTIME,
-                windows::Win32::Foundation::WPARAM(TTDT_AUTOPOP as usize),
-                windows::Win32::Foundation::LPARAM(10_000),
-            );
-
-            let _ = SendMessageW(
-                hwnd,
-                TTM_SETMAXTIPWIDTH,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(600),
-            );
-
-            Some(Self {
-                owner_hwnd,
-                hwnd,
-                toolinfo,
-                text_buf,
-                visible: false,
-            })
-        }
-    }
-
-    fn set_text(&mut self, text: &str) {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::UI::Controls::TTM_UPDATETIPTEXTW;
-        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-
-        // build wide string with trailing 0
-        self.text_buf.clear();
-        self.text_buf.extend(OsStr::new(text).encode_wide());
-        self.text_buf.push(0);
-
-        self.toolinfo.lpszText = windows::core::PWSTR(self.text_buf.as_mut_ptr());
-
-        unsafe {
-            let _ = PostMessageW(
-                self.hwnd,
-                TTM_UPDATETIPTEXTW,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(&self.toolinfo as *const _ as isize),
-            );
-        }
-    }
-
-    fn move_to(&mut self, position: (f32, f32)) {
-        use windows::Win32::UI::Controls::TTM_TRACKPOSITION;
-        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-
-        // TTM_TRACKPOSITION packs x/y into 16-bit halves.
-        // Preserve negative coordinates (common on multi-monitor layouts).
-        let x = position.0.round() as i32;
-        let y = position.1.round() as i32;
-        let packed = ((x as u32) & 0xFFFF) | (((y as u32) & 0xFFFF) << 16);
-
-        unsafe {
-            let _ = PostMessageW(
-                self.hwnd,
-                TTM_TRACKPOSITION,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(packed as isize),
-            );
-        }
-    }
-
-    fn show(&mut self) {
-        use windows::Win32::UI::Controls::TTM_TRACKACTIVATE;
-        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-
-        if self.visible {
-            return;
-        }
-        unsafe {
-            let _ = PostMessageW(
-                self.hwnd,
-                TTM_TRACKACTIVATE,
-                windows::Win32::Foundation::WPARAM(1),
-                windows::Win32::Foundation::LPARAM(&self.toolinfo as *const _ as isize),
-            );
-        }
-
-        self.visible = true;
-    }
-
-    fn hide(&mut self) {
-        use windows::Win32::UI::Controls::TTM_TRACKACTIVATE;
-        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-
-        if !self.visible {
-            return;
-        }
-        unsafe {
-            let _ = PostMessageW(
-                self.hwnd,
-                TTM_TRACKACTIVATE,
-                windows::Win32::Foundation::WPARAM(0),
-                windows::Win32::Foundation::LPARAM(&self.toolinfo as *const _ as isize),
-            );
-        }
-        self.visible = false;
-    }
-}
-
-#[cfg(windows)]
-impl Drop for HintTooltip {
-    fn drop(&mut self) {
-        use windows::Win32::UI::WindowsAndMessaging::DestroyWindow;
-        unsafe {
-            let _ = DestroyWindow(self.owner_hwnd);
-        }
-    }
+    hint_tooltip: Option<crate::platform::passive_tooltip::PassiveTooltip>,
 }
 
 #[cfg(not(windows))]

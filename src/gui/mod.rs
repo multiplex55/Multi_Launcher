@@ -980,6 +980,7 @@ pub struct LauncherApp {
     snippet_origin_window: Option<crate::active_window::ExternalForegroundWindow>,
     pub(crate) sequence_playback: crate::paste_sequence::SequencePlaybackController,
     sequence_shutdown: Option<crate::paste_sequence::SequenceShutdownCleanup>,
+    sequence_progress: crate::paste_sequence::progress::SequenceProgressTooltip,
     sequence_exit_requested: bool,
     pub(crate) sequence_routes: Option<crate::paste_sequence::SequenceRoutePresentation>,
     visible_flag: Arc<AtomicBool>,
@@ -2298,6 +2299,9 @@ impl LauncherApp {
             .as_ref()
             .is_none_or(|plugins| plugins.contains("paste_sequence"));
         self.enabled_plugins = enabled_plugins;
+        if !paste_sequence_will_be_enabled {
+            self.sequence_progress.clear();
+        }
 
         if paste_sequence_was_enabled && !paste_sequence_will_be_enabled {
             self.cancel_active_paste_sequence();
@@ -3025,6 +3029,7 @@ impl LauncherApp {
             snippet_origin_window: None,
             sequence_playback: crate::paste_sequence::SequencePlaybackController::default(),
             sequence_shutdown: None,
+            sequence_progress: crate::paste_sequence::progress::SequenceProgressTooltip::default(),
             sequence_exit_requested: false,
             sequence_routes: None,
             visible_flag: visible_flag.clone(),

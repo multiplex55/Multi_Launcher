@@ -2601,6 +2601,7 @@ impl LauncherApp {
                 ctx.request_repaint_after(delay);
             }
         }
+        self.refresh_sequence_progress_tooltip(ctx);
         geometry_cause
     }
 
@@ -4798,9 +4799,31 @@ pub(crate) fn persist_launcher_close_preferences(
 }
 
 impl LauncherApp {
+    pub(super) fn refresh_sequence_progress_tooltip(&mut self, ctx: &egui::Context) {
+        let enabled = !self.sequence_exit_requested
+            && self
+                .enabled_plugins
+                .as_ref()
+                .is_none_or(|plugins| plugins.contains("paste_sequence"));
+        let (wake, failed) = self.sequence_progress.update(
+            self.sequence_playback.progress(),
+            self.sequence_routes.as_ref(),
+            self.sequence_playback.escape_cancel_available(),
+            enabled,
+        );
+        if let Some(delay) = wake {
+            ctx.request_repaint_after(delay);
+        }
+        if failed {
+            #[cfg(not(test))]
+            self.report_error_message("paste_sequence.tooltip", "Floating playback status is unavailable on this desktop; use Paste Sequences for run status.");
+        }
+    }
+
     fn guard_overlay_app_exit(&mut self, ctx: &egui::Context) {
         let requested = ctx.input(|input| input.viewport().close_requested());
         if requested && !self.sequence_exit_requested {
+            self.sequence_progress.clear();
             self.sequence_exit_requested = true;
             crate::paste_sequence::admission::physical_paste_bridge()
                 .invalidate_owner(self.event_sink.owner_id());
@@ -4874,6 +4897,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.sequence_progress.clear();
         crate::paste_sequence::admission::physical_paste_bridge()
             .invalidate_owner(self.event_sink.owner_id());
         self.hotfolder_action_adapter.set_active(false);

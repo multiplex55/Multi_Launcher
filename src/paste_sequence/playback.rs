@@ -214,6 +214,20 @@ impl SequencePlaybackController {
             })
     }
 
+    pub(crate) fn progress(&self) -> Option<super::progress::PlaybackProgress<'_>> {
+        let started = self.started_run()?;
+        let session = self.session.as_ref()?;
+        let (step, total) = self.current_step_number()?;
+        Some(super::progress::PlaybackProgress {
+            generation: started.generation,
+            name: session.run.name(),
+            mode: started.mode,
+            step,
+            total,
+            status: self.status,
+        })
+    }
+
     pub(crate) fn set_input_lease(&mut self, lease: Option<SessionInputLease>) {
         if let Some(session) = self.session.as_mut() {
             session.input_lease = lease.filter(|lease| lease.generation == session.generation);
@@ -1417,6 +1431,36 @@ mod tests {
         match bridge.take_notice().unwrap() {
             crate::paste_sequence::admission::PhysicalPasteNotice::Paste(admission) => admission,
             other => panic!("expected admitted paste, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sequence_progress_snapshot_is_started_only_and_never_contains_payload_or_title() {
+        for mode in [
+            PlaybackMode::Automatic,
+            PlaybackMode::ManualAdvance,
+            PlaybackMode::PasteToAdvance,
+        ] {
+            let mut controller = ready_controller(prepared_run(
+                mode,
+                0,
+                &["private payload", "hidden prompt value"],
+            ));
+            assert!(controller.progress().is_none());
+            let mut platform = FakePlatform::at(Instant::now());
+            controller.start(&mut platform).unwrap();
+            let snapshot = controller.progress().unwrap();
+            assert_eq!(snapshot.mode, mode);
+            assert_eq!(snapshot.total, 2);
+            let debug = format!("{snapshot:?}");
+            assert!(!debug.contains("private payload"));
+            assert!(!debug.contains("hidden prompt value"));
+            assert!(!debug.contains("destination"));
+            controller.cancel(platform.clock);
+            assert!(
+                controller.progress().is_none(),
+                "pending clipboard cleanup has no surface"
+            );
         }
     }
 

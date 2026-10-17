@@ -402,8 +402,11 @@ impl LauncherApp {
         {
             return Err(crate::paste_sequence::SequencePlaybackError::InvalidState);
         }
-        self.sequence_playback
-            .physical_paste(admission, bridge, platform)
+        let result = self
+            .sequence_playback
+            .physical_paste(admission, bridge, platform);
+        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
+        result
     }
 
     pub(crate) fn sync_physical_paste_admission(
@@ -1559,6 +1562,7 @@ impl LauncherApp {
         {
             self.report_error_message("paste_sequence.escape", "Session Escape cancellation is unavailable. Use the configured Cancel shortcut or Cancel Run.");
         }
+        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         self.schedule_sequence_playback_wake(platform.now());
         result
     }
@@ -1585,6 +1589,7 @@ impl LauncherApp {
         } else {
             result
         };
+        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         self.schedule_sequence_playback_wake(platform.now());
         result
     }
@@ -1594,6 +1599,7 @@ impl LauncherApp {
             .invalidate_owner(self.event_sink.owner_id());
         let now = std::time::Instant::now();
         self.sequence_playback.cancel(now);
+        self.refresh_sequence_progress_tooltip(&self.egui_ctx.clone());
         self.schedule_sequence_playback_wake(now);
     }
 

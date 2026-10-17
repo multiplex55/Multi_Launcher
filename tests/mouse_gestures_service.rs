@@ -853,3 +853,105 @@ fn numeric_selection_updates_hint_text() {
 
     service.stop();
 }
+
+#[test]
+fn passive_tooltip_gesture_backends_stay_on_the_actual_worker_thread() {
+    use std::{
+        path::PathBuf,
+        rc::Rc,
+        sync::mpsc,
+        thread::{self, ThreadId},
+    };
+    let _lock = TEST_MUTEX.lock().unwrap();
+    struct RestoreDirectory(PathBuf);
+    impl Drop for RestoreDirectory {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+    let restore = RestoreDirectory(std::env::current_dir().unwrap());
+    let directory = tempdir().unwrap();
+    std::env::set_current_dir(directory.path()).unwrap();
+    type Events = mpsc::Sender<(&'static str, ThreadId)>;
+    struct BoundBackend {
+        owner: ThreadId,
+        events: Events,
+        _not_send: Rc<()>,
+    }
+    impl BoundBackend {
+        fn record(&self, event: &'static str) {
+            assert_eq!(self.owner, thread::current().id());
+            let _ = self.events.send((event, self.owner));
+        }
+    }
+    impl Drop for BoundBackend {
+        fn drop(&mut self) {
+            self.record("drop");
+        }
+    }
+    impl OverlayBackend for BoundBackend {
+        fn draw_trail_segment(&mut self, _: (f32, f32), _: (f32, f32), _: [u8; 4], _: f32) {
+            self.record("use");
+        }
+        fn clear_trail(&mut self) {
+            self.record("use");
+        }
+        fn show_hint(&mut self, _: &str, _: (f32, f32)) {
+            self.record("use");
+        }
+        fn hide_hint(&mut self) {
+            self.record("use");
+        }
+    }
+    struct BoundFactory(Events);
+    impl BoundFactory {
+        fn create(&self) -> Box<dyn OverlayBackend> {
+            let owner = thread::current().id();
+            self.0.send(("create", owner)).unwrap();
+            Box::new(BoundBackend {
+                owner,
+                events: self.0.clone(),
+                _not_send: Rc::new(()),
+            })
+        }
+    }
+    impl OverlayFactory for BoundFactory {
+        fn trail_backend(&self) -> Box<dyn OverlayBackend> {
+            self.create()
+        }
+        fn hint_backend(&self) -> Box<dyn OverlayBackend> {
+            self.create()
+        }
+    }
+    let (send, receive) = mpsc::channel();
+    let (backend, handle) = MockHookBackend::new();
+    let mut service = MouseGestureService::new_with_backend_and_overlays(
+        Box::new(backend),
+        Arc::new(BoundFactory(send)),
+        Arc::new(TestRightClickBackend::default()),
+        Arc::new(TestCursorProvider::new((0.0, 0.0))),
+    );
+    let mut config = MouseGestureConfig::default();
+    config.enabled = true;
+    config.cancel_behavior = CancelBehavior::DoNothing;
+    service.update_config(config);
+    let timeout = Duration::from_secs(2);
+    let first = receive.recv_timeout(timeout).unwrap();
+    let second = receive.recv_timeout(timeout).unwrap();
+    assert_eq!((first.0, second.0), ("create", "create"));
+    assert_eq!(first.1, second.1);
+    assert_ne!(first.1, thread::current().id());
+    assert!(handle.emit(HookEvent::RButtonDown));
+    assert_eq!(receive.recv_timeout(timeout).unwrap(), ("use", first.1));
+    assert!(handle.emit(HookEvent::Cancel));
+    service.stop();
+    let events: Vec<_> = receive.try_iter().collect();
+    assert!(events.iter().all(|(_, owner)| *owner == first.1));
+    assert_eq!(
+        events.iter().filter(|(event, _)| *event == "drop").count(),
+        2
+    );
+    assert!(!directory.path().join("mouse_gestures.json").exists());
+    drop(service);
+    drop(restore);
+}

@@ -24,6 +24,7 @@ use std::sync::Mutex;
 
 pub mod admission;
 mod playback;
+pub(crate) mod progress;
 
 #[cfg(test)]
 pub(crate) use playback::{
