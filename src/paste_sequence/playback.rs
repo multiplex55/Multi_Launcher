@@ -165,6 +165,21 @@ impl Default for SequencePlaybackController {
 }
 
 impl SequencePlaybackController {
+    /// A session generation is published only after Start succeeds. Preflight
+    /// and prepared previews never own physical input.
+    pub(crate) fn physical_paste_generation(&self) -> Option<u64> {
+        self.session
+            .as_ref()
+            .filter(|session| {
+                session.run.mode() == PlaybackMode::PasteToAdvance
+                    && matches!(
+                        self.status,
+                        SequencePlaybackStatus::AwaitPaste | SequencePlaybackStatus::Running
+                    )
+            })
+            .map(|session| session.generation)
+    }
+
     pub(crate) fn status(&self) -> SequencePlaybackStatus {
         self.status
     }

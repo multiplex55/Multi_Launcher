@@ -349,6 +349,67 @@ impl DialogCommandHost for LauncherApp {
 }
 
 impl LauncherApp {
+    pub(crate) fn sync_physical_paste_admission(&self) {
+        let enabled = self
+            .enabled_plugins
+            .as_ref()
+            .is_none_or(|plugins| plugins.contains("paste_sequence"));
+        // M5-C installs the checked lazy-publication executor. Until then the
+        // production route stays unarmed rather than swallowing normal paste.
+        let executor_ready = false;
+        crate::paste_sequence::admission::physical_paste_bridge().publish(
+            self.event_sink.owner_id(),
+            enabled
+                .then(|| self.sequence_playback.physical_paste_generation())
+                .flatten(),
+            executor_ready,
+        );
+    }
+
+    pub(crate) fn handle_physical_paste_notice(
+        &mut self,
+        notice: crate::paste_sequence::admission::PhysicalPasteNotice,
+    ) {
+        use crate::paste_sequence::admission::{PhysicalPasteNotice, physical_paste_bridge};
+        match notice {
+            PhysicalPasteNotice::Paste(admission) => {
+                if admission.owner != self.event_sink.owner_id()
+                    || !physical_paste_bridge().valid(&admission)
+                {
+                    return;
+                }
+                physical_paste_bridge().delivery_failed();
+                self.cancel_active_paste_sequence();
+                self.report_error_message(
+                    "paste_sequence.physical",
+                    "Physical paste executor is unavailable.",
+                );
+            }
+            PhysicalPasteNotice::Busy { owner, generation } => {
+                if owner == self.event_sink.owner_id()
+                    && self.sequence_playback.physical_paste_generation() == Some(generation)
+                {
+                    self.report_error_message(
+                        "paste_sequence.physical",
+                        "The previous paste is still settling. Release V and retry.",
+                    );
+                }
+            }
+            PhysicalPasteNotice::Failed {
+                owner,
+                generation,
+                reason,
+            } => {
+                if owner == self.event_sink.owner_id()
+                    && self.sequence_playback.physical_paste_generation() == Some(generation)
+                {
+                    self.cancel_active_paste_sequence();
+                    self.report_error_message("paste_sequence.physical", reason);
+                }
+            }
+        }
+    }
+
     pub(crate) fn handle_paste_sequence_hotkey(
         &mut self,
         action: crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction,
@@ -1359,6 +1420,7 @@ impl LauncherApp {
         let mut platform =
             crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
         let result = self.sequence_playback.start(&mut platform);
+        self.sync_physical_paste_admission();
         self.schedule_sequence_playback_wake(std::time::Instant::now());
         result
     }
@@ -1375,6 +1437,8 @@ impl LauncherApp {
     }
 
     pub(crate) fn cancel_sequence_playback(&mut self) {
+        crate::paste_sequence::admission::physical_paste_bridge()
+            .invalidate_owner(self.event_sink.owner_id());
         let now = std::time::Instant::now();
         self.sequence_playback.cancel(now);
         self.schedule_sequence_playback_wake(now);

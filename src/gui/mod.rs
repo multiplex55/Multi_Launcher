@@ -392,6 +392,9 @@ pub struct EventSinkRegistration {
 }
 
 impl EventSinkRegistration {
+    pub(crate) fn owner_id(&self) -> u64 {
+        self.id
+    }
     /// Attach the viewport wake after registration. If events arrived before
     /// attachment, wake once after releasing the registry lock so the queued
     /// work is not stranded.
@@ -417,6 +420,7 @@ impl EventSinkRegistration {
 
 impl Drop for EventSinkRegistration {
     fn drop(&mut self) {
+        crate::paste_sequence::admission::physical_paste_bridge().invalidate_owner(self.id);
         if let Ok(mut registry) = APP_EVENT_REGISTRY.lock() {
             registry.sinks.retain(|sink| sink.id != self.id);
         }
@@ -517,6 +521,36 @@ pub fn send_event(ev: WatchEvent) {
     for wake in wakes {
         wake.wake();
     }
+}
+
+/// Physical gestures belong to one started playback owner. They must never
+/// fan out or enter the pre-owner buffer used by ordinary refresh events.
+pub fn send_physical_paste_event(
+    owner: u64,
+    notice: crate::paste_sequence::admission::PhysicalPasteNotice,
+) -> Result<(), &'static str> {
+    let wake = {
+        let mut registry = APP_EVENT_REGISTRY
+            .lock()
+            .map_err(|_| "event registry unavailable")?;
+        let sink = registry
+            .sinks
+            .iter_mut()
+            .find(|sink| sink.id == owner)
+            .ok_or("playback event owner unavailable")?;
+        let wake = sink
+            .wake
+            .clone()
+            .ok_or("playback viewport wake unavailable")?;
+        sink.queued.fetch_add(1, Ordering::AcqRel);
+        if sink.sender.send(WatchEvent::PhysicalPaste(notice)).is_err() {
+            sink.queued.fetch_sub(1, Ordering::AcqRel);
+            return Err("playback event queue closed");
+        }
+        wake
+    };
+    wake.wake();
+    Ok(())
 }
 
 #[cfg(not(test))]
@@ -5000,6 +5034,7 @@ pub fn recv_test_event(rx: &EventReceiver) -> Option<TestWatchEvent> {
             | WatchEvent::RadialMigrationNotice(_)
             | WatchEvent::RadialMigrationState { .. }
             | WatchEvent::ScreenDrawStart
+            | WatchEvent::PhysicalPaste(_)
             | WatchEvent::PasteSequenceHotkey(_) => {
                 continue;
             }
@@ -6028,6 +6063,54 @@ mod tests {
             .and_then(|viewport| viewport.viewport_ui_cb.clone())
             .expect("radial deferred callback registered");
         (output, callback)
+    }
+
+    #[test]
+    fn physical_paste_delivery_targets_one_registered_owner_without_buffering() {
+        use crate::paste_sequence::admission::PhysicalPasteNotice;
+        let _guard = TEST_MUTEX.lock().unwrap();
+        reset_event_registry_for_test();
+        let notice = || PhysicalPasteNotice::Busy {
+            owner: 1,
+            generation: 7,
+        };
+        assert!(send_physical_paste_event(1, notice()).is_err());
+        let (other_tx, other_rx) = channel();
+        let other = register_event_sender_with_wake(
+            other_tx,
+            ViewportWake::from_callback(egui::ViewportId::ROOT, |_| {}),
+        );
+        assert!(
+            other_rx.try_recv().is_err(),
+            "physical work is never pre-owner buffered"
+        );
+        let (tx, rx) = channel();
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake_count_clone = Arc::clone(&wake_count);
+        let owner = register_event_sender_with_wake(
+            tx,
+            ViewportWake::from_callback(egui::ViewportId::ROOT, move |_| {
+                wake_count_clone.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        send_physical_paste_event(owner.owner_id(), notice()).unwrap();
+        assert!(matches!(rx.try_recv(), Ok(WatchEvent::PhysicalPaste(_))));
+        assert!(other_rx.try_recv().is_err());
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        let old_id = owner.owner_id();
+        drop(owner);
+        assert!(send_physical_paste_event(old_id, notice()).is_err());
+        drop(other);
+        let (dead_tx, dead_rx) = channel();
+        let dead = register_event_sender_with_wake(
+            dead_tx,
+            ViewportWake::from_callback(egui::ViewportId::ROOT, |_| {}),
+        );
+        drop(dead_rx);
+        assert!(send_physical_paste_event(dead.owner_id(), notice()).is_err());
+        let (no_wake_tx, _no_wake_rx) = channel();
+        let no_wake = register_event_sender(no_wake_tx);
+        assert!(send_physical_paste_event(no_wake.owner_id(), notice()).is_err());
     }
 
     #[test]

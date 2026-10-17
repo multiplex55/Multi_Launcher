@@ -22,6 +22,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+pub mod admission;
 mod playback;
 
 pub(crate) use playback::{

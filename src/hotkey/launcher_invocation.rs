@@ -1221,7 +1221,8 @@ fn publish_route_handoff_before_wake(
 }
 
 /// Owner of the one low-level launcher route. Ordinary hotkeys remain on the
-/// legacy listener; this service exists only while shared tap/hold is enabled.
+/// legacy listener. The observer is also retained for Paste Sequence sessions
+/// when radial menus are disabled.
 pub struct LauncherInvocationService {
     notices: std::sync::mpsc::Receiver<ServiceNotice>,
     #[cfg(all(windows, not(test)))]
@@ -1285,6 +1286,7 @@ impl LauncherInvocationService {
         owner: std::sync::Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
         wake: std::sync::mpsc::Sender<()>,
     ) -> Result<Self, String> {
+        crate::paste_sequence::admission::physical_paste_bridge().install_wake(wake.clone());
         #[cfg(all(windows, not(test)))]
         {
             native_service::start(config, related, owner, wake)
@@ -1407,6 +1409,7 @@ impl LauncherInvocationService {
         result
     }
     pub fn stop(&mut self) {
+        crate::paste_sequence::admission::physical_paste_bridge().observer_live(false);
         #[cfg(all(windows, not(test)))]
         {
             if self.join.is_none() {
@@ -1666,6 +1669,7 @@ mod native_service {
         }
     }
     struct State {
+        physical_paste: crate::paste_sequence::admission::PhysicalPasteReducer,
         adapter: LauncherInvocationAdapter,
         owner: Arc<dyn Fn() -> PriorityOwner + Send + Sync>,
         notices: mpsc::Sender<ServiceNotice>,
@@ -1712,12 +1716,17 @@ mod native_service {
         }
     }
     fn has_owned_input(state: &State) -> bool {
-        state.adapter.has_owned_cycle()
+        state.physical_paste.has_owned_cycle()
+            || state.adapter.has_owned_cycle()
             || state.escape.owned_provenance.is_some()
             || state.direct_owned.is_some()
             || state.item_owned.is_some()
     }
     fn cancel_lifecycle(state: &mut State, reason: LifecycleCancellation) -> Vec<InvocationIntent> {
+        crate::paste_sequence::admission::physical_paste_bridge().invalidate();
+        state
+            .physical_paste
+            .invalidate(reason.preserves_input_continuity());
         let mut intents = state.adapter.cancel_lifecycle(reason);
         for id in [
             state.escape.active_invocation(),
@@ -1795,6 +1804,31 @@ mod native_service {
                     state.primary_down = transition != KeyTransition::Up
                 }
                 let provenance = classify_provenance(injected, data.dwExtraInfo);
+                let paste_consumed = state.physical_paste.process(
+                    KeyEvent {
+                        vk: data.vkCode,
+                        transition,
+                        at: state.epoch.elapsed().as_millis() as u64,
+                        provenance,
+                    },
+                    crate::paste_sequence::admission::foreground_focus(),
+                    std::process::id(),
+                    !state.shutdown_requested
+                        && state.active_frame.is_none()
+                        && !state.adapter.has_owned_cycle()
+                        && state.direct_owned.is_none()
+                        && state.item_owned.is_none()
+                        && state.escape.owned_provenance.is_none()
+                        && matches!((state.owner)(), PriorityOwner::Launcher),
+                    crate::paste_sequence::admission::physical_paste_bridge(),
+                );
+                if paste_consumed {
+                    acknowledge_handoffs_if_drained(state);
+                    if state.shutdown_requested && !has_owned_input(state) {
+                        unsafe { PostQuitMessage(0) };
+                    }
+                    return HookDisposition::Consume;
+                }
                 if Some(data.vkCode) == primary
                     && let Some(transition) = acceptance_trace_primary_transition(transition)
                 {
@@ -2270,6 +2304,9 @@ mod native_service {
                         }
                     };
                     *slot = Some(State {
+                        physical_paste: crate::paste_sequence::admission::PhysicalPasteReducer::new(
+                            crate::paste_sequence::admission::physical_baseline(),
+                        ),
                         adapter,
                         owner,
                         notices: tx,
@@ -2345,6 +2382,17 @@ mod native_service {
                     }
                 };
                 let _hook = KeyboardHook(hook);
+                // Rebase only after installation: keys pressed during window/
+                // hook setup must not masquerade as a clean physical baseline.
+                if let Ok(mut slot) = lock.lock()
+                    && let Some(state) = slot.as_mut()
+                {
+                    state.physical_paste =
+                        crate::paste_sequence::admission::PhysicalPasteReducer::new(
+                            crate::paste_sequence::admission::physical_baseline(),
+                        );
+                }
+                crate::paste_sequence::admission::physical_paste_bridge().observer_live(true);
                 acceptance_trace::emit(Event::HookServiceReady {
                     thread_id: id,
                     desktop: hook_thread_desktop(),
@@ -2628,6 +2676,7 @@ mod native_service {
                     publish_lifecycle_cancellation(LifecycleCancellation::HookFailure);
                 }
                 drop(_hook);
+                crate::paste_sequence::admission::physical_paste_bridge().observer_live(false);
                 drop(lifecycle_signals);
                 if let Ok(mut s) = lock.lock() {
                     if let Some(state) = s.as_mut() {

@@ -442,7 +442,11 @@ fn radial_invocation_config(
             .find(|menu| menu.id == default_menu_id)
             .map_or(settings.radial.default_interaction, |menu| menu.interaction),
         accept_external_injected: true,
-        item_inputs: radial_item_inputs(settings, document, sequence_routes),
+        item_inputs: if settings.radial.enabled {
+            radial_item_inputs(settings, document, sequence_routes)
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -561,11 +565,9 @@ fn related_launcher_bindings_with_sequences(
             action: RelatedAction::ScreenDrawEmergency,
         });
     }
-    for trigger in document
-        .custom_triggers
-        .iter()
-        .filter(|v| v.scope == multi_launcher::radial::model::TriggerScope::Global)
-    {
+    for trigger in document.custom_triggers.iter().filter(|v| {
+        settings.radial.enabled && v.scope == multi_launcher::radial::model::TriggerScope::Global
+    }) {
         if let Some(hotkey) = parse_hotkey(&trigger.chord) {
             bindings.push(RelatedBinding {
                 hotkey,
@@ -715,6 +717,9 @@ impl HotkeyRouteHandoffReceipt for RouteHandoff {
 }
 
 trait HotkeyRouteHandoffIssuer {
+    fn service_available(&self, service: Option<&LauncherInvocationService>) -> bool {
+        service.is_some()
+    }
     fn begin(
         &mut self,
         service: Option<&LauncherInvocationService>,
@@ -1486,7 +1491,50 @@ fn radial_route_plan_with_sequences(
             Vec::new()
         },
         start_legacy: !shared_invocation,
-        stop_service: !settings.radial.enabled,
+        stop_service: !invocation_service_needed(settings),
+    }
+}
+
+fn paste_sequence_enabled(settings: &Settings) -> bool {
+    settings
+        .enabled_plugins
+        .as_ref()
+        .is_none_or(|plugins| plugins.contains("paste_sequence"))
+}
+
+fn invocation_service_needed(settings: &Settings) -> bool {
+    settings.radial.enabled || paste_sequence_enabled(settings)
+}
+
+fn drain_physical_paste_notices(route_transition: bool) {
+    use multi_launcher::paste_sequence::admission::{PhysicalPasteNotice, physical_paste_bridge};
+    let bridge = physical_paste_bridge();
+    while let Some(notice) = bridge.take_notice() {
+        let owner = match &notice {
+            PhysicalPasteNotice::Paste(admission) => {
+                if route_transition || !bridge.valid(admission) {
+                    bridge.delivery_failed();
+                    continue;
+                }
+                admission.owner
+            }
+            PhysicalPasteNotice::Busy { owner, .. } => *owner,
+            PhysicalPasteNotice::Failed { owner, .. } => *owner,
+        };
+        if multi_launcher::gui::send_physical_paste_event(owner, notice).is_err() {
+            bridge.delivery_failed();
+        }
+    }
+    if let Some((owner, generation, reason)) = bridge.take_failure() {
+        tracing::warn!(owner, reason, "physical paste admission disabled");
+        let _ = multi_launcher::gui::send_physical_paste_event(
+            owner,
+            PhysicalPasteNotice::Failed {
+                owner,
+                generation,
+                reason,
+            },
+        );
     }
 }
 
@@ -1710,7 +1758,7 @@ fn prepare_hotkey_runtime_message(
         );
         let listener = HotkeyTrigger::prepare_listener(triggers, "prepared", event_tx.clone())
             .map_err(HotkeyReconfigurationError::ListenerPreparation)?;
-        let staged_service = if settings.radial.enabled && !has_invocation_service {
+        let staged_service = if invocation_service_needed(&settings) && !has_invocation_service {
             LauncherInvocationService::start(
                 inert_invocation_config(&settings, radial_document, generation.0),
                 Vec::new(),
@@ -1811,6 +1859,13 @@ struct HotkeyApplicationStart<'a> {
 }
 
 fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
+    begin_hotkey_application_with_issuer(start, &mut NativeHotkeyRouteHandoffIssuer);
+}
+
+fn begin_hotkey_application_with_issuer(
+    start: HotkeyApplicationStart<'_>,
+    handoff_issuer: &mut impl HotkeyRouteHandoffIssuer,
+) {
     let HotkeyApplicationStart {
         request,
         prepared_routes,
@@ -1885,9 +1940,12 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
         );
         return;
     }
-    if prepared.settings.radial.enabled
-        && invocation_service.is_none()
-        && prepared.staged_service.is_none()
+    if invocation_service_needed(&prepared.settings)
+        && !handoff_issuer.service_available(
+            invocation_service
+                .as_ref()
+                .or(prepared.staged_service.as_ref()),
+        )
     {
         application_error(
             request,
@@ -1934,23 +1992,21 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
     };
 
     let handoff = if old_service_existed {
-        invocation_service
-            .as_ref()
-            .expect("service presence checked above")
-            .begin_route_handoff(
-                inert_invocation_config(
-                    &application.old_settings,
-                    radial_document,
-                    application.candidate_generation,
-                ),
-                shared_drain_control_bindings(
-                    &application.old_settings,
-                    radial_document,
-                    &application.old_sequence_routes,
-                ),
-                LifecycleCancellation::SettingsReload,
-            )
-    } else if application.prepared.settings.radial.enabled {
+        handoff_issuer.begin(
+            invocation_service.as_ref(),
+            inert_invocation_config(
+                &application.old_settings,
+                radial_document,
+                application.candidate_generation,
+            ),
+            shared_drain_control_bindings(
+                &application.old_settings,
+                radial_document,
+                &application.old_sequence_routes,
+            ),
+            LifecycleCancellation::SettingsReload,
+        )
+    } else if invocation_service_needed(&application.prepared.settings) {
         install_candidate_hotkey_listener(&mut application, listener);
         let plan = radial_route_plan_with_sequences(
             &application.prepared.settings,
@@ -1958,16 +2014,12 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
             application.candidate_generation,
             &application.prepared.sequence_routes,
         );
-        application
-            .prepared
-            .staged_service
-            .as_ref()
-            .expect("candidate service checked above")
-            .begin_route_handoff(
-                plan.config,
-                plan.related,
-                LifecycleCancellation::SettingsReload,
-            )
+        handoff_issuer.begin(
+            application.prepared.staged_service.as_ref(),
+            plan.config,
+            plan.related,
+            LifecycleCancellation::SettingsReload,
+        )
     } else {
         // No native hook participates in this route. Resolve the listener swap
         // through the same owner state machine so cancellation can still win
@@ -1985,7 +2037,7 @@ fn begin_hotkey_application(start: HotkeyApplicationStart<'_>) {
         Ok(handoff) => {
             *pending_launcher_route = Some(PendingLauncherRoute {
                 settings_generation,
-                handoff: Some(Box::new(handoff)),
+                handoff: Some(handoff),
                 policy_applied: None,
                 completion: PendingLauncherRouteCompletion::Hotkey(Box::new(application)),
             });
@@ -2253,7 +2305,7 @@ impl HotkeyRuntimeCommitContext<'_> {
         *self.sequence_triggers = application.prepared.sequence_triggers.clone();
         *self.settings = candidate;
         *self.settings_generation = application.candidate_generation;
-        if self.settings.radial.enabled {
+        if invocation_service_needed(self.settings) {
             if self.invocation_service.is_none() {
                 *self.invocation_service = application.prepared.staged_service.take();
             }
@@ -2441,7 +2493,7 @@ fn complete_hotkey_route_step(
                     handoff_issuer,
                 );
             }
-            Ok(()) if application.prepared.settings.radial.enabled => {
+            Ok(()) if invocation_service_needed(&application.prepared.settings) => {
                 install_candidate_hotkey_listener(&mut application, context.runtime.listener);
                 let plan = radial_route_plan_with_sequences(
                     &application.prepared.settings,
@@ -3021,7 +3073,7 @@ fn main() -> anyhow::Result<()> {
     radial_resources.reconcile(&mut radial_controller);
     let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
     let mut invocation_service = None;
-    if settings.radial.enabled {
+    if invocation_service_needed(&settings) {
         match LauncherInvocationService::start(
             radial_invocation_config(
                 &settings,
@@ -3288,7 +3340,7 @@ fn main() -> anyhow::Result<()> {
                                 );
                             }
                         }
-                    } else if settings.radial.enabled {
+                    } else if invocation_service_needed(&settings) {
                         let owner_bridge = Arc::clone(&screen_draw_recovery_bridge);
                         match LauncherInvocationService::start(
                             route_plan.config,
@@ -4556,6 +4608,9 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        // Physical admissions are never deferred with configured actions. Their
+        // exact playback lease must still be current after any route transition.
+        drain_physical_paste_notices(settings_hotkey_route_is_pending(&pending_launcher_route));
         if let Some(service) = invocation_service.as_ref() {
             while let Some(mut notice) = service.try_recv() {
                 let hook_failed = notice.cancellation == Some(LifecycleCancellation::HookFailure);
@@ -5263,7 +5318,20 @@ mod tests {
         policies: Vec<RecordedHotkeyPolicy>,
     }
 
+    impl TestHotkeyHandoffIssuer {
+        fn successful() -> Self {
+            Self {
+                results: VecDeque::from([Ok(Ok(()))]),
+                issued: 0,
+                policies: Vec::new(),
+            }
+        }
+    }
+
     impl HotkeyRouteHandoffIssuer for TestHotkeyHandoffIssuer {
+        fn service_available(&self, _service: Option<&LauncherInvocationService>) -> bool {
+            true
+        }
         fn begin(
             &mut self,
             _service: Option<&LauncherInvocationService>,
@@ -6332,10 +6400,39 @@ mod tests {
         disabled.radial.enabled = false;
         let disabled_plan = radial_route_plan(&disabled, &document, 42);
         assert!(disabled_plan.start_legacy);
-        assert!(disabled_plan.stop_service);
+        assert!(
+            !disabled_plan.stop_service,
+            "paste sessions retain the single observer"
+        );
         assert!(!disabled_plan.config.launcher_enabled);
+        assert!(disabled_plan.config.item_inputs.is_empty());
         assert!(disabled_plan.related.is_empty());
         assert_eq!(disabled_plan.config.generation, 42);
+        disabled.enabled_plugins = Some(Default::default());
+        assert!(radial_route_plan(&disabled, &document, 43).stop_service);
+        assert!(!invocation_service_needed(&disabled));
+    }
+
+    #[test]
+    fn physical_paste_service_policy_does_not_duplicate_configured_routes() {
+        let mut settings = Settings::default();
+        settings.radial.enabled = false;
+        let document = RadialDocument::starter();
+        let routes = paste_sequence_hotkey_routes_from_bindings(&settings, &[]).unwrap();
+        let plan = radial_route_plan_with_sequences(&settings, &document, 77, &routes);
+        assert!(invocation_service_needed(&settings));
+        assert!(plan.start_legacy);
+        assert!(!plan.stop_service);
+        assert!(!plan.config.launcher_enabled);
+        assert!(
+            plan.related.is_empty(),
+            "legacy listener owns Next/Cancel/Start while radial is off"
+        );
+        assert!(plan.config.item_inputs.is_empty());
+        settings.enabled_plugins = Some(Default::default());
+        assert!(!invocation_service_needed(&settings));
+        settings.radial.enabled = true;
+        assert!(invocation_service_needed(&settings));
     }
 
     #[test]
@@ -7373,7 +7470,7 @@ mod tests {
             &radial_document,
             4,
             &wake_tx,
-            false,
+            true, // The injected handoff issuer supplies the existing observer.
             invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
             &mut prepared_routes,
         );
@@ -7411,19 +7508,22 @@ mod tests {
         let mut pending_launcher_route = None;
         let mut invocation_service = None;
         let mut sequence_routes = Vec::new();
-        let mut route_handoff_issuer = NativeHotkeyRouteHandoffIssuer;
-        begin_hotkey_application(HotkeyApplicationStart {
-            request,
-            prepared_routes: &mut prepared_routes,
-            settings: &settings,
-            settings_generation: 4,
-            sequence_routes: &mut sequence_routes,
-            radial_document: &radial_document,
-            event_tx: &wake_tx,
-            listener: &mut existing_listener,
-            invocation_service: &mut invocation_service,
-            pending_launcher_route: &mut pending_launcher_route,
-        });
+        let mut route_handoff_issuer = TestHotkeyHandoffIssuer::successful();
+        begin_hotkey_application_with_issuer(
+            HotkeyApplicationStart {
+                request,
+                prepared_routes: &mut prepared_routes,
+                settings: &settings,
+                settings_generation: 4,
+                sequence_routes: &mut sequence_routes,
+                radial_document: &radial_document,
+                event_tx: &wake_tx,
+                listener: &mut existing_listener,
+                invocation_service: &mut invocation_service,
+                pending_launcher_route: &mut pending_launcher_route,
+            },
+            &mut route_handoff_issuer,
+        );
         assert!(existing_listener.is_active());
         assert_eq!(settings.hotkey, Some("Ctrl+F2".into()));
         assert!(pending_launcher_route.is_some());
@@ -7522,7 +7622,7 @@ mod tests {
             &radial_document,
             12,
             &wake_tx,
-            false,
+            true, // The injected handoff issuer supplies the existing observer.
             invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
             &mut prepared_routes,
         );
@@ -7545,18 +7645,22 @@ mod tests {
         let mut invocation_service = None;
         let mut pending_launcher_route = None;
         let mut sequence_routes = Vec::new();
-        begin_hotkey_application(HotkeyApplicationStart {
-            request,
-            prepared_routes: &mut prepared_routes,
-            settings: &settings,
-            settings_generation,
-            sequence_routes: &mut sequence_routes,
-            radial_document: &radial_document,
-            event_tx: &wake_tx,
-            listener: &mut listener,
-            invocation_service: &mut invocation_service,
-            pending_launcher_route: &mut pending_launcher_route,
-        });
+        let mut route_handoff_issuer = TestHotkeyHandoffIssuer::successful();
+        begin_hotkey_application_with_issuer(
+            HotkeyApplicationStart {
+                request,
+                prepared_routes: &mut prepared_routes,
+                settings: &settings,
+                settings_generation,
+                sequence_routes: &mut sequence_routes,
+                radial_document: &radial_document,
+                event_tx: &wake_tx,
+                listener: &mut listener,
+                invocation_service: &mut invocation_service,
+                pending_launcher_route: &mut pending_launcher_route,
+            },
+            &mut route_handoff_issuer,
+        );
 
         assert_eq!(settings.hotkey, old_settings.hotkey);
         assert_eq!(settings_generation, 12);
@@ -7583,11 +7687,11 @@ mod tests {
         );
         let Some(PendingLauncherRoute {
             completion: PendingLauncherRouteCompletion::Hotkey(application),
-            handoff: None,
+            handoff: Some(_),
             ..
         }) = pending_launcher_route.take()
         else {
-            panic!("legacy-only apply should await the main owner commit")
+            panic!("paste-only observer apply should await the main owner acknowledgement")
         };
 
         let (controller_wake, _controller_wake_rx) = channel();
@@ -7630,7 +7734,7 @@ mod tests {
             pending_route: &mut pending_launcher_route,
             deferred_notices_follow_failure: &mut deferred_notices_follow_failure,
         };
-        let mut route_handoff_issuer = NativeHotkeyRouteHandoffIssuer;
+        let mut route_handoff_issuer = TestHotkeyHandoffIssuer::successful();
         assert!(!complete_hotkey_route_step(
             *application,
             Ok(()),
@@ -7702,7 +7806,7 @@ mod tests {
             &radial_document,
             settings_generation,
             &wake_tx,
-            invocation_service.is_some(),
+            true, // The injected handoff issuer supplies the observer.
             invocation_priority_owner(Arc::new(ScreenDrawRecoveryBridge::default())),
             &mut prepared_routes,
         );
@@ -7714,18 +7818,22 @@ mod tests {
             panic!("expected stale apply request")
         };
         let mut sequence_routes = Vec::new();
-        begin_hotkey_application(HotkeyApplicationStart {
-            request,
-            prepared_routes: &mut prepared_routes,
-            settings: &settings,
-            settings_generation,
-            sequence_routes: &mut sequence_routes,
-            radial_document: &radial_document,
-            event_tx: &wake_tx,
-            listener: &mut listener,
-            invocation_service: &mut invocation_service,
-            pending_launcher_route: &mut pending_launcher_route,
-        });
+        let mut route_handoff_issuer = TestHotkeyHandoffIssuer::successful();
+        begin_hotkey_application_with_issuer(
+            HotkeyApplicationStart {
+                request,
+                prepared_routes: &mut prepared_routes,
+                settings: &settings,
+                settings_generation,
+                sequence_routes: &mut sequence_routes,
+                radial_document: &radial_document,
+                event_tx: &wake_tx,
+                listener: &mut listener,
+                invocation_service: &mut invocation_service,
+                pending_launcher_route: &mut pending_launcher_route,
+            },
+            &mut route_handoff_issuer,
+        );
         assert_eq!(
             stale_ticket.try_terminal_disposition(),
             Some(Ok(

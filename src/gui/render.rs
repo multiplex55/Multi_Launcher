@@ -2584,10 +2584,12 @@ impl LauncherApp {
         }
 
         let playback_now = std::time::Instant::now();
+        self.sync_physical_paste_admission();
         if self.sequence_playback.needs_tick() {
             let mut platform =
                 crate::paste_sequence::NativeSequencePlaybackPlatform::new(self.launcher_hwnd);
             self.sequence_playback.tick(&mut platform, playback_now);
+            self.sync_physical_paste_admission();
             if let Some(delay) = self
                 .sequence_playback
                 .next_wake_after(std::time::Instant::now())
@@ -4835,6 +4837,8 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        crate::paste_sequence::admission::physical_paste_bridge()
+            .invalidate_owner(self.event_sink.owner_id());
         self.hotfolder_action_adapter.set_active(false);
         self.hotfolder_action_pump.set_active(false);
         self.hotfolder_runtime.shutdown_and_reap();
