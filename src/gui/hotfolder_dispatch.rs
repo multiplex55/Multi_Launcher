@@ -104,6 +104,10 @@ impl LauncherHotFolderActionAdapter {
         )
     }
 
+    pub(crate) fn set_active(&self, active: bool) {
+        self.launcher_active.store(active, Ordering::Release);
+    }
+
     fn dispatch_launcher(
         &self,
         request: HotFolderExternalActionRequest,
@@ -308,7 +312,8 @@ impl HotFolderExternalActionAdapter for LauncherHotFolderActionAdapter {
                     && configuration_fingerprint.is_valid()
             }
             RuleAction::MkMacro { .. } => {
-                crate::mkmacro::runtime::hotfolder_runtime_available()
+                self.launcher_active.load(Ordering::Acquire)
+                    && crate::mkmacro::runtime::hotfolder_runtime_available()
             }
             RuleAction::Copy { .. } | RuleAction::Move { .. } | RuleAction::Rename { .. } => false,
         }
@@ -319,6 +324,9 @@ impl HotFolderExternalActionAdapter for LauncherHotFolderActionAdapter {
         request: HotFolderExternalActionRequest,
         cancellation: &crate::file_operations::ScanCancellation,
     ) -> HotFolderExternalActionOutcome {
+        if !self.launcher_active.load(Ordering::Acquire) {
+            return failure(request.operation_id, "Hot Folder runtime is disabled");
+        }
         if request.operation_id == 0
             || request.authorization.epoch == 0
             || request.authorization.rule_fingerprint != request.rule_fingerprint
@@ -368,15 +376,41 @@ impl LauncherActionCompletionPump {
         }
         pending
     }
+
+    pub(crate) fn set_active(&self, active: bool) {
+        self.launcher_active.store(active, Ordering::Release);
+        if !active {
+            self.retire_pending();
+        }
+    }
+
+    pub(crate) fn retire_pending(&self) {
+        while let Ok(pending) = self.launcher_rx.try_recv() {
+            pending.state.store(REQUEST_CANCELLED, Ordering::Release);
+            let _ = pending.reply.try_send(failure(
+                pending.request.operation_id,
+                "Hot Folder launcher dispatch was retired",
+            ));
+        }
+    }
 }
 
 impl Drop for LauncherActionCompletionPump {
     fn drop(&mut self) {
         self.launcher_active.store(false, Ordering::Release);
+        self.retire_pending();
     }
 }
 
 pub(crate) fn pump_launcher_completions(app: &mut super::LauncherApp) {
+    if !app
+        .hotfolder_action_pump
+        .launcher_active
+        .load(Ordering::Acquire)
+    {
+        app.hotfolder_action_pump.retire_pending();
+        return;
+    }
     let pending = app
         .hotfolder_action_pump
         .take_pending(MAX_LAUNCHER_DISPATCHES_PER_FRAME);

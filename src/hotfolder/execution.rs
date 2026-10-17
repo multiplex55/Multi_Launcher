@@ -8,7 +8,8 @@ use super::capability::{
     ActionCapability, ActionEnablement, HotFolderCapabilityContext, evaluate_action_capability,
 };
 use super::model::{
-    ConfigurationFingerprint, HotFolderRule, MAX_RULES, RuleAction, RuleId, RuleTrigger,
+    ConfigurationFingerprint, HotFolderEventKind, HotFolderRule, MAX_RULES, RuleAction, RuleId,
+    RuleTrigger, evaluate_rule_conditions,
 };
 use super::runtime::{
     HotFolderCandidateId, HotFolderFileEvidence, HotFolderLeaseDisposition,
@@ -28,6 +29,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -150,6 +152,15 @@ pub struct HotFolderExecutionSnapshot {
     pub recovery_required: usize,
     pub receipts: Vec<HotFolderExecutionReceipt>,
     pub journal_error: Option<String>,
+}
+
+/// Lock-free publication for the operation currently owned by the executor.
+/// The GUI may read this while the execution worker is inside native IO or an
+/// external action and cannot publish a refreshed full snapshot yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HotFolderExecutionProgress {
+    pub operation_id: Option<u64>,
+    pub cancellation_requested: bool,
 }
 
 #[derive(Debug)]
@@ -376,6 +387,191 @@ pub struct HotFolderExecutionEngine {
     operation_port: Arc<dyn HotFolderOperationPort>,
     clock: Arc<dyn ExecutionClock>,
     external_adapter: Option<Arc<dyn HotFolderExternalActionAdapter>>,
+    control: HotFolderExecutionControl,
+}
+
+#[derive(Clone, Default)]
+pub struct HotFolderExecutionControl {
+    inner: Arc<HotFolderExecutionControlState>,
+}
+
+struct HotFolderExecutionControlState {
+    admission_gate: AtomicU64,
+    next_operation: AtomicU64,
+    active_operation: AtomicU64,
+    cancellation_requested: AtomicBool,
+    active: Mutex<Option<(u64, RuleId, ScanCancellation)>>,
+}
+
+impl Default for HotFolderExecutionControlState {
+    fn default() -> Self {
+        Self {
+            admission_gate: AtomicU64::new(0),
+            next_operation: AtomicU64::new(0),
+            active_operation: AtomicU64::new(0),
+            cancellation_requested: AtomicBool::new(false),
+            active: Mutex::new(None),
+        }
+    }
+}
+
+impl HotFolderExecutionControl {
+    pub(crate) fn initially_blocked() -> Self {
+        let control = Self::default();
+        control.block_admission();
+        control
+    }
+
+    /// Atomically prevent future admissions and signal the currently owned
+    /// operation without acquiring the executor's state/journal mutex.
+    pub fn block_admission(&self) {
+        let _ = self.block_admission_for_request();
+    }
+
+    /// Close the gate and return the generation owned by this control request
+    /// plus whether it is responsible for restoring previously open admission
+    /// if it cannot be queued or fails before changing stored state.
+    pub(crate) fn block_admission_for_request(&self) -> (u64, bool) {
+        let mut current = self.inner.admission_gate.load(Ordering::Acquire);
+        let gate = loop {
+            let next = current.wrapping_add(2) | 1;
+            match self.inner.admission_gate.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break next,
+                Err(actual) => current = actual,
+            }
+        };
+        let was_open = current & 1 == 0;
+        if self.inner.active_operation.load(Ordering::Acquire) != 0 {
+            self.inner
+                .cancellation_requested
+                .store(true, Ordering::Release);
+        }
+        if let Ok(active) = self.inner.active.try_lock()
+            && let Some((_, _, cancellation)) = active.as_ref()
+        {
+            cancellation.cancel();
+        }
+        (gate, was_open)
+    }
+
+    pub fn allow_admission(&self) {
+        let mut current = self.inner.admission_gate.load(Ordering::Acquire);
+        loop {
+            let next = current & !1;
+            if next == current {
+                return;
+            }
+            match self.inner.admission_gate.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn allow_admission_if_unchanged(&self, gate: u64) -> bool {
+        self.inner
+            .admission_gate
+            .compare_exchange(gate, gate & !1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub fn gate_snapshot(&self) -> u64 {
+        self.inner.admission_gate.load(Ordering::Acquire)
+    }
+
+    pub fn progress_snapshot(&self) -> HotFolderExecutionProgress {
+        let operation_id = self.inner.active_operation.load(Ordering::Acquire);
+        HotFolderExecutionProgress {
+            operation_id: (operation_id != 0).then_some(operation_id),
+            cancellation_requested: operation_id != 0
+                && self.inner.cancellation_requested.load(Ordering::Acquire),
+        }
+    }
+
+    pub fn admission_blocked(&self) -> bool {
+        self.inner.admission_gate.load(Ordering::Acquire) & 1 == 1
+    }
+
+    fn begin_operation(&self, rule_id: RuleId) -> Option<ExecutionControlLease> {
+        if self.admission_blocked() {
+            return None;
+        }
+        let operation = self
+            .inner
+            .next_operation
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_add(1)?;
+        let cancellation = ScanCancellation::new();
+        let mut active = self.inner.active.lock().ok()?;
+        if self.admission_blocked() || active.is_some() {
+            return None;
+        }
+        self.inner
+            .cancellation_requested
+            .store(false, Ordering::Release);
+        *active = Some((operation, rule_id, cancellation.clone()));
+        self.inner
+            .active_operation
+            .store(operation, Ordering::Release);
+        if self.admission_blocked() {
+            cancellation.cancel();
+            self.inner
+                .cancellation_requested
+                .store(true, Ordering::Release);
+        }
+        drop(active);
+        if self.admission_blocked() {
+            cancellation.cancel();
+            self.inner
+                .cancellation_requested
+                .store(true, Ordering::Release);
+        }
+        Some(ExecutionControlLease {
+            control: self.clone(),
+            operation,
+            cancellation,
+        })
+    }
+}
+
+struct ExecutionControlLease {
+    control: HotFolderExecutionControl,
+    operation: u64,
+    cancellation: ScanCancellation,
+}
+
+impl Drop for ExecutionControlLease {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.control.inner.active.lock()
+            && active
+                .as_ref()
+                .is_some_and(|(operation, _, _)| *operation == self.operation)
+        {
+            *active = None;
+            if self
+                .control
+                .inner
+                .active_operation
+                .compare_exchange(self.operation, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                self.control
+                    .inner
+                    .cancellation_requested
+                    .store(false, Ordering::Release);
+            }
+        }
+    }
 }
 
 impl HotFolderExecutionEngine {
@@ -384,6 +580,7 @@ impl HotFolderExecutionEngine {
             store,
             Arc::new(NativeHotFolderOperationPort),
             Arc::new(SystemExecutionClock),
+            HotFolderExecutionControl::default(),
         )
     }
 
@@ -394,10 +591,23 @@ impl HotFolderExecutionEngine {
         store: &HotFolderRulesStore,
         external_adapter: Arc<dyn HotFolderExternalActionAdapter>,
     ) -> Result<Self, HotFolderExecutionError> {
+        Self::new_with_external_adapter_and_control(
+            store,
+            external_adapter,
+            HotFolderExecutionControl::default(),
+        )
+    }
+
+    pub fn new_with_external_adapter_and_control(
+        store: &HotFolderRulesStore,
+        external_adapter: Arc<dyn HotFolderExternalActionAdapter>,
+        control: HotFolderExecutionControl,
+    ) -> Result<Self, HotFolderExecutionError> {
         let mut engine = Self::new_with_dependencies(
             store,
             Arc::new(NativeHotFolderOperationPort),
             Arc::new(SystemExecutionClock),
+            control,
         )?;
         engine.external_adapter = Some(external_adapter);
         Ok(engine)
@@ -407,10 +617,15 @@ impl HotFolderExecutionEngine {
         self.external_adapter.clone()
     }
 
+    pub fn control(&self) -> HotFolderExecutionControl {
+        self.control.clone()
+    }
+
     fn new_with_dependencies(
         store: &HotFolderRulesStore,
         operation_port: Arc<dyn HotFolderOperationPort>,
         clock: Arc<dyn ExecutionClock>,
+        control: HotFolderExecutionControl,
     ) -> Result<Self, HotFolderExecutionError> {
         let directory = store
             .path()
@@ -420,6 +635,11 @@ impl HotFolderExecutionEngine {
         let journal = ExecutionJournal::load(&journal_path)?;
         let mut processed = VecDeque::new();
         let mut receipts = VecDeque::new();
+        let cleared_history = journal
+            .history_cleared_operation_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
         let enable_runs = journal
             .run_counters
             .iter()
@@ -439,7 +659,9 @@ impl HotFolderExecutionEngine {
             let key = row.key.to_key()?;
             push_bounded_key(&mut processed, key.clone());
             if let JournalState::Terminal(receipt) = &row.state {
-                receipts.push_back(receipt.to_receipt()?);
+                if !cleared_history.contains(&row.operation_id.to_string()) {
+                    receipts.push_back(receipt.to_receipt()?);
+                }
                 completed_runs = completed_runs.saturating_add(1);
             }
         }
@@ -469,10 +691,18 @@ impl HotFolderExecutionEngine {
             operation_port,
             clock,
             external_adapter: None,
+            control,
         })
     }
 
     pub fn pause(&self) {
+        self.control.block_admission();
+        self.pause_after_admission_closed();
+    }
+
+    /// Mark the engine paused after an owning driver has already closed the
+    /// shared admission gate at request submission time.
+    pub(crate) fn pause_after_admission_closed(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.paused = true;
             if let Some(active) = &state.active {
@@ -482,12 +712,17 @@ impl HotFolderExecutionEngine {
     }
 
     pub fn resume(&self) {
+        self.resume_with_control_gate(self.control.gate_snapshot());
+    }
+
+    pub(crate) fn resume_with_control_gate(&self, gate: u64) {
         if let Ok(mut state) = self.state.lock()
             && !state.shutdown
         {
             state.paused = false;
             state.tripped_rules.clear();
         }
+        self.control.allow_admission_if_unchanged(gate);
     }
 
     pub fn cancel_rule(&self, rule_id: &RuleId) {
@@ -532,6 +767,14 @@ impl HotFolderExecutionEngine {
     }
 
     pub fn shutdown(&self) {
+        self.control.block_admission();
+        self.shutdown_after_admission_closed();
+    }
+
+    /// Retire this engine after its app-owned driver has already revoked
+    /// admission. Avoid advancing the gate again so requests submitted after
+    /// that control keep their original generation.
+    pub(crate) fn shutdown_after_admission_closed(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.shutdown = true;
             state.paused = true;
@@ -575,6 +818,46 @@ impl HotFolderExecutionEngine {
             receipts: state.receipts.iter().cloned().collect(),
             journal_error: state.journal_error.clone(),
         }
+    }
+
+    /// Clear only the user-visible receipt history. Journal rows, processed
+    /// keys, run counters, pending recovery work and safety limits remain
+    /// intact so clearing cannot re-enable a processed input or discard a
+    /// partial operation.
+    pub fn clear_history(&self) -> Result<(), HotFolderExecutionError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| HotFolderExecutionError::InvalidJournal)?;
+        let terminal_ids = state
+            .journal
+            .rows
+            .iter()
+            .filter_map(|row| match &row.state {
+                JournalState::Terminal(_) => Some(row.operation_id.to_string()),
+                JournalState::Pending { .. } => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut terminal_ids = terminal_ids.into_iter().collect::<Vec<_>>();
+        terminal_ids.sort();
+        let previous = state.journal.history_cleared_operation_ids.clone();
+        let mut next_cleared: Vec<String> = previous
+            .iter()
+            .cloned()
+            .filter(|id| terminal_ids.contains(id))
+            .collect();
+        next_cleared.extend(terminal_ids);
+        next_cleared.sort();
+        next_cleared.dedup();
+        state.journal.history_cleared_operation_ids = next_cleared;
+        if let Err(error) = state.journal.save(&self.journal_path) {
+            state.journal.history_cleared_operation_ids = previous;
+            state.journal_error = Some("execution history could not be cleared".into());
+            return Err(HotFolderExecutionError::Journal(error));
+        }
+        state.receipts.clear();
+        state.journal_error = None;
+        Ok(())
     }
 
     fn persist_native_progress(
@@ -628,6 +911,7 @@ impl HotFolderExecutionEngine {
         candidate: &HotFolderReadyCandidate,
         rule: &HotFolderRule,
         fingerprint: &ConfigurationFingerprint,
+        cancellation: &ScanCancellation,
         error: NativeHotFolderError,
     ) -> Result<HotFolderRunDisposition, HotFolderExecutionError> {
         if watcher
@@ -660,7 +944,7 @@ impl HotFolderExecutionEngine {
             state.active = Some(ActiveOperation {
                 key: key.clone(),
                 paths: vec![candidate.path.clone()],
-                cancellation: ScanCancellation::new(),
+                cancellation: cancellation.clone(),
             });
         }
         let (status, phase, outputs, reason) = terminal_from_native(Err(error));
@@ -748,6 +1032,9 @@ impl HotFolderExecutionEngine {
         store: &HotFolderRulesStore,
         context: &HotFolderCapabilityContext<'_>,
     ) -> Result<Option<HotFolderRunDisposition>, HotFolderExecutionError> {
+        if self.control.admission_blocked() {
+            return Ok(None);
+        }
         let now = self.clock.now();
         {
             let mut state = self
@@ -774,6 +1061,11 @@ impl HotFolderExecutionEngine {
             return Ok(None);
         };
         let candidate = lease.candidate().clone();
+        let Some(control_lease) = self.control.begin_operation(candidate.rule.id.clone()) else {
+            watcher.finish_lease(lease, HotFolderLeaseDisposition::Defer)?;
+            return Ok(None);
+        };
+        let cancellation = control_lease.cancellation.clone();
         let rules = store.snapshot();
 
         // A disable/edit/delete is rejected against the store's current
@@ -823,7 +1115,6 @@ impl HotFolderExecutionEngine {
                 return Ok(Some(HotFolderRunDisposition::StaleCandidate));
             }
         };
-        let cancellation = ScanCancellation::new();
         let input = match self.operation_port.fingerprint(
             &root,
             &candidate.path,
@@ -835,6 +1126,10 @@ impl HotFolderExecutionEngine {
                 watcher.finish_lease(lease, HotFolderLeaseDisposition::RejectStale)?;
                 return Ok(Some(HotFolderRunDisposition::StaleCandidate));
             }
+            Err(error) if error.kind == NativeHotFolderFailureKind::Cancelled => {
+                watcher.finish_lease(lease, HotFolderLeaseDisposition::Defer)?;
+                return Ok(None);
+            }
             Err(error) => {
                 return self
                     .record_admission_failure(
@@ -843,6 +1138,7 @@ impl HotFolderExecutionEngine {
                         &candidate,
                         current_rule,
                         &current_fingerprint,
+                        &cancellation,
                         error,
                     )
                     .map(Some);
@@ -896,9 +1192,14 @@ impl HotFolderExecutionEngine {
             );
             let rate_key = (current_rule.id.clone(), candidate.epoch);
             let mut decision = None;
-            if state.shutdown || state.paused || state.active.is_some() {
+            if state.shutdown
+                || state.paused
+                || state.active.is_some()
+                || self.control.admission_blocked()
+                || cancellation.is_cancelled()
+            {
                 drop(state);
-                drop(lease);
+                watcher.finish_lease(lease, HotFolderLeaseDisposition::Defer)?;
                 return Ok(None);
             } else if state
                 .processed
@@ -1414,33 +1715,21 @@ fn candidate_path_matches_rule(path: &Path, root: &NativeWatchRoot, rule: &HotFo
     {
         return false;
     }
-    let relative_depth = path
+    let mut relative = PathBuf::new();
+    for component in path
         .components()
-        .count()
-        .saturating_sub(canonical_root.components().count());
-    if !rule.include_subfolders && relative_depth != 1 {
-        return false;
+        .skip(canonical_root.components().count())
+    {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        relative.push(name);
     }
-    let Some(filename) = path.file_name() else {
-        return false;
+    let event = match rule.trigger {
+        RuleTrigger::NewFile => HotFolderEventKind::Created,
+        RuleTrigger::ModifiedFile => HotFolderEventKind::Modified,
     };
-    if !rule.include_temporary_files && is_temporary_filename(filename) {
-        return false;
-    }
-    match filename.to_str() {
-        Some(filename) => rule.filter.matches_filename(filename),
-        None => rule.filter.glob.is_none() && rule.filter.extensions.is_empty(),
-    }
-}
-
-fn is_temporary_filename(filename: &OsStr) -> bool {
-    filename.to_str().is_some_and(|filename| {
-        [".part", ".crdownload"].iter().any(|suffix| {
-            filename
-                .get(filename.len().saturating_sub(suffix.len())..)
-                .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
-        })
-    })
+    evaluate_rule_conditions(rule, event, &relative).is_ok()
 }
 
 fn execution_action(kind: &str) -> HotFolderExecutionAction {
@@ -1776,6 +2065,8 @@ struct ExecutionJournal {
     format_version: u32,
     rows: Vec<JournalRow>,
     run_counters: Vec<JournalRunCounter>,
+    #[serde(default)]
+    history_cleared_operation_ids: Vec<String>,
 }
 
 impl ExecutionJournal {
@@ -1784,6 +2075,7 @@ impl ExecutionJournal {
             format_version: JOURNAL_VERSION,
             rows: Vec::new(),
             run_counters: Vec::new(),
+            history_cleared_operation_ids: Vec::new(),
         }
     }
 
@@ -1814,8 +2106,21 @@ impl ExecutionJournal {
         if journal.format_version != JOURNAL_VERSION
             || journal.rows.len() > MAX_JOURNAL_ROWS
             || journal.run_counters.len() > MAX_JOURNAL_RUN_COUNTERS
+            || journal.history_cleared_operation_ids.len() > MAX_JOURNAL_ROWS
         {
             return Err(HotFolderExecutionError::InvalidJournal);
+        }
+        let mut cleared_history = HashSet::with_capacity(
+            journal.history_cleared_operation_ids.len(),
+        );
+        for operation_id in &journal.history_cleared_operation_ids {
+            let parsed = operation_id
+                .parse::<u128>()
+                .ok()
+                .filter(|parsed| parsed.to_string() == *operation_id);
+            if parsed.is_none() || !cleared_history.insert(operation_id.clone()) {
+                return Err(HotFolderExecutionError::InvalidJournal);
+            }
         }
         let mut pending_count = 0;
         let mut keys = HashSet::with_capacity(journal.rows.len());
@@ -1865,6 +2170,12 @@ impl ExecutionJournal {
         if self.format_version != JOURNAL_VERSION
             || self.rows.len() > MAX_JOURNAL_ROWS
             || self.run_counters.len() > MAX_JOURNAL_RUN_COUNTERS
+            || self.history_cleared_operation_ids.len() > MAX_JOURNAL_ROWS
+            || self.history_cleared_operation_ids.iter().any(|operation_id| {
+                operation_id
+                    .parse::<u128>()
+                    .map_or(true, |parsed| parsed.to_string() != *operation_id)
+            })
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2627,6 +2938,7 @@ mod tests {
                 now: Instant::now(),
                 wall_now: UNIX_EPOCH + Duration::from_secs(100),
             }),
+            HotFolderExecutionControl::default(),
         )
         .expect("execution engine");
         engine.external_adapter = Some(adapter.clone());
@@ -2858,6 +3170,7 @@ mod tests {
                 now: Instant::now(),
                 wall_now: UNIX_EPOCH + Duration::from_secs(100),
             }),
+            HotFolderExecutionControl::default(),
         )
         .expect("execution engine");
         let launcher_targets = [];
@@ -2983,6 +3296,7 @@ mod tests {
                 now: Instant::now(),
                 wall_now: UNIX_EPOCH + Duration::from_secs(100),
             }),
+            HotFolderExecutionControl::default(),
         )
         .expect("reopen execution journal");
         let reopened_receipt = reopened

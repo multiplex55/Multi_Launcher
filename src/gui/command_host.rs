@@ -612,6 +612,36 @@ impl crate::commands::SearchReplaceCommandHost for LauncherApp {
     }
 }
 
+impl crate::commands::HotFolderCommandHost for LauncherApp {
+    fn execute_hotfolder_command(
+        &mut self,
+        command: crate::commands::HotFolderCommand,
+    ) -> Result<(), String> {
+        match command {
+            crate::commands::HotFolderCommand::Open => self.open_hotfolder_manager(),
+            crate::commands::HotFolderCommand::Pause => {
+                if !self.plugin_enabled("hotfolder") {
+                    return Err("Hot Folder is disabled in Plugins".into());
+                }
+                self.hotfolder_runtime
+                    .pause()
+                    .map(|_| ())
+                    .map_err(str::to_owned)?;
+            }
+            crate::commands::HotFolderCommand::Resume => {
+                if !self.plugin_enabled("hotfolder") {
+                    return Err("Hot Folder is disabled in Plugins".into());
+                }
+                self.hotfolder_runtime
+                    .resume(self.hotfolder_capability_inputs())
+                    .map(|_| ())
+                    .map_err(str::to_owned)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl FileSearchCommandHost for LauncherApp {
     fn open_file_search(&mut self) {
         self.file_search_dialog.open();
@@ -1093,6 +1123,7 @@ fn command_accepts_query_override(command: &Command) -> bool {
             | Command::JsonUtility(_)
             | Command::XmlToolkit(_)
             | Command::BatchRename(_)
+            | Command::HotFolder(_)
             | Command::HashGenerator(_)
             | Command::ColorPick(_)
             | Command::Ocr(_)

@@ -283,6 +283,25 @@ pub fn parse_action(action: &Action) -> Result<Command, CommandError> {
     if s == "xml:open" {
         return Ok(Command::XmlToolkit(XmlToolkitCommand::Open));
     }
+    if s.starts_with("hotfolder:") {
+        let command = match (s, action.args.is_none()) {
+            ("hotfolder:open", true) => Some(HotFolderCommand::Open),
+            ("hotfolder:pause", true) => Some(HotFolderCommand::Pause),
+            ("hotfolder:resume", true) => Some(HotFolderCommand::Resume),
+            _ => None,
+        };
+        return command.map(Command::HotFolder).ok_or_else(|| {
+            CommandError::new(
+                "hotfolder",
+                if action.args.is_some() {
+                    "Hot Folder commands do not accept a path or content payload"
+                } else {
+                    "unknown Hot Folder command"
+                },
+            )
+            .with_gui_failure_policy()
+        });
+    }
     if s == "rename:open" {
         return Ok(Command::BatchRename(BatchRenameCommand::Open));
     }
@@ -1541,6 +1560,9 @@ mod tests {
     fn metadata_is_stable_across_every_command_domain() {
         let cases = [
             ("launcher:toggle", "launcher", "toggle"),
+            ("hotfolder:open", "hotfolder", "open"),
+            ("hotfolder:pause", "hotfolder", "pause"),
+            ("hotfolder:resume", "hotfolder", "resume"),
             ("data:dialog", "data", "dialog"),
             ("query:abc", "query", "set"),
             ("help:show", "dialog", "help"),
@@ -1581,6 +1603,23 @@ mod tests {
         .unwrap();
         let parsed = parse(&format!("diff:open:{diff}"));
         assert_eq!((parsed.domain(), parsed.kind_name()), ("diff", "open"));
+    }
+
+    #[test]
+    fn hotfolder_commands_are_payload_free_and_closed_over_supported_controls() {
+        for raw in ["hotfolder:open", "hotfolder:pause", "hotfolder:resume"] {
+            assert!(matches!(parse(raw).command, Command::HotFolder(_)));
+        }
+        let mut payload = action("hotfolder:open");
+        payload.args = Some("C:\\private\\file.txt".into());
+        assert!(parse_action(&payload)
+            .unwrap_err()
+            .message
+            .contains("do not accept a path or content payload"));
+        assert!(parse_action(&action("hotfolder:enable"))
+            .unwrap_err()
+            .message
+            .contains("unknown Hot Folder command"));
     }
 
     #[test]

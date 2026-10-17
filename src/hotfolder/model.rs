@@ -110,6 +110,72 @@ pub enum RuleTrigger {
     ModifiedFile,
 }
 
+/// A reported filesystem event. This small value is shared by watcher
+/// admission and the read-only rule preview so both paths evaluate the same
+/// trigger semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotFolderEventKind {
+    Created,
+    Modified,
+    Removed,
+    RenamedFrom,
+    RenamedTo,
+}
+
+/// Purely evaluate one already-rooted relative filename against the stored
+/// rule conditions. The caller remains responsible for proving that `path`
+/// was reported beneath the current canonical watched root.
+pub fn evaluate_rule_conditions(
+    rule: &HotFolderRule,
+    event: HotFolderEventKind,
+    path: &Path,
+) -> Result<(), &'static str> {
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            !matches!(component, Component::Normal(_))
+        })
+    {
+        return Err("sample path is not a root-relative file path");
+    }
+    let trigger_matches = match (rule.trigger, event) {
+        (RuleTrigger::NewFile, HotFolderEventKind::Created | HotFolderEventKind::RenamedTo) => true,
+        (RuleTrigger::ModifiedFile, HotFolderEventKind::Modified) => true,
+        _ => false,
+    };
+    if !trigger_matches {
+        return Err("event does not match the selected trigger");
+    }
+    let depth = path.components().count();
+    if !rule.include_subfolders && depth != 1 {
+        return Err("subfolder events are excluded by this rule");
+    }
+    let Some(filename) = path.file_name() else {
+        return Err("sample path has no filename");
+    };
+    if !rule.include_temporary_files && is_temporary_download_filename(filename) {
+        return Err("temporary download filenames are excluded by this rule");
+    }
+    let filename_matches = match filename.to_str() {
+        Some(filename) => rule.filter.matches_filename(filename),
+        None => rule.filter.glob.is_none() && rule.filter.extensions.is_empty(),
+    };
+    if !filename_matches {
+        return Err("filename does not match this rule's filters");
+    }
+    Ok(())
+}
+
+pub(crate) fn is_temporary_download_filename(filename: &std::ffi::OsStr) -> bool {
+    filename.to_str().is_some_and(|filename| {
+        [".part", ".crdownload"].iter().any(|suffix| {
+            filename
+                .get(filename.len().saturating_sub(suffix.len())..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+        })
+    })
+}
+
 /// Bounded file-stability policy stored with a rule for the future watcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

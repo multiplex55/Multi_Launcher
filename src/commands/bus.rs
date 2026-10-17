@@ -6,7 +6,7 @@ use crate::commands::handlers::{
     handle_json_utility, handle_launcher, handle_link, handle_mouse_gesture, handle_multi_manager,
     handle_note, handle_ocr, handle_paste_sequence, handle_query, handle_radial,
     handle_search_replace,
-    handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo,
+    handle_hotfolder, handle_screen_draw, handle_screenshot, handle_simple_dialog, handle_snippet_run, handle_todo,
     handle_xml_toolkit,
 };
 
@@ -46,6 +46,7 @@ impl CommandBus {
             Command::XmlToolkit(command) => Ok(handle_xml_toolkit(host, *command)),
             Command::BatchRename(command) => Ok(handle_batch_rename(host, *command)),
             Command::SearchReplace(command) => Ok(handle_search_replace(host, *command)),
+            Command::HotFolder(command) => handle_hotfolder(host, *command),
             Command::HashGenerator(command) => Ok(handle_hash_generator(host, command)),
             Command::ColorPick(command) => handle_color_pick(host, command),
             Command::Ocr(command) => handle_ocr(host, command),
@@ -149,6 +150,7 @@ mod tests {
         xml_toolkit_opens: usize,
         batch_rename_opens: usize,
         search_replace_opens: usize,
+        hotfolder_commands: Vec<crate::commands::HotFolderCommand>,
         hash_generator_opens: usize,
         radial_calls: usize,
     }
@@ -410,6 +412,15 @@ mod tests {
     impl crate::commands::SearchReplaceCommandHost for FakeHost {
         fn open_search_replace(&mut self) {
             self.search_replace_opens += 1;
+        }
+    }
+    impl crate::commands::HotFolderCommandHost for FakeHost {
+        fn execute_hotfolder_command(
+            &mut self,
+            command: crate::commands::HotFolderCommand,
+        ) -> Result<(), String> {
+            self.hotfolder_commands.push(command);
+            Ok(())
         }
     }
     impl crate::commands::ClipboardModifyCommandHost for FakeHost {
@@ -984,6 +995,70 @@ mod tests {
         assert_eq!(outcome.results, crate::commands::ResultsPolicy::Keep);
         assert_eq!(outcome.visibility, VisibilityPolicy::Keep);
         assert_eq!(outcome.history, HistoryPolicy::Skip);
+    }
+
+    #[test]
+    fn hotfolder_provider_and_payload_free_controls_use_the_typed_bus() {
+        let mut manager = crate::plugin::PluginManager::new_inert_for_test();
+        manager.reload_from_dirs(
+            &[],
+            10,
+            crate::settings::NetUnit::Auto,
+            false,
+            &std::collections::HashMap::new(),
+            std::sync::Arc::new(Vec::new()),
+        );
+        let open = manager
+            .search_filtered("hotfolder", None, None)
+            .into_iter()
+            .find(|action| action.action == "hotfolder:open")
+            .expect("production registration exposes the manager action");
+        assert!(open.args.is_none());
+        let help = manager
+            .commands()
+            .into_iter()
+            .find(|action| action.action == "query:hotfolder")
+            .expect("the provider contributes an in-app help entry");
+        let normalized_help = help.desc.to_ascii_lowercase();
+        for requirement in [
+            "rules start disabled",
+            "startup never scans or backfills",
+            "test rule reads sample metadata only",
+            "zero execution effects",
+        ] {
+            assert!(normalized_help.contains(requirement));
+        }
+
+        let mut host = FakeHost::default();
+        let open_invocation = crate::commands::parse_command(
+            open,
+            None,
+            ActivationSource::Enter,
+        )
+        .unwrap();
+        assert_eq!(open_invocation.command, Command::HotFolder(crate::commands::HotFolderCommand::Open));
+        let outcome = CommandBus.dispatch(&open_invocation, &mut host).unwrap();
+        assert_eq!(outcome.visibility, VisibilityPolicy::Show);
+        assert_eq!(host.hotfolder_commands, vec![crate::commands::HotFolderCommand::Open]);
+
+        for raw in ["hotfolder:pause", "hotfolder:resume"] {
+            let invocation = crate::commands::parse_command(
+                Action { label: raw.into(), desc: String::new(), action: raw.into(), args: None },
+                None,
+                ActivationSource::Enter,
+            )
+            .unwrap();
+            CommandBus.dispatch(&invocation, &mut host).unwrap();
+        }
+        assert_eq!(
+            host.hotfolder_commands,
+            vec![
+                crate::commands::HotFolderCommand::Open,
+                crate::commands::HotFolderCommand::Pause,
+                crate::commands::HotFolderCommand::Resume,
+            ]
+        );
+        assert_eq!(host.headless_calls, 0);
     }
 
     #[test]

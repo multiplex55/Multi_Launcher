@@ -7,9 +7,10 @@ use super::capability::{
     ActionCapability, ActionEnablement, HotFolderCapabilityContext, evaluate_action_capability,
 };
 use super::model::{
-    ConfigurationFingerprint, HotFolderRule, MAX_DUE_OBSERVATIONS_PER_TURN, MAX_EVENT_PATH_BYTES,
-    MAX_EVENT_PATHS, MAX_PENDING_FILES, MAX_READY_CANDIDATES, MAX_RULES, MAX_RUNTIME_DIAGNOSTICS,
-    MAX_WATCH_INGRESS_EVENTS, MAX_WATCHED_ROOTS, READY_LEASE_TIMEOUT_MS, RuleId, RuleTrigger,
+    ConfigurationFingerprint, HotFolderEventKind, HotFolderRule, MAX_DUE_OBSERVATIONS_PER_TURN,
+    MAX_EVENT_PATH_BYTES, MAX_EVENT_PATHS, MAX_PENDING_FILES, MAX_READY_CANDIDATES, MAX_RULES,
+    MAX_RUNTIME_DIAGNOSTICS, MAX_WATCH_INGRESS_EVENTS, MAX_WATCHED_ROOTS,
+    READY_LEASE_TIMEOUT_MS, RuleId, evaluate_rule_conditions,
 };
 use super::store::HotFolderRulesSnapshot;
 use crate::file_operations::{
@@ -1697,7 +1698,7 @@ fn handle_arrival(
         );
         return;
     }
-    let Some(relative) = relative_reported_path(root.canonical_root(), &path) else {
+    let Some(relative) = relative_path_beneath(root.canonical_root(), &path) else {
         record_diagnostic(
             output,
             HotFolderDiagnostic {
@@ -1708,25 +1709,22 @@ fn handle_arrival(
         );
         return;
     };
-    let depth = relative.components().count();
-    let filename = relative.file_name();
+    let Some(event) = (match event_kind {
+        WatchEventKind::Created => Some(HotFolderEventKind::Created),
+        WatchEventKind::Modified => Some(HotFolderEventKind::Modified),
+        WatchEventKind::RenamedTo => Some(HotFolderEventKind::RenamedTo),
+        WatchEventKind::RenamedFrom => Some(HotFolderEventKind::RenamedFrom),
+        WatchEventKind::Removed => Some(HotFolderEventKind::Removed),
+        WatchEventKind::RenamePair
+        | WatchEventKind::Overflow
+        | WatchEventKind::Error
+        | WatchEventKind::Ignored => None,
+    }) else {
+        return;
+    };
     for active_rule in rules {
         let rule = &active_rule.rule;
-        if !rule.include_subfolders && depth != 1 {
-            continue;
-        }
-        if !rule.include_temporary_files && filename.is_some_and(is_temporary_download_filename) {
-            continue;
-        }
-        if !filename.is_some_and(|filename| filename_matches(rule, filename)) {
-            continue;
-        }
-        let trigger_matches = match (rule.trigger, event_kind) {
-            (RuleTrigger::NewFile, WatchEventKind::Created | WatchEventKind::RenamedTo) => true,
-            (RuleTrigger::ModifiedFile, WatchEventKind::Modified) => true,
-            _ => false,
-        };
-        if !trigger_matches {
+        if evaluate_rule_conditions(rule, event, &relative).is_err() {
             continue;
         }
         let candidate_key = PendingKey {
@@ -1970,7 +1968,7 @@ fn process_due(
                     continue;
                 }
                 let observed_path = observation.canonical_path().to_path_buf();
-                if relative_reported_path(root.canonical_root(), &observed_path).is_none()
+                if relative_path_beneath(root.canonical_root(), &observed_path).is_none()
                     || !paths_equivalent(&observed_path, &key.path)
                 {
                     record_diagnostic(
@@ -2102,7 +2100,7 @@ fn allocate_candidate_id(core: &mut RuntimeCore) -> Option<HotFolderCandidateId>
     Some(HotFolderCandidateId(id))
 }
 
-fn relative_reported_path(root: &Path, path: &Path) -> Option<PathBuf> {
+pub(crate) fn relative_path_beneath(root: &Path, path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
@@ -2133,24 +2131,6 @@ fn relative_reported_path(root: &Path, path: &Path) -> Option<PathBuf> {
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
     crate::batch_rename::compare_paths_windows_ordinal(left, right) == std::cmp::Ordering::Equal
-}
-
-fn filename_matches(rule: &HotFolderRule, filename: &std::ffi::OsStr) -> bool {
-    match filename.to_str() {
-        Some(filename) => rule.filter.matches_filename(filename),
-        None => rule.filter.glob.is_none() && rule.filter.extensions.is_empty(),
-    }
-}
-
-fn is_temporary_download_filename(filename: &std::ffi::OsStr) -> bool {
-    let Some(filename) = filename.to_str() else {
-        return false;
-    };
-    [".part", ".crdownload"].iter().any(|suffix| {
-        filename
-            .get(filename.len().saturating_sub(suffix.len())..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
-    })
 }
 
 #[cfg(test)]

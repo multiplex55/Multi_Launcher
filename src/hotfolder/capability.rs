@@ -163,10 +163,23 @@ pub fn evaluate_action_capability(
     }
 
     match &rule.action {
-        RuleAction::Copy { .. } => ActionCapability::Supported {
+        RuleAction::Copy { destination } => {
+            if let Some(unavailable) = directory_capability(destination, context) {
+                return unavailable;
+            }
+            ActionCapability::Supported {
             enablement: ActionEnablement::Standard,
-        },
-        RuleAction::Move { .. } | RuleAction::Rename { .. } => ActionCapability::Supported {
+            }
+        }
+        RuleAction::Move { destination } => {
+            if let Some(unavailable) = directory_capability(destination, context) {
+                return unavailable;
+            }
+            ActionCapability::Supported {
+            enablement: ActionEnablement::StrongConfirmationRequired,
+            }
+        }
+        RuleAction::Rename { .. } => ActionCapability::Supported {
             enablement: ActionEnablement::StrongConfirmationRequired,
         },
         RuleAction::RegisteredLauncherAction {
@@ -182,6 +195,24 @@ pub fn evaluate_action_capability(
             context.mkmacro_document,
             context,
         ),
+    }
+}
+
+fn directory_capability(
+    path: &Path,
+    context: &HotFolderCapabilityContext<'_>,
+) -> Option<ActionCapability> {
+    match context.root_availability.get(path) {
+        Some(RootAvailability::ExistingDirectory) => None,
+        Some(RootAvailability::Missing) => Some(ActionCapability::Unavailable {
+            reason: "action destination is missing",
+        }),
+        Some(RootAvailability::NotDirectory) => Some(ActionCapability::Invalid {
+            reason: "action destination is not a directory",
+        }),
+        Some(RootAvailability::Unreadable) | None => Some(ActionCapability::Unavailable {
+            reason: "action destination could not be inspected",
+        }),
     }
 }
 

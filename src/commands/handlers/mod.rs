@@ -12,6 +12,7 @@ mod file_search_diff;
 mod headless_gui;
 mod json_utility;
 mod hash_generator;
+mod hotfolder;
 mod launcher_query;
 mod mouse_gesture;
 mod multi_manager;
@@ -39,6 +40,7 @@ pub(crate) use headless_gui::{
 };
 pub(crate) use json_utility::handle_json_utility;
 pub(crate) use hash_generator::handle_hash_generator;
+pub(crate) use hotfolder::handle_hotfolder;
 pub(crate) use launcher_query::{handle_launcher, handle_query};
 pub(crate) use mouse_gesture::handle_mouse_gesture;
 pub(crate) use multi_manager::handle_multi_manager;

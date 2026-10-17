@@ -15,7 +15,8 @@ pub use error::CommandError;
 pub use host::{
     BatchRenameCommandHost, CalendarCommandHost, ClipboardModifyCommandHost, ColorPickCommandHost,
     CommandHost, CropCommandHost, DataCommandHost, DialogCommandHost, DiffCommandHost,
-    FileSearchCommandHost, HeadlessCommandHost, JsonUtilityCommandHost, LauncherCommandHost,
+    FileSearchCommandHost, HeadlessCommandHost, HotFolderCommandHost, JsonUtilityCommandHost,
+    LauncherCommandHost,
     MouseGestureCommandHost, MultiManagerCommandHost, NoteCommandHost, OcrCommandHost,
     RadialCommandHost, ScreenDrawCommandHost, ScreenshotCommandHost, ScreenshotCommandResult,
     SearchReplaceCommandHost, SnippetPromptIntent, TodoCommandHost, XmlToolkitCommandHost,

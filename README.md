@@ -25,6 +25,7 @@ It’s designed to be “one hotkey away” from:
 - [File-search plugin](#file-search-plugin)
 - [Search & Replace](#search--replace)
 - [Batch Renamer](#batch-renamer)
+- [Hot Folder](#hot-folder)
 - [Clipboard Modify](#clipboard-modify)
 - [Clipboard Snippets](#clipboard-snippets)
 - [JSON and screen color utilities](#json-and-screen-color-utilities)
@@ -524,6 +525,56 @@ reported. Receipts remain available after closing the dialog or restarting the
 application. Restore handles a committed replacement; Recovery handles an
 interrupted Apply or Restore. The existing `fs` filename and content search
 commands keep their normal behavior and scope.
+
+---
+
+## Hot Folder
+
+Enable the `hotfolder` plugin, type `hotfolder`, and choose **Open Hot Folder
+Manager**. New and imported rules start disabled. Choose each watched directory
+and any copy or move destination explicitly. The directory picker stores the
+selected path; the separate sample-file picker is read-only and supplies only
+metadata and a root-relative filename to **Test Rule**.
+
+Enabling a rule is a separate action that rechecks its current root, filter,
+destination, exact action target, and configuration fingerprint. Registered
+launcher actions are limited to the exact current unattended-safe action
+selected in the picker. MkMacro rules bind one exact current macro and its
+transitive configuration; interactive or unavailable macros remain unavailable.
+Strong actions show the rule, roots, scope, selected action, and fingerprint-bound
+confirmation before they can be enabled. Saving any changed rule stores it
+disabled and revokes the previous authorization; it never silently re-enables
+the edited rule.
+
+The watcher starts from reported filesystem events only. On startup or resume,
+previously enabled intent is restored only after fresh validation; existing
+files are not scanned or backfilled. Files must settle according to the rule's
+stable-observation interval and timeout (50–5,000 ms sampling, 2–10 stable
+observations, and 100–30,000 ms timeout). Temporary `.part` and `.crdownload`
+files, subfolders, and filenames outside the selected trigger/filter are skipped
+unless the rule explicitly includes the applicable scope. Runtime queues and
+history are bounded; execution is capped at 30 runs per rule and 120 total runs
+per minute, with at most 512 runs in one enable epoch.
+
+**Test Rule** evaluates one selected sample with read-only metadata. It does
+not enable or reconcile a watcher, dispatch an action or macro, change stored
+rules, consume a live event, or write to execution history. Its match result and
+planned action are separate from any real background activity.
+
+Closing the manager hides only the UI; the app-owned service continues. Use
+**Pause** to stop new admissions and request cancellation of owned active work.
+Disabling the plugin also stops watches and admissions while retaining stored
+enabled intent for later revalidation. Re-enabling the plugin starts fresh watch
+epochs without backfill. The typed commands `hotfolder:pause` and
+`hotfolder:resume` provide the same controls.
+
+History distinguishes in-flight work from terminal receipts. `Partial` means a
+filesystem operation did not complete fully; for example, a move can report
+that the destination was created while the source remained. Recovery-required
+records stay visible until resolved. **Clear History** removes terminal receipt
+history from the display and its history store while preserving dedupe,
+run-cap, and recovery state. Reasons are sanitized and do not include file
+contents or action secrets.
 
 ---
 

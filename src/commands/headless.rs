@@ -212,6 +212,9 @@ fn execute_with_external(
         Command::SearchReplace(_) => {
             anyhow::bail!("Search and Replace commands require the launcher interface")
         }
+        Command::HotFolder(_) => {
+            anyhow::bail!("Hot Folder commands require the launcher interface")
+        }
         Command::Radial(_) => anyhow::bail!("radial commands require the launcher interface"),
         Command::ScreenDraw(_) => {
             anyhow::bail!("screen draw commands require the launcher interface")

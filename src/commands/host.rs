@@ -123,6 +123,13 @@ pub trait SearchReplaceCommandHost {
     fn open_search_replace(&mut self);
 }
 
+pub trait HotFolderCommandHost {
+    fn execute_hotfolder_command(&mut self, command: super::HotFolderCommand) -> Result<(), String> {
+        let _ = command;
+        Err("Hot Folder commands require the launcher interface".into())
+    }
+}
+
 pub trait CalendarCommandHost {
     fn calendar_dashboard_enabled(&self) -> bool;
     fn calendar_preserve_command(&self) -> bool;
@@ -295,6 +302,7 @@ pub trait CommandHost:
     + XmlToolkitCommandHost
     + BatchRenameCommandHost
     + SearchReplaceCommandHost
+    + HotFolderCommandHost
     + ColorPickCommandHost
     + OcrCommandHost
     + CalendarCommandHost
@@ -321,6 +329,7 @@ impl<T> CommandHost for T where
         + XmlToolkitCommandHost
         + BatchRenameCommandHost
         + SearchReplaceCommandHost
+        + HotFolderCommandHost
         + ColorPickCommandHost
         + OcrCommandHost
         + CalendarCommandHost

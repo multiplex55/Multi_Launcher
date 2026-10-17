@@ -25,6 +25,7 @@ use crate::plugins::file_search::FileSearchPlugin;
 use crate::plugins::folders::FoldersPlugin;
 use crate::plugins::help::HelpPlugin;
 use crate::plugins::hash_generator::HashGeneratorPlugin;
+use crate::plugins::hotfolder::HotFolderPlugin;
 use crate::plugins::history::HistoryPlugin;
 use crate::plugins::ip::IpPlugin;
 use crate::plugins::json_utility::JsonUtilityPlugin;
@@ -919,6 +920,7 @@ impl PluginManager {
         self.register_with_settings(XmlToolkitPlugin, plugin_settings);
         self.register_with_settings(BatchRenamePlugin, plugin_settings);
         self.register_with_settings(SearchReplacePlugin, plugin_settings);
+        self.register_with_settings(HotFolderPlugin, plugin_settings);
         self.register_with_settings(HashGeneratorPlugin, plugin_settings);
         self.register_with_settings(RegexTesterPlugin, plugin_settings);
         self.register_with_settings(QrPlugin, plugin_settings);

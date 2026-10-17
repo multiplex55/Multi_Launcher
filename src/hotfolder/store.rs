@@ -55,6 +55,15 @@ impl HotFolderRulesSnapshot {
         }
     }
 
+    pub(crate) fn for_preview(rule: HotFolderRule) -> Self {
+        Self {
+            revision: 0,
+            rules: vec![rule],
+            quarantined_rows: Vec::new(),
+            write_block_reason: None,
+        }
+    }
+
     pub fn is_write_blocked(&self) -> bool {
         self.write_block_reason.is_some()
     }

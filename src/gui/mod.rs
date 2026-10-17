@@ -47,6 +47,8 @@ mod ocr_view;
 mod paste_sequence_dialog;
 mod hash_generator_dialog;
 pub(crate) mod hotfolder_dispatch;
+pub(crate) mod hotfolder_dialog;
+pub(crate) mod hotfolder_runtime;
 #[cfg(feature = "qa-framebuffer-capture")]
 mod qa_framebuffer;
 mod qr_dialog;
@@ -812,6 +814,8 @@ pub struct LauncherApp {
     command_bus: Arc<crate::commands::CommandBus>,
     hotfolder_action_adapter: Arc<hotfolder_dispatch::LauncherHotFolderActionAdapter>,
     hotfolder_action_pump: hotfolder_dispatch::LauncherActionCompletionPump,
+    pub(crate) hotfolder_runtime: hotfolder_runtime::HotFolderRuntimeDriver,
+    pub(crate) hotfolder_dialog: hotfolder_dialog::HotFolderDialog,
     action_cache: Vec<CachedSearchEntry>,
     action_filter_metadata: Vec<ActionFilterMetadata>,
     actions_by_id: ActionIdLookup,
@@ -2229,6 +2233,10 @@ impl LauncherApp {
         }
     }
     fn apply_enabled_plugin_selection(&mut self, enabled_plugins: Option<HashSet<String>>) {
+        let hotfolder_was_enabled = self.plugin_enabled("hotfolder");
+        let hotfolder_will_be_enabled = enabled_plugins
+            .as_ref()
+            .is_none_or(|plugins| plugins.contains("hotfolder"));
         let paste_sequence_was_enabled = self
             .enabled_plugins
             .as_ref()
@@ -2249,6 +2257,21 @@ impl LauncherApp {
         self.plugins
             .sync_enabled_plugins(self.enabled_plugins.as_ref());
         self.update_command_cache();
+
+        if hotfolder_was_enabled && !hotfolder_will_be_enabled {
+            // Retire GUI replies before asking the worker to cancel and stop.
+            self.hotfolder_action_adapter.set_active(false);
+            self.hotfolder_action_pump.set_active(false);
+            if let Err(error) = self.hotfolder_runtime.stop() {
+                tracing::warn!(reason = error, "Hot Folder stop request was not queued");
+            }
+        } else if !hotfolder_was_enabled && hotfolder_will_be_enabled {
+            self.hotfolder_action_adapter.set_active(true);
+            self.hotfolder_action_pump.set_active(true);
+            if let Err(error) = self.hotfolder_runtime.start(self.hotfolder_capability_inputs()) {
+                tracing::warn!(reason = error, "Hot Folder start request was not queued");
+            }
+        }
     }
 
     pub fn update_paths(
@@ -2455,7 +2478,7 @@ impl LauncherApp {
         let data_root = crate::platform::app_data::AppDataRoot::from_settings_path(&settings_path)
             .expect("LauncherApp settings path must resolve an application data root");
         let regex_tester_dialog = RegexTesterDialogState::with_data_root(&data_root);
-        let data_recovery_dialog = DataRecoveryDialog::new(data_root, settings.clone(), {
+        let data_recovery_dialog = DataRecoveryDialog::new(data_root.clone(), settings.clone(), {
             let ctx = ctx.clone();
             move || ctx.request_repaint()
         });
@@ -2819,11 +2842,17 @@ impl LauncherApp {
                 ctx.clone(),
                 Arc::clone(&plugins.internal_services().mkmacro_store),
             );
+        let hotfolder_runtime = hotfolder_runtime::HotFolderRuntimeDriver::new(
+            data_root,
+            hotfolder_action_adapter.clone(),
+        );
         let mut app = Self {
             actions: Arc::clone(&actions),
             command_bus: Arc::new(crate::commands::CommandBus),
             hotfolder_action_adapter,
             hotfolder_action_pump,
+            hotfolder_runtime,
+            hotfolder_dialog: hotfolder_dialog::HotFolderDialog::default(),
             query: String::new(),
             query_history: QueryHistoryNavigator::default(),
             results: (*actions).clone(),
@@ -3212,6 +3241,14 @@ impl LauncherApp {
         crate::plugins::mouse_gestures::sync_enabled_plugins(app.enabled_plugins.as_ref());
         app.plugins
             .sync_enabled_plugins(app.enabled_plugins.as_ref());
+        let hotfolder_enabled = app.plugin_enabled("hotfolder");
+        app.hotfolder_action_adapter.set_active(hotfolder_enabled);
+        app.hotfolder_action_pump.set_active(hotfolder_enabled);
+        if hotfolder_enabled {
+            if let Err(error) = app.hotfolder_runtime.start(app.hotfolder_capability_inputs()) {
+                tracing::warn!(reason = error, "Hot Folder runtime did not start");
+            }
+        }
         app.recompute_query_results_layout();
         app
     }

@@ -2590,6 +2590,13 @@ impl LauncherApp {
         {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
+        let hotfolder_snapshot = self.hotfolder_runtime.snapshot();
+        if self.hotfolder_dialog.needs_runtime_poll(
+            &hotfolder_snapshot,
+            self.visible_flag.load(Ordering::Relaxed),
+        ) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.multi_manager.maybe_auto_save_bindings();
         if let Some(message) = self.data_recovery_dialog.take_startup_notice()
             && self.enable_toasts
@@ -4569,6 +4576,7 @@ impl LauncherApp {
         self.hash_generator_dialog.show(&ctx);
         self.regex_tester_dialog.show(&ctx);
         self.xml_toolkit_dialog.show(&ctx);
+        self.render_hotfolder_manager(&ctx, first_ui_pass);
         #[cfg(feature = "qa-framebuffer-capture")]
         if self.qa_framebuffer_needs_qr_observation() {
             let observation = self.qr_dialog.show_with_qa_observation(&ctx);
@@ -4956,6 +4964,10 @@ impl eframe::App for LauncherApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.hotfolder_action_adapter.set_active(false);
+        self.hotfolder_action_pump.set_active(false);
+        self.hotfolder_runtime.shutdown_and_reap();
+        self.hotfolder_runtime.join_reaper();
         self.xml_toolkit_dialog.shutdown();
         self.hash_generator_dialog.shutdown();
         self.shutdown_batch_rename_scanner();
