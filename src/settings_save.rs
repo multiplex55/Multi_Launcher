@@ -1488,6 +1488,61 @@ mod tests {
     }
 
     #[test]
+    fn paste_settings_save_publishes_after_acknowledgement_and_reopens_committed_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = save_path(directory.path());
+        let mut baseline = Settings::default();
+        baseline.enable_toasts = false;
+        baseline.save(&path).unwrap();
+        let (context, mut app) = test_app(directory.path(), baseline.clone());
+        app.open_paste_sequence_settings_dialog();
+        app.settings_editor.paste_sequence.next_hotkey = Some("Ctrl+F9".into());
+        app.settings_editor.paste_cancel_enabled = false;
+        app.settings_editor.paste_sequence.tooltip_enabled = false;
+        app.settings_editor.paste_sequence.escape_cancel_enabled = false;
+        let desired = app.settings_editor.to_settings(&baseline);
+        let (client, owner, _wake) = crate::hotkey::reconfiguration::test_reconfiguration_runtime();
+        app.begin_settings_save_with_prepare(
+            &context,
+            SettingsSaveIntent::general(desired.clone(), &baseline),
+            move |settings| {
+                assert_eq!(settings.paste_sequence, desired.paste_sequence);
+                client.prepare(settings)
+            },
+        );
+        let HotkeyRuntimeMessage::Prepare(request) = next_runtime_message(&owner) else {
+            panic!("expected preparation")
+        };
+        complete_prepare(request, 80);
+        let HotkeyRuntimeMessage::Apply(application) = next_runtime_message(&owner) else {
+            panic!("expected application")
+        };
+        assert_eq!(
+            app.settings_editor.baseline_settings.paste_sequence,
+            baseline.paste_sequence
+        );
+        assert!(!app.settings_editor.paste_cancel_enabled);
+        let applied = AppliedHotkeyReconfiguration {
+            request_id: application.request_id(),
+            generation: application.generation(),
+        };
+        application.complete_applied(applied).unwrap();
+        drain_until_complete(&mut app, &context);
+        assert!(!app.settings_editor.paste_cancel_enabled);
+        assert_eq!(
+            app.settings_editor.paste_sequence.next_hotkey.as_deref(),
+            Some("Ctrl+F9")
+        );
+        app.show_settings = false;
+        app.open_paste_sequence_settings_dialog();
+        let reopened = &app.settings_editor.paste_sequence;
+        assert_eq!(reopened.next_hotkey.as_deref(), Some("Ctrl+F9"));
+        assert!(reopened.cancel_hotkey.is_none());
+        assert!(!reopened.tooltip_enabled && !reopened.escape_cancel_enabled);
+        assert_eq!(Settings::load(&path).unwrap().hotkey, baseline.hotkey);
+    }
+
+    #[test]
     fn rollback_restores_owned_fields_and_plugin_keys_without_replacing_latest_map() {
         let before = Settings::default();
         let mut desired = before.clone();

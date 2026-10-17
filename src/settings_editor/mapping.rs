@@ -47,6 +47,9 @@ impl SettingsEditor {
         let mut s = Self {
             baseline_settings: settings.clone(),
             paste_sequence: settings.paste_sequence.clone(),
+            paste_next_enabled: settings.paste_sequence.next_hotkey.is_some(),
+            paste_cancel_enabled: settings.paste_sequence.cancel_hotkey.is_some(),
+            reveal_paste_sequence: false,
             hotkey,
             hotkey_valid,
             last_valid_hotkey,
@@ -231,7 +234,7 @@ impl SettingsEditor {
             (self.static_w, self.static_h),
         );
         Settings {
-            paste_sequence: self.paste_sequence.clone(),
+            paste_sequence: self.paste_sequence_preferences(),
             hotkey: if self.hotkey.trim().is_empty() {
                 None
             } else {

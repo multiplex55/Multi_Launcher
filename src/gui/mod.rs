@@ -1597,6 +1597,12 @@ impl LauncherApp {
         self.show_settings = true;
     }
 
+    /// Opens the main settings at playback controls, preserving any open draft.
+    pub(crate) fn open_paste_sequence_settings_dialog(&mut self) {
+        self.open_settings_dialog();
+        self.settings_editor.reveal_paste_sequence = true;
+    }
+
     /// Opens the standalone Mouse Gesture Settings dialog.
     ///
     /// This is exposed so non-`gui` modules (e.g. `settings_editor`) can

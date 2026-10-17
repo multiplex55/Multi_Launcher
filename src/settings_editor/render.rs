@@ -10,6 +10,7 @@ const RADIAL_LEGACY_TIMING_EXPLANATION: &str = "Legacy timing: the launcher hotk
 #[derive(Clone, Copy)]
 enum TopLevelSettingsSection {
     Hotkeys,
+    PasteSequences,
     LauncherWindow,
     SearchResults,
     ActionsFeedback,
@@ -19,8 +20,9 @@ enum TopLevelSettingsSection {
 }
 
 impl TopLevelSettingsSection {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Hotkeys,
+        Self::PasteSequences,
         Self::LauncherWindow,
         Self::SearchResults,
         Self::ActionsFeedback,
@@ -32,6 +34,7 @@ impl TopLevelSettingsSection {
     const fn persistent_id(self) -> &'static str {
         match self {
             Self::Hotkeys => "settings_section_hotkeys",
+            Self::PasteSequences => "settings_section_paste_sequences",
             Self::LauncherWindow => "settings_section_launcher_window",
             Self::SearchResults => "settings_section_search_results",
             Self::ActionsFeedback => "settings_section_actions_feedback",
@@ -44,6 +47,7 @@ impl TopLevelSettingsSection {
     const fn title(self) -> &'static str {
         match self {
             Self::Hotkeys => "Hotkeys",
+            Self::PasteSequences => "Paste Sequences",
             Self::LauncherWindow => "Launcher Window & Appearance",
             Self::SearchResults => "Search & Results",
             Self::ActionsFeedback => "Actions, Safety & Feedback",
@@ -56,6 +60,9 @@ impl TopLevelSettingsSection {
     const fn description(self) -> &'static str {
         match self {
             Self::Hotkeys => "Set the launcher shortcut and optional quit/help shortcuts.",
+            Self::PasteSequences => {
+                "Configure playback controls. Saved sequence start shortcuts are edited in Paste Sequences."
+            }
             Self::LauncherWindow => "Choose window placement behavior and query/list text scales.",
             Self::SearchResults => "Tune matching and the way search results are presented.",
             Self::ActionsFeedback => "Control action completion, safety prompts, and feedback.",
@@ -82,7 +89,7 @@ fn show_settings_section(
     section: TopLevelSettingsSection,
     forced_open: Option<bool>,
     add_contents: impl FnOnce(&mut egui::Ui),
-) {
+) -> egui::Rect {
     let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
         ui.ctx(),
         section.egui_id(ui),
@@ -91,7 +98,7 @@ fn show_settings_section(
     if let Some(open) = forced_open {
         state.set_open(open);
     }
-    state
+    let (_, header, _) = state
         .show_header(ui, |ui| {
             ui.heading(section.title());
         })
@@ -99,6 +106,7 @@ fn show_settings_section(
             crate::gui::theme::widgets::secondary_help(ui, section.description());
             add_contents(ui);
         });
+    header.response.rect
 }
 
 fn set_all_settings_sections_open(ui: &egui::Ui, open: bool) {
@@ -148,6 +156,7 @@ fn settings_footer_reserved_height(ui: &egui::Ui) -> f32 {
 impl SettingsEditor {
     pub fn ui(&mut self, ctx: &egui::Context, app: &mut LauncherApp) {
         let mut open = app.show_settings;
+        let mut cancel = false;
         egui::Window::new("Settings")
             .resizable(true)
             .default_size(Self::settings_window_default_size(ctx))
@@ -184,6 +193,20 @@ impl SettingsEditor {
                             top_level_expand_request,
                             |ui| self.render_hotkey_section(ui),
                         );
+                        let reveal_paste = std::mem::take(&mut self.reveal_paste_sequence);
+                        let paste_header = show_settings_section(
+                            ui,
+                            TopLevelSettingsSection::PasteSequences,
+                            if reveal_paste {
+                                Some(true)
+                            } else {
+                                top_level_expand_request
+                            },
+                            |ui| self.render_paste_sequence_section(ui),
+                        );
+                        if reveal_paste {
+                            ui.scroll_to_rect(paste_header, Some(egui::Align::Min));
+                        }
                         show_settings_section(
                             ui,
                             TopLevelSettingsSection::LauncherWindow,
@@ -236,6 +259,12 @@ impl SettingsEditor {
                     {
                         self.save_settings(ctx, app);
                     }
+                    if ui
+                        .add_enabled(!pending, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        cancel = true;
+                    }
                     if app.settings_save_reconciliation_required() {
                         ui.label("Hotkey state needs reconciliation; saving is disabled.");
                     } else if pending {
@@ -243,7 +272,38 @@ impl SettingsEditor {
                     }
                 });
             });
+        if cancel {
+            *self = Self::new_with_plugins(&self.baseline_settings);
+            open = false;
+        }
         app.show_settings = open;
+    }
+
+    fn render_paste_sequence_section(&mut self, ui: &mut egui::Ui) {
+        render_paste_shortcut(
+            ui,
+            "Next",
+            &mut self.paste_next_enabled,
+            &mut self.paste_sequence.next_hotkey,
+        );
+        render_paste_shortcut(
+            ui,
+            "Cancel",
+            &mut self.paste_cancel_enabled,
+            &mut self.paste_sequence.cancel_hotkey,
+        );
+        ui.checkbox(
+            &mut self.paste_sequence.tooltip_enabled,
+            "Show floating playback tooltip",
+        );
+        ui.checkbox(
+            &mut self.paste_sequence.escape_cancel_enabled,
+            "Escape cancels active playback",
+        );
+        crate::gui::theme::widgets::secondary_help(
+            ui,
+            "Empty shortcuts are disabled. Shortcut conflicts are checked on Save. Changes take effect after Save succeeds.",
+        );
     }
 
     fn render_hotkey_section(&mut self, ui: &mut egui::Ui) {
@@ -1089,6 +1149,33 @@ enum ClipboardModifySettingsCommand {
     ResetFactoryDefaults,
 }
 
+fn render_paste_shortcut(
+    ui: &mut egui::Ui,
+    name: &str,
+    enabled: &mut bool,
+    value: &mut Option<String>,
+) {
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(enabled, format!("Enable {name} shortcut"));
+        ui.add_enabled_ui(*enabled, |ui| {
+            let text = value.get_or_insert_with(String::new);
+            ui.add(egui::TextEdit::singleline(text).hint_text(format!("{name} shortcut")));
+        });
+        if !*enabled {
+            ui.label("Disabled");
+        } else {
+            match crate::settings::PasteSequencePreferences::parse_optional_hotkey(value.as_deref())
+            {
+                Ok(None) => {
+                    ui.label("Disabled (empty shortcut)");
+                }
+                Ok(Some(_)) => hotkey_indicator(ui, true),
+                Err(_) => hotkey_indicator(ui, false),
+            }
+        }
+    });
+}
+
 fn hotkey_indicator(ui: &mut egui::Ui, valid: bool) {
     let (tone, label) = if valid {
         (crate::gui::theme::widgets::StatusTone::Success, "Valid")
@@ -1101,6 +1188,150 @@ fn hotkey_indicator(ui: &mut egui::Ui, valid: bool) {
 #[cfg(test)]
 mod settings_shell_tests {
     use super::*;
+
+    fn paste_settings_frame(
+        ctx: &egui::Context,
+        app: &mut LauncherApp,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Rect)> {
+        ctx.begin_pass(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        });
+        let mut editor = std::mem::take(&mut app.settings_editor);
+        editor.ui(ctx, app);
+        app.settings_editor = editor;
+        let output = ctx.end_pass();
+        fn collect(shape: &egui::epaint::Shape, labels: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => labels.push((
+                    text.galley.text().to_owned(),
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                )),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, labels);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut labels = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut labels);
+        }
+        output.drop_without_applying_deltas();
+        labels
+    }
+
+    fn paste_settings_click(ctx: &egui::Context, app: &mut LauncherApp, label: &str) {
+        let labels = paste_settings_frame(ctx, app, vec![]);
+        let pos = labels
+            .iter()
+            .find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing {label}"))
+            .1
+            .center();
+        for pressed in [true, false] {
+            paste_settings_frame(
+                ctx,
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn paste_settings_navigation_controls_and_cancel_preserve_committed_state() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut settings = crate::settings::Settings::default();
+        settings.enable_toasts = false;
+        settings.dashboard.enabled = false;
+        settings.paste_sequence.cancel_hotkey = Some("Ctrl+F10".into());
+        settings.save(path.to_str().unwrap()).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let ctx = egui::Context::default();
+        ctx.global_style_mut(|style| style.animation_time = 0.0);
+        let mut app = LauncherApp::new(
+            &ctx,
+            Arc::new(Vec::new()),
+            0,
+            crate::plugin::PluginManager::new_inert_for_test(),
+            directory
+                .path()
+                .join("actions.json")
+                .to_string_lossy()
+                .into_owned(),
+            path.to_string_lossy().into_owned(),
+            settings.clone(),
+            None,
+            None,
+            Some(std::collections::HashSet::new()),
+            Some(std::collections::HashMap::new()),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        app.open_paste_sequence_settings_dialog();
+        assert!(app.show_settings && app.settings_editor.reveal_paste_sequence);
+        app.settings_editor.paste_sequence.next_hotkey = Some("Ctrl+F9".into());
+        app.open_paste_sequence_settings_dialog();
+        assert_eq!(
+            app.settings_editor.paste_sequence.next_hotkey.as_deref(),
+            Some("Ctrl+F9")
+        );
+        for _ in 0..3 {
+            paste_settings_frame(&ctx, &mut app, vec![]);
+        }
+        assert!(!app.settings_editor.reveal_paste_sequence);
+        paste_settings_click(&ctx, &mut app, "Enable Cancel shortcut");
+        assert!(!app.settings_editor.paste_cancel_enabled);
+        assert!(
+            app.settings_editor
+                .to_settings(&settings)
+                .paste_sequence
+                .cancel_hotkey
+                .is_none()
+        );
+        paste_settings_click(&ctx, &mut app, "Enable Cancel shortcut");
+        assert_eq!(
+            app.settings_editor
+                .to_settings(&settings)
+                .paste_sequence
+                .cancel_hotkey
+                .as_deref(),
+            Some("Ctrl+F10")
+        );
+        paste_settings_click(&ctx, &mut app, "Show floating playback tooltip");
+        assert!(!app.settings_editor.paste_sequence.tooltip_enabled);
+        paste_settings_click(&ctx, &mut app, "Escape cancels active playback");
+        assert!(!app.settings_editor.paste_sequence.escape_cancel_enabled);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            app.settings_editor.baseline_settings.paste_sequence,
+            settings.paste_sequence
+        );
+        paste_settings_click(&ctx, &mut app, "Cancel");
+        assert!(!app.show_settings);
+        assert!(!app.settings_save_pending());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        app.open_paste_sequence_settings_dialog();
+        assert_eq!(app.settings_editor.paste_sequence, settings.paste_sequence);
+    }
 
     fn draw_sections(ctx: &egui::Context, expand_all: Option<bool>) -> (Vec<bool>, Vec<egui::Id>) {
         let mut open_states = Vec::new();
@@ -1144,8 +1375,8 @@ mod settings_shell_tests {
         let (defaults, ids) = draw_sections(&ctx, None);
         assert_eq!(
             defaults,
-            vec![true, true, true, false, false, false, false],
-            "the seven established default-open states remain intact"
+            vec![true, false, true, true, false, false, false, false],
+            "the established defaults remain intact beside the new collapsed Paste section"
         );
 
         let (expanded, expanded_ids) = draw_sections(&ctx, Some(true));

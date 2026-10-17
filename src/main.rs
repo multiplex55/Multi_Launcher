@@ -145,12 +145,24 @@ fn paste_sequence_hotkey_routes_from_bindings(
     }
     let mut routes = Vec::new();
     for (chord, action) in [
-        ("Ctrl+Alt+Shift+PageDown", PasteSequenceHotkeyAction::Next),
-        ("Ctrl+Alt+Shift+End", PasteSequenceHotkeyAction::Cancel),
+        (
+            settings.paste_sequence.next_hotkey.as_deref(),
+            PasteSequenceHotkeyAction::Next,
+        ),
+        (
+            settings.paste_sequence.cancel_hotkey.as_deref(),
+            PasteSequenceHotkeyAction::Cancel,
+        ),
     ] {
+        let Some(hotkey) =
+            multi_launcher::settings::PasteSequencePreferences::parse_optional_hotkey(chord)
+                .map_err(|error| format!("Paste Sequence {action:?}: {error}"))?
+        else {
+            continue;
+        };
         routes.push(PasteSequenceHotkeyRoute {
-            hotkey: parse_hotkey(chord).expect("fixed Paste Sequence chord is valid"),
-            chord: chord.into(),
+            hotkey,
+            chord: chord.unwrap_or_default().trim().into(),
             action,
         });
     }
@@ -5992,6 +6004,30 @@ mod tests {
                 .contains(&("launch Screen Draw".into(), "Ctrl+Shift+D".into()))
         );
         assert!(screen_draw_launch_trigger(&settings).is_some());
+    }
+
+    #[test]
+    fn paste_settings_routes_use_custom_disabled_and_invalid_preferences() {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = Some("Control+F9".into());
+        settings.paste_sequence.cancel_hotkey = None;
+        let routes = paste_sequence_hotkey_routes_from_bindings(&settings, &[]).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].hotkey, parse_hotkey("Ctrl+F9").unwrap());
+        assert_eq!(routes[0].action, PasteSequenceHotkeyAction::Next);
+        settings.paste_sequence.next_hotkey = Some("  ".into());
+        assert!(
+            paste_sequence_hotkey_routes_from_bindings(&settings, &[])
+                .unwrap()
+                .is_empty()
+        );
+        settings.paste_sequence.cancel_hotkey = Some("Ctrl+invalid".into());
+        assert!(
+            paste_sequence_hotkey_routes_from_bindings(&settings, &[])
+                .unwrap_err()
+                .contains("Cancel")
+        );
+        assert_eq!(settings.hotkey, Settings::default().hotkey);
     }
 
     #[test]

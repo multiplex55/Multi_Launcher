@@ -189,7 +189,8 @@ impl SettingsEditor {
         app.plugin_editor
             .sync_committed_settings(&new_settings, app.plugins.plugin_infos());
         app.settings_editor.baseline_settings = new_settings.clone();
-        app.settings_editor.paste_sequence = new_settings.paste_sequence.clone();
+        app.settings_editor
+            .sync_paste_sequence_preferences(&new_settings.paste_sequence);
         if show_success_toast && app.enable_toasts {
             app.add_toast(Toast {
                 text: "Settings saved".into(),

@@ -10,6 +10,12 @@ use std::path::PathBuf;
 const SNIPPETS_FILE: &str = crate::plugins::snippets::SNIPPETS_FILE;
 const CLIPBOARD_FILE: &str = crate::plugins::clipboard::CLIPBOARD_FILE;
 
+fn configured_shortcut_label(value: Option<&str>) -> &str {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Disabled")
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct DialogLayout {
@@ -251,6 +257,18 @@ impl PasteSequenceDialog {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Saved sequences");
+                            let preferences = &app.settings_editor.baseline_settings.paste_sequence;
+                            if ui
+                                .button("Playback Settings")
+                                .on_hover_text(format!(
+                                    "Next: {}\nCancel: {}",
+                                    configured_shortcut_label(preferences.next_hotkey.as_deref()),
+                                    configured_shortcut_label(preferences.cancel_hotkey.as_deref()),
+                                ))
+                                .clicked()
+                            {
+                                app.open_paste_sequence_settings_dialog();
+                            }
                             if ui.button("New").clicked() {
                                 self.selected_id = None;
                                 self.selected_step = None;
@@ -423,7 +441,7 @@ impl PasteSequenceDialog {
             self.inline_error = None;
         }
         ui.horizontal(|ui| {
-            ui.label("Optional hotkey");
+            ui.label("Optional start hotkey");
             ui.add(egui::TextEdit::singleline(&mut self.hotkey_text).desired_width(180.0));
         });
         ui.weak("Uses the application's existing chord syntax");
@@ -1130,6 +1148,33 @@ mod tests {
         });
         dialog.ui(ctx, app);
         ctx.end_pass().drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn paste_settings_toolbar_opens_main_section_without_losing_an_open_draft() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = layout_app(&ctx, directory.path());
+        app.show_settings = true;
+        app.settings_editor.paste_sequence.next_hotkey = Some("Ctrl+F9".into());
+        let mut dialog = PasteSequenceDialog::default();
+        dialog.open = true;
+        for _ in 0..3 {
+            layout_frame(&mut dialog, &ctx, &mut app, egui::vec2(900.0, 760.0));
+        }
+        editor_click(
+            &mut dialog,
+            &ctx,
+            &mut app,
+            egui::vec2(900.0, 760.0),
+            "Playback Settings",
+        );
+        assert!(app.show_settings && app.settings_editor.reveal_paste_sequence);
+        assert_eq!(
+            app.settings_editor.paste_sequence.next_hotkey.as_deref(),
+            Some("Ctrl+F9")
+        );
+        assert!(dialog.open);
     }
 
     #[test]

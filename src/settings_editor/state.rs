@@ -6,6 +6,9 @@ use eframe::egui;
 pub struct SettingsEditor {
     pub(crate) baseline_settings: Settings,
     pub(crate) paste_sequence: crate::settings::PasteSequencePreferences,
+    pub(crate) paste_next_enabled: bool,
+    pub(crate) paste_cancel_enabled: bool,
+    pub(crate) reveal_paste_sequence: bool,
     pub(crate) hotkey: String,
     pub(crate) hotkey_valid: bool,
     pub(crate) last_valid_hotkey: String,
@@ -157,7 +160,7 @@ impl SettingsEditor {
     }
 
     pub(crate) fn validate_before_save(&mut self) -> Result<(), &'static str> {
-        self.paste_sequence.validate()?;
+        self.paste_sequence_preferences().validate()?;
         if parse_hotkey(&self.hotkey).is_none() {
             self.hotkey = self.last_valid_hotkey.clone();
             self.hotkey_valid = true;
@@ -204,6 +207,26 @@ impl SettingsEditor {
             self.last_valid_help_hotkey = self.help_hotkey.clone();
         }
         Ok(())
+    }
+
+    pub(crate) fn paste_sequence_preferences(&self) -> crate::settings::PasteSequencePreferences {
+        let mut preferences = self.paste_sequence.clone();
+        if !self.paste_next_enabled {
+            preferences.next_hotkey = None;
+        }
+        if !self.paste_cancel_enabled {
+            preferences.cancel_hotkey = None;
+        }
+        preferences
+    }
+
+    pub(crate) fn sync_paste_sequence_preferences(
+        &mut self,
+        preferences: &crate::settings::PasteSequencePreferences,
+    ) {
+        self.paste_sequence = preferences.clone();
+        self.paste_next_enabled = preferences.next_hotkey.is_some();
+        self.paste_cancel_enabled = preferences.cancel_hotkey.is_some();
     }
 
     pub(crate) fn radial_settings(&self) -> crate::radial::model::RadialFeatureSettings {
