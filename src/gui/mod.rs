@@ -45,6 +45,7 @@ mod numpad_navigation;
 mod ocr;
 mod ocr_view;
 pub(crate) mod pinboard;
+mod pinboard_windows;
 mod paste_sequence_dialog;
 mod hash_generator_dialog;
 pub(crate) mod hotfolder_dispatch;

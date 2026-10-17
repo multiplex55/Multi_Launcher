@@ -3003,13 +3003,14 @@ impl LauncherApp {
         self.qa_framebuffer_run_hidden_logic_tick();
     }
 
-    fn viewport_bootstrap_state(&self) -> [bool; 5] {
+    fn viewport_bootstrap_state(&self) -> [bool; 6] {
         [
             self.macro_prompt.bootstrap_pending,
             self.macro_parameter_prompt.needs_viewport_bootstrap(),
             self.radial_placement_viewport.needs_viewport_bootstrap(),
             self.screen_draw_controller.toolbar_open() && !self.screen_draw_toolbar.was_open,
             self.xml_toolkit_dialog.needs_viewport_bootstrap(),
+            self.pin_windows_need_bootstrap(),
         ]
     }
 
@@ -3022,7 +3023,7 @@ impl LauncherApp {
     fn request_root_repaint_for_new_viewport_bootstrap(
         &self,
         ctx: &egui::Context,
-        previously_pending: [bool; 5],
+        previously_pending: [bool; 6],
     ) {
         let newly_pending = previously_pending
             .into_iter()
@@ -3063,6 +3064,7 @@ impl LauncherApp {
         use egui::*;
 
         let ctx = ui.ctx().clone();
+        self.show_screenshot_pins(&ctx);
         let mut frame_logic = self.root_frame_logic.clone().unwrap_or_default();
         let first_ui_pass = frame_logic.ui_passes == 0;
         frame_logic.ui_passes = frame_logic.ui_passes.saturating_add(1);
@@ -4966,7 +4968,7 @@ impl eframe::App for LauncherApp {
     }
 
     fn needs_root_ui_when_hidden(&self) -> bool {
-        self.needs_viewport_bootstrap()
+        self.needs_viewport_bootstrap() || self.pin_windows_need_hidden_root_ui()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {

@@ -2,14 +2,14 @@
 //!
 //! The pinboard owns image memory. This module only coordinates the shared
 //! rectangle selector, native exclusion acknowledgements, launcher parking,
-//! and the bounded capture worker. Floating window rendering belongs to the
-//! later pin-window owner.
+//! the bounded capture worker, and the native pin-window owner.
 
 use super::LauncherApp;
 use crate::gui::mkmacro_dialog::visual_capture_workflow::SharedVisualOverlayController;
 use crate::gui::mkmacro_dialog::visual_overlay::{
     OperationId, RectanglePurpose, VisualOverlayEvent,
 };
+use crate::gui::pinboard_windows::PinWindowPresenter;
 use crate::launcher_parking::LauncherParkingTransaction;
 use crate::mkmacro::{ExecutionDiagnostic, ScreenCaptureBackend, ScreenRect};
 use crate::pinboard::{
@@ -73,38 +73,6 @@ impl LauncherCaptureParkingFactory for NativeLauncherCaptureParkingFactory {
         Ok(Box::new(NativeLauncherCaptureParking(
             LauncherParkingTransaction::begin(generation, hwnd, virtual_desktop)?,
         )))
-    }
-}
-
-/// M11-A has no materialized pin windows. This adapter is permitted to return
-/// immediate acknowledgements only because its native pin-window registry is
-/// empty. M11-B must replace it with the registry-backed native acknowledger.
-#[derive(Default)]
-struct EmptyPinWindowRegistry;
-
-impl PinWindowVisibilityCoordinator for EmptyPinWindowRegistry {
-    fn request_hide_all(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn poll_hidden(&mut self, _: PinCaptureIdentity) -> PinVisibilityAck {
-        PinVisibilityAck::Acknowledged
-    }
-
-    fn request_restore_all(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn poll_restored(&mut self, _: PinCaptureIdentity) -> PinVisibilityAck {
-        PinVisibilityAck::Acknowledged
-    }
-
-    fn cancel_and_restore_all(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
-        Ok(())
-    }
-
-    fn shutdown_and_drain(&mut self, _: PinCaptureIdentity) -> Result<(), String> {
-        Ok(())
     }
 }
 
@@ -194,6 +162,7 @@ pub(super) struct PinboardCaptureLifecycle {
     overlay: SharedVisualOverlayController,
     capture_backend: Arc<dyn ScreenCaptureBackend>,
     parking_factory: Arc<dyn LauncherCaptureParkingFactory>,
+    windows: PinWindowPresenter,
     pin_windows: Box<dyn PinWindowVisibilityCoordinator>,
     session: Option<PinCaptureSession>,
 }
@@ -203,12 +172,15 @@ impl PinboardCaptureLifecycle {
         overlay: SharedVisualOverlayController,
         capture_backend: Arc<dyn ScreenCaptureBackend>,
     ) -> Self {
+        let windows = PinWindowPresenter::new();
+        let pin_windows = windows.visibility_coordinator();
         Self {
             board: Pinboard::default(),
             overlay,
             capture_backend,
             parking_factory: Arc::new(NativeLauncherCaptureParkingFactory),
-            pin_windows: Box::<EmptyPinWindowRegistry>::default(),
+            windows,
+            pin_windows,
             session: None,
         }
     }
@@ -231,8 +203,38 @@ impl PinboardCaptureLifecycle {
         &self.board
     }
 
-    pub(super) fn pinboard_mut(&mut self) -> &mut Pinboard {
-        &mut self.board
+    pub(super) fn poll_pin_windows(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        root_identity: (usize, u64),
+    ) {
+        self.windows.set_root_native_identity(root_identity);
+        self.windows.poll(ctx, &mut self.board);
+    }
+
+    pub(super) fn show_pin_windows(
+        &mut self,
+        ctx: &eframe::egui::Context,
+        root_identity: (usize, u64),
+    ) {
+        self.windows.set_root_native_identity(root_identity);
+        self.windows.show(ctx, &self.board);
+    }
+
+    pub(super) fn pin_windows_need_bootstrap(&self) -> bool {
+        self.windows.needs_viewport_bootstrap(&self.board)
+    }
+
+    pub(super) fn pin_windows_need_hidden_root_ui(&self) -> bool {
+        self.windows.needs_root_ui_when_hidden(&self.board)
+    }
+
+    pub(super) fn close_pin(&mut self, id: crate::pinboard::PinId) -> bool {
+        self.windows.close(id, &mut self.board)
+    }
+
+    pub(super) fn shutdown_pin_windows(&mut self) -> Result<(), String> {
+        self.windows.shutdown()
     }
 
     pub(super) fn set_pin_window_coordinator(
@@ -916,6 +918,8 @@ impl LauncherApp {
     }
 
     pub(super) fn poll_pinboard_capture(&mut self, ctx: &eframe::egui::Context) {
+        let root_identity = self.root_window_bridge.identity();
+        self.pinboard_capture.poll_pin_windows(ctx, root_identity);
         if let Some(error) = self.pinboard_capture.poll(
             &self.visibility_revision,
             &self.visible_flag,
@@ -929,6 +933,7 @@ impl LauncherApp {
     }
 
     pub(super) fn shutdown_pinboard_capture(&mut self) {
+        let mut errors = Vec::new();
         if let Err(error) = self.pinboard_capture.shutdown(
             &self.visibility_revision,
             &self.visible_flag,
@@ -936,8 +941,27 @@ impl LauncherApp {
             &mut self.last_visible,
             self.root_window_bridge.identity(),
         ) {
-            self.report_error_message("pinboard.shutdown", error);
+            errors.push(error);
         }
+        if let Err(error) = self.pinboard_capture.shutdown_pin_windows() {
+            errors.push(error);
+        }
+        if !errors.is_empty() {
+            self.report_error_message("pinboard.shutdown", errors.join("; "));
+        }
+    }
+
+    pub(super) fn show_screenshot_pins(&mut self, ctx: &eframe::egui::Context) {
+        let root_identity = self.root_window_bridge.identity();
+        self.pinboard_capture.show_pin_windows(ctx, root_identity);
+    }
+
+    pub(super) fn pin_windows_need_bootstrap(&self) -> bool {
+        self.pinboard_capture.pin_windows_need_bootstrap()
+    }
+
+    pub(super) fn pin_windows_need_hidden_root_ui(&self) -> bool {
+        self.pinboard_capture.pin_windows_need_hidden_root_ui()
     }
 
     pub(super) fn cancel_pinboard_capture(&mut self) {
@@ -945,7 +969,7 @@ impl LauncherApp {
     }
 
     pub(super) fn close_screenshot_pin(&mut self, id: crate::pinboard::PinId) -> bool {
-        self.pinboard_capture.pinboard_mut().close(id)
+        self.pinboard_capture.close_pin(id)
     }
 }
 
