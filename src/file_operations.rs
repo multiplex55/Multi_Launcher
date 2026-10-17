@@ -288,6 +288,87 @@ pub struct RenameScanResult {
     summary: RenameScanSummary,
 }
 
+/// Read-only bytes captured from a file row in a complete native scan. The
+/// evidence is for a later fresh recheck only; it does not authorize a write.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedReadSnapshot {
+    canonical_root: PathBuf,
+    root_identity: NativeFileIdentity,
+    path: PathBuf,
+    identity: NativeFileIdentity,
+    parent_identity: NativeFileIdentity,
+    length: u64,
+    modified: SystemTime,
+    bytes: Arc<[u8]>,
+    content_sha256: [u8; 32],
+}
+
+impl VerifiedReadSnapshot {
+    pub(crate) fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    pub(crate) fn root_identity(&self) -> NativeFileIdentity {
+        self.root_identity
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn identity(&self) -> NativeFileIdentity {
+        self.identity
+    }
+
+    pub(crate) fn parent_identity(&self) -> NativeFileIdentity {
+        self.parent_identity
+    }
+
+    pub(crate) fn length(&self) -> u64 {
+        self.length
+    }
+
+    pub(crate) fn modified(&self) -> SystemTime {
+        self.modified
+    }
+
+    pub(crate) fn bytes(&self) -> &Arc<[u8]> {
+        &self.bytes
+    }
+
+    pub(crate) fn content_sha256(&self) -> [u8; 32] {
+        self.content_sha256
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerifiedReadFailureKind {
+    IncompleteScan,
+    InvalidEvidence,
+    NotRegularFile,
+    Inaccessible,
+    Changed,
+    TooLarge,
+    Cancelled,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VerifiedReadFailure {
+    kind: VerifiedReadFailureKind,
+    message: String,
+}
+
+impl VerifiedReadFailure {
+    pub(crate) fn kind(&self) -> VerifiedReadFailureKind {
+        self.kind
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 impl RenameScanResult {
     pub fn generation(&self) -> RenameScanGeneration {
         self.generation
@@ -2222,6 +2303,311 @@ pub fn scan_rename_root(
     }
 }
 
+/// Capture bytes for one row of a complete scan while rechecking its retained
+/// root and parent evidence. This is a read-only snapshot boundary, not a
+/// mutation authorization token.
+pub(crate) fn read_verified_scan_file(
+    scan: &RenameScanResult,
+    row: &RenameScanRow,
+    max_bytes: u64,
+    cancellation: &ScanCancellation,
+) -> Result<VerifiedReadSnapshot, VerifiedReadFailure> {
+    if scan.status != RenameScanStatus::Complete {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::IncompleteScan,
+            "file bytes require a complete confined scan".to_owned(),
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::Cancelled,
+            "file read was cancelled".to_owned(),
+        ));
+    }
+    let Some(proof) = scan.proof.as_deref() else {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::InvalidEvidence,
+            "the complete scan did not retain native evidence".to_owned(),
+        ));
+    };
+    let Some(entry) = proof.entries.get(&row.entry_ref) else {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::InvalidEvidence,
+            "the file row does not belong to this scan".to_owned(),
+        ));
+    };
+    if row.kind != SnapshotEntryKind::File
+        || row.reparse_point
+        || entry.path != row.path
+        || entry.identity != row.identity
+        || entry.length != row.length
+        || entry.modified != row.modified
+        || row.length.is_none()
+        || row.modified.is_none()
+    {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::InvalidEvidence,
+            "the file row does not match its retained scan evidence".to_owned(),
+        ));
+    }
+    let expected_length = entry.length.unwrap_or_default();
+    if expected_length > max_bytes {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::TooLarge,
+            format!("file length {expected_length} exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        read_verified_scan_file_native(scan, row, proof, entry, max_bytes, cancellation)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (scan, row, proof, entry, max_bytes);
+        Err(verified_read_failure(
+            VerifiedReadFailureKind::Unsupported,
+            "native confined content reads are available only on Windows".to_owned(),
+        ))
+    }
+}
+
+fn verified_read_failure(kind: VerifiedReadFailureKind, message: String) -> VerifiedReadFailure {
+    VerifiedReadFailure { kind, message }
+}
+
+#[cfg(windows)]
+fn read_verified_scan_file_native(
+    scan: &RenameScanResult,
+    row: &RenameScanRow,
+    proof: &ScanProof,
+    entry: &EntryProof,
+    max_bytes: u64,
+    cancellation: &ScanCancellation,
+) -> Result<VerifiedReadSnapshot, VerifiedReadFailure> {
+    use std::io::Read;
+
+    let parent_directories = NativeRenameScanBackend
+        .reopen_chain(
+            &entry.parent_chain,
+            &proof.root,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(verified_read_backend_failure)?;
+    let Some(parent) = parent_directories.last() else {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::InvalidEvidence,
+            "the scanned file has no retained parent directory".to_owned(),
+        ));
+    };
+    if parent.identity != row.parent_identity
+        || entry.path.parent().is_none_or(|path| {
+            batch_rename::compare_paths_windows_ordinal(path, &parent.canonical_path)
+                != std::cmp::Ordering::Equal
+        })
+    {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::Changed,
+            "the scanned file's parent directory changed".to_owned(),
+        ));
+    }
+
+    // Retain the reopened ancestor handles while reading. The content handle
+    // grants read access only and does not follow a final reparse point.
+    let opened = open_native_readonly_content_file(&entry.path)
+        .map_err(|error| verified_read_io_failure("open scanned file for read", error))?;
+    if opened.kind != SnapshotEntryKind::File
+        || opened.reparse_point
+        || opened.identity != entry.identity
+        || opened.length != entry.length
+        || opened.modified != entry.modified
+        || batch_rename::compare_paths_windows_ordinal(&opened.canonical_path, &entry.path)
+            != std::cmp::Ordering::Equal
+        || !batch_rename::path_is_within_windows_ordinal(
+            &proof.root.canonical_path,
+            &opened.canonical_path,
+        )
+        || opened.canonical_path.parent().is_none_or(|path| {
+            batch_rename::compare_paths_windows_ordinal(path, &parent.canonical_path)
+                != std::cmp::Ordering::Equal
+        })
+    {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::Changed,
+            "the scanned file identity, path, type, or metadata changed before reading".to_owned(),
+        ));
+    }
+    if cancellation.is_cancelled() {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::Cancelled,
+            "file read was cancelled".to_owned(),
+        ));
+    }
+
+    let expected_length = opened.length.ok_or_else(|| {
+        verified_read_failure(
+            VerifiedReadFailureKind::InvalidEvidence,
+            "the scanned file has no captured length".to_owned(),
+        )
+    })?;
+    let capacity = usize::try_from(expected_length).map_err(|_| {
+        verified_read_failure(
+            VerifiedReadFailureKind::TooLarge,
+            "file length cannot be represented in memory".to_owned(),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(capacity).map_err(|error| {
+        verified_read_failure(
+            VerifiedReadFailureKind::TooLarge,
+            format!("could not reserve bounded file snapshot memory: {error}"),
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut content_reader = opened
+        .handle
+        .try_clone()
+        .map_err(|error| verified_read_io_failure("clone scanned file read handle", error))?;
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(verified_read_failure(
+                VerifiedReadFailureKind::Cancelled,
+                "file read was cancelled".to_owned(),
+            ));
+        }
+        let read = match content_reader.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) => {
+                if cancellation.is_cancelled() {
+                    return Err(verified_read_failure(
+                        VerifiedReadFailureKind::Cancelled,
+                        "file read was cancelled".to_owned(),
+                    ));
+                }
+                return Err(verified_read_io_failure("read scanned file", error));
+            }
+        };
+        if read == 0 {
+            break;
+        }
+        let next_length = (bytes.len() as u64)
+            .checked_add(read as u64)
+            .ok_or_else(|| {
+                verified_read_failure(
+                    VerifiedReadFailureKind::TooLarge,
+                    "file byte count overflowed".to_owned(),
+                )
+            })?;
+        if next_length > max_bytes {
+            return Err(verified_read_failure(
+                VerifiedReadFailureKind::TooLarge,
+                format!("file grew beyond the {max_bytes}-byte limit while reading"),
+            ));
+        }
+        if next_length > expected_length {
+            return Err(verified_read_failure(
+                VerifiedReadFailureKind::Changed,
+                "file length grew while reading".to_owned(),
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+
+    let metadata_after = opened
+        .handle
+        .metadata()
+        .map_err(|error| verified_read_io_failure("recheck scanned file metadata", error))?;
+    let identity_after = native_file_identity(&opened.handle)
+        .map_err(|error| verified_read_io_failure("recheck scanned file identity", error))?;
+    let path_after = final_path_for_handle(&opened.handle)
+        .map_err(|error| verified_read_io_failure("recheck scanned file path", error))?;
+    if bytes.len() as u64 != expected_length
+        || metadata_after.len() != expected_length
+        || metadata_after.modified().ok() != opened.modified
+        || identity_after != entry.identity
+        || batch_rename::compare_paths_windows_ordinal(&path_after, &entry.path)
+            != std::cmp::Ordering::Equal
+    {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::Changed,
+            "file identity, path, length, or modification time changed while reading".to_owned(),
+        ));
+    }
+
+    let parent_after = NativeRenameScanBackend
+        .reopen_chain(
+            &entry.parent_chain,
+            &proof.root,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(verified_read_backend_failure)?;
+    let Some(parent_after) = parent_after.last() else {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::Changed,
+            "the scanned file's parent disappeared after reading".to_owned(),
+        ));
+    };
+    if parent_after.identity != row.parent_identity
+        || entry.path.parent().is_none_or(|path| {
+            batch_rename::compare_paths_windows_ordinal(path, &parent_after.canonical_path)
+                != std::cmp::Ordering::Equal
+        })
+    {
+        return Err(verified_read_failure(
+            VerifiedReadFailureKind::Changed,
+            "the scanned file's parent directory changed while reading".to_owned(),
+        ));
+    }
+
+    let modified = opened.modified.ok_or_else(|| {
+        verified_read_failure(
+            VerifiedReadFailureKind::InvalidEvidence,
+            "the scanned file has no captured modification time".to_owned(),
+        )
+    })?;
+    let content_sha256 = hasher.finalize().into();
+    Ok(VerifiedReadSnapshot {
+        canonical_root: scan
+            .canonical_root
+            .clone()
+            .unwrap_or_else(|| proof.root.canonical_path.clone()),
+        root_identity: proof.root.identity,
+        path: entry.path.clone(),
+        identity: entry.identity,
+        parent_identity: row.parent_identity,
+        length: expected_length,
+        modified,
+        bytes: Arc::from(bytes.into_boxed_slice()),
+        content_sha256,
+    })
+}
+
+#[cfg(windows)]
+fn verified_read_backend_failure(error: BackendFailure) -> VerifiedReadFailure {
+    let kind = match error.kind {
+        BackendFailureKind::Inaccessible => VerifiedReadFailureKind::Inaccessible,
+        BackendFailureKind::UnsupportedIdentity => VerifiedReadFailureKind::Unsupported,
+        BackendFailureKind::Cancelled => VerifiedReadFailureKind::Cancelled,
+        BackendFailureKind::ResourceLimit => VerifiedReadFailureKind::TooLarge,
+        _ => VerifiedReadFailureKind::Changed,
+    };
+    verified_read_failure(kind, error.message)
+}
+
+#[cfg(windows)]
+fn verified_read_io_failure(operation: &'static str, error: std::io::Error) -> VerifiedReadFailure {
+    let kind = match error.kind() {
+        std::io::ErrorKind::NotFound => VerifiedReadFailureKind::Changed,
+        std::io::ErrorKind::PermissionDenied => VerifiedReadFailureKind::Inaccessible,
+        std::io::ErrorKind::Interrupted => VerifiedReadFailureKind::Inaccessible,
+        std::io::ErrorKind::InvalidData => VerifiedReadFailureKind::Changed,
+        _ => VerifiedReadFailureKind::Inaccessible,
+    };
+    verified_read_failure(kind, format!("{operation}: {error}"))
+}
+
 #[cfg(windows)]
 struct NativeRenameScanBackend;
 
@@ -3508,6 +3894,76 @@ fn open_native_mutation_file(path: &Path) -> std::io::Result<OpenedObject<std::f
         lookup_path: path.to_path_buf(),
         canonical_path,
         identity,
+        kind,
+        reparse_point,
+        length: (!is_directory).then_some(metadata.len()),
+        modified: metadata.modified().ok(),
+        handle: file,
+    })
+}
+
+/// Open a content file with read access only. Write and delete sharing are
+/// withheld while the snapshot is captured, but the handle has no mutation
+/// authority and is never returned from the read boundary.
+#[cfg(windows)]
+fn open_native_readonly_content_file(path: &Path) -> std::io::Result<OpenedObject<std::fs::File>> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::{FromRawHandle, RawHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ,
+        OPEN_EXISTING,
+    };
+    use windows::core::PCWSTR;
+
+    let mut wide_path = extended_local_path(path)?;
+    wide_path.push(0);
+    // SAFETY: `path` is a validated local path from a retained native scan
+    // proof, encoded as a NUL-terminated UTF-16 string. The handle grants only
+    // data and metadata read access and does not follow a final reparse point.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide_path.as_ptr()),
+            FILE_READ_DATA.0 | FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            HANDLE::default(),
+        )
+    }
+    .map_err(|error| {
+        native_contextual_io_error(
+            "CreateFileW(read-only content snapshot)",
+            windows_error_to_io(error),
+        )
+    })?;
+    // SAFETY: CreateFileW returned a valid owned HANDLE transferred once to
+    // File, which closes it when this short-lived snapshot operation ends.
+    let file = unsafe { std::fs::File::from_raw_handle(handle.0 as RawHandle) };
+    let metadata = file
+        .metadata()
+        .map_err(|error| native_contextual_io_error("File::metadata", error))?;
+    let attributes = metadata.file_attributes();
+    let reparse_point = attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0;
+    let is_directory = attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
+    let kind = if reparse_point {
+        SnapshotEntryKind::Other
+    } else if is_directory {
+        SnapshotEntryKind::Directory
+    } else if metadata.is_file() {
+        SnapshotEntryKind::File
+    } else {
+        SnapshotEntryKind::Other
+    };
+    Ok(OpenedObject {
+        lookup_path: path.to_path_buf(),
+        canonical_path: final_path_for_handle(&file)
+            .map_err(|error| native_contextual_io_error("GetFinalPathNameByHandleW", error))?,
+        identity: native_file_identity(&file)
+            .map_err(|error| native_contextual_io_error("FILE_ID_INFO query", error))?,
         kind,
         reparse_point,
         length: (!is_directory).then_some(metadata.len()),
