@@ -468,6 +468,36 @@ impl RenameRuleSet {
     }
 }
 
+/// Apply the same protected-extension naming rules used by the batch renamer
+/// to a single filename leaf. Hot Folder uses only prefix/suffix edits, but
+/// keeping this transformation here makes its filename validation consistent
+/// with previews and batch rename execution.
+pub(crate) fn transform_filename_with_prefix_suffix(
+    original_name: &OsStr,
+    prefix: &str,
+    suffix: &str,
+) -> Result<String, &'static str> {
+    let original_name = original_name
+        .to_str()
+        .ok_or("filename cannot be transformed without losing its original encoding")?;
+    let rules = RenameRuleSet::new(
+        ExtensionPolicy::Preserve,
+        vec![
+            RenameRule::Prefix(prefix.to_owned()),
+            RenameRule::Suffix(suffix.to_owned()),
+        ],
+    );
+    let (compiled, errors) = compile_rules(&rules);
+    if !errors.is_empty() {
+        return Err("rename parameters are outside the supported limits");
+    }
+    let transformed = transform_name(original_name, 0, &compiled, ExtensionPolicy::Preserve)
+        .map_err(|_| "the renamed filename is outside the supported limits")?;
+    validate_target_leaf(&transformed)
+        .map_err(|_| "the renamed filename is not a safe Windows filename")?;
+    Ok(transformed)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenameRequest {
     snapshot: RenameInputSnapshot,

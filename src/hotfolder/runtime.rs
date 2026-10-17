@@ -76,6 +76,10 @@ impl HotFolderCandidateId {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    pub(crate) fn from_persisted(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -364,6 +368,24 @@ impl HotFolderWatchService {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_ready_candidate(candidate: HotFolderReadyCandidate) -> Self {
+        let service = Self::new();
+        if let Ok(mut output) = service.output.lock() {
+            output.ready.push_back(candidate);
+        }
+        service
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_test_ready_candidate(&self, candidate: HotFolderReadyCandidate) {
+        if let Ok(mut output) = self.output.lock()
+            && output.ready.len() < MAX_READY_CANDIDATES
+        {
+            output.ready.push_back(candidate);
+        }
+    }
+
     pub fn restore_enabled_rules(
         &mut self,
         snapshot: &HotFolderRulesSnapshot,
@@ -493,39 +515,33 @@ impl HotFolderWatchService {
         if !lease.output.ptr_eq(&Arc::downgrade(&self.output)) {
             return Err(HotFolderRuntimeError::WrongServiceLease);
         }
-        let mut output = self
-            .output
-            .lock()
-            .map_err(|_| HotFolderRuntimeError::WorkerStopped)?;
-        expire_lease_locked(&mut output, self.clock.now());
-        let Some(active) = output.leased.as_ref() else {
-            lease.finished = true;
-            return Err(HotFolderRuntimeError::StaleLease);
-        };
-        if active.lease_id != lease.lease_id {
-            lease.finished = true;
-            return Err(HotFolderRuntimeError::StaleLease);
+        if let Some(worker) = &self.worker {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            worker
+                .sender
+                .send(WorkerMessage::FinishLease {
+                    lease_id: lease.lease_id,
+                    disposition,
+                    reply: reply_tx,
+                })
+                .map_err(|_| HotFolderRuntimeError::WorkerStopped)?;
+            let result = reply_rx
+                .recv()
+                .map_err(|_| HotFolderRuntimeError::WorkerStopped)?;
+            if !matches!(result, Err(HotFolderRuntimeError::ReadyQueueFull)) {
+                lease.finished = true;
+            }
+            return result;
         }
-        if disposition == HotFolderLeaseDisposition::Defer
-            && output.ready.len() >= MAX_READY_CANDIDATES
-        {
-            return Err(HotFolderRuntimeError::ReadyQueueFull);
-        }
-        let Some(active) = output.leased.take() else {
-            lease.finished = true;
-            return Err(HotFolderRuntimeError::StaleLease);
-        };
+        let result = finish_lease_in_output(
+            lease.lease_id,
+            disposition,
+            &self.output,
+            self.clock.now(),
+            None,
+        )?;
         lease.finished = true;
-        match disposition {
-            HotFolderLeaseDisposition::TransferToConsumer => Ok(Some(active.candidate)),
-            HotFolderLeaseDisposition::RejectStale | HotFolderLeaseDisposition::Suppress => {
-                Ok(None)
-            }
-            HotFolderLeaseDisposition::Defer => {
-                output.ready.push_front(active.candidate);
-                Ok(None)
-            }
-        }
+        Ok(result)
     }
 
     pub fn snapshot(&self) -> HotFolderRuntimeSnapshot {
@@ -628,6 +644,28 @@ impl HotFolderWatchService {
             .map_err(|_| HotFolderRuntimeError::WorkerStopped)?;
         self.worker = Some(WorkerHandle { sender, thread });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_ready_candidate(
+    rule: HotFolderRule,
+    path: PathBuf,
+    evidence: HotFolderFileEvidence,
+    epoch: u64,
+    store_revision: u64,
+) -> HotFolderReadyCandidate {
+    let rule_fingerprint =
+        ConfigurationFingerprint::of_serializable(&rule).expect("test rule fingerprint");
+    HotFolderReadyCandidate {
+        correlation: HotFolderCandidateId(1),
+        rule,
+        rule_fingerprint,
+        store_revision,
+        epoch,
+        path,
+        evidence,
+        root_id: 1,
     }
 }
 
@@ -856,6 +894,11 @@ enum WorkerMessage {
     Snapshot {
         reply: mpsc::Sender<HotFolderRuntimeSnapshot>,
     },
+    FinishLease {
+        lease_id: u64,
+        disposition: HotFolderLeaseDisposition,
+        reply: mpsc::Sender<Result<Option<HotFolderReadyCandidate>, HotFolderRuntimeError>>,
+    },
     Notify {
         root_id: u64,
         epoch: u64,
@@ -1016,6 +1059,15 @@ fn handle_message(
                 snapshot.dropped_diagnostics = output.dropped_diagnostics;
             }
             let _ = reply.send(snapshot);
+        }
+        WorkerMessage::FinishLease {
+            lease_id,
+            disposition,
+            reply,
+        } => {
+            let result =
+                finish_lease_in_output(lease_id, disposition, output, clock.now(), Some(core));
+            let _ = reply.send(result);
         }
         WorkerMessage::Notify {
             root_id,
@@ -1323,6 +1375,53 @@ fn candidate_is_current(core: &RuntimeCore, candidate: &HotFolderReadyCandidate)
                 .get(&candidate.rule.id)
                 .is_some_and(|rule| rule.fingerprint == candidate.rule_fingerprint)
     })
+}
+
+fn finish_lease_in_output(
+    lease_id: u64,
+    disposition: HotFolderLeaseDisposition,
+    output: &Arc<Mutex<OutputState>>,
+    now: Instant,
+    core: Option<&RuntimeCore>,
+) -> Result<Option<HotFolderReadyCandidate>, HotFolderRuntimeError> {
+    let mut output = output
+        .lock()
+        .map_err(|_| HotFolderRuntimeError::WorkerStopped)?;
+    expire_lease_locked(&mut output, now);
+    let Some(active) = output.leased.as_ref() else {
+        return Err(HotFolderRuntimeError::StaleLease);
+    };
+    if active.lease_id != lease_id {
+        return Err(HotFolderRuntimeError::StaleLease);
+    }
+    if core.is_some_and(|core| !candidate_is_current(core, &active.candidate)) {
+        if let Some(stale) = output.leased.take() {
+            push_diagnostic(
+                &mut output,
+                HotFolderDiagnostic {
+                    kind: HotFolderDiagnosticKind::LeaseExpired,
+                    rule_id: Some(stale.candidate.rule.id),
+                    path: Some(stale.candidate.path),
+                },
+            );
+        }
+        return Err(HotFolderRuntimeError::StaleLease);
+    }
+    if disposition == HotFolderLeaseDisposition::Defer && output.ready.len() >= MAX_READY_CANDIDATES
+    {
+        return Err(HotFolderRuntimeError::ReadyQueueFull);
+    }
+    let Some(active) = output.leased.take() else {
+        return Err(HotFolderRuntimeError::StaleLease);
+    };
+    match disposition {
+        HotFolderLeaseDisposition::TransferToConsumer => Ok(Some(active.candidate)),
+        HotFolderLeaseDisposition::RejectStale | HotFolderLeaseDisposition::Suppress => Ok(None),
+        HotFolderLeaseDisposition::Defer => {
+            output.ready.push_front(active.candidate);
+            Ok(None)
+        }
+    }
 }
 
 fn pause_core(core: &mut RuntimeCore, output: &Arc<Mutex<OutputState>>, record: bool) {

@@ -1,10 +1,11 @@
 //! Disabled-by-default Hot Folder rules and a bounded watcher/settle runtime.
 //!
-//! The runtime observes only watcher-reported paths and transfers settled
-//! evidence to a later owner. It does not dispatch launcher actions or mutate
-//! watched files.
+//! The watcher observes reported paths and transfers settled evidence to the
+//! guarded execution owner. Built-in file actions use shared native guards;
+//! external action dispatch is supplied through an explicit adapter.
 
 mod capability;
+mod execution;
 mod model;
 mod runtime;
 mod store;
@@ -12,6 +13,12 @@ mod store;
 pub use capability::{
     ActionCapability, ActionEnablement, HotFolderCapabilityContext, RootAvailability,
     bind_mkmacro_action, bind_registered_launcher_action, evaluate_action_capability,
+};
+pub use execution::{
+    HotFolderExecutionAction, HotFolderExecutionEngine, HotFolderExecutionError,
+    HotFolderExecutionPhase, HotFolderExecutionReceipt, HotFolderExecutionSnapshot,
+    HotFolderExternalActionAdapter, HotFolderExternalActionOutcome, HotFolderExternalActionRequest,
+    HotFolderOutputEvidence, HotFolderOutputKind, HotFolderRunDisposition, HotFolderTerminalStatus,
 };
 pub use model::{
     ConfigurationFingerprint, FilenameFilter, HOT_FOLDER_RULES_FILE,

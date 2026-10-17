@@ -72,7 +72,7 @@ impl fmt::Debug for RuleId {
 /// Digest of the currently selected launcher or MkMacro configuration. The
 /// digest is rechecked against the injected current catalog before capability
 /// is reported; it is never treated as cached authorization.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ConfigurationFingerprint(String);
 

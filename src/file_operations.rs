@@ -112,6 +112,85 @@ pub struct NativeWatchFileObservation {
     modified: SystemTime,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NativeHotFolderInput {
+    pub(crate) root_identity: NativeFileIdentity,
+    pub(crate) parent_identity: NativeFileIdentity,
+    pub(crate) file_identity: NativeFileIdentity,
+    pub(crate) length: u64,
+    pub(crate) modified: SystemTime,
+    pub(crate) sha256: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeHotFolderAction {
+    Copy,
+    Move,
+    Rename,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeHotFolderOutputKind {
+    Final,
+    OwnedStage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeHotFolderOutput {
+    pub(crate) kind: NativeHotFolderOutputKind,
+    pub(crate) path: PathBuf,
+    pub(crate) identity: NativeFileIdentity,
+    pub(crate) length: u64,
+    pub(crate) modified: Option<SystemTime>,
+    pub(crate) sha256: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeHotFolderFailureKind {
+    StaleSource,
+    Inaccessible,
+    DestinationUnavailable,
+    DestinationCollision,
+    UnsupportedFidelity,
+    Cancelled,
+    Io,
+    PartialMove,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NativeHotFolderPhase {
+    Admission,
+    Staging,
+    Published,
+    SourceRemoval,
+    Complete,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeHotFolderError {
+    pub(crate) kind: NativeHotFolderFailureKind,
+    pub(crate) phase: NativeHotFolderPhase,
+    /// A short, path-free reason suitable for a bounded execution receipt.
+    pub(crate) reason: &'static str,
+    /// Any stage or published payload that could not safely be removed.
+    pub(crate) retained_outputs: Vec<NativeHotFolderOutput>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeHotFolderResult {
+    pub(crate) source_identity: NativeFileIdentity,
+    pub(crate) outputs: Vec<NativeHotFolderOutput>,
+    pub(crate) phase: NativeHotFolderPhase,
+    pub(crate) partial: bool,
+    pub(crate) reason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NativeHotFolderProgress {
+    pub(crate) phase: NativeHotFolderPhase,
+    pub(crate) outputs: Vec<NativeHotFolderOutput>,
+}
+
 impl NativeWatchFileObservation {
     pub fn canonical_path(&self) -> &Path {
         &self.canonical_path
@@ -270,6 +349,198 @@ pub fn observe_watch_file(
     {
         let _ = (root, reported_path, require_read_lock);
         Err(native_watch_error(NativeWatchErrorKind::Unsupported))
+    }
+}
+
+/// Reopen a settled watcher candidate with the same deny-write/delete sharing
+/// used by M9's guarded mutation path, hash it in bounded chunks, and require
+/// the exact watcher-observed root, parent and file version.
+pub(crate) fn fingerprint_hotfolder_file(
+    root: &NativeWatchRoot,
+    path: &Path,
+    expected_root_identity: NativeFileIdentity,
+    expected_parent_identity: NativeFileIdentity,
+    expected_file_identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_modified: SystemTime,
+    cancellation: &ScanCancellation,
+) -> Result<NativeHotFolderInput, NativeHotFolderError> {
+    #[cfg(windows)]
+    {
+        let source = prepare_hotfolder_source(
+            root,
+            path,
+            expected_root_identity,
+            expected_parent_identity,
+            expected_file_identity,
+            expected_length,
+            expected_modified,
+            cancellation,
+        )
+        .map_err(|error| error.with_phase(NativeHotFolderPhase::Admission))?;
+        Ok(NativeHotFolderInput {
+            root_identity: source.native.root.identity,
+            parent_identity: source.native.parent_identity,
+            file_identity: source.identity(),
+            length: source.original_state.length,
+            modified: source.original_state.modified,
+            sha256: source.original_state.content_sha256,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            root,
+            path,
+            expected_root_identity,
+            expected_parent_identity,
+            expected_file_identity,
+            expected_length,
+            expected_modified,
+            cancellation,
+        );
+        Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::Io,
+            "native Hot Folder file actions are available only on Windows",
+            Vec::new(),
+        ))
+    }
+}
+
+/// Perform one built-in Hot Folder action through the guarded M9 native file
+/// owner. Destination directories arrive as independently admitted roots;
+/// the target leaf is always validated before any mutation.
+pub(crate) fn execute_hotfolder_native_action(
+    root: &NativeWatchRoot,
+    source_path: &Path,
+    expected: NativeHotFolderInput,
+    action: NativeHotFolderAction,
+    destination_root: Option<&NativeWatchRoot>,
+    target_leaf: &OsStr,
+    operation_id: u128,
+    progress: &mut dyn FnMut(NativeHotFolderProgress) -> std::io::Result<()>,
+    cancellation: &ScanCancellation,
+) -> Result<NativeHotFolderResult, NativeHotFolderError> {
+    #[cfg(windows)]
+    {
+        execute_hotfolder_native_action_windows(
+            root,
+            source_path,
+            expected,
+            action,
+            destination_root,
+            target_leaf,
+            operation_id,
+            progress,
+            cancellation,
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (
+            root,
+            source_path,
+            expected,
+            action,
+            destination_root,
+            target_leaf,
+            operation_id,
+            progress,
+            cancellation,
+        );
+        Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::Io,
+            "native Hot Folder file actions are available only on Windows",
+            Vec::new(),
+        ))
+    }
+}
+
+#[cfg(any(windows, test))]
+enum CrossVolumeMoveOutcome<Output> {
+    Complete(Output),
+    Partial {
+        output: Output,
+        reason: &'static str,
+    },
+}
+
+#[cfg(any(windows, test))]
+fn execute_cross_volume_move_protocol<Stage, Output, Error>(
+    create_verified_stage: impl FnOnce() -> Result<Stage, Error>,
+    publish: impl FnOnce(&mut Stage) -> Result<Output, Error>,
+    fresh_recheck: impl FnOnce(&Stage, &Output) -> bool,
+    cancellation_requested: impl Fn() -> bool,
+    record_published: impl FnOnce(&Stage, &Output) -> bool,
+    record_source_removal: impl FnOnce(&Stage, &Output) -> bool,
+    remove_source: impl FnOnce() -> bool,
+) -> Result<CrossVolumeMoveOutcome<Output>, Error> {
+    let mut stage = create_verified_stage()?;
+    let output = publish(&mut stage)?;
+    if !record_published(&stage, &output) {
+        return Ok(CrossVolumeMoveOutcome::Partial {
+            output,
+            reason: "published destination could not be durably recorded; source remains",
+        });
+    }
+    if cancellation_requested() {
+        return Ok(CrossVolumeMoveOutcome::Partial {
+            output,
+            reason: "move cancelled before source removal; both verified files remain",
+        });
+    }
+    if !fresh_recheck(&stage, &output) {
+        return Ok(CrossVolumeMoveOutcome::Partial {
+            output,
+            reason: "source or published destination changed before source removal; both remain",
+        });
+    }
+    if cancellation_requested() {
+        return Ok(CrossVolumeMoveOutcome::Partial {
+            output,
+            reason: "move cancelled before source removal; both verified files remain",
+        });
+    }
+    if !record_source_removal(&stage, &output) {
+        return Ok(CrossVolumeMoveOutcome::Partial {
+            output,
+            reason: "source removal intent could not be durably recorded; both files remain",
+        });
+    }
+    if cancellation_requested() {
+        return Ok(CrossVolumeMoveOutcome::Partial {
+            output,
+            reason: "move cancelled before source removal; both verified files remain",
+        });
+    }
+    if !remove_source() {
+        return Ok(CrossVolumeMoveOutcome::Partial {
+            output,
+            reason: "source removal failed; source and verified destination remain",
+        });
+    }
+    Ok(CrossVolumeMoveOutcome::Complete(output))
+}
+
+fn native_hotfolder_error(
+    kind: NativeHotFolderFailureKind,
+    reason: &'static str,
+    retained_outputs: Vec<NativeHotFolderOutput>,
+) -> NativeHotFolderError {
+    NativeHotFolderError {
+        kind,
+        phase: match kind {
+            NativeHotFolderFailureKind::StaleSource
+            | NativeHotFolderFailureKind::Inaccessible
+            | NativeHotFolderFailureKind::DestinationUnavailable => NativeHotFolderPhase::Admission,
+            NativeHotFolderFailureKind::DestinationCollision
+            | NativeHotFolderFailureKind::UnsupportedFidelity
+            | NativeHotFolderFailureKind::Cancelled
+            | NativeHotFolderFailureKind::Io => NativeHotFolderPhase::Staging,
+            NativeHotFolderFailureKind::PartialMove => NativeHotFolderPhase::SourceRemoval,
+        },
+        reason,
+        retained_outputs,
     }
 }
 
@@ -3628,7 +3899,9 @@ impl ActiveWorker {
         match self {
             Self::Scan(_, cancellation)
             | Self::Apply(cancellation)
-            | Self::Undo(cancellation) => cancellation,
+            | Self::Undo(cancellation) => {
+                cancellation
+            }
         }
     }
 
@@ -3824,8 +4097,7 @@ impl RenameScanCoordinator {
         let cancellation = ScanCancellation::new();
         state.pending = Some(WorkerJob::Apply {
             plan,
-            cancellation,
-        });
+            cancellation });
         runtime.operation_active = true;
         runtime.progress = None;
         runtime.last_message = None;
@@ -4055,9 +4327,7 @@ fn scan_worker_loop(
                         .receipts
                         .iter()
                         .rev()
-                        .find(|receipt| {
-                            receipt.status().blocks_new_apply()
-                        })
+                        .find(|receipt| receipt.status().blocks_new_apply())
                         .map(|receipt| receipt.message().to_owned());
                 }
             }
@@ -4091,12 +4361,8 @@ fn scan_worker_loop(
                     cancellation,
                     ..
                 } => ActiveWorker::Scan(request.generation, cancellation.clone()),
-                WorkerJob::Apply { cancellation, .. } => {
-                    ActiveWorker::Apply(cancellation.clone())
-                }
-                WorkerJob::Undo { cancellation, .. } => {
-                    ActiveWorker::Undo(cancellation.clone())
-                }
+                WorkerJob::Apply { cancellation, .. } => ActiveWorker::Apply(cancellation.clone()),
+                WorkerJob::Undo { cancellation, .. } => ActiveWorker::Undo(cancellation.clone()),
             });
             job
         };
@@ -4109,14 +4375,12 @@ fn scan_worker_loop(
                 let generation = request.generation;
                 let result = scan_rename_root(request.clone(), &cancellation);
                 let _ = reply.send(result);
-                clear_active_worker(&state, |active| {
-                    matches!(active, ActiveWorker::Scan(active_generation, _) if *active_generation == generation)
-                });
+                clear_active_worker(&state, |active| matches!(active, ActiveWorker::Scan(active_generation, _) if *active_generation == generation),
+                );
             }
             WorkerJob::Apply {
                 plan,
-                cancellation,
-            } => {
+                cancellation } => {
                 let result = if let Some(path) = journal_path.as_deref() {
                     let report_runtime = Arc::clone(&runtime);
                     Some(crate::batch_rename_transaction::execute_apply(
@@ -5007,6 +5271,1132 @@ impl GuardedReplaceFile {
     }
 }
 
+#[cfg(windows)]
+fn prepare_hotfolder_source(
+    selected_root: &NativeWatchRoot,
+    path: &Path,
+    expected_root_identity: NativeFileIdentity,
+    expected_parent_identity: NativeFileIdentity,
+    expected_file_identity: NativeFileIdentity,
+    expected_length: u64,
+    expected_modified: SystemTime,
+    cancellation: &ScanCancellation,
+) -> Result<GuardedReplaceFile, NativeHotFolderError> {
+    if cancellation.is_cancelled() {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::Cancelled,
+            "file operation cancelled before source admission",
+            Vec::new(),
+        ));
+    }
+    if expected_length > MAX_RENAME_HASH_BYTES_PER_FILE {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::UnsupportedFidelity,
+            "source file exceeds the bounded content verification limit",
+            Vec::new(),
+        ));
+    }
+    let root = refresh_watch_root(selected_root).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "watched root identity changed before action",
+            Vec::new(),
+        )
+    })?;
+    if root.identity() != expected_root_identity {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "watched root identity changed before action",
+            Vec::new(),
+        ));
+    }
+    let relative = relative_watch_path(root.canonical_root(), path).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "source path is outside the admitted watched root",
+            Vec::new(),
+        )
+    })?;
+    let parent_path = root
+        .canonical_root()
+        .join(relative.parent().unwrap_or_else(|| Path::new("")));
+    let parent_chain = admit_watch_parent_chain(&root.proof, &parent_path).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "source parent identity changed before action",
+            Vec::new(),
+        )
+    })?;
+    let backend = NativeRenameScanBackend;
+    let root_guards = backend
+        .reopen_chain(
+            &root.proof.chain,
+            &root.proof,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(|_| {
+            native_hotfolder_error(
+                NativeHotFolderFailureKind::StaleSource,
+                "watched root could not be held during action admission",
+                Vec::new(),
+            )
+        })?;
+    let parent_guards = backend
+        .reopen_chain(&parent_chain, &root.proof, DirectoryOpenAccess::Metadata)
+        .map_err(|_| {
+            native_hotfolder_error(
+                NativeHotFolderFailureKind::StaleSource,
+                "source parent could not be held during action admission",
+                Vec::new(),
+            )
+        })?;
+    let Some(parent) = parent_guards.last() else {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "source parent evidence is unavailable",
+            Vec::new(),
+        ));
+    };
+    if parent.identity != expected_parent_identity {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "source parent identity changed before action",
+            Vec::new(),
+        ));
+    }
+    let opened = open_native_replace_file(path).map_err(|error| {
+        map_hotfolder_io_error(
+            error,
+            NativeHotFolderFailureKind::StaleSource,
+            "source could not be opened with a guarded native handle",
+        )
+    })?;
+    if opened.kind != SnapshotEntryKind::File
+        || opened.reparse_point
+        || opened.identity != expected_file_identity
+        || opened.length != Some(expected_length)
+        || opened.modified != Some(expected_modified)
+        || batch_rename::compare_paths_windows_ordinal(&opened.canonical_path, path)
+            != std::cmp::Ordering::Equal
+        || opened.canonical_path.parent().is_none_or(|actual_parent| {
+            batch_rename::compare_paths_windows_ordinal(actual_parent, &parent.canonical_path)
+                != std::cmp::Ordering::Equal
+        })
+        || !batch_rename::path_is_within_windows_ordinal(
+            root.canonical_root(),
+            &opened.canonical_path,
+        )
+    {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "source identity, path, or metadata changed before action",
+            Vec::new(),
+        ));
+    }
+    let native = GuardedReplaceHandle {
+        current_path: opened.canonical_path.clone(),
+        parent_path: parent.canonical_path.clone(),
+        parent_identity: parent.identity,
+        identity: opened.identity,
+        root: root.proof.clone(),
+        parent_chain,
+        file: opened.handle,
+        root_guards,
+        parent_guards,
+    };
+    ensure_unnamed_stream_only(&native.file).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::UnsupportedFidelity,
+            "source has named streams or its stream set cannot be verified",
+            Vec::new(),
+        )
+    })?;
+    let original_state = capture_hotfolder_guard(&native, cancellation).map_err(|error| {
+        map_hotfolder_io_error(
+            error,
+            NativeHotFolderFailureKind::StaleSource,
+            "source changed during guarded content verification",
+        )
+    })?;
+    Ok(GuardedReplaceFile {
+        original_path: opened.canonical_path,
+        original_state,
+        native,
+    })
+}
+
+#[cfg(windows)]
+fn execute_hotfolder_native_action_windows(
+    selected_root: &NativeWatchRoot,
+    source_path: &Path,
+    expected: NativeHotFolderInput,
+    action: NativeHotFolderAction,
+    selected_destination: Option<&NativeWatchRoot>,
+    target_leaf: &OsStr,
+    operation_id: u128,
+    progress: &mut dyn FnMut(NativeHotFolderProgress) -> std::io::Result<()>,
+    cancellation: &ScanCancellation,
+) -> Result<NativeHotFolderResult, NativeHotFolderError> {
+    validate_replace_leaf(target_leaf).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::UnsupportedFidelity,
+            "target filename is not one safe path component",
+            Vec::new(),
+        )
+    })?;
+    let mut source = prepare_hotfolder_source(
+        selected_root,
+        source_path,
+        expected.root_identity,
+        expected.parent_identity,
+        expected.file_identity,
+        expected.length,
+        expected.modified,
+        cancellation,
+    )?;
+    let source_state = source.original_state;
+    if source_state.content_sha256 != expected.sha256 {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::StaleSource,
+            "source content changed after its admission fingerprint",
+            Vec::new(),
+        ));
+    }
+
+    if action == NativeHotFolderAction::Rename {
+        rename_hotfolder_guard_to_leaf(
+            &mut source.native,
+            target_leaf,
+            source_state,
+            cancellation,
+        )
+            .map_err(|error| {
+                map_hotfolder_io_error(
+                    error,
+                    NativeHotFolderFailureKind::Io,
+                    "source could not be renamed without replacement",
+                )
+            })?;
+        let output = hotfolder_output(
+            NativeHotFolderOutputKind::Final,
+            &source.native,
+            source_state,
+        );
+        let durable = progress(NativeHotFolderProgress {
+            phase: NativeHotFolderPhase::Published,
+            outputs: vec![output.clone()],
+        })
+        .is_ok();
+        let verified = verify_published_hotfolder_guard(&source.native, source_state).is_ok();
+        return Ok(NativeHotFolderResult {
+            source_identity: source_state.identity,
+            outputs: vec![output],
+            phase: if durable && verified {
+                NativeHotFolderPhase::Complete
+            } else {
+                NativeHotFolderPhase::Published
+            },
+            partial: !durable || !verified,
+            reason: (!durable).then_some("published rename could not be durably recorded")
+                .or_else(|| (!verified).then_some("renamed file could not be revalidated")),
+        });
+    }
+
+    let destination = selected_destination.ok_or_else(|| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::DestinationUnavailable,
+            "an explicit destination directory is required",
+            Vec::new(),
+        )
+    })?;
+    let destination = refresh_watch_root(destination).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::DestinationUnavailable,
+            "destination directory identity changed before action",
+            Vec::new(),
+        )
+    })?;
+    if action == NativeHotFolderAction::Move
+        && source.native.root.identity.volume_serial_number()
+            == destination.identity().volume_serial_number()
+    {
+        rename_hotfolder_guard_to_root(
+            &mut source.native,
+            &destination,
+            target_leaf,
+            source_state,
+            cancellation,
+        )
+        .map_err(|error| {
+            map_hotfolder_io_error(
+                error,
+                NativeHotFolderFailureKind::Io,
+                "source could not be moved without replacement",
+            )
+        })?;
+        let output = hotfolder_output(
+            NativeHotFolderOutputKind::Final,
+            &source.native,
+            source_state,
+        );
+        let durable = progress(NativeHotFolderProgress {
+            phase: NativeHotFolderPhase::Published,
+            outputs: vec![output.clone()],
+        })
+        .is_ok();
+        let verified = verify_published_hotfolder_guard(&source.native, source_state).is_ok();
+        return Ok(NativeHotFolderResult {
+            source_identity: source_state.identity,
+            outputs: vec![output],
+            phase: if durable && verified {
+                NativeHotFolderPhase::Complete
+            } else {
+                NativeHotFolderPhase::Published
+            },
+            partial: !durable || !verified,
+            reason: (!durable).then_some("published move could not be durably recorded")
+                .or_else(|| (!verified).then_some("moved file could not be revalidated")),
+        });
+    }
+
+    if action == NativeHotFolderAction::Move {
+        return execute_hotfolder_cross_volume_move(
+            &source,
+            &destination,
+            target_leaf,
+            source_state,
+            operation_id,
+            progress,
+            cancellation,
+        );
+    }
+
+    let mut stage = create_hotfolder_output_stage(
+        &source.native,
+        &destination,
+        target_leaf,
+        source_state,
+        operation_id,
+        progress,
+        cancellation,
+    )?;
+    let staged_state = stage.state;
+    let stage_path_before_publish = stage.native.current_path.clone();
+    if let Err(error) =
+        rename_hotfolder_guard_to_leaf(&mut stage.native, target_leaf, staged_state, cancellation)
+    {
+        let published = batch_rename::compare_paths_windows_ordinal(
+            &stage.native.current_path,
+            &stage_path_before_publish,
+        ) != std::cmp::Ordering::Equal;
+        let retained_outputs = if published {
+            vec![hotfolder_output(
+                NativeHotFolderOutputKind::Final,
+                &stage.native,
+                stage.state,
+            )]
+        } else {
+            match delete_owned_hotfolder_stage(&stage.native, cancellation) {
+                Ok(()) => Vec::new(),
+                Err(_) => vec![hotfolder_output(
+                    NativeHotFolderOutputKind::OwnedStage,
+                    &stage.native,
+                    capture_hotfolder_guard(&stage.native, &ScanCancellation::new())
+                        .unwrap_or(stage.state),
+                )],
+            }
+        };
+        return Err(map_hotfolder_io_error(
+            error,
+            NativeHotFolderFailureKind::Io,
+            "verified output could not be published without replacement",
+        )
+        .with_phase(if published {
+            NativeHotFolderPhase::Published
+        } else {
+            NativeHotFolderPhase::Staging
+        })
+        .with_retained_outputs(retained_outputs));
+    }
+    let output = hotfolder_output(
+        NativeHotFolderOutputKind::Final,
+        &stage.native,
+        staged_state,
+    );
+    if progress(NativeHotFolderProgress {
+        phase: NativeHotFolderPhase::Published,
+        outputs: vec![output.clone()],
+    })
+    .is_err()
+    {
+        return Ok(NativeHotFolderResult {
+            source_identity: source_state.identity,
+            outputs: vec![output],
+            phase: NativeHotFolderPhase::Published,
+            partial: true,
+            reason: Some("published copy could not be durably recorded; source was retained"),
+        });
+    }
+    let output_state = match capture_hotfolder_guard(&stage.native, &ScanCancellation::new()) {
+        Ok(state) => state,
+        Err(_) => {
+            return Ok(NativeHotFolderResult {
+                source_identity: source_state.identity,
+                outputs: vec![output],
+                phase: NativeHotFolderPhase::Published,
+                partial: true,
+                reason: Some("published output could not be revalidated; source was retained"),
+            });
+        }
+    };
+    let output = hotfolder_output(
+        NativeHotFolderOutputKind::Final,
+        &stage.native,
+        output_state,
+    );
+    Ok(NativeHotFolderResult {
+        source_identity: source_state.identity,
+        outputs: vec![output],
+        phase: NativeHotFolderPhase::Complete,
+        partial: false,
+        reason: None,
+    })
+}
+
+#[cfg(windows)]
+fn execute_hotfolder_cross_volume_move(
+    source: &GuardedReplaceFile,
+    destination: &NativeWatchRoot,
+    target_leaf: &OsStr,
+    source_state: GuardedReplaceState,
+    operation_id: u128,
+    progress: &mut dyn FnMut(NativeHotFolderProgress) -> std::io::Result<()>,
+    cancellation: &ScanCancellation,
+) -> Result<NativeHotFolderResult, NativeHotFolderError> {
+    use std::cell::{Cell, RefCell};
+
+    let retained_stage = RefCell::new(None::<GuardedReplaceStage>);
+    let published_revalidated = Cell::new(false);
+    let progress = RefCell::new(progress);
+    let outcome = execute_cross_volume_move_protocol(
+        || {
+            let stage = create_hotfolder_output_stage(
+                &source.native,
+                destination,
+                target_leaf,
+                source_state,
+                operation_id,
+                &mut **progress.borrow_mut(),
+                cancellation,
+            )?;
+            retained_stage.replace(Some(stage));
+            Ok(())
+        },
+        |_| {
+            let mut retained = retained_stage.borrow_mut();
+            let stage = retained.as_mut().ok_or_else(|| {
+                native_hotfolder_error(
+                    NativeHotFolderFailureKind::Io,
+                    "verified output stage was lost before publication",
+                    Vec::new(),
+                )
+            })?;
+            let staged_state = stage.state;
+            let stage_path_before_publish = stage.native.current_path.clone();
+            if let Err(error) = rename_hotfolder_guard_to_leaf(
+                &mut stage.native,
+                target_leaf,
+                staged_state,
+                cancellation,
+            ) {
+                let published = batch_rename::compare_paths_windows_ordinal(
+                    &stage.native.current_path,
+                    &stage_path_before_publish,
+                ) != std::cmp::Ordering::Equal;
+                let retained_outputs = if published {
+                    vec![hotfolder_output(
+                        NativeHotFolderOutputKind::Final,
+                        &stage.native,
+                        staged_state,
+                    )]
+                } else {
+                    match delete_owned_hotfolder_stage(&stage.native, cancellation) {
+                        Ok(()) => Vec::new(),
+                        Err(_) => vec![hotfolder_output(
+                            NativeHotFolderOutputKind::OwnedStage,
+                            &stage.native,
+                            capture_hotfolder_guard(&stage.native, &ScanCancellation::new())
+                                .unwrap_or(staged_state),
+                        )],
+                    }
+                };
+                return Err(map_hotfolder_io_error(
+                    error,
+                    NativeHotFolderFailureKind::Io,
+                    "verified output could not be published without replacement",
+                )
+                .with_phase(if published {
+                    NativeHotFolderPhase::Published
+                } else {
+                    NativeHotFolderPhase::Staging
+                })
+                .with_retained_outputs(retained_outputs));
+            }
+            published_revalidated.set(
+                verify_published_hotfolder_guard(&stage.native, staged_state).is_ok(),
+            );
+            stage.state = staged_state;
+            Ok(hotfolder_output(
+                NativeHotFolderOutputKind::Final,
+                &stage.native,
+                staged_state,
+            ))
+        },
+        |_, _| {
+            if !published_revalidated.get() {
+                return false;
+            }
+            let retained = retained_stage.borrow();
+            let Some(stage) = retained.as_ref() else {
+                return false;
+            };
+            verify_hotfolder_guard(&source.native, source_state, cancellation)
+                .and_then(|()| verify_hotfolder_guard(&stage.native, stage.state, cancellation))
+                .is_ok()
+        },
+        || cancellation.is_cancelled(),
+        |_, output| {
+            let mut recorder = progress.borrow_mut();
+            (*recorder)(NativeHotFolderProgress {
+                phase: NativeHotFolderPhase::Published,
+                outputs: vec![output.clone()],
+            }).is_ok()
+        },
+        |_, output| {
+            let mut recorder = progress.borrow_mut();
+            (*recorder)(NativeHotFolderProgress {
+                phase: NativeHotFolderPhase::SourceRemoval,
+                outputs: vec![output.clone()],
+            }).is_ok()
+        },
+        || delete_hotfolder_guarded(&source.native, source_state, cancellation).is_ok(),
+    )?;
+
+    let (output, partial, reason) = match outcome {
+        CrossVolumeMoveOutcome::Complete(output) => (output, false, None),
+        CrossVolumeMoveOutcome::Partial { output, reason } => (output, true, Some(reason)),
+    };
+    Ok(NativeHotFolderResult {
+        source_identity: source_state.identity,
+        outputs: vec![output],
+        phase: if partial {
+            NativeHotFolderPhase::SourceRemoval
+        } else {
+            NativeHotFolderPhase::Complete
+        },
+        partial,
+        reason,
+    })
+}
+
+#[cfg(windows)]
+impl NativeHotFolderError {
+    fn with_phase(mut self, phase: NativeHotFolderPhase) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    fn with_retained_outputs(mut self, retained_outputs: Vec<NativeHotFolderOutput>) -> Self {
+        self.retained_outputs = retained_outputs;
+        self
+    }
+}
+
+#[cfg(windows)]
+fn map_hotfolder_io_error(
+    error: std::io::Error,
+    fallback: NativeHotFolderFailureKind,
+    fallback_reason: &'static str,
+) -> NativeHotFolderError {
+    if rename_error_is_destination_collision(&error) {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::DestinationCollision,
+            "destination already exists; no file was overwritten",
+            Vec::new(),
+        )
+    } else if error.kind() == std::io::ErrorKind::Interrupted {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::Cancelled,
+            "file operation cancelled at a safe boundary",
+            Vec::new(),
+        )
+    } else if error.kind() == std::io::ErrorKind::Unsupported {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::UnsupportedFidelity,
+            "filesystem metadata or content fidelity is unsupported",
+            Vec::new(),
+        )
+    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+        let mut mapped = native_hotfolder_error(
+            NativeHotFolderFailureKind::Inaccessible,
+            "file or directory access was denied",
+            Vec::new(),
+        );
+        mapped.phase = if fallback == NativeHotFolderFailureKind::StaleSource {
+            NativeHotFolderPhase::Admission
+        } else {
+            NativeHotFolderPhase::Staging
+        };
+        mapped
+    } else {
+        native_hotfolder_error(fallback, fallback_reason, Vec::new())
+    }
+}
+
+#[cfg(windows)]
+fn capture_hotfolder_guard(
+    guard: &GuardedReplaceHandle,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<GuardedReplaceState> {
+    guard.verify_location(&guard.current_path)?;
+    let before = guard.file.metadata()?;
+    if before.len() > MAX_RENAME_HASH_BYTES_PER_FILE
+        || native_file_identity(&guard.file)? != guard.identity
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder file identity or length is outside the verified state",
+        ));
+    }
+    let sha256 = hash_file_contents(
+        &guard.file,
+        ContentVerificationMode::Cooperative(cancellation),
+    )?;
+    let after = guard.file.metadata()?;
+    if after.len() != before.len()
+        || after.modified().ok() != before.modified().ok()
+        || native_file_identity(&guard.file)? != guard.identity
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder file changed while its content was verified",
+        ));
+    }
+    guard.verify_location(&guard.current_path)?;
+    Ok(GuardedReplaceState {
+        identity: guard.identity,
+        length: after.len(),
+        modified: after.modified()?,
+        content_sha256: sha256,
+    })
+}
+
+#[cfg(windows)]
+fn verify_published_hotfolder_guard(
+    guard: &GuardedReplaceHandle,
+    expected: GuardedReplaceState,
+) -> std::io::Result<()> {
+    guard.verify_location(&guard.current_path)?;
+    let metadata = guard.file.metadata()?;
+    if native_file_identity(&guard.file)? != expected.identity
+        || metadata.len() != expected.length
+        || metadata.modified()? != expected.modified
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "published Hot Folder file identity or metadata changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn verify_hotfolder_guard(
+    guard: &GuardedReplaceHandle,
+    expected: GuardedReplaceState,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<()> {
+    let actual = capture_hotfolder_guard(guard, cancellation)?;
+    if actual != expected {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder file identity, path, metadata or content changed",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn hotfolder_output(
+    kind: NativeHotFolderOutputKind,
+    guard: &GuardedReplaceHandle,
+    state: GuardedReplaceState,
+) -> NativeHotFolderOutput {
+    NativeHotFolderOutput {
+        kind,
+        path: guard.current_path.clone(),
+        identity: state.identity,
+        length: state.length,
+        modified: Some(state.modified),
+        sha256: Some(state.content_sha256),
+    }
+}
+
+#[cfg(windows)]
+fn rename_hotfolder_guard_to_leaf(
+    guard: &mut GuardedReplaceHandle,
+    leaf: &OsStr,
+    expected: GuardedReplaceState,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<PathBuf> {
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Hot Folder operation cancelled before rename",
+        ));
+    }
+    validate_replace_leaf(leaf)?;
+    verify_hotfolder_guard(guard, expected, cancellation)?;
+    let (root_guards, parent_guards) = guard.reopen_guards()?;
+    let parent = parent_guards
+        .last()
+        .ok_or_else(|| std::io::Error::other("Hot Folder source parent guard is missing"))?;
+    rename_open_file_no_replace(&guard.file, parent, leaf)?;
+    guard.current_path = parent.canonical_path.join(leaf);
+    guard.root_guards = root_guards;
+    guard.parent_guards = parent_guards;
+    Ok(guard.current_path.clone())
+}
+
+#[cfg(windows)]
+fn rename_hotfolder_guard_to_root(
+    guard: &mut GuardedReplaceHandle,
+    destination: &NativeWatchRoot,
+    leaf: &OsStr,
+    expected: GuardedReplaceState,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<PathBuf> {
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Hot Folder operation cancelled before move",
+        ));
+    }
+    validate_replace_leaf(leaf)?;
+    verify_hotfolder_guard(guard, expected, cancellation)?;
+    let (source_root_guards, source_parent_guards) = guard.reopen_guards()?;
+    let destination = refresh_watch_root(destination)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if guard.root.identity.volume_serial_number() != destination.identity().volume_serial_number() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "cross-volume move must use verified copy, publish and source removal",
+        ));
+    }
+    let destination_guards = NativeRenameScanBackend
+        .reopen_chain(
+            &destination.proof.chain,
+            &destination.proof,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(|error| std::io::Error::other(error.message))?;
+    let Some(parent) = destination_guards.last() else {
+        return Err(std::io::Error::other(
+            "Hot Folder destination guard is missing",
+        ));
+    };
+    if parent.identity != destination.identity() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder destination identity changed before move",
+        ));
+    }
+    // Keep both source and destination ancestor chains alive through the
+    // handle-based no-replace rename.
+    let _source_guards = (source_root_guards, source_parent_guards);
+    rename_open_file_no_replace(&guard.file, parent, leaf)?;
+    guard.current_path = parent.canonical_path.join(leaf);
+    guard.parent_path = parent.canonical_path.clone();
+    guard.parent_identity = parent.identity;
+    guard.root = destination.proof.clone();
+    guard.parent_chain = destination.proof.chain.clone();
+    guard.root_guards = destination_guards.clone();
+    guard.parent_guards = destination_guards;
+    Ok(guard.current_path.clone())
+}
+
+#[cfg(windows)]
+fn create_hotfolder_output_stage(
+    source: &GuardedReplaceHandle,
+    destination: &NativeWatchRoot,
+    final_leaf: &OsStr,
+    source_state: GuardedReplaceState,
+    operation_id: u128,
+    progress: &mut dyn FnMut(NativeHotFolderProgress) -> std::io::Result<()>,
+    cancellation: &ScanCancellation,
+) -> Result<GuardedReplaceStage, NativeHotFolderError> {
+    validate_replace_leaf(final_leaf).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::UnsupportedFidelity,
+            "destination filename is not one safe path component",
+            Vec::new(),
+        )
+    })?;
+    verify_hotfolder_guard(source, source_state, cancellation).map_err(|error| {
+        map_hotfolder_io_error(
+            error,
+            NativeHotFolderFailureKind::StaleSource,
+            "source changed before output staging",
+        )
+    })?;
+    ensure_unnamed_stream_only(&source.file).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::UnsupportedFidelity,
+            "source has named streams or its stream set cannot be verified",
+            Vec::new(),
+        )
+    })?;
+    let destination = refresh_watch_root(destination).map_err(|_| {
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::DestinationUnavailable,
+            "destination directory identity changed before staging",
+            Vec::new(),
+        )
+    })?;
+    let destination_guards = NativeRenameScanBackend
+        .reopen_chain(
+            &destination.proof.chain,
+            &destination.proof,
+            DirectoryOpenAccess::Metadata,
+        )
+        .map_err(|_| {
+            native_hotfolder_error(
+                NativeHotFolderFailureKind::DestinationUnavailable,
+                "destination directory could not be held during staging",
+                Vec::new(),
+            )
+        })?;
+    let Some(parent) = destination_guards.last() else {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::DestinationUnavailable,
+            "destination directory evidence is unavailable",
+            Vec::new(),
+        ));
+    };
+    if parent.identity != destination.identity() {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::DestinationUnavailable,
+            "destination directory identity changed before staging",
+            Vec::new(),
+        ));
+    }
+    let mut created = None;
+    for attempt in 0..8_u8 {
+        if cancellation.is_cancelled() {
+            return Err(native_hotfolder_error(
+                NativeHotFolderFailureKind::Cancelled,
+                "file operation cancelled before output staging",
+                Vec::new(),
+            ));
+        }
+        let nonce = if attempt == 0 {
+            operation_id
+        } else {
+            rand::random::<u128>()
+        };
+        let stage_leaf = format!(".ml-hotfolder-{nonce:032x}.stage");
+        let stage_path = parent.canonical_path.join(&stage_leaf);
+        match create_native_replace_stage(&stage_path) {
+            Ok(file) => {
+                created = Some((stage_path, stage_leaf, file));
+                break;
+            }
+            Err(error) if rename_error_is_destination_collision(&error) => continue,
+            Err(error) => {
+                return Err(map_hotfolder_io_error(
+                    error,
+                    NativeHotFolderFailureKind::Io,
+                    "unique output stage could not be created",
+                ));
+            }
+        }
+    }
+    let Some((stage_path, _stage_leaf, output_file)) = created else {
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::DestinationCollision,
+            "unique output stage names were occupied",
+            Vec::new(),
+        ));
+    };
+    let identity = native_file_identity(&output_file).map_err(|_| {
+        let _ = delete_open_file(&output_file);
+        native_hotfolder_error(
+            NativeHotFolderFailureKind::Io,
+            "new output stage identity could not be verified",
+            Vec::new(),
+        )
+    })?;
+    let native = GuardedReplaceHandle {
+        current_path: stage_path,
+        parent_path: parent.canonical_path.clone(),
+        parent_identity: parent.identity,
+        identity,
+        root: destination.proof.clone(),
+        parent_chain: destination.proof.chain.clone(),
+        file: output_file,
+        root_guards: destination_guards.clone(),
+        parent_guards: destination_guards,
+    };
+    let mut stage = GuardedReplaceStage {
+        state: GuardedReplaceState {
+            identity,
+            length: 0,
+            modified: SystemTime::UNIX_EPOCH,
+            content_sha256: Sha256::digest([]).into(),
+        },
+        native,
+    };
+    if progress(NativeHotFolderProgress {
+        phase: NativeHotFolderPhase::Staging,
+        outputs: vec![owned_stage_output(&stage.native, Some(stage.state))],
+    })
+    .is_err()
+    {
+        let cleanup = delete_owned_hotfolder_stage(&stage.native, &ScanCancellation::new());
+        let retained_outputs = if cleanup.is_err() {
+            vec![owned_stage_output(&stage.native, None)]
+        } else {
+            Vec::new()
+        };
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::Io,
+            "owned stage could not be durably recorded before copying",
+            retained_outputs,
+        ));
+    }
+    let initialized = initialize_hotfolder_copy_stage(
+        &source.file,
+        &stage.native.file,
+        source_state,
+        cancellation,
+    );
+    let copied = match initialized {
+        Ok(state) => state,
+        Err(error) => {
+            let cleanup = delete_owned_hotfolder_stage(&stage.native, &ScanCancellation::new());
+            let retained_outputs = if cleanup.is_err() {
+                vec![owned_stage_output(&stage.native, None)]
+            } else {
+                Vec::new()
+            };
+            return Err(map_hotfolder_io_error(
+                error,
+                NativeHotFolderFailureKind::Io,
+                "output stage failed verification or fidelity checks",
+            )
+            .with_retained_outputs(retained_outputs));
+        }
+    };
+    stage.state = copied;
+    if progress(NativeHotFolderProgress {
+        phase: NativeHotFolderPhase::Staging,
+        outputs: vec![owned_stage_output(&stage.native, Some(stage.state))],
+    })
+    .is_err()
+    {
+        let cleanup = delete_owned_hotfolder_stage(&stage.native, &ScanCancellation::new());
+        let retained_outputs = if cleanup.is_err() {
+            vec![owned_stage_output(&stage.native, Some(stage.state))]
+        } else {
+            Vec::new()
+        };
+        return Err(native_hotfolder_error(
+            NativeHotFolderFailureKind::Io,
+            "verified stage could not be durably recorded before publication",
+            retained_outputs,
+        ));
+    }
+    Ok(stage)
+}
+
+#[cfg(windows)]
+fn initialize_hotfolder_copy_stage(
+    source: &std::fs::File,
+    output: &std::fs::File,
+    expected: GuardedReplaceState,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<GuardedReplaceState> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Hot Folder operation cancelled before copying bytes",
+        ));
+    }
+    let source_before = source.metadata()?;
+    if source_before.len() != expected.length
+        || source_before.modified()? != expected.modified
+        || native_file_identity(source)? != expected.identity
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder source changed before its copy began",
+        ));
+    }
+    let source_properties = query_replace_basic_info(source)?;
+    validate_replace_basic_attributes(source_properties.FileAttributes)?;
+    let mut reader = source.try_clone()?;
+    reader.seek(SeekFrom::Start(0))?;
+    let mut writer = output.try_clone()?;
+    writer.set_len(0)?;
+    writer.seek(SeekFrom::Start(0))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    while total < expected.length {
+        if cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "Hot Folder operation cancelled while copying bytes",
+            ));
+        }
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Hot Folder source ended before the captured length",
+            ));
+        }
+        total = total.checked_add(count as u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Hot Folder byte count overflowed",
+            )
+        })?;
+        if total > expected.length || total > MAX_RENAME_HASH_BYTES_PER_FILE {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Hot Folder source grew beyond the verified copy limit",
+            ));
+        }
+        writer.write_all(&buffer[..count])?;
+        hasher.update(&buffer[..count]);
+    }
+    if reader.read(&mut buffer[..1])? != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder source grew while its copy was staged",
+        ));
+    }
+    let source_hash: [u8; 32] = hasher.finalize().into();
+    if source_hash != expected.content_sha256 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder source content changed while its copy was staged",
+        ));
+    }
+    writer.flush()?;
+    writer.set_len(expected.length)?;
+    writer.sync_all()?;
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "Hot Folder operation cancelled after staging bytes",
+        ));
+    }
+    copy_replace_security(source, output)?;
+    let staged_properties = query_replace_basic_info(output)?;
+    let mut properties = source_properties;
+    properties.LastWriteTime = system_time_to_windows_ticks(expected.modified)?;
+    properties.ChangeTime = 0;
+    set_replace_basic_info(output, properties)?;
+    output.sync_all()?;
+
+    let source_after = source.metadata()?;
+    if source_after.len() != expected.length
+        || source_after.modified()? != expected.modified
+        || native_file_identity(source)? != expected.identity
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder source changed before the staged copy completed",
+        ));
+    }
+    let output_metadata = output.metadata()?;
+    let output_identity = native_file_identity(output)?;
+    let output_hash =
+        hash_file_contents(output, ContentVerificationMode::Cooperative(cancellation))?;
+    if output_metadata.len() != expected.length
+        || output_metadata.modified()? != expected.modified
+        || output_hash != expected.content_sha256
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder staged copy did not preserve verified bytes and metadata",
+        ));
+    }
+    let _ = staged_properties;
+    Ok(GuardedReplaceState {
+        identity: output_identity,
+        length: expected.length,
+        modified: output_metadata.modified()?,
+        content_sha256: output_hash,
+    })
+}
+
+#[cfg(windows)]
+fn delete_owned_hotfolder_stage(
+    guard: &GuardedReplaceHandle,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "stage cleanup cancelled",
+        ));
+    }
+    guard.verify_location(&guard.current_path)?;
+    if native_file_identity(&guard.file)? != guard.identity {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Hot Folder stage identity changed before cleanup",
+        ));
+    }
+    delete_open_file(&guard.file)
+}
+
+#[cfg(windows)]
+fn owned_stage_output(
+    guard: &GuardedReplaceHandle,
+    state: Option<GuardedReplaceState>,
+) -> NativeHotFolderOutput {
+    let metadata = guard.file.metadata().ok();
+    NativeHotFolderOutput {
+        kind: NativeHotFolderOutputKind::OwnedStage,
+        path: guard.current_path.clone(),
+        identity: guard.identity,
+        length: state.map_or_else(
+            || metadata.as_ref().map_or(0, std::fs::Metadata::len),
+            |state| state.length,
+        ),
+        modified: state
+            .map(|state| state.modified)
+            .or_else(|| metadata.and_then(|metadata| metadata.modified().ok())),
+        sha256: state.map(|state| state.content_sha256),
+    }
+}
+
+#[cfg(windows)]
+fn delete_hotfolder_guarded(
+    guard: &GuardedReplaceHandle,
+    expected: GuardedReplaceState,
+    cancellation: &ScanCancellation,
+) -> std::io::Result<()> {
+    verify_hotfolder_guard(guard, expected, cancellation)?;
+    delete_open_file(&guard.file)
+}
+
 impl GuardedReplaceStage {
     pub(crate) fn path(&self) -> &Path {
         #[cfg(windows)]
@@ -5062,8 +6452,7 @@ impl GuardedReplaceStage {
 
     pub(crate) fn delete_if_matches(
         &self,
-        cancellation: &ScanCancellation,
-    ) -> std::io::Result<()> {
+        cancellation: &ScanCancellation) -> std::io::Result<()> {
         #[cfg(windows)]
         return self.native.delete_if_matches(self.state, cancellation);
         #[cfg(not(windows))]
@@ -5395,7 +6784,7 @@ fn create_verified_replace_backup_native(
     use std::os::windows::io::{FromRawHandle, RawHandle};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_WRITE_DATA,
     };
     use windows::core::PCWSTR;
@@ -5556,8 +6945,8 @@ fn create_native_replace_stage(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::io::{FromRawHandle, RawHandle};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, CREATE_NEW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        CREATE_NEW, CreateFileW, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
         FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_SHARE_READ, FILE_WRITE_ATTRIBUTES,
         FILE_WRITE_DATA, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
     };
@@ -5698,7 +7087,7 @@ fn query_replace_basic_info(file: &std::fs::File) -> std::io::Result<windows::Wi
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        GetFileInformationByHandleEx, FileBasicInfo, FILE_BASIC_INFO,
+        FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
     };
 
     let mut info = FILE_BASIC_INFO::default();
@@ -5722,7 +7111,7 @@ fn set_replace_basic_info(
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        SetFileInformationByHandle, FileBasicInfo, FILE_BASIC_INFO,
+        FILE_BASIC_INFO, FileBasicInfo, SetFileInformationByHandle,
     };
 
     unsafe {
@@ -5748,11 +7137,15 @@ fn system_time_to_windows_ticks(time: SystemTime) -> std::io::Result<i64> {
     let seconds = duration
         .as_secs()
         .checked_add(WINDOWS_EPOCH_OFFSET_SECONDS)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow")
+        })?;
     let ticks = seconds
         .checked_mul(10_000_000)
         .and_then(|ticks| ticks.checked_add(u64::from(duration.subsec_nanos() / 100)))
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow")
+        })?;
     i64::try_from(ticks)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "timestamp overflow"))
 }
@@ -5790,8 +7183,7 @@ fn query_replace_security(
     use windows::Win32::Foundation::{BOOL, HANDLE};
     use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
     use windows::Win32::Security::{
-        DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
-        GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
         SE_DACL_PROTECTED,
     };
 
@@ -5861,7 +7253,7 @@ fn query_replace_security(
 fn copy_replace_security(source: &std::fs::File, output: &std::fs::File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::Authorization::{SetSecurityInfo, SE_FILE_OBJECT};
+    use windows::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
     use windows::Win32::Security::{
         DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
         PROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION,
@@ -5930,10 +7322,11 @@ fn delete_open_file(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{BOOLEAN, HANDLE};
     use windows::Win32::Storage::FileSystem::{
-        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+        FILE_DISPOSITION_INFO, FileDispositionInfo, SetFileInformationByHandle,
     };
 
-    let disposition = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1) };
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: BOOLEAN(1),
+    };
     unsafe {
         SetFileInformationByHandle(
             HANDLE(file.as_raw_handle() as _),
@@ -6178,7 +7571,9 @@ fn rename_open_file_no_replace(
         .len()
         .checked_mul(size_of::<u16>())
         .and_then(|length| u32::try_from(length).ok())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename too long"))?;
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "filename too long")
+        })?;
     let terminated_name_bytes = (name_bytes as usize)
         .checked_add(size_of::<u16>())
         .ok_or_else(|| {
@@ -7747,6 +9142,177 @@ mod tests {
         coordinator.shutdown().unwrap();
     }
 
+    #[test]
+    fn m10c_fake_cross_volume_move_never_removes_before_recheck_or_on_failure() {
+        use std::cell::{Cell, RefCell};
+
+        let events = RefCell::new(Vec::new());
+        let source_exists = Cell::new(true);
+        let destination_exists = Cell::new(false);
+        let outcome = execute_cross_volume_move_protocol(
+            || {
+                events.borrow_mut().push("copy");
+                events.borrow_mut().push("verify");
+                Ok::<(), ()>(())
+            },
+            |_| {
+                events.borrow_mut().push("publish");
+                destination_exists.set(true);
+                Ok::<_, ()>("published output")
+            },
+            |_, _| {
+                events.borrow_mut().push("fresh checks");
+                true
+            },
+            || false,
+            |_, _| {
+                events.borrow_mut().push("record published");
+                true
+            },
+            |_, _| {
+                events.borrow_mut().push("record source removal");
+                true
+            },
+            || {
+                events.borrow_mut().push("source removal");
+                false
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            events.borrow().as_slice(),
+            &[
+                "copy",
+                "verify",
+                "publish",
+                "record published",
+                "fresh checks",
+                "record source removal",
+                "source removal"
+            ]
+        );
+        assert!(matches!(
+            outcome,
+            CrossVolumeMoveOutcome::Partial {
+                output: "published output",
+                reason: "source removal failed; source and verified destination remain"
+            }
+        ));
+        assert!(source_exists.get());
+        assert!(destination_exists.get());
+
+        let stale_events = RefCell::new(Vec::new());
+        let stale_source_exists = Cell::new(true);
+        let stale_destination_exists = Cell::new(false);
+        let stale = execute_cross_volume_move_protocol(
+            || {
+                stale_events.borrow_mut().push("copy");
+                stale_events.borrow_mut().push("verify");
+                Ok::<(), ()>(())
+            },
+            |_| {
+                stale_events.borrow_mut().push("publish");
+                stale_destination_exists.set(true);
+                Ok::<_, ()>("published output")
+            },
+            |_, _| {
+                stale_events.borrow_mut().push("fresh checks");
+                false
+            },
+            || false,
+            |_, _| {
+                stale_events.borrow_mut().push("record published");
+                true
+            },
+            |_, _| {
+                stale_events.borrow_mut().push("record source removal");
+                true
+            },
+            || {
+                stale_events.borrow_mut().push("source removal");
+                stale_source_exists.set(false);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            stale_events.borrow().as_slice(),
+            &[
+                "copy",
+                "verify",
+                "publish",
+                "record published",
+                "fresh checks"
+            ]
+        );
+        assert!(matches!(
+            stale,
+            CrossVolumeMoveOutcome::Partial {
+                output: "published output",
+                reason: "source or published destination changed before source removal; both remain"
+            }
+        ));
+        assert!(stale_source_exists.get());
+        assert!(stale_destination_exists.get());
+
+        let progress_failure_events = RefCell::new(Vec::new());
+        let retained_source_exists = Cell::new(true);
+        let retained_destination_exists = Cell::new(false);
+        let progress_failure = execute_cross_volume_move_protocol(
+            || {
+                progress_failure_events.borrow_mut().push("copy and verify");
+                Ok::<(), ()>(())
+            },
+            |_| {
+                progress_failure_events.borrow_mut().push("publish");
+                retained_destination_exists.set(true);
+                Ok::<_, ()>("published output")
+            },
+            |_, _| {
+                progress_failure_events.borrow_mut().push("fresh checks");
+                true
+            },
+            || false,
+            |_, _| {
+                progress_failure_events.borrow_mut().push("record published");
+                true
+            },
+            |_, _| {
+                progress_failure_events
+                    .borrow_mut()
+                    .push("record source removal failed");
+                false
+            },
+            || {
+                progress_failure_events
+                    .borrow_mut()
+                    .push("source removal");
+                retained_source_exists.set(false);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            progress_failure_events.borrow().as_slice(),
+            &[
+                "copy and verify",
+                "publish",
+                "record published",
+                "fresh checks",
+                "record source removal failed"
+            ]
+        );
+        assert!(matches!(
+            progress_failure,
+            CrossVolumeMoveOutcome::Partial {
+                output: "published output",
+                reason: "source removal intent could not be durably recorded; both files remain"
+            }
+        ));
+        assert!(retained_source_exists.get());
+        assert!(retained_destination_exists.get());
+    }
+
     #[cfg(windows)]
     #[test]
     fn native_scan_reads_only_a_disposable_tree_and_preserves_sibling_occupancy() {
@@ -7787,5 +9353,159 @@ mod tests {
                 .iter()
                 .all(|row| row.identity().file_id() != [0; 16])
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn m10c_native_copy_move_rename_collision_and_stream_refusal_stay_in_fixture() {
+        use std::fs;
+        use std::io::Write;
+
+        let fixture_parent = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("productivity_expansion")
+            .join("hotfolder_native");
+        fs::create_dir_all(&fixture_parent).expect("disposable fixture parent");
+        let temp = tempfile::Builder::new()
+            .prefix("case-")
+            .tempdir_in(&fixture_parent)
+            .expect("temporary root under the accessible repository workspace");
+        let watched_path = temp.path().join("incoming");
+        let destination_path = temp.path().join("destination");
+        fs::create_dir(&watched_path).expect("watched fixture root");
+        fs::create_dir(&destination_path).expect("destination fixture root");
+        let watched = admit_watch_root(&watched_path).expect("admit fixture root");
+        let destination = admit_watch_root(&destination_path).expect("admit destination");
+        let cancellation = ScanCancellation::new();
+
+        let fingerprint = |path: &Path| {
+            let observed = observe_watch_file(&watched, path, false).expect("observe fixture file");
+            fingerprint_hotfolder_file(
+                &watched,
+                path,
+                observed.root_identity(),
+                observed.parent_identity(),
+                observed.file_identity(),
+                observed.length(),
+                observed.modified(),
+                &cancellation,
+            )
+            .expect("fingerprint fixture file")
+        };
+
+        let bytes = b"native hot folder fixture payload";
+        let mut ignore_progress = |_progress: NativeHotFolderProgress| -> std::io::Result<()> {
+            Ok(())
+        };
+        let copy_source = watched_path.join("copy-source.bin");
+        fs::write(&copy_source, bytes).expect("write copy source");
+        let copy_input = fingerprint(&copy_source);
+        let copy_result = execute_hotfolder_native_action(
+            &watched,
+            &copy_source,
+            copy_input,
+            NativeHotFolderAction::Copy,
+            Some(&destination),
+            OsStr::new("copied.bin"),
+            0x101,
+            &mut ignore_progress,
+            &cancellation,
+        )
+        .expect("copy without replacing a destination");
+        let copied_path = destination_path.join("copied.bin");
+        assert_eq!(fs::read(&copied_path).unwrap(), bytes);
+        assert!(copy_source.exists());
+        assert_eq!(copy_result.outputs.len(), 1);
+        assert_eq!(copy_result.phase, NativeHotFolderPhase::Complete);
+
+        let collision = execute_hotfolder_native_action(
+            &watched,
+            &copy_source,
+            copy_input,
+            NativeHotFolderAction::Copy,
+            Some(&destination),
+            OsStr::new("copied.bin"),
+            0x102,
+            &mut ignore_progress,
+            &cancellation,
+        )
+        .expect_err("existing destination is a collision");
+        assert_eq!(
+            collision.kind,
+            NativeHotFolderFailureKind::DestinationCollision
+        );
+        assert_eq!(fs::read(&copied_path).unwrap(), bytes);
+
+        let move_source = watched_path.join("move-source.bin");
+        fs::write(&move_source, bytes).expect("write move source");
+        let move_result = execute_hotfolder_native_action(
+            &watched,
+            &move_source,
+            fingerprint(&move_source),
+            NativeHotFolderAction::Move,
+            Some(&destination),
+            OsStr::new("moved.bin"),
+            0x103,
+            &mut ignore_progress,
+            &cancellation,
+        )
+        .expect("same-volume move");
+        let moved_path = destination_path.join("moved.bin");
+        assert!(!move_source.exists());
+        assert_eq!(fs::read(&moved_path).unwrap(), bytes);
+        assert_eq!(move_result.outputs[0].identity, move_result.source_identity);
+
+        let rename_source = watched_path.join("rename-source.bin");
+        fs::write(&rename_source, bytes).expect("write rename source");
+        let rename_result = execute_hotfolder_native_action(
+            &watched,
+            &rename_source,
+            fingerprint(&rename_source),
+            NativeHotFolderAction::Rename,
+            None,
+            OsStr::new("renamed.bin"),
+            0x104,
+            &mut ignore_progress,
+            &cancellation,
+        )
+        .expect("same-volume rename");
+        let renamed_path = watched_path.join("renamed.bin");
+        assert!(!rename_source.exists());
+        assert_eq!(fs::read(&renamed_path).unwrap(), bytes);
+        assert_eq!(
+            rename_result.outputs[0].identity,
+            rename_result.source_identity
+        );
+
+        let stream_source = watched_path.join("stream-source.bin");
+        fs::write(&stream_source, bytes).expect("write stream source");
+        let stream_path =
+            PathBuf::from(format!("{}:hotfolder-test-stream", stream_source.display()));
+        if let Ok(mut stream) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stream_path)
+        {
+            stream.write_all(b"stream").expect("write named stream");
+            drop(stream);
+            let observed = observe_watch_file(&watched, &stream_source, false)
+                .expect("observe file with named stream");
+            let refusal = fingerprint_hotfolder_file(
+                &watched,
+                &stream_source,
+                observed.root_identity(),
+                observed.parent_identity(),
+                observed.file_identity(),
+                observed.length(),
+                observed.modified(),
+                &cancellation,
+            )
+            .expect_err("unsupported stream fidelity must be refused before mutation");
+            assert_eq!(
+                refusal.kind,
+                NativeHotFolderFailureKind::UnsupportedFidelity
+            );
+            assert!(stream_source.exists());
+}
     }
 }
