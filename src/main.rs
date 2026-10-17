@@ -479,6 +479,7 @@ fn take_external_radial_metadata(
     invocations.remove(&invocation_id)
 }
 
+#[cfg(test)]
 fn related_launcher_bindings(
     settings: &Settings,
     document: &RadialDocument,
@@ -610,7 +611,6 @@ fn sequence_hotkey_triggers_from_routes(
 ) -> Vec<PasteSequenceHotkeyTrigger> {
     routes
         .iter()
-        .into_iter()
         .map(|route| {
             (
                 Arc::new(HotkeyTrigger::new(route.hotkey)),
@@ -1244,6 +1244,7 @@ impl Drop for RadialRuntimeResources {
     }
 }
 
+#[cfg(test)]
 fn radial_route_plan(
     settings: &Settings,
     document: &RadialDocument,
@@ -2632,7 +2633,6 @@ fn main() -> anyhow::Result<()> {
 
     let mut shared_invocation = settings.radial.enabled && settings.radial.shared_tap_hold;
     let mut settings_generation = 1u64;
-    let mut paste_sequence_routes = Vec::new();
     let mut paste_sequence_triggers = Vec::new();
     let watched = legacy_listener_triggers_with_sequences(
         shared_invocation,
@@ -2706,7 +2706,7 @@ fn main() -> anyhow::Result<()> {
             tracing::error!(field = issue.field, message = %issue.message, "invalid radial settings at startup; radial runtime disabled fail-closed");
         }
     }
-    paste_sequence_routes = match paste_sequence_hotkey_routes(&settings) {
+    let mut paste_sequence_routes = match paste_sequence_hotkey_routes(&settings) {
         Ok(routes) => routes,
         Err(error) => {
             tracing::warn!(%error, "Paste Sequence shortcut routes are unavailable at startup");
