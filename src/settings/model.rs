@@ -555,11 +555,115 @@ impl Default for MultiManagerSettings {
     }
 }
 
+/// Playback controls live in settings, separately from saved sequence content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PasteSequencePreferences {
+    pub next_hotkey: Option<String>,
+    pub cancel_hotkey: Option<String>,
+    pub tooltip_enabled: bool,
+    pub escape_cancel_enabled: bool,
+}
+
+impl Default for PasteSequencePreferences {
+    fn default() -> Self {
+        Self {
+            next_hotkey: Some("Ctrl+Alt+Shift+PageDown".into()),
+            cancel_hotkey: Some("Ctrl+Alt+Shift+End".into()),
+            tooltip_enabled: true,
+            escape_cancel_enabled: true,
+        }
+    }
+}
+
+impl PasteSequencePreferences {
+    /// Missing, empty and whitespace-only optional routes are disabled. Keep
+    /// the saved spelling intact; parsing never changes a user's preferences.
+    pub fn parse_optional_hotkey(value: Option<&str>) -> Result<Option<Hotkey>, &'static str> {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Ok(None),
+            Some(value) => parse_hotkey(value)
+                .map(Some)
+                .ok_or("invalid Paste Sequence shortcut"),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        Self::parse_optional_hotkey(self.next_hotkey.as_deref())
+            .map_err(|_| "Failed to save settings: Paste Sequence Next shortcut is invalid")?;
+        Self::parse_optional_hotkey(self.cancel_hotkey.as_deref())
+            .map_err(|_| "Failed to save settings: Paste Sequence Cancel shortcut is invalid")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod paste_sequence_preferences_tests {
+    use super::{PasteSequencePreferences, Settings};
+
+    #[test]
+    fn paste_preferences_legacy_and_partial_load_do_not_rewrite_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("paste_sequence");
+        legacy["hotkey"] = serde_json::json!("Shift+Alt+Win+End");
+        legacy["plugin_settings"] = serde_json::json!({"unknown": {"keep": 42}});
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let loaded = Settings::load(path.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(loaded.paste_sequence, PasteSequencePreferences::default());
+        assert_eq!(loaded.hotkey.as_deref(), Some("Shift+Alt+Win+End"));
+        assert_eq!(loaded.plugin_settings["unknown"]["keep"], 42);
+
+        legacy["paste_sequence"] = serde_json::json!({"tooltip_enabled": false});
+        let partial: Settings = serde_json::from_value(legacy).unwrap();
+        assert!(!partial.paste_sequence.tooltip_enabled);
+        assert!(partial.paste_sequence.escape_cancel_enabled);
+        assert_eq!(
+            partial.paste_sequence.next_hotkey,
+            loaded.paste_sequence.next_hotkey
+        );
+        assert_eq!(
+            partial.paste_sequence.cancel_hotkey,
+            loaded.paste_sequence.cancel_hotkey
+        );
+    }
+
+    #[test]
+    fn paste_preferences_optional_chords_keep_custom_disabled_and_invalid_values() {
+        for disabled in [None, Some(""), Some(" \t ")] {
+            assert_eq!(
+                PasteSequencePreferences::parse_optional_hotkey(disabled),
+                Ok(None)
+            );
+        }
+        let mut preferences: PasteSequencePreferences = serde_json::from_value(
+            serde_json::json!({"next_hotkey": " Control+Shift+F8 ", "cancel_hotkey": null}),
+        )
+        .unwrap();
+        assert!(preferences.validate().is_ok());
+        let encoded = serde_json::to_value(&preferences).unwrap();
+        assert_eq!(encoded["next_hotkey"], " Control+Shift+F8 ");
+        assert!(encoded["cancel_hotkey"].is_null());
+        preferences.next_hotkey = Some("Ctrl+unknown-key".into());
+        assert!(preferences.validate().unwrap_err().contains("Next"));
+        preferences.next_hotkey = Some("".into());
+        preferences.cancel_hotkey = Some("Ctrl+".into());
+        assert!(preferences.validate().unwrap_err().contains("Cancel"));
+        preferences.cancel_hotkey = Some("  ".into());
+        assert!(preferences.validate().is_ok());
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub hotkey: Option<String>,
     pub quit_hotkey: Option<String>,
     pub help_hotkey: Option<String>,
+    #[serde(default)]
+    pub paste_sequence: PasteSequencePreferences,
     pub index_paths: Option<Vec<String>>,
     pub max_indexed_items: Option<usize>,
     pub plugin_dirs: Option<Vec<String>>,
@@ -961,6 +1065,7 @@ impl Default for Settings {
             hotkey: default_launcher_hotkey(),
             quit_hotkey: None,
             help_hotkey: Some("F1".into()),
+            paste_sequence: PasteSequencePreferences::default(),
             index_paths: None,
             max_indexed_items: None,
             plugin_dirs: None,

@@ -15,6 +15,28 @@ mod tests {
     use crate::settings::Settings;
 
     #[test]
+    fn paste_preferences_survive_unrelated_editor_save_and_validate_specified_chords() {
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = Some("Alt+F9".into());
+        settings.paste_sequence.cancel_hotkey = None;
+        settings.paste_sequence.tooltip_enabled = false;
+        settings.paste_sequence.escape_cancel_enabled = false;
+        let mut editor = SettingsEditor::from_settings(&settings);
+        editor.show_launcher_title = !settings.show_launcher_title;
+        assert!(editor.validate_before_save().is_ok());
+        let candidate = editor.to_settings(&settings);
+        assert_eq!(candidate.paste_sequence, settings.paste_sequence);
+        assert_eq!(candidate.hotkey, settings.hotkey);
+        assert_ne!(candidate.show_launcher_title, settings.show_launcher_title);
+        editor.paste_sequence.next_hotkey = Some("invalid".into());
+        assert!(editor.validate_before_save().unwrap_err().contains("Next"));
+        assert_eq!(
+            settings.paste_sequence.next_hotkey.as_deref(),
+            Some("Alt+F9")
+        );
+    }
+
+    #[test]
     fn settings_window_sizing_policy_uses_expected_defaults() {
         assert_eq!(SettingsEditor::SETTINGS_WINDOW_DEFAULT_WIDTH, 640.0);
         assert_eq!(SettingsEditor::SETTINGS_WINDOW_MIN_HEIGHT, 360.0);

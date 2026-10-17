@@ -80,6 +80,7 @@ define_general_settings_fields!(
     hotkey,
     quit_hotkey,
     help_hotkey,
+    paste_sequence,
     debug_logging,
     enable_toasts,
     show_inline_errors,
@@ -140,6 +141,7 @@ enum SaveOwnership {
 
 #[derive(Clone, Debug, PartialEq)]
 struct InvocationSettingsBaseline {
+    paste_sequence: crate::settings::PasteSequencePreferences,
     hotkey: Option<String>,
     quit_hotkey: Option<String>,
     help_hotkey: Option<String>,
@@ -180,6 +182,7 @@ impl InvocationSettingsBaseline {
         };
         Self {
             hotkey: settings.hotkey.clone(),
+            paste_sequence: settings.paste_sequence.clone(),
             quit_hotkey: settings.quit_hotkey.clone(),
             help_hotkey: settings.help_hotkey.clone(),
             radial: settings.radial.clone(),
@@ -268,7 +271,7 @@ impl SettingsSaveIntent {
             .is_some_and(|expected| *expected != InvocationSettingsBaseline::from_settings(latest))
         {
             anyhow::bail!(
-                "launcher, radial, or Screen Draw hotkey settings changed since this editor was opened"
+                "launcher, radial, Screen Draw, or Paste Sequence settings changed since this editor was opened"
             );
         }
         Ok(())
@@ -355,6 +358,7 @@ impl SettingsSaveIntent {
 }
 
 fn overlay_acknowledged_invocation(latest: &mut Settings, committed: &Settings) {
+    latest.paste_sequence = committed.paste_sequence.clone();
     latest.hotkey = committed.hotkey.clone();
     latest.quit_hotkey = committed.quit_hotkey.clone();
     latest.help_hotkey = committed.help_hotkey.clone();
@@ -414,6 +418,9 @@ fn append_invocation_route_changes(
 ) {
     let latest = InvocationSettingsBaseline::from_settings(latest);
     let committed = InvocationSettingsBaseline::from_settings(committed);
+    if latest.paste_sequence != committed.paste_sequence {
+        push_changed_field(changed, "paste_sequence".into());
+    }
     if latest.hotkey != committed.hotkey {
         push_changed_field(changed, "hotkey".into());
     }
@@ -829,6 +836,7 @@ where
         .verify_invocation_baseline(&candidate)
         .map_err(|error| error.to_string())?;
     intent.apply(&mut candidate);
+    candidate.paste_sequence.validate().map_err(str::to_owned)?;
     let mut ticket = prepare(candidate).map_err(|error| error.to_string())?;
     if cancel_requested.load(std::sync::atomic::Ordering::Acquire) {
         return cancel_before_apply(
@@ -1436,6 +1444,47 @@ mod tests {
         );
         assert!(latest.mkmacro_properties.master_open);
         assert!(latest.mkmacro_properties.focus_steps);
+    }
+
+    #[test]
+    fn paste_preferences_follow_save_ownership_rollback_and_acknowledgement() {
+        let mut before = Settings::default();
+        before.paste_sequence.next_hotkey = Some("Alt+F8".into());
+        let mut desired = before.clone();
+        desired.paste_sequence.next_hotkey = None;
+        desired.paste_sequence.tooltip_enabled = false;
+        let intent = SettingsSaveIntent::general(desired.clone(), &before);
+        let mut written = before.clone();
+        intent.apply(&mut written);
+        assert_eq!(written.paste_sequence, desired.paste_sequence);
+
+        let mut latest = written.clone();
+        latest.note_more_limit += 1;
+        let conflicts = intent.rollback_owned(&mut latest, &before, &written);
+        assert!(conflicts.is_empty());
+        assert_eq!(latest.paste_sequence, before.paste_sequence);
+        assert!(latest.note_more_limit > before.note_more_limit);
+
+        latest = written.clone();
+        latest.paste_sequence.cancel_hotkey = Some("Alt+F10".into());
+        assert_eq!(
+            intent.rollback_owned(&mut latest, &before, &written),
+            vec!["paste_sequence"]
+        );
+        assert_eq!(
+            latest.paste_sequence.cancel_hotkey.as_deref(),
+            Some("Alt+F10")
+        );
+        assert!(intent.verify_invocation_baseline(&latest).is_err());
+
+        let selection = SettingsSaveIntent::plugin_selection(None, None);
+        assert!(
+            selection
+                .changed_owned_fields(&latest, &written)
+                .contains(&"paste_sequence".into())
+        );
+        selection.overlay_applied(&mut latest, &written);
+        assert_eq!(latest.paste_sequence, written.paste_sequence);
     }
 
     #[test]

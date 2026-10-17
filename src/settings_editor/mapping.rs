@@ -46,6 +46,7 @@ impl SettingsEditor {
         );
         let mut s = Self {
             baseline_settings: settings.clone(),
+            paste_sequence: settings.paste_sequence.clone(),
             hotkey,
             hotkey_valid,
             last_valid_hotkey,
@@ -230,6 +231,7 @@ impl SettingsEditor {
             (self.static_w, self.static_h),
         );
         Settings {
+            paste_sequence: self.paste_sequence.clone(),
             hotkey: if self.hotkey.trim().is_empty() {
                 None
             } else {
