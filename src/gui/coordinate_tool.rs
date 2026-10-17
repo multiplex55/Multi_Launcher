@@ -155,7 +155,7 @@ impl CoordinateToolGui {
                     ));
                 }
             }
-            Command::HudHelp | Command::CrosshairHelp => {
+            Command::HudHelp | Command::CrosshairHelp | Command::ClickHelp => {
                 return Err("help is handled by the mouse command handler".into());
             }
             Command::HaloHelp | Command::ZoomHelp => {
@@ -178,6 +178,11 @@ impl CoordinateToolGui {
                 self.set_zoom_enabled(enabled)?;
             }
             Command::SetZoomEnabled(enabled) => self.set_zoom_enabled(*enabled)?,
+            Command::ToggleClick => {
+                let enabled = !self.controller.runtime_state().click_enabled();
+                self.controller.set_click_enabled(enabled)?;
+            }
+            Command::SetClickEnabled(enabled) => self.controller.set_click_enabled(*enabled)?,
             Command::EffectsOff => self.controller.disable_effects()?,
             Command::SetCrosshairColor(color) => {
                 let color = *color;
@@ -758,6 +763,21 @@ impl CoordinateToolGui {
             if draft.zoom.outline_thickness != baseline.zoom.outline_thickness {
                 current.zoom.outline_thickness = draft.zoom.outline_thickness;
             }
+            if draft.click.style != baseline.click.style {
+                current.click.style = draft.click.style;
+            }
+            if draft.click.color != baseline.click.color {
+                current.click.color = draft.click.color;
+            }
+            if draft.click.size_px != baseline.click.size_px {
+                current.click.size_px = draft.click.size_px;
+            }
+            if draft.click.opacity != baseline.click.opacity {
+                current.click.opacity = draft.click.opacity;
+            }
+            if draft.click.duration_ms != baseline.click.duration_ms {
+                current.click.duration_ms = draft.click.duration_ms;
+            }
         })
     }
 
@@ -1129,6 +1149,8 @@ mod tests {
         draft.zoom.diameter = 300;
         draft.zoom.destination_offset.x = -321;
         draft.zoom.outline_enabled = false;
+        draft.click.style = crate::coordinate_tool::ClickEffectStyle::Flash;
+        draft.click.duration_ms = 900;
 
         Settings::update(&path, |settings| {
             settings.coordinate_tool.space = crate::coordinate_tool::CoordinateSpace::Monitor;
@@ -1147,6 +1169,8 @@ mod tests {
             settings.coordinate_tool.zoom.outline_enabled = true;
             settings.coordinate_tool.zoom.outline_color = CrosshairColor::new(100, 110, 120);
             settings.coordinate_tool.zoom.outline_thickness = 2;
+            settings.coordinate_tool.click.color = CrosshairColor::new(11, 22, 33);
+            settings.coordinate_tool.click.size_px = 64;
             Ok(())
         })
         .unwrap();
@@ -1182,6 +1206,13 @@ mod tests {
             CrosshairColor::new(100, 110, 120)
         );
         assert_eq!(committed.zoom.outline_thickness, 2);
+        assert_eq!(
+            committed.click.style,
+            crate::coordinate_tool::ClickEffectStyle::Flash
+        );
+        assert_eq!(committed.click.color, CrosshairColor::new(11, 22, 33));
+        assert_eq!(committed.click.size_px, 64);
+        assert_eq!(committed.click.duration_ms, 900);
         assert_eq!(gui.preferences(), &committed);
 
         let baseline = committed;

@@ -8,7 +8,7 @@ impl MousePlugin {
     fn action(label: impl Into<String>, command: impl Into<String>) -> Action {
         Action {
             label: label.into(),
-            desc: "Mouse coordinate HUD, one-shot picking, crosshair, actual desktop inversion halo, and live screen magnifier of desktop content. Appearance is saved in Mouse Settings; enablement is session-only. Halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline.".into(),
+            desc: "Mouse coordinate HUD, one-shot picking, click feedback, crosshair, actual desktop inversion halo, and live screen magnifier of desktop content. Appearance is saved in Mouse Settings; enablement is session-only. Halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline.".into(),
             action: command.into(),
             args: None,
         }
@@ -34,6 +34,11 @@ impl MousePlugin {
             ("mouse zoom toggle", "mouse:zoom:toggle"),
             ("mouse zoom on", "mouse:zoom:on"),
             ("mouse zoom off", "mouse:zoom:off"),
+            ("mouse click toggle", "mouse:click:toggle"),
+            ("mouse click on", "mouse:click:on"),
+            ("mouse click off", "mouse:click:off"),
+            ("mouse click settings", "mouse:click:settings"),
+            ("mouse click help", "mouse:click:help"),
             ("mouse effects off", "mouse:effects:off"),
             ("mouse help", "mouse:help"),
         ]
@@ -93,6 +98,12 @@ impl Plugin for MousePlugin {
                 .filter(|action| action.action.starts_with("mouse:zoom:"))
                 .collect();
         }
+        if query.eq_ignore_ascii_case("mouse click") {
+            return Self::inventory()
+                .into_iter()
+                .filter(|action| action.action.starts_with("mouse:click:"))
+                .collect();
+        }
         if query.eq_ignore_ascii_case("mouse effects") {
             return Self::inventory()
                 .into_iter()
@@ -107,7 +118,7 @@ impl Plugin for MousePlugin {
     }
 
     fn description(&self) -> &str {
-        "Mouse coordinate tools, actual desktop inversion halo, and live screen magnifier. Appearance is saved in Mouse Settings; enablement is session-only; halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline (prefix: `mouse`)."
+        "Mouse coordinate tools, click feedback, actual desktop inversion halo, and live screen magnifier. Appearance is saved in Mouse Settings; enablement is session-only; halo inversion depends on supported composited Windows content and may fall back to a non-inverting outline (prefix: `mouse`)."
     }
 
     fn capabilities(&self) -> &[&str] {
@@ -153,6 +164,11 @@ mod tests {
             ("MOUSE ZOOM TOGGLE", "mouse:zoom:toggle"),
             ("Mouse Zoom On", "mouse:zoom:on"),
             ("mouse zoom OFF", "mouse:zoom:off"),
+            ("MOUSE CLICK TOGGLE", "mouse:click:toggle"),
+            ("Mouse Click On", "mouse:click:on"),
+            ("mouse click OFF", "mouse:click:off"),
+            ("mouse click SETTINGS", "mouse:click:settings"),
+            ("mouse click help", "mouse:click:help"),
             ("MOUSE EFFECTS OFF", "mouse:effects:off"),
             ("mouse halo help", "mouse:halo:help"),
             ("mouse zoom help", "mouse:zoom:help"),
@@ -190,6 +206,9 @@ mod tests {
             "mouse effects off extra",
             "mouse halo help trailing",
             "mouse zoom help trailing",
+            "mouse click toggle extra",
+            "mouse click settings extra",
+            "mouse click unknown",
             "coord pick",
             "crosshair opacity 1.1",
         ] {
@@ -204,7 +223,7 @@ mod tests {
         assert_eq!(plugin.query_prefixes(), ["mouse"]);
 
         let results = plugin.search("MOUSE");
-        assert_eq!(results.len(), 20);
+        assert_eq!(results.len(), 25);
         assert!(plugin.description().contains("desktop inversion halo"));
         assert!(plugin.description().contains("live screen magnifier"));
         assert_eq!(results[0].label, "mouse settings");
@@ -232,6 +251,11 @@ mod tests {
             "mouse:zoom:toggle",
             "mouse:zoom:on",
             "mouse:zoom:off",
+            "mouse:click:toggle",
+            "mouse:click:on",
+            "mouse:click:off",
+            "mouse:click:settings",
+            "mouse:click:help",
             "mouse:effects:off",
             "mouse:help",
         ] {
@@ -257,6 +281,13 @@ mod tests {
         assert!(
             zoom.iter()
                 .all(|action| action.action.starts_with("mouse:zoom:"))
+        );
+        let click = plugin.search("MOUSE CLICK");
+        assert_eq!(click.len(), 5);
+        assert!(
+            click
+                .iter()
+                .all(|action| action.action.starts_with("mouse:click:"))
         );
         let effects = plugin.search("mouse effects");
         assert_eq!(effects.len(), 1);

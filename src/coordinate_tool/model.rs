@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 /// A signed physical pixel location in virtual-desktop coordinates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -11,6 +12,32 @@ impl PhysicalPoint {
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
+}
+
+/// A physical mouse button observed on its down edge.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ClickButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// Bounded click-ingress payload copied by the shared low-level hook.
+/// `observed_at` is monotonic and is suitable for ordering and expiry, not
+/// wall-clock display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClickPressEvent {
+    pub button: ClickButton,
+    pub position: PhysicalPoint,
+    pub observed_at: Instant,
+    pub generation: u64,
+}
+
+/// Hook callbacks must be able to offer an event without waiting for the
+/// coordinate worker or any application-owned lock.
+pub trait ClickPressSink: Send + Sync + 'static {
+    fn try_send(&self, event: ClickPressEvent) -> bool;
 }
 
 /// A physical rectangle whose right and bottom edges are exclusive, matching
@@ -280,6 +307,7 @@ pub struct CoordinateToolRuntimeState {
     crosshair_enabled: bool,
     halo_enabled: bool,
     zoom_enabled: bool,
+    click_enabled: bool,
     frozen_sample: Option<CoordinateSample>,
     last_successful_copy: Option<FormattedCoordinate>,
 }
@@ -353,9 +381,17 @@ impl CoordinateToolRuntimeState {
         self.zoom_enabled
     }
 
-    /// Whether the shared coordinate worker is needed by any of the four
-    /// independent session modes.
+    pub const fn click_enabled(&self) -> bool {
+        self.click_enabled
+    }
+
+    /// Whether the shared coordinate worker is needed by any session mode.
     pub const fn has_active_mode(&self) -> bool {
+        self.has_cursor_mode() || self.click_enabled
+    }
+
+    /// Whether cursor sampling and the native coordinate surface are needed.
+    pub const fn has_cursor_mode(&self) -> bool {
         self.hud_enabled || self.crosshair_enabled || self.halo_enabled || self.zoom_enabled
     }
 
@@ -395,12 +431,17 @@ impl CoordinateToolRuntimeState {
         self.zoom_enabled
     }
 
-    /// Turn off crosshair, halo, and zoom while preserving the coordinate HUD
+    pub fn set_click_enabled(&mut self, enabled: bool) {
+        self.click_enabled = enabled;
+    }
+
+    /// Turn off cursor and click effects while preserving the coordinate HUD
     /// and all inspector state (freeze and last successful copy).
     pub fn disable_effects(&mut self) {
         self.crosshair_enabled = false;
         self.halo_enabled = false;
         self.zoom_enabled = false;
+        self.click_enabled = false;
     }
 
     pub fn is_frozen(&self) -> bool {
@@ -599,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn four_runtime_modes_are_independent_and_effects_off_preserves_hud_state() {
+    fn runtime_modes_are_independent_and_effects_off_preserves_hud_state() {
         let live = sample(PhysicalPoint::new(-1700, 210));
         let frozen = sample(PhysicalPoint::new(-1800, 200));
         let copied = format_coordinate(&frozen, CoordinateSpace::Desktop).unwrap();
@@ -611,10 +652,12 @@ mod tests {
         assert!(state.toggle_crosshair());
         assert!(state.toggle_halo());
         assert!(state.toggle_zoom());
+        state.set_click_enabled(true);
         assert!(state.hud_enabled());
         assert!(state.crosshair_enabled());
         assert!(state.halo_enabled());
         assert!(state.zoom_enabled());
+        assert!(state.click_enabled());
 
         state.freeze(&frozen);
         state.record_successful_copy(copied.clone());
@@ -624,12 +667,19 @@ mod tests {
         assert!(!state.crosshair_enabled());
         assert!(!state.halo_enabled());
         assert!(!state.zoom_enabled());
+        assert!(!state.click_enabled());
         assert!(state.has_active_mode());
         assert_eq!(state.frozen_sample(), Some(&frozen));
         assert_eq!(state.last_successful_copy(), Some(&copied));
         assert_eq!(state.displayed_sample(&live), &frozen);
 
         state.set_hud_enabled(false);
+        assert!(!state.has_active_mode());
+        state.set_click_enabled(true);
+        assert!(state.click_enabled());
+        assert!(state.has_active_mode());
+        assert!(!state.has_cursor_mode());
+        state.set_click_enabled(false);
         assert!(!state.has_active_mode());
     }
 

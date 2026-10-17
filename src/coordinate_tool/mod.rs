@@ -17,18 +17,19 @@ pub use capture::{
     CoordinateCaptureController, NativeCoordinateCaptureRuntime,
 };
 pub use controller::{
-    CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSampler, CoordinateSurfaceBackend,
-    CoordinateToolController,
+    ClickObservationLease, ClickObservationProvider, CoordinateRenderFrame,
+    CoordinateRuntimeFactory, CoordinateSampler, CoordinateSurfaceBackend,
+    CoordinateToolController, MouseGestureClickObservationProvider,
 };
 pub use model::{
-    CoordinateEffectsStatus, CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState,
-    CoordinateUnavailable, CursorEffectStatus, ForegroundClientGeometry, FormattedCoordinate,
-    MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize, clamp_hud_origin,
-    format_coordinate,
+    ClickButton, ClickPressEvent, ClickPressSink, CoordinateEffectsStatus, CoordinateSample,
+    CoordinateSpace, CoordinateToolRuntimeState, CoordinateUnavailable, CursorEffectStatus,
+    ForegroundClientGeometry, FormattedCoordinate, MonitorGeometry, MonitorId, PhysicalPoint,
+    PhysicalRect, PhysicalSize, clamp_hud_origin, format_coordinate,
 };
 pub(crate) use native::NativeCoordinatePointSampler;
 pub use native::NativeCoordinateRuntimeFactory;
 pub use settings::{
-    CoordinateOffset, CoordinateToolPreferences, CrosshairColor, CrosshairPreferences,
-    HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
+    ClickEffectPreferences, ClickEffectStyle, CoordinateOffset, CoordinateToolPreferences,
+    CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
 };

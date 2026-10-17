@@ -287,6 +287,92 @@ impl<'de> Deserialize<'de> for ZoomPreferences {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClickEffectStyle {
+    #[default]
+    Ripple,
+    Circle,
+    Flash,
+}
+
+/// Persisted visual appearance for physical mouse button-down feedback.
+/// Enablement remains session-only in `CoordinateToolRuntimeState`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct ClickEffectPreferences {
+    pub style: ClickEffectStyle,
+    pub color: CrosshairColor,
+    /// Maximum physical-pixel extent used by the effect renderer.
+    pub size_px: i32,
+    pub opacity: f32,
+    pub duration_ms: u32,
+}
+
+impl Default for ClickEffectPreferences {
+    fn default() -> Self {
+        Self {
+            style: ClickEffectStyle::Ripple,
+            color: CrosshairColor::new(255, 80, 40),
+            size_px: 32,
+            opacity: 0.8,
+            duration_ms: 450,
+        }
+    }
+}
+
+impl ClickEffectPreferences {
+    pub fn normalized(mut self) -> Self {
+        self.size_px = self.size_px.clamp(4, 256);
+        self.opacity = if self.opacity.is_finite() {
+            self.opacity.clamp(0.1, 1.0)
+        } else {
+            Self::default().opacity
+        };
+        self.duration_ms = self.duration_ms.clamp(50, 2_000);
+        self
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+struct RawClickEffectPreferences {
+    style: ClickEffectStyle,
+    color: CrosshairColor,
+    size_px: i32,
+    opacity: f32,
+    duration_ms: u32,
+}
+
+impl Default for RawClickEffectPreferences {
+    fn default() -> Self {
+        let preferences = ClickEffectPreferences::default();
+        Self {
+            style: preferences.style,
+            color: preferences.color,
+            size_px: preferences.size_px,
+            opacity: preferences.opacity,
+            duration_ms: preferences.duration_ms,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ClickEffectPreferences {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawClickEffectPreferences::deserialize(deserializer)?;
+        Ok(Self {
+            style: raw.style,
+            color: raw.color,
+            size_px: raw.size_px,
+            opacity: raw.opacity,
+            duration_ms: raw.duration_ms,
+        }
+        .normalized())
+    }
+}
+
 /// Persisted appearance preferences for the inspector and cursor effects.
 ///
 /// HUD/crosshair/halo/zoom enabled state, frozen samples, and copy status belong
@@ -299,6 +385,7 @@ pub struct CoordinateToolPreferences {
     pub crosshair: CrosshairPreferences,
     pub halo: HaloPreferences,
     pub zoom: ZoomPreferences,
+    pub click: ClickEffectPreferences,
 }
 
 impl Default for CoordinateToolPreferences {
@@ -310,6 +397,7 @@ impl Default for CoordinateToolPreferences {
             crosshair: CrosshairPreferences::default(),
             halo: HaloPreferences::default(),
             zoom: ZoomPreferences::default(),
+            click: ClickEffectPreferences::default(),
         }
     }
 }
@@ -328,6 +416,7 @@ impl CoordinateToolPreferences {
         };
         self.halo = self.halo.normalized();
         self.zoom = self.zoom.normalized();
+        self.click = self.click.normalized();
         self
     }
 
@@ -351,6 +440,7 @@ struct RawCoordinateToolPreferences {
     crosshair: CrosshairPreferences,
     halo: HaloPreferences,
     zoom: ZoomPreferences,
+    click: ClickEffectPreferences,
 }
 
 impl Default for RawCoordinateToolPreferences {
@@ -363,6 +453,7 @@ impl Default for RawCoordinateToolPreferences {
             crosshair: preferences.crosshair,
             halo: preferences.halo,
             zoom: preferences.zoom,
+            click: preferences.click,
         }
     }
 }
@@ -380,6 +471,7 @@ impl<'de> Deserialize<'de> for CoordinateToolPreferences {
             crosshair: raw.crosshair,
             halo: raw.halo,
             zoom: raw.zoom,
+            click: raw.click,
         }
         .normalized())
     }
@@ -388,8 +480,9 @@ impl<'de> Deserialize<'de> for CoordinateToolPreferences {
 #[cfg(test)]
 mod tests {
     use super::{
-        CoordinateOffset, CoordinateToolPreferences, CrosshairColor, CrosshairPreferences,
-        HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
+        ClickEffectPreferences, ClickEffectStyle, CoordinateOffset, CoordinateToolPreferences,
+        CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail, ZoomMode,
+        ZoomPreferences,
     };
     use crate::coordinate_tool::model::CoordinateSpace;
 
@@ -408,12 +501,14 @@ mod tests {
         assert!(preferences.crosshair.high_contrast_outline);
         assert_eq!(preferences.halo, HaloPreferences::default());
         assert_eq!(preferences.zoom, ZoomPreferences::default());
+        assert_eq!(preferences.click, ClickEffectPreferences::default());
     }
 
     #[test]
     fn legacy_and_partial_preference_objects_keep_defaults_and_normalize_ranges() {
         let legacy: CoordinateToolPreferences = serde_json::from_str("{}").unwrap();
         assert_eq!(legacy, CoordinateToolPreferences::default());
+        assert_eq!(legacy.click, ClickEffectPreferences::default());
 
         let legacy_crosshair: CoordinateToolPreferences =
             serde_json::from_str(r#"{"crosshair":{"thickness":6,"arm_length":18}}"#).unwrap();
@@ -422,6 +517,7 @@ mod tests {
         assert_eq!(legacy_crosshair.crosshair.center_gap, 16);
         assert_eq!(legacy_crosshair.halo, HaloPreferences::default());
         assert_eq!(legacy_crosshair.zoom, ZoomPreferences::default());
+        assert_eq!(legacy_crosshair.click, ClickEffectPreferences::default());
 
         let partial: CoordinateToolPreferences = serde_json::from_str(
             r#"{
@@ -593,6 +689,40 @@ mod tests {
         }
         .normalized();
         assert_eq!(non_finite_halo.inversion_strength, 0.4);
+    }
+
+    #[test]
+    fn click_appearance_defaults_partial_values_normalize_and_round_trip_without_enablement() {
+        let old_settings: CoordinateToolPreferences =
+            serde_json::from_str(r#"{"crosshair":{"thickness":4}}"#).unwrap();
+        assert_eq!(old_settings.click, ClickEffectPreferences::default());
+
+        let partial: CoordinateToolPreferences = serde_json::from_str(
+            r#"{"click":{"style":"flash","size_px":999,"opacity":0.0,"duration_ms":0}}"#,
+        )
+        .unwrap();
+        assert_eq!(partial.click.style, ClickEffectStyle::Flash);
+        assert_eq!(partial.click.color, ClickEffectPreferences::default().color);
+        assert_eq!(partial.click.size_px, 256);
+        assert_eq!(partial.click.opacity, 0.1);
+        assert_eq!(partial.click.duration_ms, 50);
+
+        let serialized = serde_json::to_value(&partial).unwrap();
+        assert!(serialized.get("click_enabled").is_none());
+        assert!(serialized.get("click").is_some());
+        let round_trip: CoordinateToolPreferences = serde_json::from_value(serialized).unwrap();
+        assert_eq!(round_trip, partial);
+
+        let normalized = ClickEffectPreferences {
+            size_px: i32::MIN,
+            opacity: f32::INFINITY,
+            duration_ms: u32::MAX,
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(normalized.size_px, 4);
+        assert_eq!(normalized.opacity, 0.8);
+        assert_eq!(normalized.duration_ms, 2_000);
     }
 
     #[test]

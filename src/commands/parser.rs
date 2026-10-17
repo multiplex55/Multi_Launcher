@@ -569,6 +569,7 @@ pub(crate) fn parse_mouse_wire(action: &Action) -> Option<CoordinateToolCommand>
         ["crosshair", ..] => parse_crosshair_operation(&tokens[1..]),
         ["halo", ..] => parse_halo_operation(&tokens[1..]),
         ["zoom", ..] => parse_zoom_operation(&tokens[1..]),
+        ["click", ..] => parse_click_operation(&tokens[1..]),
         ["effects", ..] => parse_effects_operation(&tokens[1..]),
         [] => Err("mouse command is missing".into()),
         [operation, ..] => Err(format!("unknown mouse command `{operation}`")),
@@ -705,6 +706,21 @@ fn parse_zoom_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String
         }
         [operation, ..] => Err(format!("unknown mouse zoom command `{operation}`")),
         [] => Err("mouse zoom command is missing; use toggle, on, off, or help".into()),
+    }
+}
+
+fn parse_click_operation(tokens: &[&str]) -> Result<CoordinateToolCommand, String> {
+    match tokens {
+        ["toggle"] => Ok(CoordinateToolCommand::ToggleClick),
+        ["on"] => Ok(CoordinateToolCommand::SetClickEnabled(true)),
+        ["off"] => Ok(CoordinateToolCommand::SetClickEnabled(false)),
+        ["settings"] => Ok(CoordinateToolCommand::Settings),
+        ["help"] => Ok(CoordinateToolCommand::ClickHelp),
+        ["toggle" | "on" | "off" | "settings" | "help", ..] => {
+            Err("mouse click toggle, on, off, settings, and help do not take arguments".into())
+        }
+        [operation, ..] => Err(format!("unknown mouse click command `{operation}`")),
+        [] => Err("mouse click command is missing; use toggle, on, off, settings, or help".into()),
     }
 }
 
@@ -2543,6 +2559,23 @@ mod mouse_command_parser_tests {
         );
         assert_eq!(parse("mouse:zoom:help"), CoordinateToolCommand::ZoomHelp);
         assert_eq!(
+            parse("MOUSE:CLICK:TOGGLE"),
+            CoordinateToolCommand::ToggleClick
+        );
+        assert_eq!(
+            parse("mouse:click:on"),
+            CoordinateToolCommand::SetClickEnabled(true)
+        );
+        assert_eq!(
+            parse("mouse:click:off"),
+            CoordinateToolCommand::SetClickEnabled(false)
+        );
+        assert_eq!(
+            parse("mouse:click:settings"),
+            CoordinateToolCommand::Settings
+        );
+        assert_eq!(parse("mouse:click:help"), CoordinateToolCommand::ClickHelp);
+        assert_eq!(
             parse("MoUsE:EfFeCtS:OfF"),
             CoordinateToolCommand::EffectsOff
         );
@@ -2559,6 +2592,14 @@ mod mouse_command_parser_tests {
         assert_eq!(
             CoordinateToolCommand::SetZoomEnabled(true).kind_name(),
             "set_zoom_enabled"
+        );
+        assert_eq!(
+            CoordinateToolCommand::ToggleClick.kind_name(),
+            "toggle_click"
+        );
+        assert_eq!(
+            CoordinateToolCommand::SetClickEnabled(true).kind_name(),
+            "set_click_enabled"
         );
         assert_eq!(CoordinateToolCommand::EffectsOff.kind_name(), "effects_off");
         assert_eq!(
@@ -2605,6 +2646,13 @@ mod mouse_command_parser_tests {
             "mouse:zoom:factor:2",
             "mouse:zoom:diameter:160",
             "mouse:zoom:help:extra",
+            "mouse:click",
+            "mouse:click:toggle:extra",
+            "mouse:click:on:extra",
+            "mouse:click:off:extra",
+            "mouse:click:settings:extra",
+            "mouse:click:help:extra",
+            "mouse:click:unknown",
             "mouse:effects",
             "mouse:effects:on",
             "mouse:effects:off:extra",

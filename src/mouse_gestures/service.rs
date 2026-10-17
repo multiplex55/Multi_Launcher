@@ -1,3 +1,4 @@
+use crate::coordinate_tool::{ClickButton, ClickPressEvent, ClickPressSink, PhysicalPoint};
 use crate::mouse_gestures::db::{
     GESTURES_FILE, GestureCandidate, GestureMatchType, SharedGestureDb, format_gesture_label,
     load_gestures,
@@ -141,6 +142,35 @@ pub trait HookBackend: Send {
     fn install(&mut self, sender: Sender<HookEvent>) -> anyhow::Result<()>;
     fn set_enabled(&mut self, _enabled: bool) {}
 
+    /// Install the same native hook for passive physical click observation.
+    /// Backends without this capability must return an explicit unsupported
+    /// error; gesture-only backends continue to use `install` unchanged.
+    fn install_click_observation(&mut self, _target: ClickObservationTarget) -> anyhow::Result<()> {
+        Err(anyhow!(
+            "passive click observation is not supported by this hook backend"
+        ))
+    }
+
+    /// Replace or clear a passive observer while retaining an installed hook.
+    fn set_click_observation(
+        &mut self,
+        target: Option<ClickObservationTarget>,
+    ) -> anyhow::Result<()> {
+        if target.is_some() {
+            Err(anyhow!(
+                "passive click observation is not supported by this hook backend"
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Drop gesture dispatch while leaving an independently leased observer
+    /// attached to the shared hook.
+    fn clear_gesture_consumer(&mut self) {
+        self.set_enabled(false);
+    }
+
     /// Disables dispatch while keeping an installed process-wide hook alive.
     ///
     /// Backends may return `true` only when they can guarantee that callbacks
@@ -153,6 +183,27 @@ pub trait HookBackend: Send {
 
     fn uninstall(&mut self) -> anyhow::Result<()>;
     fn is_installed(&self) -> bool;
+}
+
+#[derive(Clone)]
+pub struct ClickObservationTarget {
+    generation: u64,
+    sink: Arc<dyn ClickPressSink>,
+}
+
+impl ClickObservationTarget {
+    pub(crate) fn new(generation: u64, sink: Arc<dyn ClickPressSink>) -> Self {
+        Self { generation, sink }
+    }
+
+    fn offer(&self, button: ClickButton, position: PhysicalPoint) {
+        let _ = self.sink.try_send(ClickPressEvent {
+            button,
+            position,
+            observed_at: Instant::now(),
+            generation: self.generation,
+        });
+    }
 }
 
 pub trait OverlayFactory: Send + Sync {
@@ -209,12 +260,20 @@ pub struct MouseGestureService {
     config: MouseGestureConfig,
     runtime_suppressions: HashSet<GestureSuppressionToken>,
     next_suppression_token: u64,
+    click_observer: Option<ClickObserverLease>,
+    next_click_observation_token: u64,
     db: Option<SharedGestureDb>,
     backend: Box<dyn HookBackend>,
     overlay_factory: Arc<dyn OverlayFactory>,
     right_click_backend: Arc<dyn RightClickBackend>,
     cursor_provider: Arc<dyn CursorPositionProvider>,
     worker: Option<WorkerHandle>,
+}
+
+struct ClickObserverLease {
+    token: ClickObservationToken,
+    target: ClickObservationTarget,
+    retired: Arc<AtomicBool>,
 }
 
 impl Default for MouseGestureService {
@@ -253,6 +312,8 @@ impl MouseGestureService {
             config: MouseGestureConfig::default(),
             runtime_suppressions: HashSet::new(),
             next_suppression_token: 0,
+            click_observer: None,
+            next_click_observation_token: 0,
             db,
             backend,
             overlay_factory,
@@ -318,6 +379,68 @@ impl MouseGestureService {
             return false;
         }
         self.reconcile_running_state(false);
+        true
+    }
+
+    fn acquire_click_observation(
+        &mut self,
+        target: ClickObservationTarget,
+        retired: Arc<AtomicBool>,
+    ) -> anyhow::Result<ClickObservationToken> {
+        if self
+            .click_observer
+            .as_ref()
+            .is_some_and(|lease| !lease.retired.load(Ordering::Acquire))
+        {
+            return Err(anyhow!("passive click observation is already active"));
+        }
+
+        if self.backend.is_installed() {
+            self.backend.set_click_observation(Some(target.clone()))?;
+        } else {
+            self.backend.install_click_observation(target.clone())?;
+        }
+
+        let token = loop {
+            let token = ClickObservationToken(self.next_click_observation_token);
+            self.next_click_observation_token = self.next_click_observation_token.wrapping_add(1);
+            if self
+                .click_observer
+                .as_ref()
+                .is_none_or(|active| active.token != token)
+            {
+                break token;
+            }
+        };
+        self.click_observer = Some(ClickObserverLease {
+            token,
+            target,
+            retired,
+        });
+        Ok(token)
+    }
+
+    fn release_click_observation(&mut self, token: ClickObservationToken) -> bool {
+        if self
+            .click_observer
+            .as_ref()
+            .is_none_or(|active| active.token != token)
+        {
+            return false;
+        }
+
+        if let Some(active) = self.click_observer.as_ref() {
+            active.retired.store(true, Ordering::Release);
+        }
+        self.click_observer = None;
+        if let Err(error) = self.backend.set_click_observation(None) {
+            tracing::error!(?error, "failed to clear passive click observer");
+        }
+        if !self.config.enabled && self.worker.is_none() && self.backend.is_installed() {
+            if let Err(error) = self.backend.uninstall() {
+                tracing::error!(?error, "failed to uninstall unused mouse hook");
+            }
+        }
         true
     }
 
@@ -400,11 +523,13 @@ impl MouseGestureService {
             return;
         }
 
-        if let Err(err) = self.backend.uninstall() {
+        self.backend.set_enabled(false);
+        self.stop_worker();
+        if self.click_observer.is_some() {
+            self.backend.clear_gesture_consumer();
+        } else if let Err(err) = self.backend.uninstall() {
             tracing::error!(?err, "failed to uninstall mouse hook");
         }
-
-        self.stop_worker();
     }
 
     fn stop_worker(&mut self) {
@@ -417,6 +542,9 @@ impl MouseGestureService {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GestureSuppressionToken(u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ClickObservationToken(u64);
 
 /// Owns one runtime suppression and releases it on explicit release or drop.
 ///
@@ -475,6 +603,58 @@ impl Drop for GestureSuppressionGuard {
     }
 }
 
+/// Owns one passive click observer attached to the process-wide mouse hook.
+/// Dropping the guard releases that consumer without changing gesture settings.
+#[must_use = "dropping the guard immediately releases passive click observation"]
+pub struct ClickObservationGuard {
+    service: Arc<Mutex<MouseGestureService>>,
+    token: Option<ClickObservationToken>,
+    retired: Arc<AtomicBool>,
+}
+
+impl ClickObservationGuard {
+    fn acquire(
+        service: Arc<Mutex<MouseGestureService>>,
+        generation: u64,
+        sink: Arc<dyn ClickPressSink>,
+    ) -> anyhow::Result<Self> {
+        let target = ClickObservationTarget::new(generation, sink);
+        let retired = Arc::new(AtomicBool::new(false));
+        let token = match service.lock() {
+            Ok(mut service) => service.acquire_click_observation(target, Arc::clone(&retired))?,
+            Err(error) => {
+                tracing::error!("mouse gesture service lock was poisoned while observing clicks");
+                error
+                    .into_inner()
+                    .acquire_click_observation(target, Arc::clone(&retired))?
+            }
+        };
+        Ok(Self {
+            service,
+            token: Some(token),
+            retired,
+        })
+    }
+
+    pub fn release(&mut self) {
+        self.release_with_completion(None);
+    }
+
+    fn release_with_completion(&mut self, completion: Option<Sender<()>>) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        self.retired.store(true, Ordering::Release);
+        release_click_observation_token(Arc::clone(&self.service), token, completion);
+    }
+}
+
+impl Drop for ClickObservationGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 fn release_guard_token(service: Arc<Mutex<MouseGestureService>>, token: GestureSuppressionToken) {
     let deferred_service = Arc::clone(&service);
     match service.try_lock() {
@@ -504,6 +684,51 @@ fn release_guard_token(service: Arc<Mutex<MouseGestureService>>, token: GestureS
     }
 }
 
+fn release_click_observation_token(
+    service: Arc<Mutex<MouseGestureService>>,
+    token: ClickObservationToken,
+    completion: Option<Sender<()>>,
+) {
+    let deferred_service = Arc::clone(&service);
+    match service.try_lock() {
+        Ok(mut service) => {
+            service.release_click_observation(token);
+            notify_click_release_completion(completion);
+        }
+        Err(std::sync::TryLockError::Poisoned(error)) => {
+            tracing::error!("mouse gesture service lock was poisoned while disabling clicks");
+            error.into_inner().release_click_observation(token);
+            notify_click_release_completion(completion);
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {
+            if let Err(error) = thread::Builder::new()
+                .name("click-observation-release".into())
+                .spawn(move || match deferred_service.lock() {
+                    Ok(mut service) => {
+                        service.release_click_observation(token);
+                        notify_click_release_completion(completion);
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            "mouse gesture service lock was poisoned while disabling clicks"
+                        );
+                        error.into_inner().release_click_observation(token);
+                        notify_click_release_completion(completion);
+                    }
+                })
+            {
+                tracing::error!(?error, "failed to defer click observer release");
+            }
+        }
+    }
+}
+
+fn notify_click_release_completion(completion: Option<Sender<()>>) {
+    if let Some(completion) = completion {
+        let _ = completion.send(());
+    }
+}
+
 static SERVICE: OnceCell<Arc<Mutex<MouseGestureService>>> = OnceCell::new();
 
 fn global_service() -> &'static Arc<Mutex<MouseGestureService>> {
@@ -514,6 +739,15 @@ fn global_service() -> &'static Arc<Mutex<MouseGestureService>> {
 /// is released or dropped.
 pub fn acquire_gesture_suppression() -> GestureSuppressionGuard {
     GestureSuppressionGuard::acquire(Arc::clone(global_service()))
+}
+
+/// Attaches a passive click sink to the existing process-wide mouse hook.
+/// Returns an error when the active hook backend cannot observe clicks.
+pub fn acquire_click_observation(
+    generation: u64,
+    sink: Arc<dyn ClickPressSink>,
+) -> anyhow::Result<ClickObservationGuard> {
+    ClickObservationGuard::acquire(Arc::clone(global_service()), generation, sink)
 }
 
 pub fn with_service<F>(f: F)
@@ -1402,6 +1636,14 @@ mod tests {
         }
     }
 
+    struct ChannelClickSink(mpsc::SyncSender<ClickPressEvent>);
+
+    impl ClickPressSink for ChannelClickSink {
+        fn try_send(&self, event: ClickPressEvent) -> bool {
+            self.0.try_send(event).is_ok()
+        }
+    }
+
     #[test]
     fn malformed_selection_state_disables_writes_and_preserves_bytes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1486,6 +1728,255 @@ mod tests {
         assert!(!should_allow_wheel_cycle(WheelCycleGate::Deadzone, false));
         assert!(should_allow_wheel_cycle(WheelCycleGate::Deadzone, true));
         assert!(should_allow_wheel_cycle(WheelCycleGate::Shift, false));
+    }
+
+    #[test]
+    fn passive_click_observation_shares_the_gesture_hook_and_keeps_press_policy() {
+        let (backend, handle) = MockHookBackend::new();
+        let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+        let (event_tx, event_rx) = mpsc::sync_channel(1);
+        let target = ClickObservationTarget::new(41, Arc::new(ChannelClickSink(event_tx)));
+        let token = service
+            .acquire_click_observation(target, Arc::new(AtomicBool::new(false)))
+            .unwrap();
+
+        assert!(!service.is_running());
+        assert_eq!(handle.install_count(), 1);
+        assert_eq!(handle.uninstall_count(), 0);
+
+        let left_point = PhysicalPoint::new(-1700, 240);
+        assert!(!handle.emit_physical_button_down(ClickButton::Left, left_point, false, false));
+        let left = event_rx.try_recv().unwrap();
+        assert_eq!(left.button, ClickButton::Left);
+        assert_eq!(left.position, left_point);
+        assert_eq!(left.generation, 41);
+
+        let right_point = PhysicalPoint::new(80, -30);
+        assert!(!handle.emit_physical_button_down(ClickButton::Right, right_point, false, false));
+        // The observer queue is full, so the next visual event is dropped.
+        // This never consumes or synthesizes a mouse action.
+        assert!(!handle.emit_physical_button_down(
+            ClickButton::Middle,
+            PhysicalPoint::new(9, 10),
+            false,
+            false
+        ));
+        let right = event_rx.try_recv().unwrap();
+        assert_eq!(right.button, ClickButton::Right);
+        assert_eq!(right.position, right_point);
+        assert!(event_rx.try_recv().is_err());
+        assert!(!handle.emit_physical_button_down(
+            ClickButton::Left,
+            PhysicalPoint::new(1, 2),
+            true,
+            false
+        ));
+        assert!(!handle.emit_physical_button_down(
+            ClickButton::Left,
+            PhysicalPoint::new(1, 2),
+            false,
+            true
+        ));
+        assert!(event_rx.try_recv().is_err());
+
+        service.start();
+        assert!(service.is_running());
+        assert_eq!(
+            handle.install_count(),
+            1,
+            "gesture mode reuses the click hook"
+        );
+        assert!(handle.emit_physical_button_down(ClickButton::Right, right_point, false, false));
+        let right = event_rx.try_recv().unwrap();
+        assert_eq!(right.position, right_point);
+        assert_eq!(right.button, ClickButton::Right);
+
+        let mut config = service.config.clone();
+        config.debug_logging = true;
+        service.update_config(config);
+        service.update_db(None);
+        assert!(service.is_running());
+        assert_eq!(handle.install_count(), 1, "restarts retain the shared hook");
+        assert!(!handle.emit_physical_button_down(
+            ClickButton::Middle,
+            PhysicalPoint::new(-5, -6),
+            false,
+            false
+        ));
+        assert_eq!(event_rx.try_recv().unwrap().button, ClickButton::Middle);
+
+        let suppression = service.acquire_runtime_suppression();
+        assert!(!service.is_running());
+        assert!(!handle.emit_physical_button_down(ClickButton::Right, right_point, false, false));
+        assert_eq!(event_rx.try_recv().unwrap().position, right_point);
+        assert!(service.release_runtime_suppression(suppression));
+        assert!(service.is_running());
+
+        assert!(service.release_click_observation(token));
+        assert_eq!(
+            handle.uninstall_count(),
+            0,
+            "gesture consumer keeps the hook"
+        );
+        assert!(handle.emit_physical_button_down(ClickButton::Right, right_point, false, false));
+        assert!(event_rx.try_recv().is_err());
+        service.stop();
+        assert_eq!(handle.uninstall_count(), 1);
+    }
+
+    #[test]
+    fn passive_click_lease_survives_gesture_stop_and_releases_the_last_hook_consumer() {
+        let (backend, handle) = MockHookBackend::new();
+        let mut service = MouseGestureService::new_with_backend(Box::new(backend));
+        let (event_tx, event_rx) = mpsc::sync_channel(4);
+        let token = service
+            .acquire_click_observation(
+                ClickObservationTarget::new(9, Arc::new(ChannelClickSink(event_tx))),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .unwrap();
+        service.start();
+        service.stop();
+
+        assert!(!service.is_running());
+        assert_eq!(handle.install_count(), 1);
+        assert_eq!(handle.uninstall_count(), 0);
+        assert!(!handle.emit_physical_button_down(
+            ClickButton::Middle,
+            PhysicalPoint::new(-12, 34),
+            false,
+            false
+        ));
+        let click = event_rx.try_recv().unwrap();
+        assert_eq!(click.position, PhysicalPoint::new(-12, 34));
+        assert_eq!(click.generation, 9);
+
+        assert!(service.release_click_observation(token));
+        assert_eq!(handle.uninstall_count(), 1);
+        assert!(!handle.emit_physical_button_down(
+            ClickButton::Middle,
+            PhysicalPoint::new(0, 0),
+            false,
+            false
+        ));
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn click_observation_guard_drop_releases_without_changing_gesture_configuration() {
+        let (backend, handle) = MockHookBackend::new();
+        let service = Arc::new(Mutex::new(MouseGestureService::new_with_backend(Box::new(
+            backend,
+        ))));
+        let (event_tx, _event_rx) = mpsc::sync_channel(2);
+        let guard = ClickObservationGuard::acquire(
+            Arc::clone(&service),
+            3,
+            Arc::new(ChannelClickSink(event_tx)),
+        )
+        .unwrap();
+
+        assert!(!service.lock().unwrap().config.enabled);
+        assert!(!service.lock().unwrap().is_running());
+        assert_eq!(handle.install_count(), 1);
+        drop(guard);
+
+        assert!(!service.lock().unwrap().config.enabled);
+        assert!(!service.lock().unwrap().is_running());
+        assert_eq!(handle.uninstall_count(), 1);
+    }
+
+    #[test]
+    fn deferred_click_release_cannot_remove_a_replacement_observer() {
+        let (backend, handle) = MockHookBackend::new();
+        let service = Arc::new(Mutex::new(MouseGestureService::new_with_backend(Box::new(
+            backend,
+        ))));
+        let (old_event_tx, _old_event_rx) = mpsc::sync_channel(2);
+        let mut old_guard = ClickObservationGuard::acquire(
+            Arc::clone(&service),
+            3,
+            Arc::new(ChannelClickSink(old_event_tx)),
+        )
+        .unwrap();
+        let old_token = old_guard.token.unwrap();
+
+        // Hold the service mutex while dropping the guard so its actual release
+        // path must defer the token cleanup to its release worker.
+        let mut service_lock = service.lock().unwrap();
+        let (release_done_tx, release_done_rx) = mpsc::channel();
+        old_guard.release_with_completion(Some(release_done_tx));
+        assert!(old_guard.token.is_none());
+
+        let (new_event_tx, new_event_rx) = mpsc::sync_channel(2);
+        let new_retired = Arc::new(AtomicBool::new(false));
+        let new_token = service_lock
+            .acquire_click_observation(
+                ClickObservationTarget::new(44, Arc::new(ChannelClickSink(new_event_tx))),
+                Arc::clone(&new_retired),
+            )
+            .unwrap();
+        let new_guard = ClickObservationGuard {
+            service: Arc::clone(&service),
+            token: Some(new_token),
+            retired: new_retired,
+        };
+
+        assert!(
+            !service_lock.release_click_observation(old_token),
+            "a late release must not clear a replacement token"
+        );
+        drop(service_lock);
+
+        release_done_rx
+            .recv()
+            .expect("the deferred old-token release should complete");
+        let point = PhysicalPoint::new(-1400, 275);
+        assert!(!handle.emit_physical_button_down(ClickButton::Middle, point, false, false));
+        let event = new_event_rx.try_recv().unwrap();
+        assert_eq!(event.position, point);
+        assert_eq!(event.generation, 44);
+        assert!(new_event_rx.try_recv().is_err());
+
+        drop(new_guard);
+        assert_eq!(handle.uninstall_count(), 1);
+    }
+
+    #[test]
+    fn hook_backends_without_passive_observation_report_unsupported() {
+        struct GestureOnlyBackend {
+            installed: bool,
+        }
+
+        impl HookBackend for GestureOnlyBackend {
+            fn install(&mut self, _sender: Sender<HookEvent>) -> anyhow::Result<()> {
+                self.installed = true;
+                Ok(())
+            }
+
+            fn uninstall(&mut self) -> anyhow::Result<()> {
+                self.installed = false;
+                Ok(())
+            }
+
+            fn is_installed(&self) -> bool {
+                self.installed
+            }
+        }
+
+        let mut service = MouseGestureService::new_with_backend(Box::new(GestureOnlyBackend {
+            installed: false,
+        }));
+        let (event_tx, _event_rx) = mpsc::sync_channel(1);
+        let target = ClickObservationTarget::new(0, Arc::new(ChannelClickSink(event_tx)));
+        let error = service
+            .acquire_click_observation(target, Arc::new(AtomicBool::new(false)))
+            .unwrap_err();
+        assert!(error.to_string().contains("not supported"));
+        assert!(!service.backend.is_installed());
+        service.start();
+        assert!(service.is_running());
+        service.stop();
     }
 
     #[test]
@@ -1746,6 +2237,74 @@ impl HookBackend for DefaultHookBackend {
         hook_dispatch().set_tracking(false);
         hook_dispatch().set_active(false);
         hook_dispatch().set_sender(Some(sender));
+        self.ensure_hook_thread()
+    }
+
+    fn install_click_observation(&mut self, target: ClickObservationTarget) -> anyhow::Result<()> {
+        hook_dispatch().set_click_observer(Some(target));
+        if let Err(error) = self.ensure_hook_thread() {
+            hook_dispatch().set_click_observer(None);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn set_click_observation(
+        &mut self,
+        target: Option<ClickObservationTarget>,
+    ) -> anyhow::Result<()> {
+        hook_dispatch().set_click_observer(target);
+        Ok(())
+    }
+
+    fn clear_gesture_consumer(&mut self) {
+        hook_dispatch().set_enabled(false);
+        hook_dispatch().set_tracking(false);
+        hook_dispatch().set_active(false);
+        hook_dispatch().set_sender(None);
+    }
+
+    fn uninstall(&mut self) -> anyhow::Result<()> {
+        // Stop dispatch first to avoid any new work while shutting down.
+        hook_dispatch().set_enabled(false);
+        hook_dispatch().set_tracking(false);
+        hook_dispatch().set_active(false);
+        hook_dispatch().set_sender(None);
+        hook_dispatch().set_click_observer(None);
+
+        if let Some(th) = self.hook_thread.take() {
+            use windows::Win32::Foundation::{LPARAM, WPARAM};
+            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
+            unsafe {
+                let _ = PostThreadMessageW(th.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+            let _ = th.join.join();
+        }
+
+        Ok(())
+    }
+
+    fn is_installed(&self) -> bool {
+        self.hook_thread.is_some()
+    }
+
+    fn set_enabled(&mut self, enabled: bool) {
+        hook_dispatch().set_enabled(enabled);
+        if !enabled {
+            hook_dispatch().set_tracking(false);
+            hook_dispatch().set_active(false);
+        }
+    }
+
+    fn suspend_without_uninstall(&mut self) -> bool {
+        self.set_enabled(false);
+        self.is_installed()
+    }
+}
+
+#[cfg(windows)]
+impl DefaultHookBackend {
+    fn ensure_hook_thread(&mut self) -> anyhow::Result<()> {
         if self.hook_thread.is_some() {
             return Ok(());
         }
@@ -1845,42 +2404,6 @@ impl HookBackend for DefaultHookBackend {
         self.hook_thread = Some(HookThread { thread_id, join });
         Ok(())
     }
-
-    fn uninstall(&mut self) -> anyhow::Result<()> {
-        // Stop dispatch first to avoid any new work while shutting down.
-        hook_dispatch().set_enabled(false);
-        hook_dispatch().set_tracking(false);
-        hook_dispatch().set_active(false);
-        hook_dispatch().set_sender(None);
-
-        if let Some(th) = self.hook_thread.take() {
-            use windows::Win32::Foundation::{LPARAM, WPARAM};
-            use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT};
-            unsafe {
-                let _ = PostThreadMessageW(th.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
-            }
-            let _ = th.join.join();
-        }
-
-        Ok(())
-    }
-
-    fn is_installed(&self) -> bool {
-        self.hook_thread.is_some()
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        hook_dispatch().set_enabled(enabled);
-        if !enabled {
-            hook_dispatch().set_tracking(false);
-            hook_dispatch().set_active(false);
-        }
-    }
-
-    fn suspend_without_uninstall(&mut self) -> bool {
-        self.set_enabled(false);
-        self.is_installed()
-    }
 }
 
 #[cfg(not(windows))]
@@ -1894,6 +2417,25 @@ impl HookBackend for DefaultHookBackend {
     }
 
     fn set_enabled(&mut self, _enabled: bool) {}
+
+    fn install_click_observation(&mut self, _target: ClickObservationTarget) -> anyhow::Result<()> {
+        Err(anyhow!(
+            "passive click observation is not supported on this platform"
+        ))
+    }
+
+    fn set_click_observation(
+        &mut self,
+        target: Option<ClickObservationTarget>,
+    ) -> anyhow::Result<()> {
+        if target.is_some() {
+            Err(anyhow!(
+                "passive click observation is not supported on this platform"
+            ))
+        } else {
+            Ok(())
+        }
+    }
 
     fn uninstall(&mut self) -> anyhow::Result<()> {
         Ok(())
@@ -1913,8 +2455,10 @@ pub struct MockHookBackend {
 struct MockHookState {
     install_count: AtomicUsize,
     uninstall_count: AtomicUsize,
+    installed: AtomicBool,
     enabled: AtomicBool,
     sender: Mutex<Option<Sender<HookEvent>>>,
+    click_observer: Mutex<Option<ClickObservationTarget>>,
 }
 
 impl MockHookBackend {
@@ -1931,12 +2475,43 @@ impl MockHookBackend {
 
 impl HookBackend for MockHookBackend {
     fn install(&mut self, sender: Sender<HookEvent>) -> anyhow::Result<()> {
-        let mut guard = self.state.sender.lock().map_err(|_| anyhow!("lock"))?;
-        if guard.is_none() {
+        if !self.state.installed.swap(true, Ordering::SeqCst) {
             self.state.install_count.fetch_add(1, Ordering::SeqCst);
         }
+        let mut guard = self.state.sender.lock().map_err(|_| anyhow!("lock"))?;
         *guard = Some(sender);
         Ok(())
+    }
+
+    fn install_click_observation(&mut self, target: ClickObservationTarget) -> anyhow::Result<()> {
+        if !self.state.installed.swap(true, Ordering::SeqCst) {
+            self.state.install_count.fetch_add(1, Ordering::SeqCst);
+        }
+        *self
+            .state
+            .click_observer
+            .lock()
+            .map_err(|_| anyhow!("lock"))? = Some(target);
+        Ok(())
+    }
+
+    fn set_click_observation(
+        &mut self,
+        target: Option<ClickObservationTarget>,
+    ) -> anyhow::Result<()> {
+        *self
+            .state
+            .click_observer
+            .lock()
+            .map_err(|_| anyhow!("lock"))? = target;
+        Ok(())
+    }
+
+    fn clear_gesture_consumer(&mut self) {
+        self.state.enabled.store(false, Ordering::SeqCst);
+        if let Ok(mut sender) = self.state.sender.lock() {
+            *sender = None;
+        }
     }
 
     fn set_enabled(&mut self, enabled: bool) {
@@ -1950,19 +2525,21 @@ impl HookBackend for MockHookBackend {
 
     fn uninstall(&mut self) -> anyhow::Result<()> {
         self.state.enabled.store(false, Ordering::SeqCst);
-        let mut guard = self.state.sender.lock().map_err(|_| anyhow!("lock"))?;
-        if guard.is_some() {
+        if self.state.installed.swap(false, Ordering::SeqCst) {
             self.state.uninstall_count.fetch_add(1, Ordering::SeqCst);
         }
+        let mut guard = self.state.sender.lock().map_err(|_| anyhow!("lock"))?;
         *guard = None;
+        *self
+            .state
+            .click_observer
+            .lock()
+            .map_err(|_| anyhow!("lock"))? = None;
         Ok(())
     }
 
     fn is_installed(&self) -> bool {
-        match self.state.sender.lock() {
-            Ok(guard) => guard.is_some(),
-            Err(_) => false,
-        }
+        self.state.installed.load(Ordering::SeqCst)
     }
 }
 
@@ -1991,6 +2568,43 @@ impl MockHookHandle {
             Err(_) => false,
         }
     }
+
+    /// Simulate the passive observer and the original right-button gesture
+    /// decision. `true` means the gesture hook keeps its existing consume path.
+    pub fn emit_physical_button_down(
+        &self,
+        button: ClickButton,
+        position: PhysicalPoint,
+        injected: bool,
+        tagged: bool,
+    ) -> bool {
+        if !injected && !tagged {
+            let target = self
+                .state
+                .click_observer
+                .try_lock()
+                .ok()
+                .and_then(|guard| guard.clone());
+            if let Some(target) = target {
+                target.offer(button, position);
+            }
+        }
+
+        if self.state.enabled.load(Ordering::SeqCst)
+            && !injected
+            && !tagged
+            && button == ClickButton::Right
+        {
+            if let Ok(guard) = self.state.sender.try_lock()
+                && let Some(sender) = guard.as_ref()
+            {
+                let _ = sender.send(HookEvent::RButtonDown);
+            }
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -2002,6 +2616,7 @@ struct HookDispatch {
     wheel_gate: AtomicUsize,
     ignore_window_titles: Mutex<Vec<String>>,
     sender: Mutex<Option<Sender<HookEvent>>>,
+    click_observer: Mutex<Option<ClickObservationTarget>>,
 }
 
 #[cfg(windows)]
@@ -2061,6 +2676,23 @@ impl HookDispatch {
             *guard = sender;
         }
     }
+
+    fn set_click_observer(&self, target: Option<ClickObservationTarget>) {
+        if let Ok(mut guard) = self.click_observer.lock() {
+            *guard = target;
+        }
+    }
+
+    fn observe_click(&self, button: ClickButton, position: PhysicalPoint) {
+        let target = self
+            .click_observer
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.clone());
+        if let Some(target) = target {
+            target.offer(button, position);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -2076,6 +2708,7 @@ fn hook_dispatch() -> &'static HookDispatch {
         wheel_gate: AtomicUsize::new(WheelCycleGate::Deadzone.as_usize()),
         ignore_window_titles: Mutex::new(Vec::new()),
         sender: Mutex::new(None),
+        click_observer: Mutex::new(None),
     })
 }
 
@@ -2086,17 +2719,35 @@ unsafe extern "system" fn mouse_hook_proc(
     l_param: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, HC_ACTION, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+        CallNextHookEx, HC_ACTION, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+        WM_RBUTTONUP,
     };
 
     use windows::Win32::UI::WindowsAndMessaging::MSLLHOOKSTRUCT;
 
     if n_code == HC_ACTION as i32 {
         let msg = w_param.0 as u32;
+        let dispatch = hook_dispatch();
+
+        let click_button = match msg {
+            WM_LBUTTONDOWN => Some(ClickButton::Left),
+            WM_RBUTTONDOWN => Some(ClickButton::Right),
+            WM_MBUTTONDOWN => Some(ClickButton::Middle),
+            _ => None,
+        };
+        if let Some(button) = click_button {
+            // Observation is passive and independent of gesture enablement.
+            // Copy the physical edge and exact hook coordinates before gesture
+            // policy can consume a right press. The sink uses try-send only.
+            let info = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };
+            let injected_flagged = (info.flags & 0x1) != 0 || (info.flags & 0x2) != 0;
+            let injected_tagged = info.dwExtraInfo == MG_INJECT_TAG;
+            if !dispatch.is_injecting() && !injected_flagged && !injected_tagged {
+                dispatch.observe_click(button, PhysicalPoint::new(info.pt.x, info.pt.y));
+            }
+        }
 
         if msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP || msg == WM_MOUSEWHEEL {
-            let dispatch = hook_dispatch();
-
             if dispatch.enabled.load(Ordering::Acquire) {
                 // If we're injecting (or the event is injected), do NOT consume it and do NOT forward to worker.
                 let info = unsafe { &*(l_param.0 as *const MSLLHOOKSTRUCT) };

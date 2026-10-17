@@ -1,13 +1,19 @@
-use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::collections::VecDeque;
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use super::model::{
-    CoordinateEffectsStatus, CoordinateSample, CoordinateToolRuntimeState, FormattedCoordinate,
+    ClickPressEvent, ClickPressSink, CoordinateEffectsStatus, CoordinateSample,
+    CoordinateToolRuntimeState, FormattedCoordinate,
 };
 use super::settings::CoordinateToolPreferences;
+use crate::mouse_gestures::service::{ClickObservationGuard, acquire_click_observation};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(16);
+const CLICK_QUEUE_CAPACITY: usize = 64;
+const CLICK_PENDING_CAPACITY: usize = 64;
 
 pub trait CoordinateSampler {
     fn sample(&mut self) -> Result<CoordinateSample, String>;
@@ -45,6 +51,33 @@ pub trait CoordinateRuntimeFactory: Send + Sync + 'static {
     fn create_backend(&self) -> Result<Box<dyn CoordinateSurfaceBackend>, String>;
 }
 
+pub trait ClickObservationLease: Send {}
+
+pub trait ClickObservationProvider: Send + Sync + 'static {
+    fn acquire(
+        &self,
+        generation: u64,
+        sink: Arc<dyn ClickPressSink>,
+    ) -> Result<Box<dyn ClickObservationLease>, String>;
+}
+
+#[derive(Debug, Default)]
+pub struct MouseGestureClickObservationProvider;
+
+impl ClickObservationLease for ClickObservationGuard {}
+
+impl ClickObservationProvider for MouseGestureClickObservationProvider {
+    fn acquire(
+        &self,
+        generation: u64,
+        sink: Arc<dyn ClickPressSink>,
+    ) -> Result<Box<dyn ClickObservationLease>, String> {
+        acquire_click_observation(generation, sink)
+            .map(|guard| Box::new(guard) as Box<dyn ClickObservationLease>)
+            .map_err(|error| format!("Could not enable click visualization: {error}"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoordinateRenderFrame {
     pub preferences: CoordinateToolPreferences,
@@ -70,26 +103,47 @@ struct SharedState {
     sample_error: Option<String>,
     backend_error: Option<String>,
     effects_status: CoordinateEffectsStatus,
+    click_generation: u64,
+    click_presses: VecDeque<ClickPressEvent>,
 }
 
 enum WorkerMessage {
     Shutdown,
+    ClickPress(ClickPressEvent),
+    SetCursorModes {
+        enabled: bool,
+        response: mpsc::SyncSender<Result<(), String>>,
+    },
 }
 
 struct WorkerHandle {
-    sender: mpsc::Sender<WorkerMessage>,
+    sender: SyncSender<WorkerMessage>,
     join: JoinHandle<Result<(), String>>,
+    cursor_modes: bool,
 }
 
-/// Coordinates the HUD, crosshair, halo, and zoom and owns their single worker.
+struct WorkerClickPressSink {
+    sender: SyncSender<WorkerMessage>,
+}
+
+impl ClickPressSink for WorkerClickPressSink {
+    fn try_send(&self, event: ClickPressEvent) -> bool {
+        self.sender
+            .try_send(WorkerMessage::ClickPress(event))
+            .is_ok()
+    }
+}
+
+/// Coordinates the HUD, cursor effects, click ingress, and owns their single worker.
 ///
-/// There is no thread while all four modes are disabled. Turning off the final
-/// mode synchronously joins the worker, after its backend has released native
-/// windows and drawing resources.
+/// Click-only mode blocks on its bounded event queue and creates no sampler or
+/// native surface. Turning off the final mode synchronously joins the worker.
 pub struct CoordinateToolController {
     factory: Arc<dyn CoordinateRuntimeFactory>,
+    click_observation: Arc<dyn ClickObservationProvider>,
     shared: Arc<Mutex<SharedState>>,
     worker: Option<WorkerHandle>,
+    click_lease: Option<Box<dyn ClickObservationLease>>,
 }
 
 impl CoordinateToolController {
@@ -101,12 +155,26 @@ impl CoordinateToolController {
         factory: Arc<dyn CoordinateRuntimeFactory>,
         preferences: CoordinateToolPreferences,
     ) -> Self {
+        Self::new_with_preferences_and_click_observation(
+            factory,
+            preferences,
+            Arc::new(MouseGestureClickObservationProvider),
+        )
+    }
+
+    pub fn new_with_preferences_and_click_observation(
+        factory: Arc<dyn CoordinateRuntimeFactory>,
+        preferences: CoordinateToolPreferences,
+        click_observation: Arc<dyn ClickObservationProvider>,
+    ) -> Self {
         let mut shared = SharedState::default();
         shared.preferences = preferences.normalized();
         Self {
             factory,
+            click_observation,
             shared: Arc::new(Mutex::new(shared)),
             worker: None,
+            click_lease: None,
         }
     }
 
@@ -146,11 +214,83 @@ impl CoordinateToolController {
         )
     }
 
-    /// Disable the crosshair, halo, and zoom without changing HUD or inspector
+    /// Disable cursor and click effects without changing HUD or inspector
     /// state. The shared worker remains active if the HUD is still enabled.
     pub fn disable_effects(&mut self) -> Result<(), String> {
-        lock(&self.shared).runtime.disable_effects();
+        {
+            let mut shared = lock(&self.shared);
+            shared.runtime.disable_effects();
+            shared.click_generation = shared.click_generation.wrapping_add(1);
+            shared.click_presses.clear();
+        }
+        self.click_lease.take();
         self.reconcile_worker()
+    }
+
+    /// Toggle session-only click visualization and acquire or release its
+    /// passive lease on the shared mouse hook.
+    pub fn set_click_enabled(&mut self, enabled: bool) -> Result<(), String> {
+        let (previous, generation) = {
+            let mut shared = lock(&self.shared);
+            let previous = shared.runtime.click_enabled();
+            if previous == enabled {
+                return Ok(());
+            }
+            shared.click_generation = shared.click_generation.wrapping_add(1);
+            shared.click_presses.clear();
+            shared.runtime.set_click_enabled(enabled);
+            (previous, shared.click_generation)
+        };
+
+        if !enabled {
+            // Invalidate before unregistering so any callback already holding
+            // the old sink can only enqueue a stale generation.
+            self.click_lease.take();
+            return self.reconcile_worker();
+        }
+
+        if let Err(error) = self.reconcile_worker() {
+            self.rollback_click_enable(previous);
+            return Err(error);
+        }
+
+        let Some(sender) = self.worker.as_ref().map(|worker| worker.sender.clone()) else {
+            self.rollback_click_enable(previous);
+            return Err("Coordinate worker did not start for click visualization".into());
+        };
+        let sink: Arc<dyn ClickPressSink> = Arc::new(WorkerClickPressSink { sender });
+        match self.click_observation.acquire(generation, sink) {
+            Ok(lease) => {
+                self.click_lease = Some(lease);
+                Ok(())
+            }
+            Err(error) => {
+                self.rollback_click_enable(previous);
+                Err(error)
+            }
+        }
+    }
+
+    fn rollback_click_enable(&mut self, previous: bool) {
+        {
+            let mut shared = lock(&self.shared);
+            shared.runtime.set_click_enabled(previous);
+            shared.click_generation = shared.click_generation.wrapping_add(1);
+            shared.click_presses.clear();
+        }
+        self.click_lease.take();
+        if let Err(error) = self.reconcile_worker() {
+            tracing::error!(
+                ?error,
+                "failed to stop click worker after observer setup failed"
+            );
+        }
+    }
+
+    /// Drain physical press events that have passed generation and queue checks.
+    /// The renderer can consume them without consulting sampled cursor state.
+    pub fn take_click_presses(&self) -> Vec<ClickPressEvent> {
+        lock(&self.shared).click_presses.drain(..).collect()
     }
 
     fn set_mode(
@@ -260,32 +400,48 @@ impl CoordinateToolController {
             shared.runtime.set_hud_enabled(false);
             shared.runtime.disable_effects();
             shared.pending_freeze = false;
+            shared.click_generation = shared.click_generation.wrapping_add(1);
+            shared.click_presses.clear();
         }
+        self.click_lease.take();
         self.stop_worker()
     }
 
     fn reconcile_worker(&mut self) -> Result<(), String> {
-        let active = lock(&self.shared).runtime.has_active_mode();
-        match (active, self.worker.is_some()) {
-            (true, false) => self.start_worker(),
-            (false, true) => self.stop_worker(),
+        let (active, cursor_modes) = {
+            let shared = lock(&self.shared);
+            (
+                shared.runtime.has_active_mode(),
+                shared.runtime.has_cursor_mode(),
+            )
+        };
+        match (active, self.worker.as_ref()) {
+            (true, None) => self.start_worker(cursor_modes),
+            (false, Some(_)) => self.stop_worker(),
+            (true, Some(worker)) if worker.cursor_modes != cursor_modes => {
+                self.configure_cursor_modes(cursor_modes)
+            }
             _ => Ok(()),
         }
     }
 
-    fn start_worker(&mut self) -> Result<(), String> {
+    fn start_worker(&mut self, cursor_modes: bool) -> Result<(), String> {
         let factory = Arc::clone(&self.factory);
         let shared = Arc::clone(&self.shared);
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(CLICK_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("coordinate-tool-passive".into())
-            .spawn(move || run_worker(factory, receiver, ready_sender, shared))
+            .spawn(move || run_worker(factory, receiver, ready_sender, shared, cursor_modes))
             .map_err(|error| format!("Could not start coordinate worker: {error}"))?;
 
         match ready_receiver.recv() {
             Ok(Ok(())) => {
-                self.worker = Some(WorkerHandle { sender, join });
+                self.worker = Some(WorkerHandle {
+                    sender,
+                    join,
+                    cursor_modes,
+                });
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -297,6 +453,25 @@ impl CoordinateToolController {
                 Err(format!("Coordinate worker stopped during setup: {error}"))
             }
         }
+    }
+
+    fn configure_cursor_modes(&mut self, enabled: bool) -> Result<(), String> {
+        let worker = self
+            .worker
+            .as_mut()
+            .ok_or_else(|| "Coordinate worker is not running".to_string())?;
+        let (response, receiver) = mpsc::sync_channel(1);
+        worker
+            .sender
+            .send(WorkerMessage::SetCursorModes { enabled, response })
+            .map_err(|error| format!("Could not update coordinate worker: {error}"))?;
+        let result = receiver
+            .recv()
+            .map_err(|error| format!("Coordinate worker stopped during update: {error}"))?;
+        if result.is_ok() || !enabled {
+            worker.cursor_modes = enabled;
+        }
+        result
     }
 
     fn stop_worker(&mut self) -> Result<(), String> {
@@ -312,6 +487,7 @@ impl CoordinateToolController {
         shared.latest_sample = None;
         shared.pending_freeze = false;
         shared.sample_error = None;
+        shared.click_presses.clear();
         result
     }
 }
@@ -324,39 +500,84 @@ impl Drop for CoordinateToolController {
 
 fn run_worker(
     factory: Arc<dyn CoordinateRuntimeFactory>,
-    receiver: mpsc::Receiver<WorkerMessage>,
+    receiver: Receiver<WorkerMessage>,
     ready: mpsc::SyncSender<Result<(), String>>,
     shared: Arc<Mutex<SharedState>>,
+    mut cursor_modes: bool,
 ) -> Result<(), String> {
-    let mut sampler = match factory.create_sampler() {
-        Ok(sampler) => sampler,
-        Err(error) => {
-            let _ = ready.send(Err(error.clone()));
-            return Err(error);
+    let (mut sampler, mut backend) = if cursor_modes {
+        match create_cursor_runtime(factory.as_ref()) {
+            Ok((sampler, backend)) => (Some(sampler), Some(backend)),
+            Err(error) => {
+                let _ = ready.send(Err(error.clone()));
+                return Err(error);
+            }
         }
-    };
-    let mut backend = match factory.create_backend() {
-        Ok(backend) => backend,
-        Err(error) => {
-            drop(sampler);
-            let _ = ready.send(Err(error.clone()));
-            return Err(error);
-        }
+    } else {
+        (None, None)
     };
     if ready.send(Ok(())).is_err() {
-        let shutdown = backend.shutdown();
-        drop(backend);
-        drop(sampler);
-        return shutdown;
+        return shutdown_cursor_runtime(&mut sampler, &mut backend, &shared);
     }
 
     let mut last_good_sample: Option<CoordinateSample> = None;
     let mut last_frame: Option<CoordinateRenderFrame> = None;
     loop {
-        match receiver.recv_timeout(SAMPLE_INTERVAL) {
-            Ok(WorkerMessage::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        let received = if cursor_modes {
+            receiver
+                .recv_timeout(SAMPLE_INTERVAL)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => "timeout",
+                    mpsc::RecvTimeoutError::Disconnected => "disconnected",
+                })
+        } else {
+            receiver.recv().map_err(|_| "disconnected")
+        };
+
+        match received {
+            Err("timeout") => {}
+            Err("disconnected") | Ok(WorkerMessage::Shutdown) => break,
+            Ok(WorkerMessage::ClickPress(event)) => record_click_press(&shared, event),
+            Ok(WorkerMessage::SetCursorModes { enabled, response }) => {
+                let result = if enabled == cursor_modes {
+                    Ok(())
+                } else if enabled {
+                    match create_cursor_runtime(factory.as_ref()) {
+                        Ok((new_sampler, new_backend)) => {
+                            sampler = Some(new_sampler);
+                            backend = Some(new_backend);
+                            cursor_modes = true;
+                            last_good_sample = None;
+                            last_frame = None;
+                            Ok(())
+                        }
+                        Err(error) => {
+                            lock(&shared).backend_error = Some(error.clone());
+                            Err(error)
+                        }
+                    }
+                } else {
+                    let shutdown = shutdown_cursor_runtime(&mut sampler, &mut backend, &shared);
+                    cursor_modes = false;
+                    last_good_sample = None;
+                    last_frame = None;
+                    if let Err(error) = shutdown {
+                        lock(&shared).backend_error = Some(error);
+                    }
+                    Ok(())
+                };
+                let _ = response.send(result);
+            }
+            Err(_) => break,
         }
+
+        if !cursor_modes {
+            continue;
+        }
+
+        let (Some(sampler), Some(backend)) = (sampler.as_mut(), backend.as_mut()) else {
+            continue;
+        };
 
         let force_refresh = match backend.poll_events() {
             Ok(force_refresh) => force_refresh,
@@ -417,11 +638,58 @@ fn run_worker(
         lock(&shared).effects_status = backend.effects_status();
     }
 
-    let shutdown = backend.shutdown();
-    lock(&shared).effects_status = backend.effects_status();
-    drop(backend);
-    drop(sampler);
+    shutdown_cursor_runtime(&mut sampler, &mut backend, &shared)
+}
+
+fn create_cursor_runtime(
+    factory: &dyn CoordinateRuntimeFactory,
+) -> Result<
+    (
+        Box<dyn CoordinateSampler>,
+        Box<dyn CoordinateSurfaceBackend>,
+    ),
+    String,
+> {
+    let sampler = factory.create_sampler()?;
+    match factory.create_backend() {
+        Ok(backend) => Ok((sampler, backend)),
+        Err(error) => {
+            drop(sampler);
+            Err(error)
+        }
+    }
+}
+
+fn shutdown_cursor_runtime(
+    sampler: &mut Option<Box<dyn CoordinateSampler>>,
+    backend: &mut Option<Box<dyn CoordinateSurfaceBackend>>,
+    shared: &Arc<Mutex<SharedState>>,
+) -> Result<(), String> {
+    let shutdown = backend
+        .take()
+        .map(|mut backend| {
+            let result = backend.shutdown();
+            lock(shared).effects_status = backend.effects_status();
+            result
+        })
+        .unwrap_or(Ok(()));
+    sampler.take();
+    let mut shared = lock(shared);
+    shared.latest_sample = None;
+    shared.pending_freeze = false;
+    shared.sample_error = None;
     shutdown
+}
+
+fn record_click_press(shared: &Arc<Mutex<SharedState>>, event: ClickPressEvent) {
+    let mut shared = lock(shared);
+    if !shared.runtime.click_enabled()
+        || shared.click_generation != event.generation
+        || shared.click_presses.len() >= CLICK_PENDING_CAPACITY
+    {
+        return;
+    }
+    shared.click_presses.push_back(event);
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -438,13 +706,78 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSampler,
-        CoordinateSurfaceBackend, CoordinateToolController,
+        ClickObservationLease, ClickObservationProvider, CoordinateRenderFrame,
+        CoordinateRuntimeFactory, CoordinateSampler, CoordinateSurfaceBackend,
+        CoordinateToolController,
     };
     use crate::coordinate_tool::model::{
-        CoordinateEffectsStatus, CoordinateSample, CursorEffectStatus, ForegroundClientGeometry,
-        MonitorGeometry, MonitorId, PhysicalPoint, PhysicalRect,
+        ClickButton, ClickPressEvent, ClickPressSink, CoordinateEffectsStatus, CoordinateSample,
+        CursorEffectStatus, ForegroundClientGeometry, MonitorGeometry, MonitorId, PhysicalPoint,
+        PhysicalRect,
     };
+
+    #[derive(Clone)]
+    struct FakeClickObservation {
+        active: Arc<Mutex<Option<(u64, Arc<dyn ClickPressSink>)>>>,
+        acquisitions: Arc<AtomicUsize>,
+        releases: Arc<AtomicUsize>,
+        failure: Option<String>,
+    }
+
+    impl FakeClickObservation {
+        fn new(failure: Option<&str>) -> Self {
+            Self {
+                active: Arc::new(Mutex::new(None)),
+                acquisitions: Arc::new(AtomicUsize::new(0)),
+                releases: Arc::new(AtomicUsize::new(0)),
+                failure: failure.map(str::to_string),
+            }
+        }
+
+        fn current(&self) -> Option<(u64, Arc<dyn ClickPressSink>)> {
+            self.active.lock().unwrap().clone()
+        }
+    }
+
+    struct FakeClickLease {
+        active: Arc<Mutex<Option<(u64, Arc<dyn ClickPressSink>)>>>,
+        releases: Arc<AtomicUsize>,
+        generation: u64,
+    }
+
+    impl ClickObservationLease for FakeClickLease {}
+
+    impl Drop for FakeClickLease {
+        fn drop(&mut self) {
+            let mut active = self.active.lock().unwrap();
+            if active
+                .as_ref()
+                .is_some_and(|(generation, _)| *generation == self.generation)
+            {
+                *active = None;
+            }
+            self.releases.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    impl ClickObservationProvider for FakeClickObservation {
+        fn acquire(
+            &self,
+            generation: u64,
+            sink: Arc<dyn ClickPressSink>,
+        ) -> Result<Box<dyn ClickObservationLease>, String> {
+            if let Some(error) = &self.failure {
+                return Err(error.clone());
+            }
+            *self.active.lock().unwrap() = Some((generation, sink));
+            self.acquisitions.fetch_add(1, Ordering::AcqRel);
+            Ok(Box::new(FakeClickLease {
+                active: Arc::clone(&self.active),
+                releases: Arc::clone(&self.releases),
+                generation,
+            }))
+        }
+    }
 
     #[derive(Clone)]
     struct FakeFactory {
@@ -643,6 +976,30 @@ mod tests {
                 "worker should refresh unchanged successful frames"
             );
             std::thread::yield_now();
+        }
+    }
+
+    fn receive_click(controller: &CoordinateToolController) -> ClickPressEvent {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut events = controller.take_click_presses();
+            if let Some(event) = events.pop() {
+                return event;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "worker should record click ingress"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn click_event(generation: u64, button: ClickButton, point: PhysicalPoint) -> ClickPressEvent {
+        ClickPressEvent {
+            button,
+            position: point,
+            observed_at: Instant::now(),
+            generation,
         }
     }
 
@@ -1039,5 +1396,176 @@ mod tests {
             assert_eq!(factory.count(&factory.shutdowns), 1);
             controller.shutdown().unwrap();
         }
+    }
+
+    #[test]
+    fn click_only_worker_is_event_driven_and_keeps_exact_physical_press_coordinates() {
+        let (factory, _rendered) = FakeFactory::new([], Ok(sample(0, 0, "DISPLAY1")));
+        let observer = Arc::new(FakeClickObservation::new(None));
+        let provider: Arc<dyn ClickObservationProvider> = observer.clone();
+        let mut controller = CoordinateToolController::new_with_preferences_and_click_observation(
+            Arc::new(factory.clone()),
+            Default::default(),
+            provider,
+        );
+
+        controller.set_click_enabled(true).unwrap();
+        assert!(controller.is_running());
+        assert!(controller.runtime_state().click_enabled());
+        assert!(controller.runtime_state().has_active_mode());
+        assert!(!controller.runtime_state().has_cursor_mode());
+        assert_eq!(factory.count(&factory.sampler_creations), 0);
+        assert_eq!(factory.count(&factory.backend_creations), 0);
+        assert_eq!(factory.count(&factory.sample_calls), 0);
+
+        let (generation, sink) = observer.current().unwrap();
+        let point = PhysicalPoint::new(-2014, 113);
+        let event = click_event(generation, ClickButton::Middle, point);
+        assert!(sink.try_send(event));
+        let observed = receive_click(&controller);
+        assert_eq!(observed.button, ClickButton::Middle);
+        assert_eq!(observed.position, point);
+        assert_eq!(observed.generation, generation);
+        assert_eq!(observed.observed_at, event.observed_at);
+        assert_eq!(factory.count(&factory.sample_calls), 0);
+        assert_eq!(factory.count(&factory.backend_creations), 0);
+
+        controller.set_click_enabled(false).unwrap();
+        assert!(!controller.is_running());
+        assert!(!controller.runtime_state().click_enabled());
+        assert!(observer.current().is_none());
+        assert_eq!(observer.releases.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn saved_click_appearance_never_enables_the_session_runtime() {
+        let (factory, _rendered) = FakeFactory::new([], Ok(sample(0, 0, "DISPLAY1")));
+        let observer = Arc::new(FakeClickObservation::new(None));
+        let provider: Arc<dyn ClickObservationProvider> = observer.clone();
+        let mut preferences = crate::coordinate_tool::CoordinateToolPreferences::default();
+        preferences.click.size_px = 48;
+        let mut controller = CoordinateToolController::new_with_preferences_and_click_observation(
+            Arc::new(factory.clone()),
+            preferences,
+            provider,
+        );
+
+        assert!(!controller.runtime_state().click_enabled());
+        assert!(!controller.is_running());
+        controller
+            .set_preferences(crate::coordinate_tool::CoordinateToolPreferences {
+                click: crate::coordinate_tool::ClickEffectPreferences {
+                    duration_ms: 700,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(controller.preferences().click.duration_ms, 700);
+        assert!(!controller.runtime_state().click_enabled());
+        assert!(!controller.is_running());
+        assert_eq!(observer.acquisitions.load(Ordering::Acquire), 0);
+        assert_eq!(factory.count(&factory.sampler_creations), 0);
+        assert_eq!(factory.count(&factory.backend_creations), 0);
+    }
+
+    #[test]
+    fn off_on_invalidates_old_click_generation_while_cursor_worker_continues() {
+        let (factory, rendered) = FakeFactory::new([], Ok(sample(-1800, 200, "DISPLAY1")));
+        let observer = Arc::new(FakeClickObservation::new(None));
+        let provider: Arc<dyn ClickObservationProvider> = observer.clone();
+        let mut controller = CoordinateToolController::new_with_preferences_and_click_observation(
+            Arc::new(factory.clone()),
+            Default::default(),
+            provider,
+        );
+
+        controller.set_hud_enabled(true).unwrap();
+        let _ = receive(&rendered);
+        controller.set_click_enabled(true).unwrap();
+        let (old_generation, old_sink) = observer.current().unwrap();
+        controller.set_click_enabled(false).unwrap();
+        assert!(
+            controller.is_running(),
+            "the HUD keeps the shared worker alive"
+        );
+        controller.set_click_enabled(true).unwrap();
+        let (new_generation, new_sink) = observer.current().unwrap();
+        assert!(new_generation > old_generation);
+
+        assert!(old_sink.try_send(click_event(
+            old_generation,
+            ClickButton::Left,
+            PhysicalPoint::new(1, 2),
+        )));
+        let expected_point = PhysicalPoint::new(-31, 77);
+        assert!(new_sink.try_send(click_event(
+            new_generation,
+            ClickButton::Right,
+            expected_point,
+        )));
+
+        let observed = receive_click(&controller);
+        assert_eq!(observed.button, ClickButton::Right);
+        assert_eq!(observed.position, expected_point);
+        assert_eq!(observed.generation, new_generation);
+        assert!(controller.take_click_presses().is_empty());
+        assert_eq!(factory.count(&factory.sampler_creations), 1);
+
+        controller.set_click_enabled(false).unwrap();
+        controller.set_hud_enabled(false).unwrap();
+        assert!(!controller.is_running());
+    }
+
+    #[test]
+    fn click_observer_setup_failure_rolls_back_runtime_enablement() {
+        let (factory, _rendered) = FakeFactory::new([], Ok(sample(0, 0, "DISPLAY1")));
+        let observer = Arc::new(FakeClickObservation::new(Some("observer unavailable")));
+        let provider: Arc<dyn ClickObservationProvider> = observer.clone();
+        let mut controller = CoordinateToolController::new_with_preferences_and_click_observation(
+            Arc::new(factory.clone()),
+            Default::default(),
+            provider,
+        );
+
+        assert_eq!(
+            controller.set_click_enabled(true).unwrap_err(),
+            "observer unavailable"
+        );
+        assert!(!controller.runtime_state().click_enabled());
+        assert!(!controller.runtime_state().has_active_mode());
+        assert!(!controller.is_running());
+        assert_eq!(factory.count(&factory.sampler_creations), 0);
+        assert_eq!(factory.count(&factory.backend_creations), 0);
+        assert_eq!(observer.acquisitions.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn effects_off_releases_click_observation_while_preserving_hud_and_freeze() {
+        let (factory, rendered) = FakeFactory::new([], Ok(sample(-1800, 200, "DISPLAY1")));
+        let observer = Arc::new(FakeClickObservation::new(None));
+        let provider: Arc<dyn ClickObservationProvider> = observer.clone();
+        let mut controller = CoordinateToolController::new_with_preferences_and_click_observation(
+            Arc::new(factory),
+            Default::default(),
+            provider,
+        );
+
+        controller.set_hud_enabled(true).unwrap();
+        let _ = receive(&rendered);
+        controller.freeze();
+        controller.set_click_enabled(true).unwrap();
+        assert!(observer.current().is_some());
+
+        controller.disable_effects().unwrap();
+        let runtime = controller.runtime_state();
+        assert!(runtime.hud_enabled());
+        assert!(runtime.is_frozen());
+        assert!(!runtime.click_enabled());
+        assert!(observer.current().is_none());
+        assert!(controller.is_running());
+
+        controller.set_hud_enabled(false).unwrap();
+        assert!(!controller.is_running());
     }
 }

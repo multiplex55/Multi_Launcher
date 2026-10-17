@@ -31,6 +31,9 @@ pub(crate) fn handle_coordinate_tool<H: LauncherCommandHost + ?Sized>(
         CoordinateToolCommand::ZoomHelp => {
             return Ok(help_outcome(ZOOM_HELP));
         }
+        CoordinateToolCommand::ClickHelp => {
+            return Ok(help_outcome(CLICK_HELP));
+        }
         CoordinateToolCommand::Invalid { error, .. } => {
             let mut error = CommandError::new("mouse", error.clone());
             error.toast = true;
@@ -67,7 +70,7 @@ fn help_outcome(text: &str) -> CommandOutcome {
     }
 }
 
-const MOUSE_HELP: &str = "Mouse controls: `mouse settings` opens the saved appearance UI. Quick actions: `mouse coords toggle`, `mouse coords copy`, `mouse coords pick`, and `mouse coords cancel`; crosshair controls are `mouse crosshair toggle|on|off`, halo controls are `mouse halo toggle|on|off`, and magnifier controls are `mouse zoom toggle|on|off`. Zoom is a live magnifier of actual desktop content on supported composited Windows surfaces. `mouse effects off` disables the crosshair, halo, and magnifier while preserving the coordinate HUD and an active pick. Enablement is session-only; appearance is saved in Mouse Settings. Halo inversion requires supported composited Windows content and may use a non-inverting outline fallback. Advanced commands: `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, `mouse coords offset <signed-x> <signed-y>` (-512..512), `mouse coords freeze|unfreeze`, `mouse crosshair color #rrggbb`, `mouse crosshair thickness` (1..16), `mouse crosshair length` (2..256), `mouse crosshair gap <0..128>` (per-arm physical pixels), `mouse crosshair opacity` (0.1..1.0), `mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`. Coordinates are signed physical pixels. A pick consumes a fresh left press and release; Escape cancels without changing the clipboard. Picking uses its click-time sample even while the HUD is frozen. Client coordinates use the foreground client origin, or the last external active window while Multi Launcher is foreground. See `mouse coords help`, `mouse crosshair help`, `mouse halo help`, and `mouse zoom help` for details.";
+const MOUSE_HELP: &str = "Mouse controls: `mouse settings` opens the saved appearance UI. Quick actions: `mouse coords toggle`, `mouse coords copy`, `mouse coords pick`, and `mouse coords cancel`; crosshair controls are `mouse crosshair toggle|on|off`, halo controls are `mouse halo toggle|on|off`, magnifier controls are `mouse zoom toggle|on|off`, and click feedback uses `mouse click toggle|on|off`. `mouse click settings` opens the same Mouse Settings destination. Zoom is a live magnifier of actual desktop content on supported composited Windows surfaces. `mouse effects off` disables click feedback, the crosshair, halo, and magnifier while preserving the coordinate HUD and an active pick. Enablement is session-only; appearance is saved in Mouse Settings. Halo inversion requires supported composited Windows content and may use a non-inverting outline fallback. Advanced commands: `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, `mouse coords offset <signed-x> <signed-y>` (-512..512), `mouse coords freeze|unfreeze`, `mouse crosshair color #rrggbb`, `mouse crosshair thickness` (1..16), `mouse crosshair length` (2..256), `mouse crosshair gap <0..128>` (per-arm physical pixels), `mouse crosshair opacity` (0.1..1.0), `mouse crosshair guides on|off`, and `mouse crosshair contrast on|off`. Coordinates are signed physical pixels. A pick consumes a fresh left press and release; Escape cancels without changing the clipboard. Picking uses its click-time sample even while the HUD is frozen. Client coordinates use the foreground client origin, or the last external active window while Multi Launcher is foreground. See `mouse coords help`, `mouse crosshair help`, `mouse halo help`, `mouse zoom help`, and `mouse click help` for details.";
 
 const COORDINATE_HELP: &str = "Coordinate HUD: `mouse coords toggle` toggles the HUD; use `mouse coords on|off`, `mouse coords space desktop|monitor|client`, `mouse coords compact|detailed`, or `mouse coords offset <signed-x> <signed-y>` (-512..512). Use `mouse coords freeze|unfreeze`; `mouse coords copy` writes the displayed signed physical-pixel position as x,y. `mouse coords pick` copies the next click's physical x,y in the selected space after consuming its press and release; Escape cancels without changing the clipboard. Pick uses its click-time sample even while the HUD is frozen. `mouse coords cancel` requests safe cancellation and drains any consumed click release. Desktop uses signed virtual-desktop coordinates, monitor is relative to the cursor monitor origin, and client is relative to the foreground client origin. While Multi Launcher is foreground, client coordinates use the last external active window. For display preferences, use `mouse settings`. The crosshair is independent; see `mouse crosshair help`.";
 
@@ -76,6 +79,8 @@ const CROSSHAIR_HELP: &str = "Crosshair controls: `mouse crosshair toggle|on|off
 const HALO_HELP: &str = "Cursor halo controls: `mouse halo toggle|on|off` changes session enablement immediately. Its radius, inversion strength, and outline are saved in `mouse settings`. On supported composited Windows content the halo inverts desktop colors; if native inversion is unavailable, the status reports a non-inverting outline fallback. See `mouse help` for `mouse effects off`, which preserves the coordinate HUD and active pick.";
 
 const ZOOM_HELP: &str = "Cursor magnifier controls: `mouse zoom toggle|on|off` changes session enablement immediately. The live screen lens follows the current cursor; its factor, centered/offset destination, diameter, and outline are saved in `mouse settings`. Magnification depends on supported composited Windows desktop content. See `mouse help` for `mouse effects off`, which preserves the coordinate HUD and active pick.";
+
+const CLICK_HELP: &str = "Click feedback: `mouse click toggle|on|off` observes physical left, right, and middle button presses for a transient visual indicator. `mouse click settings` opens Mouse Settings for saved Ripple, Circle, or Flash style, color, size, opacity, and duration. Enablement is session-only; `mouse effects off` disables click feedback while preserving the coordinate HUD and pick state.";
 
 #[cfg(test)]
 mod tests {
@@ -187,7 +192,7 @@ mod tests {
         let general = handle_coordinate_tool(&mut host, &CoordinateToolCommand::Help).unwrap();
         assert!(matches!(
             general.toasts.as_slice(),
-            [ToastPolicy::Info(text)] if text.contains("mouse settings") && text.contains("mouse coords pick") && text.contains("mouse crosshair gap <0..128>") && text.contains("mouse halo toggle|on|off") && text.contains("mouse zoom toggle|on|off") && text.contains("mouse effects off") && text.contains("preserving the coordinate HUD and an active pick") && text.contains("non-inverting outline fallback")
+            [ToastPolicy::Info(text)] if text.contains("mouse settings") && text.contains("mouse coords pick") && text.contains("mouse crosshair gap <0..128>") && text.contains("mouse halo toggle|on|off") && text.contains("mouse zoom toggle|on|off") && text.contains("mouse click toggle|on|off") && text.contains("mouse click settings") && text.contains("mouse effects off") && text.contains("preserving the coordinate HUD and an active pick") && text.contains("non-inverting outline fallback")
         ));
         let crosshair_help =
             handle_coordinate_tool(&mut host, &CoordinateToolCommand::CrosshairHelp).unwrap();
@@ -206,6 +211,12 @@ mod tests {
         assert!(matches!(
             zoom_help.toasts.as_slice(),
             [ToastPolicy::Info(text)] if text.contains("live screen lens") && text.contains("mouse zoom toggle|on|off") && text.contains("mouse settings")
+        ));
+        let click_help =
+            handle_coordinate_tool(&mut host, &CoordinateToolCommand::ClickHelp).unwrap();
+        assert!(matches!(
+            click_help.toasts.as_slice(),
+            [ToastPolicy::Info(text)] if text.contains("left, right, and middle") && text.contains("style, color, size, opacity, and duration") && text.contains("session-only")
         ));
         let help = handle_coordinate_tool(&mut host, &CoordinateToolCommand::HudHelp).unwrap();
         assert!(

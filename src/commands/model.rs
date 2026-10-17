@@ -243,6 +243,9 @@ pub enum CoordinateToolCommand {
     ToggleZoom,
     SetZoomEnabled(bool),
     ZoomHelp,
+    ToggleClick,
+    SetClickEnabled(bool),
+    ClickHelp,
     EffectsOff,
     Invalid { raw: String, error: String },
 }
@@ -260,6 +263,7 @@ kinds!(CoordinateToolCommand,
     Self::SetContrast(_) => "set_contrast", Self::CrosshairHelp => "crosshair_help",
     Self::ToggleHalo => "toggle_halo", Self::SetHaloEnabled(_) => "set_halo_enabled", Self::HaloHelp => "halo_help",
     Self::ToggleZoom => "toggle_zoom", Self::SetZoomEnabled(_) => "set_zoom_enabled", Self::ZoomHelp => "zoom_help",
+    Self::ToggleClick => "toggle_click", Self::SetClickEnabled(_) => "set_click_enabled", Self::ClickHelp => "click_help",
     Self::EffectsOff => "effects_off",
     Self::Invalid { .. } => "invalid"
 );
