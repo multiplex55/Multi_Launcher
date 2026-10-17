@@ -2,12 +2,174 @@ use image::{Rgba, RgbaImage};
 
 use super::controller::CoordinateRenderFrame;
 use super::model::{
-    CoordinateSample, CoordinateSpace, CoordinateUnavailable, MonitorId, PhysicalPoint,
-    PhysicalRect, PhysicalSize,
+    ClickButton, ClickPressEvent, CoordinateSample, CoordinateSpace, CoordinateUnavailable,
+    MonitorId, PhysicalPoint, PhysicalRect, PhysicalSize,
 };
 use super::settings::{
-    CrosshairColor, CrosshairPreferences, HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
+    ClickEffectPreferences, ClickEffectStyle, CrosshairColor, CrosshairPreferences,
+    HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
 };
+
+pub(crate) const CLICK_EFFECT_CAPACITY: usize = 16;
+pub(crate) const CLICK_ANIMATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(16);
+
+/// One bounded, already-rasterized physical-pixel indicator for the passive
+/// surface backend. Its identity stays stable while its animation advances.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClickEffectFrame {
+    pub id: u64,
+    pub button: ClickButton,
+    pub origin: PhysicalPoint,
+    pub image: RgbaImage,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveClickEffect {
+    id: u64,
+    button: ClickButton,
+    position: PhysicalPoint,
+    generation: u64,
+    observed_at: std::time::Instant,
+    expires_at: std::time::Instant,
+    appearance: ClickEffectPreferences,
+}
+
+/// Owns only transient visual state. Admission is finite and explicitly
+/// visual-only: a full burst drops its oldest visible ripple to admit the
+/// newest physical press.
+#[derive(Debug, Default)]
+pub(crate) struct ClickEffectManager {
+    active: std::collections::VecDeque<ActiveClickEffect>,
+    next_id: u64,
+}
+
+impl ClickEffectManager {
+    pub(crate) fn admit(
+        &mut self,
+        event: ClickPressEvent,
+        appearance: ClickEffectPreferences,
+        now: std::time::Instant,
+    ) -> bool {
+        let appearance = appearance.normalized();
+        let duration = std::time::Duration::from_millis(u64::from(appearance.duration_ms));
+        let Some(elapsed) = now.checked_duration_since(event.observed_at) else {
+            return false;
+        };
+        if elapsed >= duration || click_effect_origin(event.position, appearance.size_px).is_none()
+        {
+            return false;
+        }
+        let Some(expires_at) = event.observed_at.checked_add(duration) else {
+            return false;
+        };
+
+        if self.active.len() == CLICK_EFFECT_CAPACITY {
+            self.active.pop_front();
+        }
+        self.next_id = self.next_id.wrapping_add(1);
+        self.active.push_back(ActiveClickEffect {
+            id: self.next_id,
+            button: event.button,
+            position: event.position,
+            generation: event.generation,
+            observed_at: event.observed_at,
+            expires_at,
+            appearance,
+        });
+        true
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        !self.active.is_empty()
+    }
+
+    pub(crate) fn active_generation(&self) -> Option<u64> {
+        self.active.front().map(|effect| effect.generation)
+    }
+
+    /// Remove expired effects and rasterize the current animation state. This
+    /// also makes expiry deterministic for tests by accepting a monotonic time.
+    pub(crate) fn frames_at(&mut self, now: std::time::Instant) -> Vec<ClickEffectFrame> {
+        self.active.retain(|effect| now < effect.expires_at);
+        self.active
+            .iter()
+            .filter_map(|effect| {
+                let duration = effect.expires_at.duration_since(effect.observed_at);
+                let elapsed = now.checked_duration_since(effect.observed_at)?;
+                let progress = (elapsed.as_secs_f32() / duration.as_secs_f32()).clamp(0.0, 1.0);
+                let image = click_effect_bitmap(effect.appearance, progress)?;
+                let origin = click_effect_origin(effect.position, effect.appearance.size_px)?;
+                Some(ClickEffectFrame {
+                    id: effect.id,
+                    button: effect.button,
+                    origin,
+                    image,
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn clear(&mut self) -> bool {
+        let had_effects = self.is_active();
+        self.active.clear();
+        had_effects
+    }
+}
+
+fn click_effect_origin(position: PhysicalPoint, size_px: i32) -> Option<PhysicalPoint> {
+    let size = size_px.clamp(4, 256);
+    let half = size / 2;
+    let origin = PhysicalPoint::new(position.x.checked_sub(half)?, position.y.checked_sub(half)?);
+    i32::try_from(i64::from(origin.x).checked_add(i64::from(size))?).ok()?;
+    i32::try_from(i64::from(origin.y).checked_add(i64::from(size))?).ok()?;
+    Some(origin)
+}
+
+fn click_effect_bitmap(preferences: ClickEffectPreferences, progress: f32) -> Option<RgbaImage> {
+    let preferences = preferences.normalized();
+    if !progress.is_finite() || !(0.0..1.0).contains(&progress) {
+        return None;
+    }
+    let diameter = u32::try_from(preferences.size_px).ok()?;
+    let radius = diameter as f32 / 2.0;
+    let thickness = (diameter as f32 / 16.0).clamp(1.0, 8.0);
+    let outer_radius = radius - 0.5;
+    let ring_radius = match preferences.style {
+        ClickEffectStyle::Ripple => outer_radius * (0.18 + 0.82 * progress),
+        ClickEffectStyle::Circle => outer_radius,
+        ClickEffectStyle::Flash => outer_radius,
+    };
+    let fade = 1.0 - progress;
+    let alpha = (f32::from(opacity_alpha(preferences.opacity)) * fade)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    let mut image = RgbaImage::new(diameter, diameter);
+    let color = Rgba([
+        preferences.color.red,
+        preferences.color.green,
+        preferences.color.blue,
+        alpha,
+    ]);
+    let edge = thickness / 2.0;
+    for y in 0..diameter {
+        let dy = y as f32 + 0.5 - radius;
+        for x in 0..diameter {
+            let dx = x as f32 + 0.5 - radius;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let visible = match preferences.style {
+                ClickEffectStyle::Ripple | ClickEffectStyle::Circle => {
+                    distance <= outer_radius && (distance - ring_radius).abs() <= edge
+                }
+                ClickEffectStyle::Flash => distance <= outer_radius,
+            };
+            if visible && alpha > 0 {
+                image.put_pixel(x, y, color);
+            }
+        }
+    }
+    Some(image)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PixelRect {
@@ -1309,22 +1471,187 @@ fn concise_error(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CrosshairGeometry, GuideOrientation, HaloColorTransform, PhysicalInsets, ZoomAxisPlacement,
-        ZoomDestinationBounds, ZoomGeometryError, ZoomPresentationError, ZoomSourceCoverage,
+        CLICK_EFFECT_CAPACITY, ClickEffectManager, CrosshairGeometry, GuideOrientation,
+        HaloColorTransform, PhysicalInsets, ZoomAxisPlacement, ZoomDestinationBounds,
+        ZoomGeometryError, ZoomPresentationError, ZoomSourceCoverage, click_effect_origin,
         crosshair_bitmap, crosshair_geometry, guide_geometry, halo_fallback_bitmap, halo_geometry,
         halo_outline_bitmap, zoom_identity_color_matrix, zoom_lens_geometry, zoom_outline_bitmap,
         zoom_presentation_geometry,
     };
     use crate::coordinate_tool::controller::CoordinateRenderFrame;
     use crate::coordinate_tool::model::{
-        CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState, ForegroundClientGeometry,
-        MonitorGeometry, MonitorId,
+        ClickButton, ClickPressEvent, CoordinateSample, CoordinateSpace,
+        CoordinateToolRuntimeState, ForegroundClientGeometry, MonitorGeometry, MonitorId,
     };
     use crate::coordinate_tool::model::{PhysicalPoint, PhysicalRect, PhysicalSize};
     use crate::coordinate_tool::settings::{
-        CoordinateOffset, CrosshairColor, CrosshairPreferences, HaloPreferences, ZoomMode,
-        ZoomPreferences,
+        ClickEffectPreferences, ClickEffectStyle, CoordinateOffset, CrosshairColor,
+        CrosshairPreferences, HaloPreferences, ZoomMode, ZoomPreferences,
     };
+
+    fn click_event(
+        button: ClickButton,
+        position: PhysicalPoint,
+        observed_at: std::time::Instant,
+        generation: u64,
+    ) -> ClickPressEvent {
+        ClickPressEvent {
+            button,
+            position,
+            observed_at,
+            generation,
+        }
+    }
+
+    fn visible_pixel_count(image: &image::RgbaImage) -> usize {
+        image.pixels().filter(|pixel| pixel.0[3] > 0).count()
+    }
+
+    #[test]
+    fn click_rasters_cover_all_buttons_and_styles_with_finite_fading_geometry() {
+        let start = std::time::Instant::now();
+        for button in [ClickButton::Left, ClickButton::Right, ClickButton::Middle] {
+            let mut style_images = Vec::new();
+            for style in [
+                ClickEffectStyle::Ripple,
+                ClickEffectStyle::Circle,
+                ClickEffectStyle::Flash,
+            ] {
+                let mut manager = ClickEffectManager::default();
+                let appearance = ClickEffectPreferences {
+                    style,
+                    size_px: 64,
+                    opacity: 0.8,
+                    duration_ms: 500,
+                    ..Default::default()
+                };
+                assert!(manager.admit(
+                    click_event(button, PhysicalPoint::new(-400, 120), start, 9),
+                    appearance,
+                    start,
+                ));
+                let first = manager.frames_at(start + std::time::Duration::from_millis(100));
+                let later = manager.frames_at(start + std::time::Duration::from_millis(200));
+                assert_eq!(first.len(), 1);
+                assert_eq!(first[0].button, button);
+                assert_eq!(first[0].origin, PhysicalPoint::new(-432, 88));
+                assert_eq!(first[0].image.dimensions(), (64, 64));
+                assert!(visible_pixel_count(&first[0].image) > 0);
+                style_images.push(first[0].image.clone());
+                let first_alpha = first[0]
+                    .image
+                    .pixels()
+                    .map(|pixel| pixel.0[3])
+                    .max()
+                    .unwrap_or_default();
+                let later_alpha = later[0]
+                    .image
+                    .pixels()
+                    .map(|pixel| pixel.0[3])
+                    .max()
+                    .unwrap_or_default();
+                assert!(later_alpha < first_alpha);
+                if style == ClickEffectStyle::Flash {
+                    assert!(first[0].image.get_pixel(32, 32).0[3] > 0);
+                }
+            }
+            assert_ne!(style_images[0], style_images[1]);
+            assert_ne!(style_images[1], style_images[2]);
+            assert_ne!(style_images[0], style_images[2]);
+        }
+    }
+
+    #[test]
+    fn click_admission_discards_future_and_expired_events_and_clears_at_deadline() {
+        let now = std::time::Instant::now();
+        let appearance = ClickEffectPreferences {
+            duration_ms: 50,
+            ..Default::default()
+        };
+        let mut manager = ClickEffectManager::default();
+        let point = PhysicalPoint::new(-1920, 120);
+        assert!(!manager.admit(
+            click_event(
+                ClickButton::Left,
+                point,
+                now - std::time::Duration::from_millis(50),
+                1,
+            ),
+            appearance,
+            now,
+        ));
+        assert!(!manager.admit(
+            click_event(
+                ClickButton::Left,
+                point,
+                now + std::time::Duration::from_millis(1),
+                1,
+            ),
+            appearance,
+            now,
+        ));
+        assert!(!manager.admit(
+            click_event(ClickButton::Left, PhysicalPoint::new(i32::MIN, 0), now, 1,),
+            appearance,
+            now,
+        ));
+        assert!(manager.admit(
+            click_event(ClickButton::Right, point, now, 1),
+            appearance,
+            now,
+        ));
+        assert_eq!(
+            manager
+                .frames_at(now + std::time::Duration::from_millis(49))
+                .len(),
+            1
+        );
+        assert!(
+            manager
+                .frames_at(now + std::time::Duration::from_millis(50))
+                .is_empty()
+        );
+        assert!(!manager.clear());
+    }
+
+    #[test]
+    fn click_bursts_are_bounded_drop_oldest_and_check_physical_bitmap_edges() {
+        let now = std::time::Instant::now();
+        let mut manager = ClickEffectManager::default();
+        let appearance = ClickEffectPreferences {
+            size_px: 10_000,
+            duration_ms: 2_000,
+            ..Default::default()
+        };
+        for index in 0..(CLICK_EFFECT_CAPACITY + 4) {
+            assert!(manager.admit(
+                click_event(
+                    ClickButton::Middle,
+                    PhysicalPoint::new(i32::try_from(index).unwrap() * 10, 300),
+                    now,
+                    4,
+                ),
+                appearance,
+                now,
+            ));
+        }
+        let frames = manager.frames_at(now + std::time::Duration::from_millis(1));
+        assert_eq!(frames.len(), CLICK_EFFECT_CAPACITY);
+        assert_eq!(frames[0].id, 5);
+        assert_eq!(frames[0].origin, PhysicalPoint::new(4 * 10 - 128, 172));
+        assert_eq!(
+            frames.last().unwrap().id,
+            (CLICK_EFFECT_CAPACITY + 4) as u64
+        );
+        assert_eq!(frames.last().unwrap().image.dimensions(), (256, 256));
+        assert!(manager.clear());
+        assert!(!manager.is_active());
+        assert!(!manager.clear());
+        assert_eq!(
+            click_effect_origin(PhysicalPoint::new(i32::MAX, 0), 256),
+            None
+        );
+    }
 
     #[test]
     fn halo_blend_preserves_input_full_inversion_and_expected_partial_rgb_values() {

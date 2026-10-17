@@ -7,10 +7,10 @@ use eframe::egui;
 
 use crate::commands::CoordinateToolCommand;
 use crate::coordinate_tool::{
-    CaptureOutcome, CaptureRuntime, CaptureSessionId, CoordinateCaptureController,
-    CoordinateEffectsStatus, CoordinateRuntimeFactory, CoordinateSpace, CoordinateToolController,
-    CoordinateToolPreferences, CoordinateUnavailable, NativeCoordinateCaptureRuntime,
-    format_coordinate,
+    CaptureOutcome, CaptureRuntime, CaptureSessionId, ClickObservationProvider,
+    CoordinateCaptureController, CoordinateEffectsStatus, CoordinateRuntimeFactory,
+    CoordinateSpace, CoordinateToolController, CoordinateToolPreferences, CoordinateUnavailable,
+    MouseGestureClickObservationProvider, NativeCoordinateCaptureRuntime, format_coordinate,
 };
 use crate::launcher_parking::LauncherParkingTransaction;
 use crate::settings::Settings;
@@ -76,6 +76,23 @@ impl CoordinateToolGui {
         )
     }
 
+    pub(crate) fn with_backends_and_click_observation(
+        settings_path: String,
+        preferences: CoordinateToolPreferences,
+        factory: Arc<dyn CoordinateRuntimeFactory>,
+        clipboard: Box<dyn CoordinateClipboardWriter>,
+        click_observation: Arc<dyn ClickObservationProvider>,
+    ) -> Self {
+        Self::with_backends_and_capture_and_click_observation(
+            settings_path,
+            preferences,
+            factory,
+            clipboard,
+            Arc::new(NativeCoordinateCaptureRuntime),
+            click_observation,
+        )
+    }
+
     pub(crate) fn with_backends_and_capture(
         settings_path: String,
         preferences: CoordinateToolPreferences,
@@ -83,11 +100,30 @@ impl CoordinateToolGui {
         clipboard: Box<dyn CoordinateClipboardWriter>,
         capture_runtime: Arc<dyn CaptureRuntime>,
     ) -> Self {
+        Self::with_backends_and_capture_and_click_observation(
+            settings_path,
+            preferences,
+            factory,
+            clipboard,
+            capture_runtime,
+            Arc::new(MouseGestureClickObservationProvider),
+        )
+    }
+
+    pub(crate) fn with_backends_and_capture_and_click_observation(
+        settings_path: String,
+        preferences: CoordinateToolPreferences,
+        factory: Arc<dyn CoordinateRuntimeFactory>,
+        clipboard: Box<dyn CoordinateClipboardWriter>,
+        capture_runtime: Arc<dyn CaptureRuntime>,
+        click_observation: Arc<dyn ClickObservationProvider>,
+    ) -> Self {
         let preferences = preferences.normalized();
         Self {
-            controller: CoordinateToolController::new_with_preferences(
+            controller: CoordinateToolController::new_with_preferences_and_click_observation(
                 factory,
                 preferences.clone(),
+                click_observation,
             ),
             settings_path,
             preferences,

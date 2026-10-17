@@ -464,6 +464,15 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
         if self.shutdown_complete {
             return;
         }
+        let requests = self.requested;
+        let live_sources = self.cached_live_sources.clone();
+        // Cheap layered surfaces can change independently of the sampled
+        // cursor frame (for example, a click window can be created or reused
+        // while the cursor is stationary). Install the complete current
+        // exclusion list before any visible magnifier refresh can capture the
+        // desktop again.
+        self.apply_filter_lists(cheap_window_ids, requests, &live_sources);
+
         let mut failed_surface = false;
         for kind in EFFECT_KINDS {
             if !self.requested.enabled(kind) {
@@ -530,8 +539,6 @@ impl<O: EffectNativeOperations> CursorEffectsRuntime<O> {
             }
         }
         if failed_surface {
-            let requests = self.requested;
-            let live_sources = self.cached_live_sources.clone();
             self.apply_filter_lists(cheap_window_ids, requests, &live_sources);
             let source = live_sources[EffectKind::Halo.index()].as_ref();
             if self.halo_fallback_ready() && requests.halo {
@@ -3564,6 +3571,46 @@ mod tests {
         poll(&mut runtime);
         assert_eq!(runtime.operations.refresh_calls, 2);
         assert_eq!(*runtime.status().halo(), CursorEffectStatus::Disabled);
+        runtime.shutdown().unwrap();
+    }
+
+    #[test]
+    fn stationary_capture_installs_changed_exclusions_before_refresh() {
+        let mut runtime = CursorEffectsRuntime::new(FakeOperations::default());
+        let preferences = CoordinateToolPreferences::default();
+        reconcile(
+            &mut runtime,
+            requests(true, true),
+            &preferences,
+            Some(PhysicalPoint::new(-1920, 240)),
+            false,
+        );
+        let cheap_windows = [1, 2, 3, 4, 55];
+        runtime.invalidate_filter_lists();
+        runtime.operations.events.clear();
+
+        runtime.poll_visible_sources(&cheap_windows);
+
+        let first_refresh = runtime
+            .operations
+            .events
+            .iter()
+            .position(|event| event.starts_with("refresh:"))
+            .expect("stationary polling should refresh visible effects");
+        for effect in ["halo", "zoom"] {
+            let filter = runtime
+                .operations
+                .events
+                .iter()
+                .position(|event| event == &format!("filter:{effect}"))
+                .expect("dirty exclusions should be refreshed");
+            assert!(
+                filter < first_refresh,
+                "filters must precede desktop capture"
+            );
+        }
+        assert!(runtime.operations.filter_lists[0].contains(&55));
+        assert!(runtime.operations.filter_lists[1].contains(&55));
         runtime.shutdown().unwrap();
     }
 

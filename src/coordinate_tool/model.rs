@@ -338,12 +338,23 @@ pub enum CursorEffectStatus {
     Unavailable(String),
 }
 
+/// Session and native presentation status for transient click indicators.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ClickEffectStatus {
+    #[default]
+    Disabled,
+    Idle,
+    Animating,
+    Unavailable(String),
+}
+
 /// Per-effect native status, separate from persisted preferences and requested
 /// runtime flags.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CoordinateEffectsStatus {
     halo: CursorEffectStatus,
     zoom: CursorEffectStatus,
+    click: ClickEffectStatus,
 }
 
 impl CoordinateEffectsStatus {
@@ -355,12 +366,20 @@ impl CoordinateEffectsStatus {
         &self.zoom
     }
 
+    pub fn click(&self) -> &ClickEffectStatus {
+        &self.click
+    }
+
     pub(crate) fn set_halo(&mut self, status: CursorEffectStatus) {
         self.halo = status;
     }
 
     pub(crate) fn set_zoom(&mut self, status: CursorEffectStatus) {
         self.zoom = status;
+    }
+
+    pub(crate) fn set_click(&mut self, status: ClickEffectStatus) {
+        self.click = status;
     }
 }
 

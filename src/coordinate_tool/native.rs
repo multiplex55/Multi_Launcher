@@ -126,10 +126,10 @@ mod windows_runtime {
         EffectNativeOperations, EffectRequests,
     };
     use super::super::render::{
-        GuideOrientation, HaloColorTransform, ZoomPresentationGeometry, ZoomRasterRect,
-        crosshair_bitmap, guide_bitmap, guide_geometry, halo_fallback_bitmap, halo_geometry,
-        halo_outline_bitmap, hud_font_size, hud_layout, hud_lines, zoom_identity_color_matrix,
-        zoom_outline_bitmap,
+        CLICK_EFFECT_CAPACITY, ClickEffectFrame, GuideOrientation, HaloColorTransform,
+        ZoomPresentationGeometry, ZoomRasterRect, crosshair_bitmap, guide_bitmap, guide_geometry,
+        halo_fallback_bitmap, halo_geometry, halo_outline_bitmap, hud_font_size, hud_layout,
+        hud_lines, zoom_identity_color_matrix, zoom_outline_bitmap,
     };
     use super::super::settings::{CrosshairPreferences, HaloPreferences, ZoomPreferences};
     use crate::performance::coordinate_profile::{
@@ -340,6 +340,7 @@ mod windows_runtime {
             WM_NCHITTEST => {
                 LRESULT(windows::Win32::UI::WindowsAndMessaging::HTTRANSPARENT as isize)
             }
+            WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_DISPLAYCHANGE | WM_DPICHANGED => {
                 // These are sent directly to each top-level window, so they do
                 // not necessarily appear as MSG values in the worker's queue.
@@ -805,6 +806,15 @@ mod windows_runtime {
                 self.visible = false;
                 self.filter_input_changed = true;
             }
+        }
+
+        fn clear_for_reuse(&mut self) {
+            self.hide();
+            if let Some(dib) = self.dib.as_mut() {
+                unsafe { ptr::write_bytes(dib.bits, 0, dib.byte_len) };
+                self.dirty = true;
+            }
+            self.position = None;
         }
 
         fn take_filter_input_change(&mut self) -> bool {
@@ -2095,10 +2105,14 @@ mod windows_runtime {
     }
 
     pub(super) struct WindowsSurfaceBackend {
+        _dpi_context: ThreadDpiContext,
+        instance: HINSTANCE,
         hud: LayeredSurface,
         crosshair: LayeredSurface,
         horizontal_guide: LayeredSurface,
         vertical_guide: LayeredSurface,
+        click_surfaces: Vec<LayeredSurface>,
+        click_surface_effect_ids: Vec<Option<u64>>,
         effects: CursorEffectsRuntime<WindowsEffectOperations>,
         crosshair_preferences: Option<CrosshairPreferences>,
         crosshair_image: Option<RgbaImage>,
@@ -2115,12 +2129,17 @@ mod windows_runtime {
 
     impl WindowsSurfaceBackend {
         pub(super) fn new() -> Result<Self, String> {
+            let dpi_context = ThreadDpiContext::per_monitor_v2()?;
             let instance = register_surface_class()?;
             Ok(Self {
+                _dpi_context: dpi_context,
+                instance,
                 hud: LayeredSurface::new(instance)?,
                 crosshair: LayeredSurface::new(instance)?,
                 horizontal_guide: LayeredSurface::new(instance)?,
                 vertical_guide: LayeredSurface::new(instance)?,
+                click_surfaces: Vec::with_capacity(CLICK_EFFECT_CAPACITY),
+                click_surface_effect_ids: Vec::with_capacity(CLICK_EFFECT_CAPACITY),
                 effects: CursorEffectsRuntime::new(WindowsEffectOperations::new(instance)),
                 crosshair_preferences: None,
                 crosshair_image: None,
@@ -2359,10 +2378,92 @@ mod windows_runtime {
         fn take_cheap_filter_input_change(&mut self) -> bool {
             // Evaluate every surface so each transition is consumed even if
             // an earlier one already requested an exclusion refresh.
-            self.hud.take_filter_input_change()
+            let mut changed = self.hud.take_filter_input_change()
                 | self.crosshair.take_filter_input_change()
                 | self.horizontal_guide.take_filter_input_change()
-                | self.vertical_guide.take_filter_input_change()
+                | self.vertical_guide.take_filter_input_change();
+            for surface in &mut self.click_surfaces {
+                changed |= surface.take_filter_input_change();
+            }
+            changed
+        }
+
+        fn cheap_window_ids(&self) -> Vec<usize> {
+            let mut windows = vec![
+                self.hud.hwnd.0 as usize,
+                self.crosshair.hwnd.0 as usize,
+                self.horizontal_guide.hwnd.0 as usize,
+                self.vertical_guide.hwnd.0 as usize,
+            ];
+            windows.extend(
+                self.click_surfaces
+                    .iter()
+                    .map(|surface| surface.hwnd.0 as usize),
+            );
+            windows
+        }
+
+        fn clear_click_surfaces(&mut self) {
+            for (surface, effect_id) in self
+                .click_surfaces
+                .iter_mut()
+                .zip(&mut self.click_surface_effect_ids)
+            {
+                surface.clear_for_reuse();
+                *effect_id = None;
+            }
+            self.effects.invalidate_filter_lists();
+        }
+
+        fn render_click_effects_inner(
+            &mut self,
+            frames: &[ClickEffectFrame],
+        ) -> Result<(), String> {
+            if frames.len() > CLICK_EFFECT_CAPACITY {
+                return Err("Click visualization exceeded its bounded surface pool".into());
+            }
+            let active_ids: Vec<u64> = frames.iter().map(|frame| frame.id).collect();
+            for (surface, effect_id) in self
+                .click_surfaces
+                .iter_mut()
+                .zip(&mut self.click_surface_effect_ids)
+            {
+                if effect_id.is_some_and(|id| !active_ids.contains(&id)) {
+                    surface.clear_for_reuse();
+                    *effect_id = None;
+                }
+            }
+            for frame in frames {
+                let slot = if let Some(slot) = self
+                    .click_surface_effect_ids
+                    .iter()
+                    .position(|effect_id| *effect_id == Some(frame.id))
+                {
+                    slot
+                } else if let Some(slot) = self
+                    .click_surface_effect_ids
+                    .iter()
+                    .position(Option::is_none)
+                {
+                    self.click_surface_effect_ids[slot] = Some(frame.id);
+                    slot
+                } else {
+                    if self.click_surfaces.len() == CLICK_EFFECT_CAPACITY {
+                        return Err("No click visualization surface is available".into());
+                    }
+                    self.click_surfaces
+                        .push(LayeredSurface::new(self.instance)?);
+                    self.click_surface_effect_ids.push(Some(frame.id));
+                    self.click_surfaces.len() - 1
+                };
+                self.click_surfaces[slot].present_image(frame.origin, &frame.image)?;
+            }
+            if self.take_cheap_filter_input_change() {
+                // Install the complete surface pool exclusion set before any
+                // cursor-effect refresh can capture desktop content.
+                self.effects.invalidate_filter_lists();
+            }
+            Ok(())
         }
     }
 
@@ -2394,12 +2495,7 @@ mod windows_runtime {
             if frame.current_sample.is_none() {
                 return Ok(());
             }
-            let cheap_window_ids = [
-                self.hud.hwnd.0 as usize,
-                self.crosshair.hwnd.0 as usize,
-                self.horizontal_guide.hwnd.0 as usize,
-                self.vertical_guide.hwnd.0 as usize,
-            ];
+            let cheap_window_ids = self.cheap_window_ids();
             self.effects.poll_visible_sources(&cheap_window_ids);
             self.sync_effect_stack_order();
             Ok(())
@@ -2411,12 +2507,7 @@ mod windows_runtime {
             }
             let force = mem::take(&mut self.refresh_requested);
             let topology_invalidated = mem::take(&mut self.topology_invalidated);
-            let cheap_window_ids = [
-                self.hud.hwnd.0 as usize,
-                self.crosshair.hwnd.0 as usize,
-                self.horizontal_guide.hwnd.0 as usize,
-                self.vertical_guide.hwnd.0 as usize,
-            ];
+            let cheap_window_ids = self.cheap_window_ids();
             self.halo_outline_enabled = frame.preferences.halo.outline_enabled;
             self.zoom_outline_enabled = frame.preferences.zoom.outline_enabled;
             let mut errors = Vec::new();
@@ -2444,6 +2535,18 @@ mod windows_runtime {
             errors.into_iter().next().map_or(Ok(()), Err)
         }
 
+        fn render_click_effects(&mut self, frames: &[ClickEffectFrame]) -> Result<(), String> {
+            if self.shutdown {
+                return Err("Coordinate surfaces are already shut down".into());
+            }
+            let result = self.render_click_effects_inner(frames);
+            if result.is_err() {
+                self.clear_click_surfaces();
+                let _ = self.take_cheap_filter_input_change();
+            }
+            result
+        }
+
         fn effects_status(&self) -> CoordinateEffectsStatus {
             self.effects.status()
         }
@@ -2457,6 +2560,13 @@ mod windows_runtime {
             if let Err(error) = self.effects.shutdown() {
                 errors.push(error);
             }
+            for surface in &mut self.click_surfaces {
+                if let Err(error) = surface.shutdown() {
+                    errors.push(error);
+                }
+            }
+            self.click_surfaces.clear();
+            self.click_surface_effect_ids.clear();
             for result in [
                 self.hud.shutdown(),
                 self.crosshair.shutdown(),

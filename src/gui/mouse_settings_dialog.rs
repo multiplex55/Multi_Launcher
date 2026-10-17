@@ -1,7 +1,8 @@
 use crate::commands::CoordinateToolCommand;
 use crate::coordinate_tool::{
-    CoordinateOffset, CoordinateSpace, CoordinateToolPreferences, CrosshairColor,
-    CursorEffectStatus, HaloPreferences, HudDetail, ZoomMode, ZoomPreferences,
+    ClickEffectPreferences, ClickEffectStatus, ClickEffectStyle, CoordinateOffset, CoordinateSpace,
+    CoordinateToolPreferences, CrosshairColor, CursorEffectStatus, HaloPreferences, HudDetail,
+    ZoomMode, ZoomPreferences,
 };
 use crate::gui::coordinate_tool::CoordinateToolGui;
 use crate::gui::theme::widgets::{
@@ -49,6 +50,15 @@ impl MouseSettingsDialog {
         self.draft.zoom = ZoomPreferences::default();
     }
 
+    fn reset_click_draft(&mut self) {
+        self.draft.click = ClickEffectPreferences::default();
+    }
+
+    fn cancel_draft(&mut self, current: &CoordinateToolPreferences) {
+        self.reset_from(current);
+        self.open = false;
+    }
+
     pub(crate) fn apply_to(&mut self, adapter: &mut CoordinateToolGui) -> Result<(), String> {
         match adapter.apply_draft_preferences(&self.baseline, &self.draft) {
             Ok(()) => {
@@ -86,6 +96,7 @@ impl MouseSettingsDialog {
         let runtime = adapter.runtime_state();
         let effect_status = adapter.effects_status();
         let mut open = self.open;
+        let mut cancel_requested = false;
         let output = egui::Window::new("Mouse Settings")
             .open(&mut open)
             .resizable(true)
@@ -111,6 +122,95 @@ impl MouseSettingsDialog {
                             semantic_status(ui, StatusTone::Error, "Settings error", Some(error));
                             ui.separator();
                         }
+
+                        ui.horizontal_wrapped(|ui| {
+                            compact_section_heading(ui, "Click Visualization", None);
+                            if ui.small_button("Reset click draft").clicked() {
+                                self.reset_click_draft();
+                            }
+                        });
+                        let mut click_enabled = runtime.click_enabled();
+                        if ui
+                            .push_id("mouse_settings_click_enabled", |ui| {
+                                ui.checkbox(&mut click_enabled, "Enabled for this session")
+                            })
+                            .inner
+                            .on_hover_text(
+                                "Starts or stops passive click feedback immediately. Enablement is not saved.",
+                            )
+                            .changed()
+                            && let Err(error) =
+                                adapter.execute(&CoordinateToolCommand::SetClickEnabled(click_enabled))
+                        {
+                            self.last_error = Some(error);
+                        }
+                        let click_status = adapter.effects_status().click().clone();
+                        semantic_status(
+                            ui,
+                            click_status_tone(&click_status),
+                            &click_status_text(&click_status),
+                            None,
+                        );
+                        ui.small(applied_click_summary(adapter.preferences()));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label("Style");
+                            egui::ComboBox::from_id_salt("mouse_settings_click_style")
+                                .selected_text(click_style_label(self.draft.click.style))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.draft.click.style,
+                                        ClickEffectStyle::Ripple,
+                                        "Ripple",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.draft.click.style,
+                                        ClickEffectStyle::Circle,
+                                        "Circle",
+                                    );
+                                    ui.selectable_value(
+                                        &mut self.draft.click.style,
+                                        ClickEffectStyle::Flash,
+                                        "Flash",
+                                    );
+                                });
+                        });
+                        let mut click_rgb = [
+                            self.draft.click.color.red,
+                            self.draft.click.color.green,
+                            self.draft.click.color.blue,
+                        ];
+                        if crate::gui::theme::widgets::labeled_form_row(
+                            ui,
+                            "RGB color",
+                            |ui| ui.color_edit_button_srgb(&mut click_rgb),
+                        )
+                        .changed()
+                        {
+                            self.draft.click.color = CrosshairColor::new(
+                                click_rgb[0],
+                                click_rgb[1],
+                                click_rgb[2],
+                            );
+                        }
+                        ui.add(
+                            egui::Slider::new(&mut self.draft.click.size_px, 4..=256)
+                                .show_value(true)
+                                .text("Size (physical pixels)"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.draft.click.opacity, 0.1..=1.0)
+                                .show_value(true)
+                                .text("Opacity"),
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut self.draft.click.duration_ms, 50..=2_000)
+                                .show_value(true)
+                                .text("Duration (ms)"),
+                        );
+                        ui.small(
+                            "The indicator follows the physical press point and disappears after its saved duration. Appearance changes stay in draft until Apply.",
+                        );
+                        ui.separator();
 
                         compact_section_heading(ui, "Crosshair", None);
                         let mut crosshair_enabled = runtime.crosshair_enabled();
@@ -419,18 +519,65 @@ impl MouseSettingsDialog {
                         });
 
                         ui.separator();
-                        let apply_button =
-                            ui.add_enabled(self.is_dirty(), egui::Button::new("Apply"));
-                        if with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary).clicked()
-                            && let Err(error) = self.apply_to(adapter)
-                        {
-                            self.last_error = Some(error);
-                        }
+                        ui.horizontal(|ui| {
+                            let apply_button =
+                                ui.add_enabled(self.is_dirty(), egui::Button::new("Apply"));
+                            if with_button_emphasis(ui, apply_button, ButtonEmphasis::Primary)
+                                .clicked()
+                                && let Err(error) = self.apply_to(adapter)
+                            {
+                                self.last_error = Some(error);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel_requested = true;
+                            }
+                        });
                     })
             });
         self.open = open;
+        if cancel_requested {
+            self.cancel_draft(adapter.preferences());
+        }
         output.and_then(|window| window.inner)
     }
+}
+
+fn click_status_text(status: &ClickEffectStatus) -> String {
+    match status {
+        ClickEffectStatus::Disabled => "Disabled".into(),
+        ClickEffectStatus::Idle => "Requested · idle".into(),
+        ClickEffectStatus::Animating => "Animating".into(),
+        ClickEffectStatus::Unavailable(reason) => {
+            format!("Unavailable: {}", concise_status_reason(reason))
+        }
+    }
+}
+
+fn click_status_tone(status: &ClickEffectStatus) -> StatusTone {
+    match status {
+        ClickEffectStatus::Disabled | ClickEffectStatus::Idle => StatusTone::Info,
+        ClickEffectStatus::Animating => StatusTone::Success,
+        ClickEffectStatus::Unavailable(_) => StatusTone::Error,
+    }
+}
+
+fn click_style_label(style: ClickEffectStyle) -> &'static str {
+    match style {
+        ClickEffectStyle::Ripple => "Ripple",
+        ClickEffectStyle::Circle => "Circle",
+        ClickEffectStyle::Flash => "Flash",
+    }
+}
+
+fn applied_click_summary(preferences: &CoordinateToolPreferences) -> String {
+    let click = preferences.click;
+    format!(
+        "Saved click appearance: {} · {} px · {:.0}% opacity · {} ms",
+        click_style_label(click.style),
+        click.size_px,
+        click.opacity * 100.0,
+        click.duration_ms
+    )
 }
 
 fn effect_status_text(status: &CursorEffectStatus) -> String {
@@ -509,8 +656,9 @@ mod tests {
 
     use super::*;
     use crate::coordinate_tool::{
-        CoordinateRenderFrame, CoordinateRuntimeFactory, CoordinateSample, CoordinateSampler,
-        CoordinateSurfaceBackend, PhysicalPoint,
+        ClickObservationLease, ClickObservationProvider, CoordinateRenderFrame,
+        CoordinateRuntimeFactory, CoordinateSample, CoordinateSampler, CoordinateSurfaceBackend,
+        PhysicalPoint,
     };
 
     struct TestSampler;
@@ -550,6 +698,22 @@ mod tests {
         }
     }
 
+    struct TestClickLease;
+
+    impl ClickObservationLease for TestClickLease {}
+
+    struct TestClickObservation;
+
+    impl ClickObservationProvider for TestClickObservation {
+        fn acquire(
+            &self,
+            _generation: u64,
+            _sink: Arc<dyn crate::coordinate_tool::ClickPressSink>,
+        ) -> Result<Box<dyn ClickObservationLease>, String> {
+            Ok(Box::new(TestClickLease))
+        }
+    }
+
     struct TestClipboard;
 
     impl crate::gui::coordinate_tool::CoordinateClipboardWriter for TestClipboard {
@@ -559,11 +723,12 @@ mod tests {
     }
 
     fn fake_adapter(path: String, preferences: CoordinateToolPreferences) -> CoordinateToolGui {
-        CoordinateToolGui::with_backends(
+        CoordinateToolGui::with_backends_and_click_observation(
             path,
             preferences,
             Arc::new(TestFactory),
             Box::new(TestClipboard),
+            Arc::new(TestClickObservation),
         )
     }
 
@@ -617,6 +782,8 @@ mod tests {
         dialog.draft.halo.inversion_strength = 0.8;
         dialog.draft.zoom.diameter = 240;
         dialog.draft.zoom.destination_offset.x = -400;
+        dialog.draft.click.style = ClickEffectStyle::Flash;
+        dialog.draft.click.duration_ms = 900;
         let draft = dialog.draft.clone();
 
         assert!(dialog.apply_to(&mut adapter).is_err());
@@ -652,12 +819,18 @@ mod tests {
         dialog.draft.zoom.outline_enabled = false;
         dialog.draft.zoom.outline_color = CrosshairColor::new(200, 100, 40);
         dialog.draft.zoom.outline_thickness = 6;
+        dialog.draft.click.style = ClickEffectStyle::Circle;
+        dialog.draft.click.color = CrosshairColor::new(25, 120, 230);
+        dialog.draft.click.size_px = 92;
+        dialog.draft.click.opacity = 0.55;
+        dialog.draft.click.duration_ms = 1_100;
         assert!(dialog.is_dirty());
 
         dialog.apply_to(&mut adapter).unwrap();
         assert_eq!(adapter.preferences().crosshair.center_gap, 128);
         assert_eq!(adapter.preferences().halo, dialog.draft.halo);
         assert_eq!(adapter.preferences().zoom, dialog.draft.zoom);
+        assert_eq!(adapter.preferences().click, dialog.draft.click);
         assert_eq!(dialog.baseline.crosshair.center_gap, 128);
         assert_eq!(dialog.draft.crosshair.center_gap, 128);
         assert!(!dialog.is_dirty());
@@ -674,6 +847,7 @@ mod tests {
             .coordinate_tool;
         assert_eq!(saved.halo, dialog.draft.halo);
         assert_eq!(saved.zoom, dialog.draft.zoom);
+        assert_eq!(saved.click, dialog.draft.click);
 
         dialog.open = false;
         dialog.open(adapter.preferences());
@@ -699,6 +873,7 @@ mod tests {
         dialog.draft.crosshair.center_gap = 24;
         dialog.draft.halo.radius = 140;
         dialog.draft.zoom.zoom_factor = 3.0;
+        dialog.draft.click.size_px = 96;
 
         dialog.reset_halo_draft();
         assert_eq!(dialog.draft.halo, HaloPreferences::default());
@@ -708,9 +883,41 @@ mod tests {
 
         dialog.reset_zoom_draft();
         assert_eq!(dialog.draft.zoom, ZoomPreferences::default());
+        assert_eq!(dialog.draft.click.size_px, 96);
+        dialog.reset_click_draft();
+        assert_eq!(dialog.draft.click, ClickEffectPreferences::default());
         assert_eq!(dialog.draft.halo, HaloPreferences::default());
         assert_eq!(dialog.baseline, initial);
         assert!(dialog.is_dirty());
+    }
+
+    #[test]
+    fn cancel_discards_click_draft_and_reopen_starts_clean() {
+        let initial = CoordinateToolPreferences::default();
+        let current = CoordinateToolPreferences {
+            click: ClickEffectPreferences {
+                style: ClickEffectStyle::Circle,
+                size_px: 72,
+                ..Default::default()
+            },
+            ..initial.clone()
+        };
+        let mut dialog = MouseSettingsDialog::default();
+        dialog.open(&initial);
+        dialog.draft.click.style = ClickEffectStyle::Flash;
+        dialog.draft.click.size_px = 120;
+        dialog.last_error = Some("injected save failure".into());
+        assert!(dialog.is_dirty());
+
+        dialog.cancel_draft(&current);
+        assert!(!dialog.open);
+        assert_eq!(dialog.draft.click, current.click);
+        assert!(!dialog.is_dirty());
+        assert!(dialog.last_error.is_none());
+
+        dialog.open(&current);
+        assert_eq!(dialog.draft, current);
+        assert!(!dialog.is_dirty());
     }
 
     #[test]
@@ -732,14 +939,19 @@ mod tests {
         dialog.open(&initial);
         dialog.draft.halo.radius = 128;
         dialog.draft.zoom.zoom_factor = 3.0;
+        dialog.draft.click.duration_ms = 950;
         let draft = dialog.draft.clone();
 
         adapter.set_halo_enabled(true).unwrap();
         adapter.set_zoom_enabled(true).unwrap();
+        adapter
+            .execute(&CoordinateToolCommand::SetClickEnabled(true))
+            .unwrap();
 
         let runtime = adapter.runtime_state();
         assert!(runtime.halo_enabled());
         assert!(runtime.zoom_enabled());
+        assert!(runtime.click_enabled());
         assert_eq!(adapter.preferences(), &initial);
         assert_eq!(
             crate::settings::Settings::load(&path)
@@ -773,6 +985,19 @@ mod tests {
             effect_status_text(&CursorEffectStatus::Unavailable("host failed".into()))
                 .contains("host failed")
         );
+        assert_eq!(click_status_text(&ClickEffectStatus::Disabled), "Disabled");
+        assert_eq!(
+            click_status_text(&ClickEffectStatus::Idle),
+            "Requested · idle"
+        );
+        assert_eq!(
+            click_status_text(&ClickEffectStatus::Animating),
+            "Animating"
+        );
+        assert!(
+            click_status_text(&ClickEffectStatus::Unavailable("surface failed".into()))
+                .contains("surface failed")
+        );
 
         let committed = CoordinateToolPreferences::default();
         let mut draft = committed.clone();
@@ -780,6 +1005,10 @@ mod tests {
         draft.halo.inversion_strength = 0.9;
         draft.zoom.zoom_factor = 4.0;
         draft.zoom.diameter = 400;
+        draft.click.style = ClickEffectStyle::Flash;
+        draft.click.size_px = 96;
+        draft.click.opacity = 0.6;
+        draft.click.duration_ms = 700;
         assert!(
             applied_halo_summary(&committed)
                 .contains("Saved halo appearance: 40% inversion · 60 px")
@@ -789,6 +1018,11 @@ mod tests {
         );
         assert!(applied_halo_summary(&draft).contains("90% inversion · 200 px"));
         assert!(applied_zoom_summary(&draft).contains("4.00× · 400 px"));
+        assert_eq!(click_style_label(draft.click.style), "Flash");
+        assert!(
+            applied_click_summary(&committed).contains("Saved click appearance: Ripple · 32 px")
+        );
+        assert!(applied_click_summary(&draft).contains("Flash · 96 px · 60% opacity · 700 ms"));
     }
 
     #[test]

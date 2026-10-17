@@ -22,10 +22,10 @@ pub use controller::{
     CoordinateToolController, MouseGestureClickObservationProvider,
 };
 pub use model::{
-    ClickButton, ClickPressEvent, ClickPressSink, CoordinateEffectsStatus, CoordinateSample,
-    CoordinateSpace, CoordinateToolRuntimeState, CoordinateUnavailable, CursorEffectStatus,
-    ForegroundClientGeometry, FormattedCoordinate, MonitorGeometry, MonitorId, PhysicalPoint,
-    PhysicalRect, PhysicalSize, clamp_hud_origin, format_coordinate,
+    ClickButton, ClickEffectStatus, ClickPressEvent, ClickPressSink, CoordinateEffectsStatus,
+    CoordinateSample, CoordinateSpace, CoordinateToolRuntimeState, CoordinateUnavailable,
+    CursorEffectStatus, ForegroundClientGeometry, FormattedCoordinate, MonitorGeometry, MonitorId,
+    PhysicalPoint, PhysicalRect, PhysicalSize, clamp_hud_origin, format_coordinate,
 };
 pub(crate) use native::NativeCoordinatePointSampler;
 pub use native::NativeCoordinateRuntimeFactory;
